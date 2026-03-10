@@ -1,0 +1,528 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>APEX — Professional Options Agent</title>
+<style>
+@import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;700&display=swap');
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+:root{
+  --bg:#07101f;--bg2:#0a1628;--bg3:#0d1e35;
+  --border:#0d3050;--green:#00ff88;--blue:#00c4ff;
+  --dim:#336688;--text:#cce8ff;--red:#ff5555;--gold:#ffd700;--orange:#ff9944;
+}
+body{font-family:'IBM Plex Mono','Courier New',monospace;background:var(--bg);color:var(--text);height:100vh;display:flex;flex-direction:column;overflow:hidden}
+
+#header{padding:10px 20px;background:var(--bg2);border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between;flex-shrink:0}
+#logo{display:flex;align-items:center;gap:10px}
+#logo-icon{width:38px;height:38px;border-radius:8px;background:linear-gradient(135deg,var(--green),var(--blue));display:flex;align-items:center;justify-content:center;font-weight:900;font-size:18px;color:var(--bg)}
+#logo-name{font-size:16px;font-weight:700;color:var(--green);letter-spacing:4px}
+#logo-sub{font-size:9px;color:var(--dim);letter-spacing:1px}
+#stats{display:flex;gap:16px;align-items:center}
+.stat{text-align:right}
+.stat-label{font-size:8px;color:var(--dim);letter-spacing:1px}
+.stat-value{font-size:12px;font-weight:700}
+
+#tabs{display:flex;background:var(--bg2);border-bottom:1px solid var(--border);flex-shrink:0}
+.tab{padding:8px 18px;font-size:11px;cursor:pointer;color:var(--dim);border-bottom:2px solid transparent;font-family:inherit;background:none;border-top:none;border-left:none;border-right:none;transition:all 0.15s}
+.tab:hover{color:var(--text)}
+.tab.active{color:var(--green);border-bottom-color:var(--green)}
+
+.panel{display:none;flex:1;overflow:hidden;flex-direction:column}
+.panel.active{display:flex}
+
+.bar{padding:6px 20px;display:flex;gap:8px;align-items:center;flex-shrink:0}
+.bar.hidden{display:none}
+#keybar{background:rgba(0,255,136,0.03);border-bottom:1px solid rgba(0,255,136,0.08)}
+#autobar{background:rgba(0,196,255,0.04);border-bottom:1px solid rgba(0,196,255,0.1);justify-content:space-between}
+#posbar{background:rgba(0,255,136,0.02);border-bottom:1px solid rgba(0,255,136,0.06);overflow-x:auto}
+.bar label{font-size:10px;color:var(--dim);white-space:nowrap}
+.bar input{flex:1;padding:5px 10px;background:rgba(255,255,255,0.04);border:1px solid #1a3a55;border-radius:6px;color:var(--text);font-size:11px;font-family:inherit;outline:none}
+.bar-btn{padding:5px 12px;border-radius:6px;font-size:11px;cursor:pointer;font-family:inherit;white-space:nowrap;border:1px solid rgba(0,255,136,0.25);background:rgba(0,255,136,0.08);color:var(--green)}
+.bar-btn:hover{background:rgba(0,255,136,0.18)}
+.bar-btn.red{border-color:rgba(255,85,85,0.3);background:rgba(255,85,85,0.08);color:var(--red)}
+.bar-btn.orange{border-color:rgba(255,153,68,0.3);background:rgba(255,153,68,0.08);color:var(--orange)}
+
+#heatbar{display:flex;align-items:center;gap:10px;padding:5px 20px;background:rgba(255,255,255,0.01);border-bottom:1px solid var(--border);flex-shrink:0}
+#heat-track{flex:1;height:4px;background:rgba(255,255,255,0.06);border-radius:2px;overflow:hidden}
+#heat-fill{height:100%;border-radius:2px;transition:width 0.4s,background 0.4s}
+
+.pos-chip{font-size:10px;background:rgba(0,255,136,0.06);border:1px solid rgba(0,255,136,0.15);border-radius:6px;padding:2px 8px;color:var(--green);white-space:nowrap;cursor:pointer;flex-shrink:0}
+.pos-chip:hover{background:rgba(0,255,136,0.14)}
+.pos-chip.partial{border-color:rgba(255,215,0,0.3);color:var(--gold)}
+
+#log{flex:1;overflow-y:auto;padding:12px 20px;display:flex;flex-direction:column;gap:10px}
+.msg{display:flex;gap:8px}
+.msg.user{justify-content:flex-end}
+.avatar{width:26px;height:26px;border-radius:50%;flex-shrink:0;margin-top:2px;display:flex;align-items:center;justify-content:center;font-size:10px;font-weight:900}
+.avatar.apex{background:linear-gradient(135deg,var(--green),var(--blue));color:var(--bg)}
+.avatar.user{background:#0d2a4a;border:1px solid #1a4060;color:var(--green)}
+.avatar.auto{background:rgba(255,215,0,0.12);border:1px solid rgba(255,215,0,0.25);color:var(--gold);font-size:9px}
+.avatar.warn{background:rgba(255,85,85,0.12);border:1px solid rgba(255,85,85,0.25);color:var(--red);font-size:9px}
+.bubble{max-width:88%;padding:9px 13px;font-size:11.5px;line-height:1.75;white-space:pre-wrap}
+.bubble.apex{background:rgba(255,255,255,0.03);border:1px solid rgba(255,255,255,0.06);border-radius:3px 14px 14px 14px;color:var(--text)}
+.bubble.user{max-width:60%;background:linear-gradient(135deg,#0d2a4a,#0a1e35);border:1px solid #1a4060;border-radius:14px 14px 3px 14px;color:var(--text)}
+.bubble.auto{background:rgba(255,215,0,0.03);border:1px solid rgba(255,215,0,0.1);border-radius:3px 14px 14px 14px;color:#ffe98a}
+.bubble.warn{background:rgba(255,85,85,0.05);border:1px solid rgba(255,85,85,0.15);border-radius:3px 14px 14px 14px;color:#ffaaaa}
+
+#quickbar{padding:7px 20px 0;display:flex;gap:7px;flex-wrap:wrap;flex-shrink:0}
+.quick-btn{padding:4px 11px;border-radius:20px;border:1px solid #1a3a55;background:rgba(255,255,255,0.03);color:#6aaccc;font-size:11px;cursor:pointer;font-family:inherit;transition:all 0.15s}
+.quick-btn:hover{background:rgba(0,255,136,0.08);border-color:rgba(0,255,136,0.3);color:var(--green)}
+#inputbar{padding:7px 20px 13px;display:flex;gap:8px;flex-shrink:0}
+#inputbar input{flex:1;padding:9px 13px;background:rgba(255,255,255,0.04);border:1px solid #1a3a55;border-radius:10px;color:var(--text);font-size:12px;font-family:inherit;outline:none}
+#inputbar input::placeholder{color:#1a3a55}
+#send-btn{padding:9px 15px;border-radius:10px;border:none;background:linear-gradient(135deg,var(--green),var(--blue));color:var(--bg);font-weight:700;font-size:14px;cursor:pointer}
+
+#analytics-panel{padding:16px 20px;overflow-y:auto;gap:14px}
+.analytics-grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+.analytics-grid.wide{grid-template-columns:1fr}
+.acard{background:rgba(255,255,255,0.02);border:1px solid rgba(255,255,255,0.06);border-radius:10px;padding:14px}
+.acard h3{font-size:11px;color:var(--dim);letter-spacing:1px;margin-bottom:10px;text-transform:uppercase}
+.acard-row{display:flex;justify-content:space-between;font-size:11px;margin-bottom:5px}
+.acard-row .label{color:var(--dim)}
+.acard-row .value{font-weight:700}
+#chart-container{height:130px;position:relative}
+#pnl-canvas{width:100%;height:100%}
+.greek-row{display:flex;gap:8px;flex-wrap:wrap;margin-top:4px}
+.greek-chip{background:rgba(0,196,255,0.06);border:1px solid rgba(0,196,255,0.15);border-radius:6px;padding:4px 10px;font-size:11px}
+.greek-chip .gname{color:var(--dim);font-size:9px;display:block}
+.greek-chip .gval{color:var(--blue);font-weight:700}
+.sector-row{display:flex;align-items:center;gap:8px;margin-bottom:6px;font-size:11px}
+.sector-name{min-width:80px;color:var(--dim)}
+.sector-track{flex:1;height:6px;background:rgba(255,255,255,0.06);border-radius:3px;overflow:hidden}
+.sector-fill{height:100%;border-radius:3px;background:linear-gradient(90deg,var(--green),var(--blue))}
+.sector-pct{min-width:36px;text-align:right;font-weight:700}
+
+/* Server log panel */
+#serverlog-panel{padding:16px 20px;overflow-y:auto;flex:1}
+.log-entry{font-size:11px;line-height:1.6;padding:3px 0;border-bottom:1px solid rgba(255,255,255,0.03)}
+.log-entry .lt{color:var(--dim);margin-right:10px}
+.log-entry.trade .lm{color:var(--green)}
+.log-entry.close .lm{color:var(--blue)}
+.log-entry.filter .lm{color:#446688}
+.log-entry.warn .lm,.log-entry.error .lm{color:var(--red)}
+.log-entry.bonus .lm{color:var(--gold)}
+.log-entry.circuit .lm{color:var(--orange)}
+.log-entry.scan .lm{color:var(--dim)}
+.log-entry.partial .lm{color:var(--orange)}
+
+#server-status{padding:5px 20px;background:rgba(0,196,255,0.03);border-bottom:1px solid var(--border);font-size:10px;color:var(--dim);display:flex;gap:20px;flex-shrink:0}
+#server-status span{white-space:nowrap}
+
+::-webkit-scrollbar{width:3px}
+::-webkit-scrollbar-thumb{background:rgba(0,255,136,.12);border-radius:2px}
+</style>
+</head>
+<body>
+
+<div id="header">
+  <div id="logo">
+    <div id="logo-icon">▲</div>
+    <div>
+      <div id="logo-name">APEX</div>
+      <div id="logo-sub">PROFESSIONAL OPTIONS AGENT · SERVER MODE</div>
+    </div>
+  </div>
+  <div id="stats">
+    <div class="stat"><div class="stat-label">SERVER</div><div class="stat-value" id="server-ping" style="color:#446688;font-size:10px">● CONNECTING</div></div>
+    <div class="stat"><div class="stat-label">CASH</div><div class="stat-value" id="stat-cash" style="color:var(--green)">--</div></div>
+    <div class="stat"><div class="stat-label">POSITIONS</div><div class="stat-value" id="stat-positions" style="color:var(--blue)">--</div></div>
+    <div class="stat"><div class="stat-label">REVENUE</div><div class="stat-value" id="stat-revenue" style="color:#446688">--</div></div>
+    <div class="stat"><div class="stat-label">REALIZED P&L</div><div class="stat-value" id="stat-pnl" style="color:var(--green)">--</div></div>
+  </div>
+</div>
+
+<div id="tabs">
+  <button class="tab active" onclick="switchTab('trade')">📡 Trading</button>
+  <button class="tab" onclick="switchTab('analytics')">📊 Analytics</button>
+  <button class="tab" onclick="switchTab('serverlog')">🖥 Server Log</button>
+</div>
+
+<!-- TRADE PANEL -->
+<div id="trade-panel" class="panel active">
+
+  <div id="keybar" class="bar">
+    <label>Finnhub Key:</label>
+    <input id="key-input" type="password" placeholder="Paste Finnhub key — saves to server env for background trading"/>
+    <button class="bar-btn" onclick="saveKey()">Save to Server</button>
+  </div>
+
+  <div id="autobar" class="bar hidden">
+    <div style="display:flex;gap:14px;align-items:center;font-size:10px;color:var(--dim)">
+      <span>Last scan: <strong id="last-scan" style="color:var(--text)">--</strong></span>
+      <span>Schedule: <strong id="next-scan" style="color:var(--text)">hourly :35 past, 9:35–3:35 ET</strong></span>
+      <span>Trades today: <strong id="trades-today" style="color:var(--text)">0</strong></span>
+      <span>Circuit: <strong id="circuit-status" style="color:var(--green)">OPEN</strong></span>
+    </div>
+    <div style="display:flex;gap:7px">
+      <button class="bar-btn" onclick="triggerScan()">⚡ Run Scan Now</button>
+      <button class="bar-btn red" onclick="resetMonth()">↺ New Month</button>
+    </div>
+  </div>
+
+  <div id="heatbar">
+    <span id="heat-label" style="font-size:10px;color:var(--dim);white-space:nowrap">PORTFOLIO HEAT: 0%</span>
+    <div id="heat-track"><div id="heat-fill" style="width:0%;background:var(--green)"></div></div>
+    <span style="font-size:10px;color:var(--dim);white-space:nowrap">MAX 60%</span>
+  </div>
+
+  <div id="posbar" class="bar hidden">
+    <label style="white-space:nowrap;font-size:9px">OPEN:</label>
+  </div>
+
+  <div id="log"></div>
+
+  <div id="quickbar">
+    <button class="quick-btn" onclick="triggerScan()">📡 Scan Now</button>
+    <button class="quick-btn" onclick="showPositions()">📋 Positions</button>
+    <button class="quick-btn" onclick="showBudget()">💰 Budget</button>
+    <button class="quick-btn" onclick="showHistory()">📜 History</button>
+    <button class="quick-btn" onclick="switchTab('serverlog')">🖥 Server Log</button>
+  </div>
+
+  <div id="inputbar">
+    <input id="cmd-input" placeholder="close TICKER · scan · budget · positions · history"
+      onkeydown="if(event.key==='Enter') handleCommand()"/>
+    <button id="send-btn" onclick="handleCommand()">▶</button>
+  </div>
+</div>
+
+<!-- ANALYTICS PANEL -->
+<div id="analytics-panel" class="panel">
+  <div class="analytics-grid">
+    <div class="acard analytics-grid wide">
+      <h3>📈 P&L Equity Curve</h3>
+      <div id="chart-container"><canvas id="pnl-canvas"></canvas></div>
+    </div>
+    <div class="acard">
+      <h3>Performance</h3>
+      <div class="acard-row"><span class="label">Total P&L</span><span class="value" id="a-pnl">--</span></div>
+      <div class="acard-row"><span class="label">Win Rate</span><span class="value" id="a-winrate">--</span></div>
+      <div class="acard-row"><span class="label">Avg Win</span><span class="value" id="a-avgwin" style="color:var(--green)">--</span></div>
+      <div class="acard-row"><span class="label">Avg Loss</span><span class="value" id="a-avgloss" style="color:var(--red)">--</span></div>
+      <div class="acard-row"><span class="label">Profit Factor</span><span class="value" id="a-pf">--</span></div>
+      <div class="acard-row"><span class="label">Trades Closed</span><span class="value" id="a-trades">--</span></div>
+    </div>
+    <div class="acard">
+      <h3>Risk Dashboard</h3>
+      <div class="acard-row"><span class="label">Portfolio Heat</span><span class="value" id="a-heat">--</span></div>
+      <div class="acard-row"><span class="label">Circuit Breaker</span><span class="value" id="a-circuit">--</span></div>
+      <div class="acard-row"><span class="label">Open Positions</span><span class="value" id="a-open">--</span></div>
+      <div class="acard-row"><span class="label">Cash Available</span><span class="value" id="a-cash">--</span></div>
+      <div class="acard-row"><span class="label">Revenue</span><span class="value" id="a-revenue">--</span></div>
+      <div class="acard-row"><span class="label">Bonus Earned</span><span class="value" id="a-bonus" style="color:var(--gold)">--</span></div>
+    </div>
+    <div class="acard analytics-grid wide">
+      <h3>Sector Exposure</h3>
+      <div id="sector-chart"><span style="font-size:11px;color:var(--dim)">No open positions</span></div>
+    </div>
+  </div>
+</div>
+
+<!-- SERVER LOG PANEL -->
+<div id="serverlog-panel" class="panel">
+  <div id="server-status">
+    <span>Uptime: <strong id="s-uptime">--</strong></span>
+    <span>Last scan: <strong id="s-lastscan">--</strong></span>
+    <span>Auto-scan: <strong style="color:var(--green)">hourly :35 past · 9:35 AM–3:35 PM ET · Mon–Fri</strong></span>
+    <span>State: <strong style="color:var(--green)">Persisted to state.json</strong></span>
+  </div>
+  <div id="server-log-entries" style="padding:10px 20px;overflow-y:auto;flex:1"></div>
+</div>
+
+<script>
+const fmt = n => "$" + parseFloat(n).toFixed(2);
+let serverState = null;
+let pnlPoints   = [];
+
+// ── Fetch state from server every 15s ──────────────────────────────────────
+async function fetchState() {
+  try {
+    const res  = await fetch("/api/state");
+    const data = await res.json();
+    serverState = data;
+    updateUI(data);
+    document.getElementById("server-ping").textContent = "● LIVE";
+    document.getElementById("server-ping").style.color = "var(--green)";
+    document.getElementById("autobar").classList.remove("hidden");
+    if (data.finnhubKeySet) document.getElementById("keybar").classList.add("hidden");
+  } catch(e) {
+    document.getElementById("server-ping").textContent = "● OFFLINE";
+    document.getElementById("server-ping").style.color = "var(--red)";
+  }
+}
+
+function updateUI(d) {
+  const pnl = d.realizedPnL || 0;
+  document.getElementById("stat-cash").textContent      = fmt(d.cash);
+  document.getElementById("stat-positions").textContent = d.positions.length;
+  document.getElementById("stat-revenue").textContent   = fmt(d.totalRevenue);
+  document.getElementById("stat-revenue").style.color   = d.totalRevenue >= 2000 ? "var(--gold)" : "#446688";
+  document.getElementById("stat-pnl").textContent       = (pnl>=0?"+":"") + fmt(pnl);
+  document.getElementById("stat-pnl").style.color       = pnl >= 0 ? "var(--green)" : "var(--red)";
+  document.getElementById("trades-today").textContent   = d.todayTrades || 0;
+  document.getElementById("last-scan").textContent      = d.lastScan ? new Date(d.lastScan).toLocaleString() : "Never";
+  const cs = document.getElementById("circuit-status");
+  cs.textContent = d.circuitOpen ? "OPEN" : "TRIPPED";
+  cs.style.color = d.circuitOpen ? "var(--green)" : "var(--red)";
+  const heat = d.heatPct || 0;
+  document.getElementById("heat-fill").style.width      = Math.min(100,heat) + "%";
+  document.getElementById("heat-fill").style.background = heat>50?"var(--red)":heat>35?"var(--orange)":"var(--green)";
+  document.getElementById("heat-label").textContent     = `PORTFOLIO HEAT: ${heat.toFixed(0)}%`;
+  updatePosBar(d.positions);
+  updateAnalytics(d);
+  updateServerLog(d.tradeLog || []);
+  document.getElementById("s-uptime").textContent = formatUptime(d.uptime);
+  document.getElementById("s-lastscan").textContent = d.lastScan ? new Date(d.lastScan).toLocaleString() : "Never";
+}
+
+function formatUptime(secs) {
+  if (!secs) return "--";
+  const h = Math.floor(secs/3600), m = Math.floor((secs%3600)/60);
+  return `${h}h ${m}m`;
+}
+
+function updatePosBar(positions) {
+  const bar = document.getElementById("posbar");
+  while (bar.children.length > 1) bar.removeChild(bar.lastChild);
+  if (!positions.length) { bar.classList.add("hidden"); return; }
+  bar.classList.remove("hidden");
+  positions.forEach(p => {
+    const c = document.createElement("div");
+    c.className   = "pos-chip" + (p.partialClosed?" partial":"");
+    c.textContent = `${p.ticker} $${p.strike}C ${p.contracts}x${p.partialClosed?" [½]":""} ✕`;
+    c.onclick     = () => closePosition(p.ticker);
+    bar.appendChild(c);
+  });
+}
+
+function updateAnalytics(d) {
+  const trades = d.closedTrades || [];
+  const pnl    = d.realizedPnL  || 0;
+  const wins   = trades.filter(t=>t.pnl>0);
+  const losses = trades.filter(t=>t.pnl<=0);
+  const avgW   = wins.length   ? wins.reduce((s,t)=>s+t.pnl,0)/wins.length   : 0;
+  const avgL   = losses.length ? losses.reduce((s,t)=>s+t.pnl,0)/losses.length : 0;
+  const grossW = wins.reduce((s,t)=>s+t.pnl,0);
+  const grossL = Math.abs(losses.reduce((s,t)=>s+t.pnl,0));
+  const pf     = grossL>0 ? (grossW/grossL).toFixed(2) : wins.length?"∞":"N/A";
+  document.getElementById("a-pnl").textContent    = (pnl>=0?"+":"") + fmt(pnl);
+  document.getElementById("a-pnl").style.color     = pnl>=0?"var(--green)":"var(--red)";
+  document.getElementById("a-winrate").textContent = trades.length ? Math.round(wins.length/trades.length*100)+"% ("+wins.length+"/"+trades.length+")" : "N/A";
+  document.getElementById("a-avgwin").textContent  = avgW ? "+"+fmt(avgW) : "$0.00";
+  document.getElementById("a-avgloss").textContent = avgL ? fmt(avgL) : "$0.00";
+  document.getElementById("a-pf").textContent      = pf;
+  document.getElementById("a-trades").textContent  = trades.length;
+  document.getElementById("a-heat").textContent    = (d.heatPct||0).toFixed(0)+"%";
+  document.getElementById("a-circuit").textContent = d.circuitOpen?"OPEN ✅":"TRIPPED ⚠️";
+  document.getElementById("a-open").textContent    = d.positions.length;
+  document.getElementById("a-cash").textContent    = fmt(d.cash);
+  document.getElementById("a-revenue").textContent = fmt(d.totalRevenue);
+  document.getElementById("a-bonus").textContent   = fmt(d.extraBudget||0);
+  // Equity curve from closed trades
+  pnlPoints = [0];
+  let running = 0;
+  (d.closedTrades||[]).forEach(t => { running += t.pnl; pnlPoints.push(running); });
+  drawChart();
+  drawSectors(d.positions);
+}
+
+function drawChart() {
+  const canvas = document.getElementById("pnl-canvas");
+  const cont   = document.getElementById("chart-container");
+  canvas.width = cont.clientWidth || 600;
+  canvas.height= cont.clientHeight|| 130;
+  const ctx = canvas.getContext("2d");
+  if (pnlPoints.length < 2) {
+    ctx.fillStyle="rgba(255,255,255,0.1)"; ctx.font="11px monospace";
+    ctx.fillText("No trade history yet",20,65); return;
+  }
+  const W=canvas.width,H=canvas.height,pad=20;
+  const mn=Math.min(...pnlPoints,0),mx=Math.max(...pnlPoints,0);
+  const range=mx-mn||1;
+  const sy=v=>H-pad-((v-mn)/range)*(H-pad*2);
+  const sx=i=>pad+(i/(pnlPoints.length-1))*(W-pad*2);
+  const zero=sy(0);
+  ctx.clearRect(0,0,W,H);
+  ctx.strokeStyle="rgba(255,255,255,0.08)";ctx.lineWidth=1;ctx.setLineDash([3,4]);
+  ctx.beginPath();ctx.moveTo(pad,zero);ctx.lineTo(W-pad,zero);ctx.stroke();
+  ctx.setLineDash([]);
+  const g=ctx.createLinearGradient(0,0,0,H);
+  g.addColorStop(0,"rgba(0,255,136,0.18)");g.addColorStop(1,"rgba(0,255,136,0)");
+  ctx.beginPath();ctx.moveTo(sx(0),zero);
+  pnlPoints.forEach((v,i)=>ctx.lineTo(sx(i),sy(v)));
+  ctx.lineTo(sx(pnlPoints.length-1),zero);ctx.closePath();
+  ctx.fillStyle=g;ctx.fill();
+  ctx.strokeStyle="var(--green)";ctx.lineWidth=2;
+  ctx.beginPath();pnlPoints.forEach((v,i)=>i===0?ctx.moveTo(sx(i),sy(v)):ctx.lineTo(sx(i),sy(v)));
+  ctx.stroke();
+  const last=pnlPoints[pnlPoints.length-1];
+  ctx.fillStyle=last>=0?"var(--green)":"var(--red)";ctx.font="bold 11px monospace";
+  ctx.fillText((last>=0?"+":"")+fmt(last),W-pad-65,sy(last)-6);
+}
+
+function drawSectors(positions) {
+  const cont = document.getElementById("sector-chart");
+  cont.innerHTML = "";
+  if (!positions.length) { cont.innerHTML='<span style="font-size:11px;color:var(--dim)">No open positions</span>'; return; }
+  const map={};
+  positions.forEach(p=>{ map[p.sector]=(map[p.sector]||0)+p.cost; });
+  const total=Object.values(map).reduce((s,v)=>s+v,0)||1;
+  Object.entries(map).sort((a,b)=>b[1]-a[1]).forEach(([s,v])=>{
+    const pct=v/total*100;
+    const row=document.createElement("div");
+    row.className="sector-row";
+    row.innerHTML=`<span class="sector-name">${s}</span><div class="sector-track"><div class="sector-fill" style="width:${pct}%"></div></div><span class="sector-pct">${pct.toFixed(0)}%</span>`;
+    cont.appendChild(row);
+  });
+}
+
+function updateServerLog(logs) {
+  const cont = document.getElementById("server-log-entries");
+  cont.innerHTML = "";
+  if (!logs.length) { cont.innerHTML='<div style="font-size:11px;color:var(--dim)">No server activity yet.</div>'; return; }
+  logs.slice(0,100).forEach(e => {
+    const div = document.createElement("div");
+    div.className = "log-entry " + (e.type||"scan");
+    const t = new Date(e.time).toLocaleString();
+    div.innerHTML = `<span class="lt">${t}</span><span class="lm">[${(e.type||"").toUpperCase()}] ${e.message}</span>`;
+    cont.appendChild(div);
+  });
+}
+
+// ── Tab switching ──────────────────────────────────────────────────────────
+function switchTab(tab) {
+  document.querySelectorAll('.tab').forEach((t,i)=>t.classList.toggle('active',['trade','analytics','serverlog'][i]===tab));
+  ['trade','analytics','serverlog'].forEach(id=>{
+    const p=document.getElementById(id+'-panel');
+    if(p) p.classList.toggle('active',id===tab);
+  });
+  if (tab==='analytics' && serverState) updateAnalytics(serverState);
+}
+
+// ── API calls ──────────────────────────────────────────────────────────────
+function addLog(type, text) {
+  const log=document.getElementById("log");
+  const w=document.createElement("div");w.className="msg "+type;
+  const av=document.createElement("div");av.className="avatar "+type;
+  av.textContent=type==="auto"?"⚡":type==="warn"?"⚠":"▲";
+  const b=document.createElement("div");b.className="bubble "+type;b.textContent=text;
+  if(type==="user"){w.appendChild(b);w.appendChild(av);}else{w.appendChild(av);w.appendChild(b);}
+  log.appendChild(w);log.scrollTop=log.scrollHeight;
+}
+
+async function saveKey() {
+  const key = document.getElementById("key-input").value.trim();
+  if (!key) return;
+  try {
+    const res = await fetch("/api/key",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({key})});
+    const d   = await res.json();
+    if (d.ok) {
+      document.getElementById("keybar").classList.add("hidden");
+      addLog("apex","✅ Finnhub key saved to server.\n\nAPEX will now fetch live prices automatically.\nDaily scan runs at 9:35 AM ET, Mon–Fri.");
+    }
+  } catch(e) { addLog("warn","Failed to save key: "+e.message); }
+}
+
+async function triggerScan() {
+  addLog("auto","⚡ Manual scan triggered — check Server Log for real-time output.");
+  try {
+    await fetch("/api/scan",{method:"POST"});
+    setTimeout(fetchState, 3000);
+  } catch(e) { addLog("warn","Scan request failed: "+e.message); }
+}
+
+async function closePosition(ticker) {
+  if (!confirm(`Close ${ticker} position?`)) return;
+  try {
+    const res = await fetch(`/api/close/${ticker}`,{method:"POST"});
+    const d   = await res.json();
+    if (d.ok) { addLog("apex",`${ticker} closed. Refreshing...`); fetchState(); }
+    else addLog("warn", d.error || "Close failed.");
+  } catch(e) { addLog("warn","Close failed: "+e.message); }
+}
+
+async function resetMonth() {
+  if (!confirm("Reset month? Cash resets, history kept.")) return;
+  try {
+    await fetch("/api/reset-month",{method:"POST"});
+    addLog("apex","↺ Month reset."); fetchState();
+  } catch(e) { addLog("warn","Reset failed."); }
+}
+
+function showPositions() {
+  if (!serverState) { addLog("warn","Not connected to server."); return; }
+  const pos = serverState.positions;
+  if (!pos.length) { addLog("apex",'No open positions.'); return; }
+  const lines = pos.map((p,i)=>`[${i+1}] ${p.ticker} $${p.strike}C exp ${p.expDate}${p.partialClosed?" [PARTIAL]":""}\n    ${p.contracts}x · Entry $${p.premium} · opened ${p.openDate}\n    Target: $${p.target} · Stop: $${p.stop}`).join("\n\n");
+  addLog("apex",`OPEN POSITIONS (${pos.length})\n\n${lines}\n\nClick a chip above or type "close TICKER" to close.`);
+}
+
+function showBudget() {
+  if (!serverState) { addLog("warn","Not connected."); return; }
+  const d=serverState;
+  const pnl=d.realizedPnL||0;
+  addLog("apex",
+`BUDGET
+
+  Cash:          ${fmt(d.cash)}
+  Heat:          ${(d.heatPct||0).toFixed(0)}% of capital
+  Revenue:       ${fmt(d.totalRevenue)}
+  Realized P&L:  ${pnl>=0?"+":""}${fmt(pnl)}
+  Bonus earned:  ${fmt(d.extraBudget||0)}
+  Trades today:  ${d.todayTrades||0}
+  Circuit:       ${d.circuitOpen?"OPEN ✅":"TRIPPED ⚠️"}
+  Last scan:     ${d.lastScan?new Date(d.lastScan).toLocaleString():"Never"}
+  Next scan:     hourly at :35 past (9:35 AM–3:35 PM ET, Mon–Fri)`);
+}
+
+function showHistory() {
+  if (!serverState) { addLog("warn","Not connected."); return; }
+  const trades=(serverState.closedTrades||[]).slice(-12).reverse();
+  if (!trades.length) { addLog("apex","No closed trades yet."); return; }
+  const lines=trades.map(t=>`${t.date}  ${t.ticker.padEnd(5)}  ${((t.pnl>=0?"+":"")+parseFloat(t.pnl).toFixed(2)).padStart(9)}  (${t.pct}%)  [${t.reason}]`).join("\n");
+  const pnl=serverState.realizedPnL||0;
+  const wins=(serverState.closedTrades||[]).filter(t=>t.pnl>0).length;
+  addLog("apex",`TRADE HISTORY (last 12)\n\nDate        Ticker    P&L        %       Reason\n${"─".repeat(54)}\n${lines}\n\n  Total P&L:  ${pnl>=0?"+":""}${fmt(pnl)}\n  Win Rate:   ${(serverState.closedTrades||[]).length?Math.round(wins/(serverState.closedTrades||[]).length*100)+"% ("+wins+"/"+(serverState.closedTrades||[]).length+")":"N/A"}`);
+}
+
+function handleCommand() {
+  const raw = document.getElementById("cmd-input").value.trim();
+  if (!raw) return;
+  document.getElementById("cmd-input").value="";
+  const el=document.createElement("div");el.className="msg user";
+  const av=document.createElement("div");av.className="avatar user";av.textContent="U";
+  const b=document.createElement("div");b.className="bubble user";b.textContent=raw;
+  el.appendChild(b);el.appendChild(av);
+  document.getElementById("log").appendChild(el);
+  document.getElementById("log").scrollTop=99999;
+  const c=raw.toLowerCase();
+  if(c==="scan")                         triggerScan();
+  else if(c.startsWith("close "))        closePosition(c.replace("close ","").trim().toUpperCase());
+  else if(c==="positions"||c==="portfolio") showPositions();
+  else if(c==="budget")                  showBudget();
+  else if(c==="history")                 showHistory();
+  else addLog("apex",`Commands: scan · close TICKER · positions · budget · history`);
+}
+
+// ── Init ───────────────────────────────────────────────────────────────────
+fetchState();
+setInterval(fetchState, 15000);
+
+addLog("apex",
+`APEX SERVER DASHBOARD
+
+This dashboard connects to your always-on server.
+The trading engine runs in the background at 9:35 AM ET daily.
+You can close this browser — trades will keep executing.
+
+To get started:
+  1. Paste your Finnhub key above and click "Save to Server"
+  2. Click "⚡ Run Scan Now" to trigger an immediate scan
+  3. Check the Server Log tab for all background activity
+
+Dashboard refreshes automatically every 15 seconds.`);
+</script>
+</body>
+</html>
