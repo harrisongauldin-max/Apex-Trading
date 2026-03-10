@@ -15,10 +15,14 @@ const REVENUE_THRESHOLD = 2000;
 const BONUS_AMOUNT      = 1000;
 const MAX_HEAT          = 0.60;
 const MAX_POSITION_PCT  = 0.25;
-const STOP_LOSS_PCT     = 0.55;
-const TAKE_PROFIT_PCT   = 0.75;
+const STOP_LOSS_PCT     = 0.35;
+const TAKE_PROFIT_PCT   = 0.65;
 const PARTIAL_CLOSE_PCT = 0.50;
 const CIRCUIT_BREAKER   = 0.08;
+const TIME_STOP_DAYS    = 7;
+const TIME_STOP_MOVE    = 0.05;
+const IV_COLLAPSE_PCT   = 0.30;
+const MA50_BUFFER       = 0.01;
 const MAX_SECTOR_PCT    = 0.50;
 const IVR_MAX           = 70;
 const EARNINGS_SKIP_DAYS= 5;
@@ -267,7 +271,7 @@ async function runDailyScan() {
 }
 
 // ── Cron: run every day at 9:35 AM ET (market open + 5 min) ───────────────
-cron.schedule("35 9 * * 1-5", () => {
+cron.schedule("35 9-15 * * 1-5", () => {
   console.log("Cron triggered: running daily scan");
   runDailyScan();
 }, { timezone: "America/New_York" });
