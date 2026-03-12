@@ -160,6 +160,11 @@ input[type=text]:focus{border-color:var(--blue)}
       <div class="metric-sm" id="revenue">$--</div>
       <div class="sub" id="revenue-sub">target: $2,000</div>
     </div>
+    <div class="card">
+      <div class="card-title">BIL ETF Parked</div>
+      <div class="metric-sm" id="etf-value" style="color:var(--blue)">$0.00</div>
+      <div class="sub" id="etf-shares">0 shares · $1,500 floor target</div>
+    </div>
   </div>
 
   <div class="grid4" style="margin-bottom:12px">
@@ -488,6 +493,8 @@ function renderMetrics() {
 
   const heat = state.heatPct || 0;
   document.getElementById('heat').textContent = heat.toFixed(1) + '%';
+  document.getElementById('etf-value').textContent  = '$' + (state.cashETFValue || 0).toFixed(2);
+  document.getElementById('etf-shares').textContent = (state.cashETFShares || 0) + ' shares · $1,500 floor target · ~5% APY';
   document.getElementById('heat').style.color = heat > 50 ? 'var(--red)' : heat > 35 ? 'var(--orange)' : 'var(--green)';
   const fill = document.getElementById('heat-fill');
   fill.style.width = Math.min(heat, 100) + '%';
