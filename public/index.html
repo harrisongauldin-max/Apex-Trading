@@ -201,9 +201,14 @@ input[type=text]:focus{border-color:var(--blue)}
   </div>
 
   <div class="section-title">Quick Actions</div>
-  <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:16px">
+  <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:16px">
     <button class="btn btn-green" onclick="triggerScan()">▶ MANUAL SCAN</button>
     <button class="btn btn-red" onclick="resetMonth()">↺ RESET MONTH</button>
+    <div style="display:flex;align-items:center;gap:6px">
+      <span style="font-size:11px;color:var(--muted)">BUDGET:</span>
+      <input type="number" id="budget-input" placeholder="5000" min="100" max="1000000" style="background:var(--panel);border:1px solid var(--border);color:var(--text);padding:6px 10px;border-radius:6px;font-family:var(--font);font-size:11px;width:100px;outline:none"/>
+      <button class="btn btn-gold" onclick="setBudget()">SET</button>
+    </div>
   </div>
 
   <div class="section-title">Recent Activity</div>
@@ -800,6 +805,17 @@ async function resetMonth() {
   if (!confirm("Reset month? This resets cash to $5,000 and clears today's trade count.")) return;
   await fetch('/api/reset-month', {method:'POST'});
   await fetchState();
+}
+
+async function setBudget() {
+  const input = document.getElementById('budget-input');
+  const amount = parseFloat(input.value);
+  if (!amount || amount < 100) { alert('Please enter a valid budget (minimum $100)'); return; }
+  if (!confirm(`Set budget to ${fmt(amount)}? This updates your available cash immediately.`)) return;
+  const res = await fetch('/api/set-budget', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({budget:amount})});
+  const data = await res.json();
+  if (data.ok) { input.value = ''; await fetchState(); }
+  else alert('Error: ' + (data.error || 'Unknown error'));
 }
 
 async function loadReport() {
