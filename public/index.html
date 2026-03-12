@@ -127,6 +127,9 @@ input[type=text]:focus{border-color:var(--blue)}
 <div class="tabs">
   <div class="tab active" onclick="switchTab('trading')">TRADING</div>
   <div class="tab" onclick="switchTab('analytics')">ANALYTICS</div>
+  <div class="tab" onclick="switchTab('theta')">THETA</div>
+  <div class="tab" onclick="switchTab('attribution')">ATTRIBUTION</div>
+  <div class="tab" onclick="switchTab('tax')">TAX LOG</div>
   <div class="tab" onclick="switchTab('journal')">JOURNAL</div>
   <div class="tab" onclick="switchTab('stocks')">STOCKS</div>
   <div class="tab" onclick="switchTab('report')">REPORT</div>
@@ -270,6 +273,90 @@ input[type=text]:focus{border-color:var(--blue)}
       <div class="chart-title">Exit Reason Breakdown</div>
       <canvas id="exit-chart" height="180"></canvas>
     </div>
+  </div>
+</div>
+
+<!-- ═══════════════ THETA TAB ═══════════════ -->
+<div id="tab-theta" class="content">
+  <div class="grid2" style="margin-bottom:12px">
+    <div class="card">
+      <div class="card-title">Total Daily Theta Burn</div>
+      <div class="metric-sm" id="theta-total" style="color:var(--red)">$0.00</div>
+      <div class="sub">cost of holding all positions per day</div>
+    </div>
+    <div class="card">
+      <div class="card-title">Drawdown Status</div>
+      <div class="metric-sm" id="dd-pct">0.00%</div>
+      <div class="sub" id="dd-mode">Normal sizing</div>
+    </div>
+  </div>
+  <div class="section-title" style="margin-top:0">Time Decay by Position</div>
+  <div id="theta-table-wrap">
+    <div class="no-data">No open positions. Theta burn will appear here when trades are active.</div>
+  </div>
+  <div class="section-title">Drawdown & Recovery</div>
+  <div class="card" style="margin-top:0">
+    <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px;font-size:13px">
+      <div><div style="color:var(--muted);font-size:11px;margin-bottom:4px">PEAK VALUE</div><div id="dd-peak" style="font-weight:700">$--</div></div>
+      <div><div style="color:var(--muted);font-size:11px;margin-bottom:4px">CURRENT VALUE</div><div id="dd-current" style="font-weight:700">$--</div></div>
+      <div><div style="color:var(--muted);font-size:11px;margin-bottom:4px">SIZING REDUCTION</div><div id="dd-reduction" style="font-weight:700;color:var(--red)">None</div></div>
+    </div>
+    <div style="margin-top:12px;font-size:12px;color:var(--muted)">Recovery mode triggers at -15% drawdown from peak. Position sizing reduces 25% automatically until account recovers.</div>
+  </div>
+  <div class="section-title">Correlation Groups</div>
+  <div id="corr-wrap">
+    <div class="no-data">Loading correlation data...</div>
+  </div>
+</div>
+
+<!-- ═══════════════ ATTRIBUTION TAB ═══════════════ -->
+<div id="tab-attribution" class="content">
+  <div class="section-title" style="margin-top:0">P&L by Stock</div>
+  <div id="attr-ticker-wrap"><div class="no-data">No closed trades yet. Attribution will appear after trades close.</div></div>
+
+  <div class="section-title">P&L by Sector</div>
+  <div id="attr-sector-wrap"><div class="no-data">No closed trades yet.</div></div>
+
+  <div class="section-title">P&L by Score Range</div>
+  <div id="attr-score-wrap"><div class="no-data">No closed trades yet.</div></div>
+
+  <div class="section-title">Pre-market & Sector ETF Filters</div>
+  <div class="card" style="margin-top:0;font-size:13px;line-height:1.7">
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px">
+      <div>
+        <div style="font-weight:700;margin-bottom:6px;color:var(--blue)">Pre-Market Checks</div>
+        <div>✅ Strong pre-market (+1.5%+) = signal boost</div>
+        <div>🚫 Negative pre-market (-1%+) = skip entry</div>
+        <div>Applies during first 2 hours of trading session</div>
+      </div>
+      <div>
+        <div style="font-weight:700;margin-bottom:6px;color:var(--blue)">Sector ETF Confirmation</div>
+        <div>📈 XLK — Technology sector filter</div>
+        <div>📈 XLF — Financial sector filter</div>
+        <div>📈 SMH — Semiconductor stocks filter</div>
+      </div>
+    </div>
+    <div style="margin-top:12px;padding-top:12px;border-top:1px solid var(--border)">
+      <div style="font-weight:700;margin-bottom:6px;color:var(--blue)">Support & Resistance</div>
+      <div>Checks 20-day high/low before entry. Skips if price is within 2% of resistance or 3% of support. Prevents buying into walls and breakdowns.</div>
+    </div>
+  </div>
+</div>
+
+<!-- ═══════════════ TAX LOG TAB ═══════════════ -->
+<div id="tab-tax" class="content">
+  <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;flex-wrap:wrap;gap:8px">
+    <div class="section-title" style="margin:0">Tax Log — All Closed Trades</div>
+    <button class="btn btn-green" onclick="loadTaxLog()">↻ REFRESH</button>
+  </div>
+  <div class="alert alert-orange" style="margin-bottom:12px">
+    ⚠️ All options positions are short-term capital gains (held under 1 year). Consult a tax professional. This log is for reference only.
+  </div>
+  <div id="tax-table-wrap">
+    <div class="no-data">No closed trades yet. Tax log populates as trades close.</div>
+  </div>
+  <div style="margin-top:12px;padding:12px;background:var(--card);border-radius:8px;font-size:12px;color:var(--muted)">
+    <strong>Fields:</strong> Trade ID · Ticker · Type · Open Date · Close Date · Cost Basis · Proceeds · Net P&L · Tax Treatment · Exit Reason
   </div>
 </div>
 
@@ -843,15 +930,186 @@ function renderServerLog() {
   }).join('');
 }
 
+// ── Theta Tab ─────────────────────────────────────────────────────────────
+async function loadTheta() {
+  try {
+    const [tRes, dRes, cRes] = await Promise.all([
+      fetch('/api/theta').then(r=>r.json()),
+      fetch('/api/drawdown').then(r=>r.json()),
+      fetch('/api/correlation').then(r=>r.json()),
+    ]);
+
+    // Theta total
+    document.getElementById('theta-total').textContent = '$' + tRes.totalDailyBurn.toFixed(2);
+
+    // Theta table
+    const wrap = document.getElementById('theta-table-wrap');
+    if (!tRes.positions.length) {
+      wrap.innerHTML = '<div class="no-data">No open positions.</div>';
+    } else {
+      wrap.innerHTML = `<table style="width:100%;border-collapse:collapse;font-size:13px">
+        <thead><tr style="color:var(--muted);font-size:11px;text-align:left">
+          <th style="padding:6px 8px">TICKER</th><th style="padding:6px 8px">THETA/DAY</th>
+          <th style="padding:6px 8px">DTE</th><th style="padding:6px 8px">DAILY BURN</th>
+          <th style="padding:6px 8px">7-DAY BURN</th>
+        </tr></thead><tbody>
+        ${tRes.positions.map(p=>`<tr style="border-top:1px solid var(--border)">
+          <td style="padding:8px;font-weight:700">${p.ticker}</td>
+          <td style="padding:8px;color:var(--red)">${p.theta.toFixed(4)}</td>
+          <td style="padding:8px">${p.dte}d</td>
+          <td style="padding:8px;color:var(--red)">-$${p.dailyBurn.toFixed(2)}</td>
+          <td style="padding:8px;color:var(--red)">-$${(p.dailyBurn*7).toFixed(2)}</td>
+        </tr>`).join('')}
+        </tbody></table>`;
+    }
+
+    // Drawdown
+    const ddColor = dRes.drawdownPct < -10 ? 'var(--red)' : dRes.drawdownPct < -5 ? 'var(--orange)' : 'var(--green)';
+    document.getElementById('dd-pct').textContent = dRes.drawdownPct.toFixed(2) + '%';
+    document.getElementById('dd-pct').style.color = ddColor;
+    document.getElementById('dd-mode').textContent = dRes.recoveryMode ? '⚠️ Recovery Mode — sizing -25%' : 'Normal sizing';
+    document.getElementById('dd-peak').textContent = '$' + dRes.peakCash.toFixed(2);
+    document.getElementById('dd-current').textContent = '$' + dRes.currentValue.toFixed(2);
+    document.getElementById('dd-reduction').textContent = dRes.sizingReduction;
+
+    // Correlation groups
+    const corrWrap = document.getElementById('corr-wrap');
+    if (!cRes.groups.length) {
+      corrWrap.innerHTML = '<div class="no-data">No correlated positions currently held.</div>';
+    } else {
+      corrWrap.innerHTML = cRes.groups.map(g=>`
+        <div class="card" style="margin-bottom:8px;font-size:13px">
+          <div style="font-weight:700;margin-bottom:6px;color:var(--orange)">⚠️ Held: ${g.held.join(', ')}</div>
+          <div style="color:var(--muted)">Group: ${g.group.join(' · ')}</div>
+          <div style="font-size:11px;margin-top:4px;color:var(--muted)">Max 1 position per correlated group. No new entries from this group.</div>
+        </div>`).join('');
+    }
+  } catch(e) { console.error('Theta load error:', e); }
+}
+
+// ── Attribution Tab ────────────────────────────────────────────────────────
+async function loadAttribution() {
+  try {
+    const data = await fetch('/api/attribution').then(r=>r.json());
+    const pct  = (n,d) => d ? ((n/Math.abs(d))*100).toFixed(1)+'%' : '--';
+    const pnlColor = n => n >= 0 ? 'var(--green)' : 'var(--red)';
+    const fmt = n => (n>=0?'+':'')+n.toFixed(2);
+
+    // By ticker
+    const tickerWrap = document.getElementById('attr-ticker-wrap');
+    const tickers = Object.entries(data.byTicker).sort((a,b)=>b[1].pnl-a[1].pnl);
+    if (!tickers.length) {
+      tickerWrap.innerHTML = '<div class="no-data">No closed trades yet.</div>';
+    } else {
+      tickerWrap.innerHTML = `<table style="width:100%;border-collapse:collapse;font-size:13px">
+        <thead><tr style="color:var(--muted);font-size:11px;text-align:left">
+          <th style="padding:6px 8px">STOCK</th><th style="padding:6px 8px">TRADES</th>
+          <th style="padding:6px 8px">WINS</th><th style="padding:6px 8px">WIN RATE</th>
+          <th style="padding:6px 8px">NET P&L</th>
+        </tr></thead><tbody>
+        ${tickers.map(([t,v])=>`<tr style="border-top:1px solid var(--border)">
+          <td style="padding:8px;font-weight:700">${t}</td>
+          <td style="padding:8px">${v.trades}</td>
+          <td style="padding:8px;color:var(--green)">${v.wins}</td>
+          <td style="padding:8px">${pct(v.wins,v.trades)}</td>
+          <td style="padding:8px;font-weight:700;color:${pnlColor(v.pnl)}">$${fmt(v.pnl)}</td>
+        </tr>`).join('')}
+        </tbody></table>`;
+    }
+
+    // By sector
+    const sectorWrap = document.getElementById('attr-sector-wrap');
+    const sectors = Object.entries(data.bySector).sort((a,b)=>b[1].pnl-a[1].pnl);
+    if (!sectors.length) {
+      sectorWrap.innerHTML = '<div class="no-data">No closed trades yet.</div>';
+    } else {
+      sectorWrap.innerHTML = `<table style="width:100%;border-collapse:collapse;font-size:13px">
+        <thead><tr style="color:var(--muted);font-size:11px;text-align:left">
+          <th style="padding:6px 8px">SECTOR</th><th style="padding:6px 8px">TRADES</th><th style="padding:6px 8px">NET P&L</th>
+        </tr></thead><tbody>
+        ${sectors.map(([s,v])=>`<tr style="border-top:1px solid var(--border)">
+          <td style="padding:8px;font-weight:700">${s}</td>
+          <td style="padding:8px">${v.trades}</td>
+          <td style="padding:8px;font-weight:700;color:${pnlColor(v.pnl)}">$${fmt(v.pnl)}</td>
+        </tr>`).join('')}
+        </tbody></table>`;
+    }
+
+    // By score range
+    const scoreWrap = document.getElementById('attr-score-wrap');
+    const scores = Object.entries(data.byScoreRange);
+    scoreWrap.innerHTML = `<table style="width:100%;border-collapse:collapse;font-size:13px">
+      <thead><tr style="color:var(--muted);font-size:11px;text-align:left">
+        <th style="padding:6px 8px">SCORE RANGE</th><th style="padding:6px 8px">TRADES</th><th style="padding:6px 8px">NET P&L</th>
+      </tr></thead><tbody>
+      ${scores.map(([r,v])=>`<tr style="border-top:1px solid var(--border)">
+        <td style="padding:8px;font-weight:700">${r}</td>
+        <td style="padding:8px">${v.trades}</td>
+        <td style="padding:8px;font-weight:700;color:${pnlColor(v.pnl)}">$${v.trades?fmt(v.pnl):'--'}</td>
+      </tr>`).join('')}
+      </tbody></table>`;
+  } catch(e) { console.error('Attribution error:', e); }
+}
+
+// ── Tax Log Tab ────────────────────────────────────────────────────────────
+async function loadTaxLog() {
+  try {
+    const data = await fetch('/api/taxlog').then(r=>r.json());
+    const wrap = document.getElementById('tax-table-wrap');
+    if (!data.length) {
+      wrap.innerHTML = '<div class="no-data">No closed trades yet.</div>';
+      return;
+    }
+    const totalPnl = data.reduce((s,t)=>s+t.pnl,0);
+    const pnlColor = n => n >= 0 ? 'var(--green)' : 'var(--red)';
+    wrap.innerHTML = `
+      <div style="display:flex;gap:16px;margin-bottom:12px;flex-wrap:wrap">
+        <div class="card" style="flex:1;min-width:140px">
+          <div style="font-size:11px;color:var(--muted)">TOTAL TRADES</div>
+          <div style="font-size:22px;font-weight:700">${data.length}</div>
+        </div>
+        <div class="card" style="flex:1;min-width:140px">
+          <div style="font-size:11px;color:var(--muted)">NET P&L (ALL TRADES)</div>
+          <div style="font-size:22px;font-weight:700;color:${pnlColor(totalPnl)}">$${totalPnl>=0?'+':''}${totalPnl.toFixed(2)}</div>
+        </div>
+        <div class="card" style="flex:1;min-width:140px">
+          <div style="font-size:11px;color:var(--muted)">TAX TREATMENT</div>
+          <div style="font-size:18px;font-weight:700;color:var(--orange)">All Short-Term</div>
+        </div>
+      </div>
+      <table style="width:100%;border-collapse:collapse;font-size:12px">
+        <thead><tr style="color:var(--muted);font-size:11px;text-align:left">
+          <th style="padding:5px 6px">#</th><th style="padding:5px 6px">TICKER</th>
+          <th style="padding:5px 6px">OPENED</th><th style="padding:5px 6px">CLOSED</th>
+          <th style="padding:5px 6px">COST BASIS</th><th style="padding:5px 6px">PROCEEDS</th>
+          <th style="padding:5px 6px">NET P&L</th><th style="padding:5px 6px">EXIT</th>
+        </tr></thead><tbody>
+        ${data.map(t=>`<tr style="border-top:1px solid var(--border)">
+          <td style="padding:6px">${t.id}</td>
+          <td style="padding:6px;font-weight:700">${t.ticker}</td>
+          <td style="padding:6px;color:var(--muted)">${t.openDate}</td>
+          <td style="padding:6px;color:var(--muted)">${t.closeDate}</td>
+          <td style="padding:6px">$${t.costBasis.toFixed(2)}</td>
+          <td style="padding:6px">$${t.proceeds.toFixed(2)}</td>
+          <td style="padding:6px;font-weight:700;color:${pnlColor(t.pnl)}">$${t.pnl>=0?'+':''}${t.pnl.toFixed(2)}</td>
+          <td style="padding:6px;font-size:11px;color:var(--muted)">${t.reason||'--'}</td>
+        </tr>`).join('')}
+        </tbody></table>`;
+  } catch(e) { console.error('Tax log error:', e); }
+}
+
 // ── Tab switching with full render hooks ─────────────────────────────────
 function switchTab(name) {
   document.querySelectorAll('.tab').forEach(t=>t.classList.remove('active'));
   document.querySelectorAll('.content').forEach(c=>c.classList.remove('active'));
   document.querySelector(`[onclick="switchTab('${name}')"]`).classList.add('active');
   document.getElementById(`tab-${name}`).classList.add('active');
-  if (name==='analytics') renderCharts();
-  if (name==='report') loadReport();
-  if (name==='log') renderServerLog();
+  if (name==='analytics')   renderCharts();
+  if (name==='report')      loadReport();
+  if (name==='log')         renderServerLog();
+  if (name==='theta')       loadTheta();
+  if (name==='attribution') loadAttribution();
+  if (name==='tax')         loadTaxLog();
 }
 
 // ── Init ──────────────────────────────────────────────────────────────────
