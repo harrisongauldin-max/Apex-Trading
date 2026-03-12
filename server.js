@@ -472,8 +472,9 @@ async function checkAllFilters(stock, price) {
   // 5. Consecutive losses
   if (state.consecutiveLosses >= CONSEC_LOSS_LIMIT) return { pass:false, reason:`${CONSEC_LOSS_LIMIT} consecutive losses — paused for day` };
 
-  // 6. Duplicate position
-  if (state.positions.find(p => p.ticker === stock.ticker)) return { pass:false, reason:`Already have open ${stock.ticker}` };
+  // 6. Duplicate position — allow up to 3 positions per ticker, but only if existing is profitable
+  const existingPositions = state.positions.filter(p => p.ticker === stock.ticker);
+  if (existingPositions.length >= 3) return { pass:false, reason:`Already have 3 positions in ${stock.ticker} — max reached` };
 
   // 7. Portfolio heat
   if (heatPct() >= MAX_HEAT) return { pass:false, reason:`Portfolio heat at ${(heatPct()*100).toFixed(0)}% max` };
@@ -534,7 +535,7 @@ async function checkAllFilters(stock, price) {
         return { pass:false, reason:`Pre-market negative (${(premarketMove*100).toFixed(1)}%) — bearish open` };
       }
       if (premarketMove >= PREMARKET_STRONG_MOVE) {
-        log(`  ✅ ${stock.ticker} strong pre-market +${(premarketMove*100).toFixed(1)}% — boost signal`);
+        logEvent("scan", `${stock.ticker} strong pre-market +${(premarketMove*100).toFixed(1)}% — boost signal`);
         stock._premarketBoost = true;
       }
     }
@@ -560,7 +561,7 @@ function calcPositionSize(premium, score, vix) {
 
   // Drawdown recovery mode — reduce sizing 25%
   const recoveryMult = isDrawdownRecovery() ? (1 - DRAWDOWN_SIZING_REDUCE) : 1.0;
-  if (isDrawdownRecovery()) log("  ⚠️  Drawdown recovery mode active — sizing reduced 25%");
+  if (isDrawdownRecovery()) logEvent("warn", "Drawdown recovery mode active — sizing reduced 25%");
 
   // Max per position
   const maxCost    = Math.min(state.cash * scoreMult * vixMult * recoveryMult, state.cash * 0.25, MAX_LOSS_PER_TRADE / STOP_LOSS_PCT);
