@@ -954,38 +954,37 @@ STOCK PORTFOLIO
 }
 
 // ── Cron Schedules ────────────────────────────────────────────────────────
-// Every minute during market hours Mon-Fri
-cron.schedule("* 9-16 * * 1-5", () => { runScan(); }, { timezone:"America/New_York" });
+// Every minute Mon-Fri (market hours checked inside runScan)
+cron.schedule("* * * * 1-5", () => { runScan(); });
 
-// Morning email 9:00 AM ET
-cron.schedule("0 9 * * 1-5", () => {
-  state.dayStartCash = state.cash;
-  state.todayTrades  = 0;
+// Morning reset + email 14:00 UTC = 9:00 AM ET
+cron.schedule("0 14 * * 1-5", () => {
+  state.dayStartCash      = state.cash;
+  state.todayTrades       = 0;
   state.consecutiveLosses = 0;
-  state.circuitOpen  = true;
+  state.circuitOpen       = true;
   saveState();
   sendEmail("morning");
-}, { timezone:"America/New_York" });
+});
 
-// EOD email 4:05 PM ET
-cron.schedule("5 16 * * 1-5", () => { sendEmail("eod"); }, { timezone:"America/New_York" });
+// EOD email 21:05 UTC = 4:05 PM ET
+cron.schedule("5 21 * * 1-5", () => { sendEmail("eod"); });
 
-// Weekly reset Monday 9:00 AM ET
-cron.schedule("0 9 * * 1", () => {
-  state.weekStartCash      = state.cash;
-  state.weeklyCircuitOpen  = true;
+// Weekly reset Monday morning
+cron.schedule("0 14 * * 1", () => {
+  state.weekStartCash     = state.cash;
+  state.weeklyCircuitOpen = true;
   saveState();
   logEvent("reset", "Weekly circuit breaker reset");
-}, { timezone:"America/New_York" });
+});
 
-// Monthly report first trading day at 9:00 AM
-cron.schedule("0 9 1-7 * 1", () => {
+// Monthly report first week Monday
+cron.schedule("0 14 1-7 * 1", () => {
   const report = buildMonthlyReport();
   logEvent("monthly", report);
   state.monthlyProfit = 0;
   state.monthStart    = new Date().toLocaleDateString();
   saveState();
-  // Send monthly report via email
   if (GMAIL_USER && GMAIL_PASS) {
     mailer.sendMail({
       from:GMAIL_USER, to:GMAIL_USER,
@@ -993,7 +992,7 @@ cron.schedule("0 9 1-7 * 1", () => {
       text: report,
     }).catch(e => logEvent("error","Monthly email: "+e.message));
   }
-}, { timezone:"America/New_York" });
+});
 
 // ── Express API ───────────────────────────────────────────────────────────
 app.use(express.json());
