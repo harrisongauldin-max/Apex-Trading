@@ -932,11 +932,16 @@ async function runScan() {
   const scored = [];
   for (const stock of WATCHLIST) {
     if (state.positions.find(p=>p.ticker===stock.ticker)) continue;
-    const { pass } = await checkAllFilters(stock, 0);
-    if (!pass) continue;
 
+    // Fetch price FIRST before running filters
     const price = await getStockQuote(stock.ticker);
-    if (!price || price < MIN_STOCK_PRICE) continue;
+    if (!price || price < MIN_STOCK_PRICE) {
+      logEvent("filter", `${stock.ticker} price $${price||0} unavailable or below min — skip`);
+      continue;
+    }
+
+    const { pass, reason } = await checkAllFilters(stock, price);
+    if (!pass) { logEvent("filter", `${stock.ticker} filter fail: ${reason}`); continue; }
 
     const bars     = await getStockBars(stock.ticker, 30);
     const avgVol   = bars.length ? bars.slice(0,-1).reduce((s,b)=>s+b.v,0)/Math.max(bars.length-1,1) : 0;
