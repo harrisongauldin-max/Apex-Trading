@@ -338,15 +338,6 @@ let state = {};
 let equityHistory = [];
 let charts = {};
 
-function switchTab(name) {
-  document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
-  document.querySelectorAll('.content').forEach(c => c.classList.remove('active'));
-  document.querySelector(`[onclick="switchTab('${name}')"]`).classList.add('active');
-  document.getElementById(`tab-${name}`).classList.add('active');
-  if (name === 'analytics') renderCharts();
-  if (name === 'report') loadReport();
-}
-
 // ── Fetch & Render ─────────────────────────────────────────────────────────
 async function fetchState() {
   try {
@@ -836,8 +827,7 @@ function renderServerLog() {
   }).join('');
 }
 
-// Auto-render server log when on that tab
-const origSwitchTab = switchTab;
+// ── Tab switching with full render hooks ─────────────────────────────────
 function switchTab(name) {
   document.querySelectorAll('.tab').forEach(t=>t.classList.remove('active'));
   document.querySelectorAll('.content').forEach(c=>c.classList.remove('active'));
