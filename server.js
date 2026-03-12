@@ -258,31 +258,35 @@ function getTaxLog() {
   });
 }
 
+// Bulletproof ET time — uses Intl API which handles DST correctly on any server timezone
+function getETTime(date) {
+  const str = (date || new Date()).toLocaleString("en-US", { timeZone: "America/New_York" });
+  return new Date(str);
+}
+
 function isEntryWindow() {
-  const now = new Date();
-  // Convert to ET (UTC-5 or UTC-4 during DST)
-  const etOffset = isDST(now) ? -4 : -5;
-  const et = new Date(now.getTime() + (now.getTimezoneOffset() + etOffset * 60) * 60000);
+  const et = getETTime();
   const h = et.getHours(), m = et.getMinutes();
+  const day = et.getDay(); // 0=Sun, 6=Sat
+  if (day === 0 || day === 6) return false; // no weekends
   return (h > ENTRY_START_HOUR || (h === ENTRY_START_HOUR && m >= 0)) &&
          (h < ENTRY_END_HOUR   || (h === ENTRY_END_HOUR && m <= ENTRY_END_MIN));
 }
 
 function isDST(date) {
+  // Kept for compatibility but getETTime() is now used everywhere
   const jan = new Date(date.getFullYear(), 0, 1).getTimezoneOffset();
   const jul = new Date(date.getFullYear(), 6, 1).getTimezoneOffset();
   return Math.max(jan, jul) !== date.getTimezoneOffset();
 }
 
 function isMarketHours() {
-  const now = new Date();
-  const etOffset = isDST(now) ? -4 : -5;
-  const et = new Date(now.getTime() + (now.getTimezoneOffset() + etOffset * 60) * 60000);
-  const day = et.getDay();
-  const h = et.getHours(), m = et.getMinutes();
+  const et   = getETTime();
+  const h    = et.getHours(), m = et.getMinutes();
+  const day  = et.getDay();
   if (day === 0 || day === 6) return false;
   const mins = h * 60 + m;
-  return mins >= 570 && mins <= 960; // 9:30 AM - 4:00 PM
+  return mins >= 570 && mins <= 960; // 9:30 AM - 4:00 PM ET
 }
 
 // ── Greeks (Black-Scholes) ────────────────────────────────────────────────
@@ -1156,8 +1160,9 @@ STOCK PORTFOLIO
 // Every minute Mon-Fri (market hours checked inside runScan)
 cron.schedule("* * * * 1-5", () => { runScan(); });
 
-// Morning reset + email 14:00 UTC = 9:00 AM ET
-cron.schedule("0 14 * * 1-5", () => {
+// Morning reset + email 13:00 UTC = 9:00 AM EDT (UTC-4, DST in effect Mar-Nov)
+// Note: becomes 14:00 UTC = 9:00 AM EST in winter (Nov-Mar)
+cron.schedule("0 13 * * 1-5", () => {
   state.dayStartCash      = state.cash;
   state.todayTrades       = 0;
   state.consecutiveLosses = 0;
@@ -1166,11 +1171,11 @@ cron.schedule("0 14 * * 1-5", () => {
   sendEmail("morning");
 });
 
-// EOD email 21:05 UTC = 4:05 PM ET
-cron.schedule("5 21 * * 1-5", () => { sendEmail("eod"); });
+// EOD email 20:05 UTC = 4:05 PM EDT (UTC-4)
+cron.schedule("5 20 * * 1-5", () => { sendEmail("eod"); });
 
 // Weekly reset Monday morning
-cron.schedule("0 14 * * 1", () => {
+cron.schedule("0 13 * * 1", () => {
   state.weekStartCash     = state.cash;
   state.weeklyCircuitOpen = true;
   saveState();
