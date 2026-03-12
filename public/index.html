@@ -561,6 +561,7 @@ function renderPositions() {
         <div style="display:flex;align-items:center;gap:10px">
           <span style="font-size:16px;font-weight:700;color:var(--blue)">${p.ticker}</span>
           <span style="font-size:11px;color:var(--muted)">$${p.strike}${p.optionType==='put'?'P':'C'} · ${p.expDate}</span>
+          <span style="font-size:9px;padding:2px 6px;border-radius:10px;background:${p.expiryType==='weekly'?'rgba(255,215,0,.15)':'rgba(100,100,100,.2)'};color:${p.expiryType==='weekly'?'var(--gold)':'var(--muted)'}">${(p.expiryType||'monthly').toUpperCase()}</span>
           <span style="font-size:9px;padding:2px 6px;border-radius:10px;background:${p.optionType==='put'?'rgba(255,80,80,.15)':'rgba(0,196,255,.1)'};color:${p.optionType==='put'?'#ff5050':'var(--blue)'}">${p.optionType==='put'?'PUT':'CALL'}</span>
           <span style="font-size:9px;padding:2px 6px;border-radius:10px;background:rgba(0,196,255,.1);color:var(--blue)">${p.sector}</span>
           ${p.partialClosed ? '<span style="font-size:9px;padding:2px 6px;border-radius:10px;background:rgba(255,215,0,.1);color:var(--gold)">PARTIAL</span>' : ''}
