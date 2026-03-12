@@ -1182,8 +1182,11 @@ cron.schedule("0 13 * * 1", () => {
   logEvent("reset", "Weekly circuit breaker reset");
 });
 
-// Monthly report first week Monday
-cron.schedule("0 14 1-7 * 1", () => {
+// Monthly report — runs every Monday, checks inside if it is the first Monday of the month
+cron.schedule("0 13 * * 1", () => {
+  const et  = getETTime();
+  const day = et.getDate();
+  if (day > 7) return; // only first Monday of month
   const report = buildMonthlyReport();
   logEvent("monthly", report);
   state.monthlyProfit = 0;
@@ -1192,7 +1195,7 @@ cron.schedule("0 14 1-7 * 1", () => {
   if (GMAIL_USER && GMAIL_PASS) {
     mailer.sendMail({
       from:GMAIL_USER, to:GMAIL_USER,
-      subject:`APEX Monthly Report — ${new Date().toLocaleDateString("en-US",{month:"long",year:"numeric"})}`,
+      subject:`APEX Monthly Report — ${et.toLocaleDateString("en-US",{month:"long",year:"numeric"})}`,
       text: report,
     }).catch(e => logEvent("error","Monthly email: "+e.message));
   }
