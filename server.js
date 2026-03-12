@@ -691,8 +691,97 @@ function calcPositionSize(premium, score, vix) {
 }
 
 // ── Build Trade Card ──────────────────────────────────────────────────────
-function buildCard(stock, price, contracts, iv, optionType = "call") {
-  const expDays   = stock.expiryDays || 30;
+// ── Expiration Date Calculator ────────────────────────────────────────────
+// Returns the next real options expiry Friday on or after targetDate
+function getNextExpiryFriday(targetDate) {
+  const d = new Date(targetDate);
+  // Find the next Friday on or after targetDate
+  const day = d.getDay(); // 0=Sun, 6=Sat
+  const daysUntilFriday = day <= 5 ? (5 - day) : 6; // days until next Friday
+  d.setDate(d.getDate() + daysUntilFriday);
+  return d;
+}
+
+// Returns the third Friday of a given month/year (standard monthly expiry)
+function getThirdFriday(year, month) {
+  const d = new Date(year, month, 1);
+  // Find first Friday
+  const firstFriday = (5 - d.getDay() + 7) % 7;
+  // Third Friday = first Friday + 14 days
+  d.setDate(firstFriday + 15);
+  return d;
+}
+
+// Smart expiry selection based on score, VIX, and option type
+// Returns { expDate: string, expDays: number, expiryType: "weekly"|"monthly" }
+function selectExpiry(score, vix, optionType, earningsDate) {
+  const today  = getETTime();
+  const now    = today.getTime();
+
+  // Determine target DTE window based on conditions
+  let targetDays;
+  let expiryType;
+
+  if (score >= 85 && vix < 25 && optionType === "call") {
+    // High score, low VIX, call = weekly for max leverage
+    targetDays = 14;
+    expiryType = "weekly";
+  } else if (vix >= VIX_REDUCE50 || optionType === "put") {
+    // High VIX or put = monthly, need more time
+    targetDays = 45;
+    expiryType = "monthly";
+  } else if (score >= 70 && vix < 30) {
+    // Normal setup = standard monthly
+    targetDays = 30;
+    expiryType = "monthly";
+  } else {
+    // Default to monthly with extra buffer
+    targetDays = 45;
+    expiryType = "monthly";
+  }
+
+  // Calculate target date
+  const targetDate = new Date(now + targetDays * 86400000);
+
+  let expiry;
+  if (expiryType === "weekly") {
+    // Find next Friday at or after targetDate
+    expiry = getNextExpiryFriday(targetDate);
+    // Make sure it's at least 7 days out (avoid gamma risk)
+    const minDate = new Date(now + 7 * 86400000);
+    if (expiry < minDate) expiry = getNextExpiryFriday(new Date(expiry.getTime() + 7 * 86400000));
+  } else {
+    // Find third Friday of target month
+    expiry = getThirdFriday(targetDate.getFullYear(), targetDate.getMonth());
+    // If that Friday has already passed or too close, go to next month
+    const minDate = new Date(now + 21 * 86400000);
+    if (expiry < minDate) {
+      const nextMonth = targetDate.getMonth() === 11 ? 0 : targetDate.getMonth() + 1;
+      const nextYear  = targetDate.getMonth() === 11 ? targetDate.getFullYear() + 1 : targetDate.getFullYear();
+      expiry = getThirdFriday(nextYear, nextMonth);
+    }
+  }
+
+  // If earnings date is within our expiry window, extend past earnings
+  if (earningsDate) {
+    const eDays = Math.round((new Date(earningsDate) - new Date(now)) / 86400000);
+    if (eDays > 0 && eDays < Math.round((expiry - new Date(now)) / 86400000)) {
+      // Earnings before expiry — extend to next monthly after earnings
+      const postEarnings = new Date(new Date(earningsDate).getTime() + 7 * 86400000);
+      expiry = getThirdFriday(postEarnings.getFullYear(), postEarnings.getMonth());
+    }
+  }
+
+  const expDays = Math.round((expiry - new Date(now)) / 86400000);
+  const expDate = expiry.toLocaleDateString("en-US", { month: "short", day: "2-digit", year: "numeric" });
+
+  return { expDate, expDays: Math.max(expDays, 7), expiryType };
+}
+
+function buildCard(stock, price, contracts, iv, optionType = "call", score = 75, vix = 15) {
+  // Smart expiry — real Friday dates, weekly vs monthly based on conditions
+  const { expDate, expDays, expiryType } = selectExpiry(score, vix, optionType, stock.earningsDate);
+
   const otmPct    = stock.momentum === "strong" ? 0.035 : 0.045;
   // Calls: strike ABOVE price. Puts: strike BELOW price
   const strike    = optionType === "put"
@@ -702,22 +791,20 @@ function buildCard(stock, price, contracts, iv, optionType = "call") {
   const t         = expDays / 365;
   const premium   = parseFloat((price * ivVal * Math.sqrt(t) * 0.4 + 0.3).toFixed(2));
   const cost      = parseFloat((premium * 100 * contracts).toFixed(2));
-  const expDate   = new Date(Date.now()+expDays*86400000).toLocaleDateString("en-US",{month:"short",day:"2-digit",year:"numeric"});
   const greeks    = calcGreeks(price, strike, expDays, ivVal);
   const target    = parseFloat((premium*(1+TAKE_PROFIT_PCT)).toFixed(2));
   const stop      = parseFloat((premium*(1-STOP_LOSS_PCT)).toFixed(2));
-  // Breakeven: calls need price above strike+premium, puts need price below strike-premium
   const breakeven = optionType === "put"
     ? parseFloat((strike - premium).toFixed(2))
     : parseFloat((strike + premium).toFixed(2));
-  return { ...stock, price, strike, premium, contracts, cost, expDate, expDays, target, stop, breakeven, greeks, iv:ivVal, optionType };
+  return { ...stock, price, strike, premium, contracts, cost, expDate, expDays, expiryType, target, stop, breakeven, greeks, iv:ivVal, optionType };
 }
 
 // ── Execute Trade ─────────────────────────────────────────────────────────
 async function executeTrade(stock, price, score, scoreReasons, vix, optionType = "call") {
   const iv        = 0.25 + stock.ivr * 0.003;
   const contracts = calcPositionSize(price * iv * Math.sqrt(stock.expiryDays/365) * 0.4 + 0.3, score, vix);
-  const t         = buildCard(stock, price, contracts, iv, optionType);
+  const t         = buildCard(stock, price, contracts, iv, optionType, score, vix);
 
   // Ensure liquid cash — liquidate BIL if needed before checking
   await ensureLiquidCash(t.cost + CAPITAL_FLOOR);
