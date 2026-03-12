@@ -797,7 +797,7 @@ async function closePos(ticker) {
 }
 
 async function resetMonth() {
-  if (!confirm('Reset month? This resets cash to $5,000 and clears today\\'s trade count.')) return;
+  if (!confirm("Reset month? This resets cash to $5,000 and clears today's trade count.")) return;
   await fetch('/api/reset-month', {method:'POST'});
   await fetchState();
 }
