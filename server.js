@@ -22,7 +22,7 @@ const GMAIL_PASS        = process.env.GMAIL_APP_PASSWORD|| "";
 const STATE_FILE        = path.join(__dirname, "state.json");
 
 // ── Trading Constants ─────────────────────────────────────────────────────
-const MONTHLY_BUDGET      = 5000;
+const MONTHLY_BUDGET      = 10000;
 const CAPITAL_FLOOR       = 3000;
 const REVENUE_THRESHOLD   = 2000;
 const BONUS_AMOUNT        = 1000;
@@ -136,6 +136,7 @@ function loadState() {
   return {
     cash:             MONTHLY_BUDGET,
     extraBudget:      0,
+    customBudget:     0,   // set by dashboard — persists across restarts
     totalRevenue:     0,
     positions:        [],
     stockPositions:   [],
@@ -178,7 +179,7 @@ function logEvent(type, message) {
 
 // ── Helpers ───────────────────────────────────────────────────────────────
 const fmt         = n  => "$" + parseFloat(n).toFixed(2);
-const totalCap    = () => MONTHLY_BUDGET + state.extraBudget;
+const totalCap    = () => (state.customBudget || MONTHLY_BUDGET) + (state.extraBudget || 0);
 const openRisk    = () => state.positions.reduce((s,p) => s + p.cost * (p.partialClosed ? 0.5 : 1), 0);
 const heatPct     = () => openRisk() / totalCap();
 const realizedPnL = () => state.closedTrades.reduce((s,t) => s + t.pnl, 0);
@@ -364,6 +365,54 @@ function scoreSetup(stock, relStrength, adx, volume, avgVolume) {
   return { score: Math.min(score, 100), reasons };
 }
 
+// ── Put Setup Scoring ────────────────────────────────────────────────────
+// Mirror of scoreSetup but for bearish setups — looks for opposite signals
+function scorePutSetup(stock, relStrength, adx, volume, avgVolume) {
+  let score = 0;
+  const reasons = [];
+
+  // Momentum — weak is good for puts (20pts)
+  if (stock.momentum === "recovering")       { score += 20; reasons.push("Weak momentum — bearish (+20)"); }
+  else if (stock.momentum === "steady")      { score += 10; reasons.push("Neutral momentum (+10)"); }
+  else                                       { score += 0;  reasons.push("Strong momentum — bad for put (+0)"); }
+
+  // RSI overbought 70+ or falling from high (15pts)
+  if (stock.rsi >= 72)                       { score += 15; reasons.push(`RSI ${stock.rsi} — overbought (+15)`); }
+  else if (stock.rsi >= 65 && stock.rsi < 72){ score += 8;  reasons.push(`RSI ${stock.rsi} — elevated (+8)`); }
+  else if (stock.rsi <= 45)                  { score += 5;  reasons.push(`RSI ${stock.rsi} — oversold caution (+5)`); }
+  else                                       { reasons.push(`RSI ${stock.rsi} neutral for put (+0)`); }
+
+  // MACD bearish (15pts)
+  if (stock.macd.includes("bearish crossover")) { score += 15; reasons.push("MACD bearish crossover (+15)"); }
+  else if (stock.macd.includes("bearish"))      { score += 10; reasons.push("MACD bearish (+10)"); }
+  else if (stock.macd.includes("neutral"))      { score += 5;  reasons.push("MACD neutral (+5)"); }
+  else                                          { reasons.push("MACD bullish — bad for put (+0)"); }
+
+  // IVR — lower is still better for buying puts (15pts)
+  if (stock.ivr < 30)       { score += 15; reasons.push(`IVR ${stock.ivr} — cheap options (+15)`); }
+  else if (stock.ivr < 50)  { score += 10; reasons.push(`IVR ${stock.ivr} — moderate (+10)`); }
+  else if (stock.ivr < 65)  { score += 5;  reasons.push(`IVR ${stock.ivr} — elevated (+5)`); }
+  else                      { reasons.push(`IVR ${stock.ivr} — expensive (+0)`); }
+
+  // Bearish catalyst (15pts)
+  if (stock.bearishCatalyst) { score += 15; reasons.push(`Bearish catalyst: ${stock.bearishCatalyst} (+15)`); }
+
+  // Volume confirmation (10pts)
+  if (volume && avgVolume && volume > avgVolume * 1.2) { score += 10; reasons.push("Above-avg volume (+10)"); }
+  else if (volume && avgVolume && volume > avgVolume)  { score += 5;  reasons.push("Average volume (+5)"); }
+  else                                                 { reasons.push("Low volume (+0)"); }
+
+  // Relative weakness vs SPY — negative is good for puts (10pts)
+  if (relStrength < 0.95)      { score += 10; reasons.push(`Weak vs SPY: ${((relStrength-1)*100).toFixed(1)}% (+10)`); }
+  else if (relStrength < 1.0)  { score += 5;  reasons.push(`Slightly weak vs SPY (+5)`); }
+  else                         { reasons.push(`Outperforming SPY — bad for put (+0)`); }
+
+  // ADX bonus — strong downtrend
+  if (adx && adx > 25) { score += 5; reasons.push(`ADX ${adx} — strong trend (+5)`); }
+
+  return { score: Math.min(score, 100), reasons };
+}
+
 // ── Alpaca API ────────────────────────────────────────────────────────────
 const alpacaHeaders = () => ({
   "APCA-API-KEY-ID":     ALPACA_KEY,
@@ -544,7 +593,7 @@ async function checkAllFilters(stock, price) {
   // 5. Consecutive losses
   if (state.consecutiveLosses >= CONSEC_LOSS_LIMIT) return { pass:false, reason:`${CONSEC_LOSS_LIMIT} consecutive losses — paused for day` };
 
-  // 6. Duplicate position — allow up to 3 positions per ticker, but only if existing is profitable
+  // 6. Position limits per ticker — max 3 total, max 2 of same type (call/put)
   const existingPositions = state.positions.filter(p => p.ticker === stock.ticker);
   if (existingPositions.length >= 3) return { pass:false, reason:`Already have 3 positions in ${stock.ticker} — max reached` };
 
@@ -642,10 +691,13 @@ function calcPositionSize(premium, score, vix) {
 }
 
 // ── Build Trade Card ──────────────────────────────────────────────────────
-function buildCard(stock, price, contracts, iv) {
+function buildCard(stock, price, contracts, iv, optionType = "call") {
   const expDays   = stock.expiryDays || 30;
   const otmPct    = stock.momentum === "strong" ? 0.035 : 0.045;
-  const strike    = Math.round(price * (1+otmPct) / 5) * 5;
+  // Calls: strike ABOVE price. Puts: strike BELOW price
+  const strike    = optionType === "put"
+    ? Math.round(price * (1 - otmPct) / 5) * 5
+    : Math.round(price * (1 + otmPct) / 5) * 5;
   const ivVal     = iv || (0.25 + stock.ivr * 0.003);
   const t         = expDays / 365;
   const premium   = parseFloat((price * ivVal * Math.sqrt(t) * 0.4 + 0.3).toFixed(2));
@@ -654,15 +706,18 @@ function buildCard(stock, price, contracts, iv) {
   const greeks    = calcGreeks(price, strike, expDays, ivVal);
   const target    = parseFloat((premium*(1+TAKE_PROFIT_PCT)).toFixed(2));
   const stop      = parseFloat((premium*(1-STOP_LOSS_PCT)).toFixed(2));
-  const breakeven = parseFloat((strike+premium).toFixed(2));
-  return { ...stock, price, strike, premium, contracts, cost, expDate, expDays, target, stop, breakeven, greeks, iv:ivVal };
+  // Breakeven: calls need price above strike+premium, puts need price below strike-premium
+  const breakeven = optionType === "put"
+    ? parseFloat((strike - premium).toFixed(2))
+    : parseFloat((strike + premium).toFixed(2));
+  return { ...stock, price, strike, premium, contracts, cost, expDate, expDays, target, stop, breakeven, greeks, iv:ivVal, optionType };
 }
 
 // ── Execute Trade ─────────────────────────────────────────────────────────
-async function executeTrade(stock, price, score, scoreReasons, vix) {
+async function executeTrade(stock, price, score, scoreReasons, vix, optionType = "call") {
   const iv        = 0.25 + stock.ivr * 0.003;
   const contracts = calcPositionSize(price * iv * Math.sqrt(stock.expiryDays/365) * 0.4 + 0.3, score, vix);
-  const t         = buildCard(stock, price, contracts, iv);
+  const t         = buildCard(stock, price, contracts, iv, optionType);
 
   // Ensure liquid cash — liquidate BIL if needed before checking
   await ensureLiquidCash(t.cost + CAPITAL_FLOOR);
@@ -712,8 +767,9 @@ async function executeTrade(stock, price, score, scoreReasons, vix) {
   });
   if (state.tradeJournal.length > 200) state.tradeJournal = state.tradeJournal.slice(0,200);
 
+  const typeLabel = optionType === "put" ? "P" : "C";
   logEvent("trade",
-    `BUY ${t.ticker} $${t.strike}C exp ${t.expDate} | ${t.contracts}x @ $${t.premium} | ` +
+    `BUY ${t.ticker} $${t.strike}${typeLabel} exp ${t.expDate} | ${t.contracts}x @ $${t.premium} | ` +
     `cost ${fmt(t.cost)} | score ${score} | delta ${t.greeks.delta} | cash ${fmt(state.cash)} | heat ${(heatPct()*100).toFixed(0)}%`
   );
   saveState();
@@ -1038,10 +1094,21 @@ async function runScan() {
       if (gap > MAX_GAP_PCT) { logEvent("filter", `${stock.ticker} gap ${(gap*100).toFixed(1)}% — skip`); continue; }
     }
 
-    const { score, reasons } = scoreSetup(stock, relStrength, adx, todayVol, avgVol);
-    if (score < MIN_SCORE) { logEvent("filter", `${stock.ticker} score ${score} < ${MIN_SCORE} — skip`); continue; }
+    // Score both call and put setups — pick the better one
+    const callSetup = scoreSetup(stock, relStrength, adx, todayVol, avgVol);
+    const putSetup  = scorePutSetup(stock, relStrength, adx, todayVol, avgVol);
 
-    scored.push({ stock, price, score, reasons, relStrength, adx, todayVol, avgVol });
+    const bestScore = Math.max(callSetup.score, putSetup.score);
+    const optionType = putSetup.score > callSetup.score ? "put" : "call";
+    const bestReasons = optionType === "put" ? putSetup.reasons : callSetup.reasons;
+
+    if (bestScore < MIN_SCORE) {
+      logEvent("filter", `${stock.ticker} call:${callSetup.score} put:${putSetup.score} — both below ${MIN_SCORE} — skip`);
+      continue;
+    }
+
+    logEvent("filter", `${stock.ticker} best setup: ${optionType.toUpperCase()} score ${bestScore}`);
+    scored.push({ stock, price, score: bestScore, reasons: bestReasons, optionType });
     await new Promise(r=>setTimeout(r,200));
   }
 
@@ -1056,7 +1123,7 @@ async function runScan() {
     const { pass, reason } = await checkAllFilters(stock, price);
     if (!pass) { logEvent("filter", `${stock.ticker} — ${reason}`); continue; }
 
-    const entered = await executeTrade(stock, price, score, reasons, state.vix);
+    const entered = await executeTrade(stock, price, score, reasons, state.vix, optionType);
     if (entered) await new Promise(r=>setTimeout(r,500));
   }
 
@@ -1239,8 +1306,11 @@ STOCK PORTFOLIO
 }
 
 // ── Cron Schedules ────────────────────────────────────────────────────────
-// Every minute Mon-Fri (market hours checked inside runScan)
-cron.schedule("* * * * 1-5", () => { runScan(); });
+// Every 30 seconds Mon-Fri (market hours checked inside runScan)
+setInterval(() => {
+  const day = getETTime().getDay();
+  if (day >= 1 && day <= 5) runScan();
+}, 30000);
 
 // Morning reset + email 13:00 UTC = 9:00 AM EDT (UTC-4, DST in effect Mar-Nov)
 // Note: becomes 14:00 UTC = 9:00 AM EST in winter (Nov-Mar)
@@ -1372,11 +1442,12 @@ app.post("/api/set-budget", (req,res) => {
   const { budget } = req.body;
   const amount = parseFloat(budget);
   if (!amount || amount < 100 || amount > 1000000) { res.status(400).json({error:"Invalid budget"}); return; }
-  const diff = amount - state.cash;
-  state.cash = parseFloat(amount.toFixed(2));
-  state.dayStartCash = state.cash;
-  state.weekStartCash = state.cash;
-  state.peakCash = Math.max(state.peakCash, state.cash);
+  // Save the custom budget to state so it survives restarts and resets
+  state.customBudget   = amount;
+  state.cash           = parseFloat(amount.toFixed(2));
+  state.dayStartCash   = state.cash;
+  state.weekStartCash  = state.cash;
+  state.peakCash       = Math.max(state.peakCash || 0, state.cash);
   logEvent("reset", `Budget updated to ${fmt(amount)}`);
   saveState();
   res.json({ok:true, cash:state.cash});
