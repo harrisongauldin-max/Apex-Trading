@@ -1050,7 +1050,6 @@ async function runScan() {
 
   // Enter trades
   for (const { stock, price, score, reasons } of scored) {
-    if (state.todayTrades >= MAX_TRADES_PER_DAY) break;
     if (heatPct() >= MAX_HEAT) break;
     if (state.cash <= CAPITAL_FLOOR) break;
 
