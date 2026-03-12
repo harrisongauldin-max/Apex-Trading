@@ -594,8 +594,9 @@ async function manageStockPositions() {
 
 // ── Main Scan Engine ──────────────────────────────────────────────────────
 async function runScan() {
-  if (!ALPACA_KEY) { logEvent("warn", "No ALPACA_API_KEY set"); return; }
-  if (!isMarketHours()) return;
+  if (!ALPACA_KEY) { logEvent("warn", "No ALPACA_API_KEY set — check Railway variables"); return; }
+  logEvent("scan", `Scan triggered | market: ${isMarketHours()} | entry window: ${isEntryWindow()} | VIX: ${state.vix} | cash: ${fmt(state.cash)} | positions: ${state.positions.length}`);
+  if (!isMarketHours()) { logEvent("scan", "Outside market hours — skipping trade logic"); return; }
 
   // Update VIX
   state.vix = await getVIX() || state.vix;
@@ -1027,6 +1028,19 @@ app.post("/api/reset-month", (req,res) => {
 });
 app.get("/api/journal",      (req,res) => res.json(state.tradeJournal.slice(0,50)));
 app.get("/api/report",       (req,res) => res.json({report:buildMonthlyReport()}));
+app.post("/api/set-budget", (req,res) => {
+  const { budget } = req.body;
+  const amount = parseFloat(budget);
+  if (!amount || amount < 100 || amount > 1000000) { res.status(400).json({error:"Invalid budget"}); return; }
+  const diff = amount - state.cash;
+  state.cash = parseFloat(amount.toFixed(2));
+  state.dayStartCash = state.cash;
+  state.weekStartCash = state.cash;
+  state.peakCash = Math.max(state.peakCash, state.cash);
+  logEvent("reset", `Budget updated to ${fmt(amount)}`);
+  saveState();
+  res.json({ok:true, cash:state.cash});
+});
 app.get("/health",           (req,res) => res.json({status:"ok",uptime:process.uptime(),vix:state.vix,positions:state.positions.length}));
 
 app.listen(PORT, () => {
