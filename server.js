@@ -50,7 +50,7 @@ const MAX_SPREAD_PCT      = 0.10;
 const MAX_GAP_PCT         = 0.03;
 const TARGET_DELTA_MIN    = 0.28;
 const TARGET_DELTA_MAX    = 0.42;
-const MAX_TRADES_PER_DAY  = 3;
+// MAX_TRADES_PER_DAY removed — portfolio heat (60%) controls position limits
 const CONSEC_LOSS_LIMIT   = 3;
 const WEEKLY_DD_LIMIT     = 0.15;
 const MAX_LOSS_PER_TRADE  = 400;
@@ -63,6 +63,12 @@ const STOCK_PROFIT_THRESH = 1000;   // monthly profit threshold for stock buys
 const STOCK_ALLOC_PCT     = 0.20;   // 20% of profits above threshold
 const MAX_STOCK_PCT       = 0.30;   // max 30% of account in stocks
 const STOCK_STOP_PCT      = 0.15;   // -15% stop on stock positions
+
+// Cash ETF parking — floor is split 50/50 between liquid and BIL
+const CASH_ETF             = "BIL";     // 1-3 Month T-Bill ETF
+const CASH_ETF_FLOOR_PCT   = 0.50;      // 50% of capital floor parked in BIL
+const CASH_ETF_TARGET      = CAPITAL_FLOOR * 0.50;  // $1,500 in BIL at all times
+const CASH_ETF_MIN         = 100;       // minimum rebalance threshold
 
 // VIX tiers
 const VIX_NORMAL    = 20;
@@ -147,6 +153,9 @@ function loadState() {
     monthlyProfit:    0,
     stockBudget:      0,
     peakCash:         MONTHLY_BUDGET,
+    cashETFShares:    0,
+    cashETFValue:     0,
+    cashETFPrice:     91,
     lastScan:         null,
     vix:              15,
   };
@@ -418,6 +427,71 @@ async function getOptionsSnapshot(symbol) {
   } catch(e) { return null; }
 }
 
+// ── Cash ETF Management ───────────────────────────────────────────────────
+// Target: park 50% of deployable idle cash in BIL, keep 50% liquid
+// Deployable = cash above (floor + buffer)
+
+function getDeployableCash() {
+  // Everything above the floor is deployable — floor itself is managed separately
+  return Math.max(0, state.cash - CAPITAL_FLOOR);
+}
+
+async function rebalanceCashETF() {
+  // Goal: always keep CASH_ETF_TARGET ($1,500) parked in BIL as the ETF half of the floor
+  // The other $1,500 stays liquid as the cash half of the floor
+  const currentETF    = state.cashETFValue || 0;
+  const currentShares = state.cashETFShares || 0;
+  const diff          = CASH_ETF_TARGET - currentETF;
+
+  if (Math.abs(diff) < CASH_ETF_MIN) return; // already balanced
+
+  // Get BIL price
+  let bilPrice = 91;
+  try {
+    const p = await getStockQuote(CASH_ETF);
+    if (p && p > 50) bilPrice = p;
+  } catch(e) {}
+
+  if (diff > 0 && state.cash > CAPITAL_FLOOR + diff) {
+    // Buy BIL to top up to $1,500 target
+    const sharesToBuy = Math.floor(diff / bilPrice);
+    if (sharesToBuy < 1) return;
+    const cost = sharesToBuy * bilPrice;
+    state.cash          -= cost;
+    state.cashETFShares  = currentShares + sharesToBuy;
+    state.cashETFValue   = parseFloat((state.cashETFShares * bilPrice).toFixed(2));
+    state.cashETFPrice   = bilPrice;
+    logEvent("etf", `BIL rebalance — bought ${sharesToBuy} shares @ $${bilPrice.toFixed(2)} | ETF floor: ${fmt(state.cashETFValue)} | liquid: ${fmt(state.cash)}`);
+    saveState();
+
+  } else if (diff < 0 && currentShares > 0) {
+    // Sell excess BIL back to cash
+    const sharesToSell = Math.min(currentShares, Math.ceil(Math.abs(diff) / bilPrice));
+    if (sharesToSell < 1) return;
+    const proceeds = parseFloat((sharesToSell * bilPrice).toFixed(2));
+    state.cash          += proceeds;
+    state.cashETFShares  = currentShares - sharesToSell;
+    state.cashETFValue   = parseFloat((state.cashETFShares * bilPrice).toFixed(2));
+    logEvent("etf", `BIL rebalance — sold ${sharesToSell} shares | ETF floor: ${fmt(state.cashETFValue)} | liquid: ${fmt(state.cash)}`);
+    saveState();
+  }
+}
+
+// Liquidate BIL if needed to fund a trade — only touches ETF above the floor target
+async function ensureLiquidCash(needed) {
+  if (state.cash >= needed) return;
+  const shortfall    = needed - state.cash;
+  const bilPrice     = state.cashETFPrice || 91;
+  const sharesToSell = Math.min(state.cashETFShares || 0, Math.ceil(shortfall / bilPrice));
+  if (sharesToSell < 1) return;
+  const proceeds = parseFloat((sharesToSell * bilPrice).toFixed(2));
+  state.cash          += proceeds;
+  state.cashETFShares  = (state.cashETFShares || 0) - sharesToSell;
+  state.cashETFValue   = parseFloat((state.cashETFShares * bilPrice).toFixed(2));
+  logEvent("etf", `BIL liquidated ${fmt(proceeds)} to fund trade | liquid: ${fmt(state.cash)}`);
+  saveState();
+}
+
 // ── Pre-market Analysis ───────────────────────────────────────────────────
 async function getPremarketData(ticker) {
   try {
@@ -466,8 +540,6 @@ async function checkAllFilters(stock, price) {
   // 3. Capital floor
   if (state.cash <= CAPITAL_FLOOR) return { pass:false, reason:`Cash at capital floor (${fmt(CAPITAL_FLOOR)})` };
 
-  // 4. Max trades per day
-  if (state.todayTrades >= MAX_TRADES_PER_DAY) return { pass:false, reason:`Max ${MAX_TRADES_PER_DAY} trades/day reached` };
 
   // 5. Consecutive losses
   if (state.consecutiveLosses >= CONSEC_LOSS_LIMIT) return { pass:false, reason:`${CONSEC_LOSS_LIMIT} consecutive losses — paused for day` };
@@ -591,6 +663,9 @@ async function executeTrade(stock, price, score, scoreReasons, vix) {
   const iv        = 0.25 + stock.ivr * 0.003;
   const contracts = calcPositionSize(price * iv * Math.sqrt(stock.expiryDays/365) * 0.4 + 0.3, score, vix);
   const t         = buildCard(stock, price, contracts, iv);
+
+  // Ensure liquid cash — liquidate BIL if needed before checking
+  await ensureLiquidCash(t.cost + CAPITAL_FLOOR);
 
   if (t.cost > state.cash - CAPITAL_FLOOR || t.contracts < 1) {
     logEvent("skip", `${stock.ticker} — insufficient cash after floor (need ${fmt(t.cost)})`);
@@ -794,6 +869,9 @@ async function runScan() {
   // Update VIX
   state.vix = await getVIX() || state.vix;
 
+  // Rebalance idle cash into BIL ETF
+  await rebalanceCashETF();
+
   // Manage stock positions
   await manageStockPositions();
 
@@ -909,7 +987,6 @@ async function runScan() {
   // 2. New entries
   if (!isEntryWindow()) return;
   if (!state.circuitOpen || !state.weeklyCircuitOpen) return;
-  if (state.todayTrades >= MAX_TRADES_PER_DAY) return;
   if (state.consecutiveLosses >= CONSEC_LOSS_LIMIT) return;
   if (state.cash <= CAPITAL_FLOOR) return;
 
@@ -1269,6 +1346,16 @@ app.get("/api/correlation",  (req,res) => {
   })).filter(g => g.held.length > 0);
   res.json({ groups, heldTickers: held });
 });
+
+app.get("/api/etf", (req,res) => res.json({
+  ticker:     CASH_ETF,
+  shares:     state.cashETFShares || 0,
+  value:      parseFloat((state.cashETFValue || 0).toFixed(2)),
+  price:      state.cashETFPrice || 91,
+  allocation: `${CASH_ETF_ALLOC*100}% of idle cash`,
+  liquidCash: parseFloat(state.cash.toFixed(2)),
+  deployable: parseFloat(getDeployableCash().toFixed(2)),
+}));
 
 app.get("/api/drawdown",     (req,res) => {
   const peak    = state.peakCash || MONTHLY_BUDGET;
