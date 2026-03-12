@@ -70,6 +70,35 @@ const VIX_REDUCE25  = 25;
 const VIX_REDUCE50  = 30;
 const VIX_PAUSE     = 35;
 
+// New feature constants
+const DRAWDOWN_RECOVERY_PCT    = 0.15;  // trigger recovery mode at -15% drawdown
+const DRAWDOWN_SIZING_REDUCE   = 0.25;  // reduce sizing by 25% in recovery mode
+const FAST_PROFIT_PCT          = 0.40;  // accelerate target if +40% in 48hrs
+const FAST_PROFIT_HOURS        = 48;
+const PREMARKET_STRONG_MOVE    = 0.015; // 1.5% pre-market move = strong signal
+const PREMARKET_NEGATIVE       = -0.01; // -1% pre-market = skip entry
+const RESISTANCE_BUFFER        = 0.02;  // skip if within 2% of resistance
+const SUPPORT_BUFFER           = 0.03;  // skip if within 3% of support breaking
+
+// Correlation groups — max 1 position per group
+const CORRELATION_GROUPS = [
+  ["NVDA", "AMD", "SMCI", "ARM"],   // Semiconductors
+  ["AAPL", "MSFT", "GOOGL", "CRM"], // Mega-cap tech
+  ["AMZN", "META"],                  // Ad/cloud
+  ["JPM", "GS", "COIN"],             // Financials
+  ["TSLA", "UBER"],                  // Consumer mobility
+];
+
+// Sector ETF confirmation map
+const SECTOR_ETF_MAP = {
+  "Technology": "XLK",
+  "Financial":  "XLF",
+  "Consumer":   "XLY",
+  "Index":      null,  // no confirmation needed for indexes
+};
+// Always check SMH for semiconductor stocks
+const SEMIS = ["NVDA", "AMD", "SMCI", "ARM"];
+
 // ── Watchlist (18 high-liquidity stocks) ──────────────────────────────────
 const WATCHLIST = [
   { ticker:"NVDA",  sector:"Technology",  momentum:"strong",     rsi:58, macd:"bullish crossover", trend:"above 50MA",         catalyst:"AI infrastructure demand",      expiryDays:14,  ivr:52, beta:1.8, earningsDate:null },
@@ -145,6 +174,89 @@ const openRisk    = () => state.positions.reduce((s,p) => s + p.cost * (p.partia
 const heatPct     = () => openRisk() / totalCap();
 const realizedPnL = () => state.closedTrades.reduce((s,t) => s + t.pnl, 0);
 const stockValue  = () => state.stockPositions.reduce((s,p) => s + p.cost, 0);
+
+// Drawdown recovery mode check
+const isDrawdownRecovery = () => {
+  const dd = (state.cash - (state.peakCash || MONTHLY_BUDGET)) / (state.peakCash || MONTHLY_BUDGET);
+  return dd <= -DRAWDOWN_RECOVERY_PCT;
+};
+
+// Correlation check — returns group if stock is correlated with existing position
+const getCorrelatedGroup = (ticker) => {
+  for (const group of CORRELATION_GROUPS) {
+    if (!group.includes(ticker)) continue;
+    const existingInGroup = state.positions.filter(p => group.includes(p.ticker));
+    if (existingInGroup.length > 0) return group;
+  }
+  return null;
+};
+
+// Support/resistance from price bars
+function getSupportResistance(bars) {
+  if (bars.length < 20) return { support: 0, resistance: Infinity };
+  const recent = bars.slice(-20);
+  const highs  = recent.map(b => b.h);
+  const lows   = recent.map(b => b.l);
+  return {
+    resistance: Math.max(...highs),
+    support:    Math.min(...lows),
+  };
+}
+
+// Performance attribution helpers
+function getPnLByTicker() {
+  const map = {};
+  (state.closedTrades || []).forEach(t => {
+    if (!map[t.ticker]) map[t.ticker] = { pnl: 0, trades: 0, wins: 0 };
+    map[t.ticker].pnl    += t.pnl;
+    map[t.ticker].trades += 1;
+    if (t.pnl > 0) map[t.ticker].wins += 1;
+  });
+  return map;
+}
+
+function getPnLBySector() {
+  const map = {};
+  (state.closedTrades || []).forEach(t => {
+    const stock  = WATCHLIST.find(w => w.ticker === t.ticker);
+    const sector = stock ? stock.sector : "Unknown";
+    if (!map[sector]) map[sector] = { pnl: 0, trades: 0 };
+    map[sector].pnl    += t.pnl;
+    map[sector].trades += 1;
+  });
+  return map;
+}
+
+function getPnLByScoreRange() {
+  const map = { "70-79": { pnl:0, trades:0 }, "80-89": { pnl:0, trades:0 }, "90-100": { pnl:0, trades:0 } };
+  (state.closedTrades || []).forEach(t => {
+    const j = (state.tradeJournal || []).find(e => e.action === "OPEN" && e.ticker === t.ticker);
+    const score = j ? j.score : 0;
+    const key = score >= 90 ? "90-100" : score >= 80 ? "80-89" : "70-79";
+    if (map[key]) { map[key].pnl += t.pnl; map[key].trades += 1; }
+  });
+  return map;
+}
+
+// Tax tracking — build full trade log with cost basis
+function getTaxLog() {
+  return (state.closedTrades || []).map((t, i) => {
+    const openJ  = (state.tradeJournal || []).find(e => e.action === "OPEN" && e.ticker === t.ticker);
+    const closeJ = (state.tradeJournal || []).find(e => e.action === "CLOSE" && e.ticker === t.ticker);
+    return {
+      id:          i + 1,
+      ticker:      t.ticker,
+      type:        "Call Option",
+      openDate:    openJ  ? new Date(openJ.time).toLocaleDateString()  : t.date,
+      closeDate:   t.date,
+      costBasis:   openJ  ? parseFloat((openJ.premium * 100 * (openJ.contracts||1)).toFixed(2)) : 0,
+      proceeds:    closeJ ? parseFloat(((closeJ.exitPremium||0) * 100 * (openJ?.contracts||1)).toFixed(2)) : 0,
+      pnl:         parseFloat(t.pnl.toFixed(2)),
+      shortTerm:   true, // options are always short-term
+      reason:      t.reason,
+    };
+  });
+}
 
 function isEntryWindow() {
   const now = new Date();
@@ -302,6 +414,40 @@ async function getOptionsSnapshot(symbol) {
   } catch(e) { return null; }
 }
 
+// ── Pre-market Analysis ───────────────────────────────────────────────────
+async function getPremarketData(ticker) {
+  try {
+    const data = await alpacaGet(`/stocks/${ticker}/quotes/latest`, ALPACA_DATA);
+    if (!data || !data.quote) return null;
+    const prePrice = parseFloat(data.quote.ap || data.quote.bp || 0);
+    return prePrice;
+  } catch(e) { return null; }
+}
+
+// ── Sector ETF Confirmation ────────────────────────────────────────────────
+async function checkSectorETF(stock) {
+  const etfMap = { "Technology":"XLK", "Financial":"XLF", "Consumer":"XLY" };
+  const etfs   = [];
+
+  // Sector ETF
+  if (etfMap[stock.sector]) etfs.push(etfMap[stock.sector]);
+
+  // SMH for semiconductors
+  if (SEMIS.includes(stock.ticker)) etfs.push("SMH");
+
+  if (!etfs.length) return { pass: true, reason: null };
+
+  for (const etf of etfs) {
+    const bars = await getStockBars(etf, 5);
+    if (bars.length < 2) continue;
+    const etfReturn = (bars[bars.length-1].c - bars[0].o) / bars[0].o;
+    if (etfReturn < -0.01) {
+      return { pass: false, reason: `${etf} sector ETF down ${(etfReturn*100).toFixed(1)}% — sector headwind` };
+    }
+  }
+  return { pass: true, reason: null };
+}
+
 // ── Pre-trade Filters ─────────────────────────────────────────────────────
 async function checkAllFilters(stock, price) {
   const fails = [];
@@ -352,6 +498,44 @@ async function checkAllFilters(stock, price) {
   const vix = state.vix || 15;
   if (vix >= VIX_PAUSE) return { pass:false, reason:`VIX ${vix} above pause threshold (${VIX_PAUSE})` };
 
+  // 14. Correlation group — max 1 position per correlated group
+  const corrGroup = getCorrelatedGroup(stock.ticker);
+  if (corrGroup) return { pass:false, reason:`Correlated position already open (group: ${corrGroup.join(", ")})` };
+
+  // 15. Sector ETF confirmation
+  const etfCheck = await checkSectorETF(stock);
+  if (!etfCheck.pass) return { pass:false, reason:etfCheck.reason };
+
+  // 16. Support/resistance check
+  try {
+    const bars = await getStockBars(stock.ticker, 20);
+    if (bars.length >= 10) {
+      const sr = getSupportResistance(bars);
+      if (price >= sr.resistance * (1 - RESISTANCE_BUFFER)) {
+        return { pass:false, reason:`Price within ${(RESISTANCE_BUFFER*100).toFixed(0)}% of 20-day resistance ($${sr.resistance.toFixed(2)})` };
+      }
+      if (price <= sr.support * (1 + SUPPORT_BUFFER)) {
+        return { pass:false, reason:`Price near 20-day support ($${sr.support.toFixed(2)}) — risk of breakdown` };
+      }
+    }
+  } catch(e) { /* skip if data unavailable */ }
+
+  // 17. Pre-market check (only relevant in first 90 mins of session)
+  const etHour = new Date().toLocaleString("en-US", {timeZone:"America/New_York", hour:"numeric", hour12:false});
+  if (parseInt(etHour) < 12) {
+    const priceYest = (await getStockBars(stock.ticker, 2))[0]?.c;
+    if (priceYest) {
+      const premarketMove = (price - priceYest) / priceYest;
+      if (premarketMove <= PREMARKET_NEGATIVE) {
+        return { pass:false, reason:`Pre-market negative (${(premarketMove*100).toFixed(1)}%) — bearish open` };
+      }
+      if (premarketMove >= PREMARKET_STRONG_MOVE) {
+        log(`  ✅ ${stock.ticker} strong pre-market +${(premarketMove*100).toFixed(1)}% — boost signal`);
+        stock._premarketBoost = true;
+      }
+    }
+  }
+
   return { pass:true, reason:null };
 }
 
@@ -370,8 +554,12 @@ function calcPositionSize(premium, score, vix) {
   // VIX-based sizing reduction
   const vixMult = vix >= VIX_REDUCE50 ? 0.5 : vix >= VIX_REDUCE25 ? 0.75 : 1.0;
 
+  // Drawdown recovery mode — reduce sizing 25%
+  const recoveryMult = isDrawdownRecovery() ? (1 - DRAWDOWN_SIZING_REDUCE) : 1.0;
+  if (isDrawdownRecovery()) log("  ⚠️  Drawdown recovery mode active — sizing reduced 25%");
+
   // Max per position
-  const maxCost    = Math.min(state.cash * scoreMult * vixMult, state.cash * 0.25, MAX_LOSS_PER_TRADE / STOP_LOSS_PCT);
+  const maxCost    = Math.min(state.cash * scoreMult * vixMult * recoveryMult, state.cash * 0.25, MAX_LOSS_PER_TRADE / STOP_LOSS_PCT);
   const contracts  = Math.max(1, Math.min(5, Math.floor(maxCost / (premium * 100))));
   return contracts;
 }
@@ -624,6 +812,16 @@ async function runScan() {
       logEvent("scan", `${pos.ticker} fast stop — down ${(chg*100).toFixed(0)}% in ${hoursOpen.toFixed(0)}hrs`);
       closePosition(pos.ticker, "fast-stop"); continue;
     }
+
+    // Profit target acceleration — if +40% in first 48hrs, take it now
+    if (hoursOpen <= FAST_PROFIT_HOURS && chg >= FAST_PROFIT_PCT && !pos.partialClosed) {
+      logEvent("scan", `${pos.ticker} ACCELERATED PROFIT — +${(chg*100).toFixed(0)}% in ${hoursOpen.toFixed(0)}hrs — taking gains early`);
+      closePosition(pos.ticker, "fast-target"); continue;
+    }
+
+    // Update peak cash for drawdown tracking
+    const curCash = state.cash + openRisk() + realizedPnL();
+    if (curCash > (state.peakCash || MONTHLY_BUDGET)) state.peakCash = curCash;
 
     // Hard stop loss
     if (chg <= -STOP_LOSS_PCT) {
@@ -1028,6 +1226,48 @@ app.post("/api/reset-month", (req,res) => {
 });
 app.get("/api/journal",      (req,res) => res.json(state.tradeJournal.slice(0,50)));
 app.get("/api/report",       (req,res) => res.json({report:buildMonthlyReport()}));
+
+// ── New Feature Endpoints ──────────────────────────────────────────────────
+app.get("/api/attribution",  (req,res) => res.json({
+  byTicker:     getPnLByTicker(),
+  bySector:     getPnLBySector(),
+  byScoreRange: getPnLByScoreRange(),
+}));
+
+app.get("/api/taxlog",       (req,res) => res.json(getTaxLog()));
+
+app.get("/api/theta",        (req,res) => {
+  const positions = state.positions.map(pos => {
+    const dte      = Math.max(1, Math.round((new Date(pos.expDate)-new Date())/86400000));
+    const theta    = pos.greeks ? pos.greeks.theta : -(pos.premium / (dte * 2));
+    const dailyBurn= Math.abs(theta) * 100 * (pos.contracts || 1) * (pos.partialClosed ? 0.5 : 1);
+    return { ticker: pos.ticker, theta: parseFloat(theta.toFixed(4)), dailyBurn: parseFloat(dailyBurn.toFixed(2)), dte };
+  });
+  const totalBurn = positions.reduce((s,p) => s + p.dailyBurn, 0);
+  res.json({ positions, totalDailyBurn: parseFloat(totalBurn.toFixed(2)) });
+});
+
+app.get("/api/correlation",  (req,res) => {
+  const held     = state.positions.map(p => p.ticker);
+  const groups   = CORRELATION_GROUPS.map(g => ({
+    group: g,
+    held:  g.filter(t => held.includes(t)),
+  })).filter(g => g.held.length > 0);
+  res.json({ groups, heldTickers: held });
+});
+
+app.get("/api/drawdown",     (req,res) => {
+  const peak    = state.peakCash || MONTHLY_BUDGET;
+  const current = state.cash + openRisk();
+  const dd      = ((current - peak) / peak) * 100;
+  res.json({
+    peakCash:       parseFloat(peak.toFixed(2)),
+    currentValue:   parseFloat(current.toFixed(2)),
+    drawdownPct:    parseFloat(dd.toFixed(2)),
+    recoveryMode:   isDrawdownRecovery(),
+    sizingReduction: isDrawdownRecovery() ? `${DRAWDOWN_SIZING_REDUCE*100}%` : "None",
+  });
+});
 app.post("/api/set-budget", (req,res) => {
   const { budget } = req.body;
   const amount = parseFloat(budget);
