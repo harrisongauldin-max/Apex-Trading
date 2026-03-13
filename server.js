@@ -830,6 +830,10 @@ async function executeTrade(stock, price, score, scoreReasons, vix, optionType =
     ivr:stock.ivr, iv:t.iv, greeks:t.greeks, beta:stock.beta||1,
     peakPremium:t.premium, trailStop:null, breakevenLocked:false,
     score, halfPosition: false,
+    price:        price,           // underlying stock price — updated each scan
+    optionType:   optionType,      // "call" or "put"
+    expiryType:   t.expiryType,    // "weekly" or "monthly"
+    currentPrice: t.premium,       // current option price — updated each scan
   };
 
   state.positions.push(position);
@@ -1123,7 +1127,10 @@ async function runScan() {
       closePosition(pos.ticker, "expiry-roll"); continue;
     }
 
-    logEvent("scan", `${pos.ticker} | chg:${(chg*100).toFixed(1)}% | peak:$${pos.peakPremium.toFixed(2)} | DTE:${dte} | HOLD`);
+    // Update current price on position so dashboard shows live data
+    pos.price        = price;
+    pos.currentPrice = curP;
+    logEvent("scan", `${pos.ticker} | chg:${(chg*100).toFixed(1)}% | cur:$${curP} | peak:$${pos.peakPremium.toFixed(2)} | DTE:${dte} | HOLD`);
     saveState();
   }
 
