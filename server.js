@@ -420,9 +420,17 @@ const alpacaHeaders = () => ({
   "Content-Type":        "application/json",
 });
 
+// Timeout wrapper — kills hung API calls after 5 seconds
+function withTimeout(promise, ms = 5000) {
+  return Promise.race([
+    promise,
+    new Promise((_, reject) => setTimeout(() => reject(new Error("API timeout")), ms))
+  ]);
+}
+
 async function alpacaGet(endpoint, base = ALPACA_BASE) {
   try {
-    const res  = await fetch(`${base}${endpoint}`, { headers: alpacaHeaders() });
+    const res = await withTimeout(fetch(`${base}${endpoint}`, { headers: alpacaHeaders() }));
     return await res.json();
   } catch(e) { logEvent("error", `alpacaGet(${endpoint}): ${e.message}`); return null; }
 }
@@ -1008,7 +1016,11 @@ async function manageStockPositions() {
 }
 
 // - Main Scan Engine -
+let scanRunning = false;
 async function runScan() {
+  if (scanRunning) { logEvent("scan", "Scan skipped — previous scan still running"); return; }
+  scanRunning = true;
+  try {
   if (!ALPACA_KEY) { logEvent("warn", "No ALPACA_API_KEY set - check Railway variables"); return; }
   logEvent("scan", `Scan triggered | market: ${isMarketHours()} | entry window: ${isEntryWindow()} | VIX: ${state.vix} | cash: ${fmt(state.cash)} | positions: ${state.positions.length}`);
   if (!isMarketHours()) { logEvent("scan", "Outside market hours - skipping trade logic"); return; }
@@ -1016,8 +1028,12 @@ async function runScan() {
   // Update VIX
   state.vix = await getVIX() || state.vix;
 
-  // Rebalance idle cash into BIL ETF
-  await rebalanceCashETF();
+  // Rebalance idle cash into BIL ETF — only every 5 minutes to reduce API load
+  const now = Date.now();
+  if (!state.lastRebalance || now - state.lastRebalance > 5 * 60 * 1000) {
+    await rebalanceCashETF();
+    state.lastRebalance = now;
+  }
 
   // Manage stock positions
   await manageStockPositions();
