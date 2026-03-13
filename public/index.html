@@ -573,14 +573,33 @@ function renderPositions() {
         </div>
       </div>
       <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-bottom:10px">
-        <div><div style="font-size:9px;color:var(--muted)">ENTRY</div><div style="font-weight:700">$${p.premium}</div></div>
+        <div><div style="font-size:9px;color:var(--muted)">ENTRY PRICE</div><div style="font-weight:700">$${p.premium}</div></div>
+        <div>
+          <div style="font-size:9px;color:var(--muted)">CURRENT PRICE</div>
+          <div style="font-weight:700;color:${(() => { const dte=Math.max(1,Math.round((new Date(p.expDate)-new Date())/86400000)); const cur=parseFloat((p.price*(p.iv||0.3)*Math.sqrt(dte/365)*0.4+0.1).toFixed(2)); const chg=(cur-p.premium)/p.premium; return chg>=0?'var(--green)':'var(--red)'; })()}">
+            $${(() => { const dte=Math.max(1,Math.round((new Date(p.expDate)-new Date())/86400000)); return parseFloat((p.price*(p.iv||0.3)*Math.sqrt(dte/365)*0.4+0.1).toFixed(2)); })()}
+          </div>
+        </div>
+        <div>
+          <div style="font-size:9px;color:var(--muted)">UNREALIZED P&L</div>
+          <div style="font-weight:700;color:${(() => { const dte=Math.max(1,Math.round((new Date(p.expDate)-new Date())/86400000)); const cur=parseFloat((p.price*(p.iv||0.3)*Math.sqrt(dte/365)*0.4+0.1).toFixed(2)); const pnl=(cur-p.premium)*100*(p.contracts||1)*(p.partialClosed?0.5:1); return pnl>=0?'var(--green)':'var(--red)'; })()}">
+            ${(() => { const dte=Math.max(1,Math.round((new Date(p.expDate)-new Date())/86400000)); const cur=parseFloat((p.price*(p.iv||0.3)*Math.sqrt(dte/365)*0.4+0.1).toFixed(2)); const pnl=(cur-p.premium)*100*(p.contracts||1)*(p.partialClosed?0.5:1); return (pnl>=0?'+':'')+pnl.toFixed(2); })()}
+          </div>
+        </div>
+        <div>
+          <div style="font-size:9px;color:var(--muted)">P&L %</div>
+          <div style="font-weight:700;color:${(() => { const dte=Math.max(1,Math.round((new Date(p.expDate)-new Date())/86400000)); const cur=parseFloat((p.price*(p.iv||0.3)*Math.sqrt(dte/365)*0.4+0.1).toFixed(2)); const chg=(cur-p.premium)/p.premium*100; return chg>=0?'var(--green)':'var(--red)'; })()}">
+            ${(() => { const dte=Math.max(1,Math.round((new Date(p.expDate)-new Date())/86400000)); const cur=parseFloat((p.price*(p.iv||0.3)*Math.sqrt(dte/365)*0.4+0.1).toFixed(2)); const chg=(cur-p.premium)/p.premium*100; return (chg>=0?'+':'')+chg.toFixed(1)+'%'; })()}
+          </div>
+        </div>
         <div><div style="font-size:9px;color:var(--muted)">CONTRACTS</div><div style="font-weight:700">${p.contracts}x</div></div>
         <div><div style="font-size:9px;color:var(--muted)">COST</div><div style="font-weight:700">${fmt(p.cost)}</div></div>
-        <div><div style="font-size:9px;color:var(--muted)">DTE</div><div style="font-weight:700">${p.expiryDays}d</div></div>
+        <div><div style="font-size:9px;color:var(--muted)">DTE</div><div style="font-weight:700">${Math.max(1,Math.round((new Date(p.expDate)-new Date())/86400000))}d</div></div>
+        <div><div style="font-size:9px;color:var(--muted)">IVR</div><div style="font-weight:700">${p.ivr}</div></div>
         <div><div style="font-size:9px;color:var(--muted)">TARGET</div><div style="font-weight:700;color:var(--green)">$${p.target}</div></div>
         <div><div style="font-size:9px;color:var(--muted)">STOP</div><div style="font-weight:700;color:var(--red)">$${p.stop}</div></div>
         <div><div style="font-size:9px;color:var(--muted)">BREAKEVEN</div><div style="font-weight:700">$${p.breakeven}</div></div>
-        <div><div style="font-size:9px;color:var(--muted)">IVR</div><div style="font-weight:700">${p.ivr}</div></div>
+        <div><div style="font-size:9px;color:var(--muted)">${p.ticker} STOCK PRICE</div><div style="font-weight:700;color:var(--blue)">$${p.price ? p.price.toFixed(2) : '--'}</div></div>
       </div>
       <div style="display:flex;gap:8px;flex-wrap:wrap">
         <div class="greek-chip"><span class="greek-label">Δ DELTA</span><span class="greek-val" style="color:var(--blue)">${p.greeks?.delta||'--'}</span></div>
