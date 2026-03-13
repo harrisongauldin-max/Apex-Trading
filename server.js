@@ -52,7 +52,7 @@ const TARGET_DELTA_MIN    = 0.28;
 const TARGET_DELTA_MAX    = 0.42;
 // MAX_TRADES_PER_DAY removed - portfolio heat (60%) controls position limits
 const CONSEC_LOSS_LIMIT   = 3;
-const WEEKLY_DD_LIMIT     = 0.15;
+const WEEKLY_DD_LIMIT     = 0.25;
 const MAX_LOSS_PER_TRADE  = 400;
 const MIN_SCORE           = 70;
 const FULL_KELLY_SCORE    = 85;
@@ -911,10 +911,12 @@ function closePosition(ticker, reason, exitPremium = null) {
   // Peak cash tracking for drawdown
   if (state.cash > state.peakCash) state.peakCash = state.cash;
 
-  // Circuit breaker checks
-  const dailyPnL  = state.cash - state.dayStartCash;
-  const weeklyPnL = state.cash - state.weekStartCash;
-  if (dailyPnL / totalCap() <= -0.08 && state.circuitOpen) {
+  // Circuit breaker checks -- use total portfolio value (cash + open positions)
+  // so deploying capital into trades does not falsely trigger the breaker
+  const portfolioValue = state.cash + openRisk();
+  const dailyPnL  = portfolioValue - state.dayStartCash;
+  const weeklyPnL = portfolioValue - state.weekStartCash;
+  if (dailyPnL / totalCap() <= -0.15 && state.circuitOpen) {
     state.circuitOpen = false;
     logEvent("circuit", `DAILY circuit breaker - loss ${fmt(Math.abs(dailyPnL))}`);
   }
@@ -1493,6 +1495,18 @@ app.post("/api/close/:tkr",  (req,res) => {
   closePosition(t,"manual");
   res.json({ok:true});
 });
+// Reset circuit breakers without wiping everything else
+app.post("/api/reset-circuit", (req, res) => {
+  state.circuitOpen       = true;
+  state.weeklyCircuitOpen = true;
+  state.consecutiveLosses = 0;
+  state.dayStartCash      = state.cash + openRisk();
+  state.weekStartCash     = state.cash + openRisk();
+  saveState();
+  logEvent("reset", "Circuit breakers manually reset");
+  res.json({ ok: true });
+});
+
 app.post("/api/reset-month", (req,res) => {
   state.cash=MONTHLY_BUDGET+state.extraBudget; state.todayTrades=0;
   state.monthStart=new Date().toLocaleDateString(); state.dayStartCash=state.cash;
