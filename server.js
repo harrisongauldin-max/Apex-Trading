@@ -1152,7 +1152,7 @@ async function runScan() {
 
   // 2. New entries
   if (!isEntryWindow()) return;
-  if (!state.circuitOpen || !state.weeklyCircuitOpen) return;
+  if (state.circuitOpen === false || state.weeklyCircuitOpen === false) return;
   if (state.consecutiveLosses >= CONSEC_LOSS_LIMIT) return;
   if (state.cash <= CAPITAL_FLOOR) return;
 
