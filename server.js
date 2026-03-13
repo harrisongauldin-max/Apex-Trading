@@ -1242,6 +1242,11 @@ async function runScan() {
 
   state.lastScan = new Date().toISOString();
   saveState();
+  } catch(e) {
+    logEvent("error", `runScan crashed: ${e.message}`);
+  } finally {
+    scanRunning = false;
+  }
 }
 
 // - ADX Calculation -
