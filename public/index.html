@@ -901,6 +901,11 @@ async function closePos(ticker) {
   await fetchState();
 }
 
+async function resetCircuit() {
+  if (!confirm('Reset circuit breakers and resume scanning?')) return;
+  await fetch('/api/reset-circuit', {method:'POST'});
+  location.reload();
+}
 async function resetMonth() {
   if (!confirm("Reset month? This resets cash to $5,000 and clears today's trade count.")) return;
   await fetch('/api/reset-month', {method:'POST'});
