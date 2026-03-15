@@ -1,5 +1,5 @@
 // -
-// APEX v2.0 - Professional Options Trading Agent
+// APEX v3.0 - Professional Options Trading Agent
 // Alpaca Paper Trading Edition
 // -
 const express    = require("express");
@@ -2464,7 +2464,7 @@ app.get("/health",           (req,res) => res.json({status:"ok",uptime:process.u
 // Boot sequence - load state from Redis then start server
 initState().then(() => {
   app.listen(PORT, () => {
-    console.log(`APEX v2.0 running on port ${PORT}`);
+    console.log(`APEX v3.0 running on port ${PORT}`);
     console.log(`Alpaca key:  ${ALPACA_KEY?"SET":"NOT SET"}`);
     console.log(`Gmail:       ${GMAIL_USER||"NOT SET"}`);
     console.log(`Redis:       ${REDIS_URL?"SET":"NOT SET - using file fallback"}`);
