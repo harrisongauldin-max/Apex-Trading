@@ -186,12 +186,46 @@ input[type=text]:focus{border-color:var(--blue)}
     <div class="card">
       <div class="card-title">Last Scan</div>
       <div class="metric-sm" style="font-size:11px" id="last-scan">--</div>
-      <div class="sub">1-min frequency</div>
+      <div class="sub">30-sec frequency</div>
     </div>
   </div>
 
   <div id="vix-alert" class="alert alert-green" style="margin-bottom:12px">
     <strong>VIX --</strong> — Normal market conditions. Full position sizing active.
+  </div>
+
+  <!-- Market Context Row -->
+  <div class="grid4" style="margin-bottom:12px">
+    <div class="card">
+      <div class="card-title">Fear & Greed</div>
+      <div class="metric-sm" id="fg-score" style="color:var(--gold)">--</div>
+      <div class="sub" id="fg-rating">--</div>
+    </div>
+    <div class="card">
+      <div class="card-title">Market Breadth</div>
+      <div class="metric-sm" id="breadth-pct">--%</div>
+      <div class="sub" id="breadth-sub">-- advancing</div>
+    </div>
+    <div class="card">
+      <div class="card-title">Leading Sector</div>
+      <div class="metric-sm" style="font-size:13px" id="sector-leading">--</div>
+      <div class="sub" id="sector-lagging">lagging: --</div>
+    </div>
+    <div class="card">
+      <div class="card-title">Sharpe / VaR</div>
+      <div class="metric-sm" style="font-size:13px" id="sharpe-ratio">--</div>
+      <div class="sub" id="var-95">VaR 95%: --</div>
+    </div>
+  </div>
+
+  <!-- Macro News Banner -->
+  <div id="macro-banner" style="background:var(--panel);border:1px solid var(--border);border-radius:8px;padding:10px 14px;margin-bottom:12px;display:none">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
+      <span style="font-size:10px;color:var(--muted);letter-spacing:1px">MACRO SIGNAL</span>
+      <span id="macro-signal-badge" style="font-size:10px;padding:2px 8px;border-radius:10px;background:rgba(255,215,0,.15);color:var(--gold)">NEUTRAL</span>
+    </div>
+    <div id="macro-triggers" style="font-size:11px;color:var(--muted);margin-bottom:6px"></div>
+    <div id="macro-headlines" style="font-size:10px;color:var(--muted);line-height:1.6"></div>
   </div>
 
   <div class="section-title">Open Positions</div>
@@ -212,6 +246,8 @@ input[type=text]:focus{border-color:var(--blue)}
   <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:16px">
     <button class="btn btn-green" onclick="triggerScan()">▶ MANUAL SCAN</button>
     <button class="btn btn-red" onclick="resetMonth()">↺ RESET MONTH</button>
+    <button class="btn" style="background:#b8640a" onclick="resetCircuit()">↺ RESET CIRCUIT</button>
+    <button class="btn" style="background:#7b0000;border:1px solid #ff0000" onclick="emergencyClose()">⚠ EMERGENCY CLOSE ALL</button>
     <div style="display:flex;align-items:center;gap:6px">
       <span style="font-size:11px;color:var(--muted)">BUDGET:</span>
       <input type="number" id="budget-input" placeholder="5000" min="100" max="1000000" style="background:var(--panel);border:1px solid var(--border);color:var(--text);padding:6px 10px;border-radius:6px;font-family:var(--font);font-size:11px;width:100px;outline:none"/>
@@ -438,11 +474,13 @@ let charts = {};
 // ── Fetch & Render ─────────────────────────────────────────────────────────
 async function fetchState() {
   try {
-    const res  = await fetch('/api/state');
-    state      = await res.json();
+    const [stateRes, healthRes] = await Promise.all([fetch('/api/state'), fetch('/api/health')]);
+    state  = await stateRes.json();
+    health = await healthRes.json();
     renderAll();
   } catch(e) { console.error('Fetch error:', e); }
 }
+let health = {};
 
 function fmt(n) { return '$' + parseFloat(n || 0).toFixed(2); }
 function fmtPct(n) { return (n >= 0 ? '+' : '') + parseFloat(n || 0).toFixed(1) + '%'; }
@@ -455,6 +493,7 @@ function fmtTime(iso) {
 function renderAll() {
   renderHeader();
   renderMetrics();
+  renderMarketContext();
   renderPositions();
   renderGreeks();
   renderVixAlert();
@@ -462,6 +501,8 @@ function renderAll() {
   renderStocks();
   renderJournal();
 }
+
+function renderMarketContext() { /* handled in renderMetrics */ }
 
 function renderHeader() {
   const ms = document.getElementById('market-status');
@@ -510,6 +551,51 @@ function renderMetrics() {
   document.getElementById('consec-loss').textContent = state.consecutiveLosses || 0;
   document.getElementById('consec-loss').style.color = (state.consecutiveLosses||0) >= 2 ? 'var(--red)' : 'var(--text)';
   document.getElementById('last-scan').textContent = fmtTime(state.lastScan);
+
+  // Market context cards
+  const mc = health.marketContext || {};
+  const fg = mc.fearGreed || { score: 50, rating: 'neutral' };
+  const br = mc.breadth   || { advancing: 0, declining: 0, breadthPct: 50 };
+  const sr = mc.sectorRotation || { leading: '--', lagging: '--' };
+  const el2 = id => document.getElementById(id);
+  if (el2('fg-score')) {
+    el2('fg-score').textContent = fg.score;
+    el2('fg-score').style.color = fg.score < 25 ? 'var(--red)' : fg.score > 75 ? 'var(--green)' : 'var(--gold)';
+    el2('fg-rating').textContent = fg.rating;
+  }
+  if (el2('breadth-pct')) {
+    el2('breadth-pct').textContent = br.breadthPct + '%';
+    el2('breadth-pct').style.color = br.breadthPct > 60 ? 'var(--green)' : br.breadthPct < 40 ? 'var(--red)' : 'var(--gold)';
+    el2('breadth-sub').textContent = `${br.advancing} advancing / ${br.declining} declining`;
+  }
+  if (el2('sector-leading')) {
+    el2('sector-leading').textContent = sr.leading || '--';
+    el2('sector-lagging').textContent = `lagging: ${sr.lagging || '--'}`;
+  }
+  if (el2('sharpe-ratio')) {
+    const sharpe = health.sharpe || 0;
+    const var95  = health.var95  || 0;
+    el2('sharpe-ratio').textContent = `Sharpe: ${sharpe}`;
+    el2('sharpe-ratio').style.color = sharpe > 1 ? 'var(--green)' : sharpe > 0 ? 'var(--gold)' : 'var(--red)';
+    el2('var-95').textContent = `VaR 95%: ${fmt(var95)}`;
+  }
+
+  // Macro banner
+  const macro = (health.marketContext || {}).macro || {};
+  const macroBanner = document.getElementById('macro-banner');
+  const macroSignal = macro.signal || 'neutral';
+  if (macroBanner && macroSignal !== 'neutral' && (macro.triggers || []).length > 0) {
+    macroBanner.style.display = 'block';
+    const sigColor = macroSignal.includes('bearish') ? 'var(--red)' : macroSignal.includes('bullish') ? 'var(--green)' : 'var(--gold)';
+    const badge = document.getElementById('macro-signal-badge');
+    if (badge) { badge.textContent = macroSignal.toUpperCase(); badge.style.color = sigColor; badge.style.background = macroSignal.includes('bearish') ? 'rgba(255,80,80,.15)' : 'rgba(0,255,136,.15)'; }
+    const trig = document.getElementById('macro-triggers');
+    if (trig) trig.textContent = 'Triggers: ' + (macro.triggers || []).join(', ');
+    const hl = document.getElementById('macro-headlines');
+    if (hl) hl.innerHTML = (macro.headlines || []).slice(0, 3).map(h => `• ${h}`).join('<br>');
+  } else if (macroBanner) {
+    macroBanner.style.display = 'none';
+  }
 
   // Analytics metrics
   const trades  = state.closedTrades || [];
@@ -901,6 +987,11 @@ async function closePos(ticker) {
   await fetchState();
 }
 
+async function emergencyClose() {
+  if (!confirm('EMERGENCY CLOSE ALL POSITIONS? This cannot be undone.')) return;
+  await fetch('/api/emergency-close', {method:'POST'});
+  location.reload();
+}
 async function resetCircuit() {
   if (!confirm('Reset circuit breakers and resume scanning?')) return;
   await fetch('/api/reset-circuit', {method:'POST'});
