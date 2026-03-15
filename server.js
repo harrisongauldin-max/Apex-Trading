@@ -3207,11 +3207,21 @@ async function runSimTick(scenario, simPrices, tick) {
     if (curP > pos.peakPremium) pos.peakPremium = curP;
 
     let exitReason = null;
-    if (chg <= -STOP_LOSS_PCT)                                                  exitReason = "stop";
-    else if (hrs <= 48 && chg <= -FAST_STOP_PCT)                               exitReason = "fast-stop";
-    else if (hrs <= 48 && chg >= 0.40)                                         exitReason = "fast-profit";
-    else if (chg >= TAKE_PROFIT_PCT)                                            exitReason = "target";
-    else if (hrs >= TIME_STOP_DAYS * 24 && Math.abs(chg) < TIME_STOP_MOVE)    exitReason = "time-stop";
+
+    // Update trailing stop — activates at +30%, trails 15% below peak
+    if (chg >= TRAIL_ACTIVATE_PCT) {
+      const simTrail = pos.peakPremium * (1 - TRAIL_STOP_PCT);
+      pos.trailStop  = simTrail;
+      if (curP <= simTrail) exitReason = "trail";
+    }
+
+    if (!exitReason) {
+      if (chg <= -STOP_LOSS_PCT)                                                exitReason = "stop";
+      else if (hrs <= 48 && chg <= -FAST_STOP_PCT)                             exitReason = "fast-stop";
+      else if (hrs <= 48 && chg >= 0.40)                                       exitReason = "fast-profit";
+      else if (chg >= TAKE_PROFIT_PCT)                                          exitReason = "target";
+      else if (hrs >= TIME_STOP_DAYS * 24 && Math.abs(chg) < TIME_STOP_MOVE)  exitReason = "time-stop";
+    }
 
     if (exitReason) {
       const pnl = parseFloat(((curP - pos.premium) * 100 * pos.contracts).toFixed(2));
