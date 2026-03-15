@@ -134,6 +134,7 @@ input[type=text]:focus{border-color:var(--blue)}
   <div class="tab" onclick="switchTab('stocks')">STOCKS</div>
   <div class="tab" onclick="switchTab('report')">REPORT</div>
   <div class="tab" onclick="switchTab('log')">SERVER LOG</div>
+  <div class="tab" onclick="switchTab('backtest')">BACKTEST</div>
 </div>
 
 <!-- ═══════════════ TRADING TAB ═══════════════ -->
@@ -464,6 +465,39 @@ input[type=text]:focus{border-color:var(--blue)}
     <button class="btn" onclick="clearLog()">CLEAR</button>
   </div>
   <div class="log-box" id="server-log" style="height:500px"></div>
+</div>
+
+<!-- BACKTEST TAB -->
+<div id="tab-backtest" class="content">
+  <div style="display:flex;align-items:center;gap:12px;margin-bottom:16px;flex-wrap:wrap">
+    <div>
+      <label style="font-size:11px;color:var(--muted)">MONTHS:</label>
+      <select id="bt-months" style="background:var(--panel);border:1px solid var(--border);color:var(--text);padding:6px 10px;border-radius:6px;font-family:var(--font);font-size:11px;margin-left:6px">
+        <option value="3">3 months</option>
+        <option value="6" selected>6 months</option>
+        <option value="12">12 months</option>
+      </select>
+    </div>
+    <button class="btn btn-green" id="bt-run-btn" onclick="runBacktest()">&#9654; RUN BACKTEST</button>
+    <span id="bt-status" style="font-size:11px;color:var(--muted)">Results will appear below</span>
+  </div>
+
+  <div id="bt-results" style="display:none">
+    <!-- Summary Cards -->
+    <div class="grid4" style="margin-bottom:12px" id="bt-summary-cards"></div>
+
+    <!-- Monthly P&L -->
+    <div class="section-title">Monthly P&L</div>
+    <div id="bt-monthly" style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:16px"></div>
+
+    <!-- By Ticker -->
+    <div class="section-title">Performance by Stock</div>
+    <div id="bt-by-ticker" style="margin-bottom:16px"></div>
+
+    <!-- Trade Log -->
+    <div class="section-title">Trade Log (<span id="bt-trade-count">0</span> trades)</div>
+    <div class="log-box" id="bt-trade-log" style="max-height:300px"></div>
+  </div>
 </div>
 
 <script>
@@ -1017,6 +1051,69 @@ async function resetCircuit() {
   await fetch('/api/reset-circuit', {method:'POST'});
   location.reload();
 }
+async function runBacktest() {
+  const months  = document.getElementById('bt-months').value;
+  const btn     = document.getElementById('bt-run-btn');
+  const status  = document.getElementById('bt-status');
+  btn.disabled  = true;
+  btn.textContent = '⏳ Running...';
+  status.textContent = `Fetching ${months} months of historical data... this takes 30-60 seconds`;
+
+  try {
+    const res    = await fetch(`/api/backtest?months=${months}`);
+    const data   = await res.json();
+
+    if (data.error) { status.textContent = 'Error: ' + data.error; btn.disabled = false; btn.textContent = '▶ RUN BACKTEST'; return; }
+
+    const s = data.summary;
+    document.getElementById('bt-results').style.display = 'block';
+    status.textContent = `Backtest complete: ${s.startDate} → ${s.endDate}`;
+
+    // Summary cards
+    document.getElementById('bt-summary-cards').innerHTML = `
+      <div class="card"><div class="card-title">Total Return</div><div class="metric-sm" style="color:${s.totalReturn>=0?'var(--green)':'var(--red)'}">${s.totalReturn>=0?'+':''}${s.totalReturn}%</div><div class="sub">${s.totalPnL>=0?'+':''}$${s.totalPnL.toFixed(2)}</div></div>
+      <div class="card"><div class="card-title">Win Rate</div><div class="metric-sm" style="color:${s.winRate>=55?'var(--green)':'var(--red)'}">${s.winRate}%</div><div class="sub">${s.wins}W / ${s.losses}L of ${s.totalTrades}</div></div>
+      <div class="card"><div class="card-title">Profit Factor</div><div class="metric-sm" style="color:${s.profitFactor>=2?'var(--green)':s.profitFactor>=1?'var(--gold)':'var(--red)'}">${s.profitFactor}x</div><div class="sub">Avg win $${s.avgWin} / loss $${s.avgLoss}</div></div>
+      <div class="card"><div class="card-title">Max Drawdown</div><div class="metric-sm" style="color:var(--red)">${s.maxDrawdown}%</div><div class="sub">${s.callTrades} calls / ${s.putTrades} puts</div></div>
+    `;
+
+    // Monthly P&L
+    const monthly = data.monthlyPnL || {};
+    document.getElementById('bt-monthly').innerHTML = Object.entries(monthly).sort().map(([m, pnl]) =>
+      `<div class="card" style="min-width:120px"><div class="card-title">${m}</div><div style="font-weight:700;color:${pnl>=0?'var(--green)':'var(--red)'}">${pnl>=0?'+':''}$${pnl.toFixed(2)}</div></div>`
+    ).join('');
+
+    // By ticker
+    const byTicker = data.byTicker || {};
+    const sorted   = Object.entries(byTicker).sort((a, b) => b[1].pnl - a[1].pnl);
+    document.getElementById('bt-by-ticker').innerHTML = `
+      <table style="width:100%;border-collapse:collapse;font-size:12px">
+        <thead><tr style="color:var(--muted);font-size:10px;text-align:left">
+          <th style="padding:6px">TICKER</th><th>TRADES</th><th>WIN RATE</th><th>P&L</th>
+        </tr></thead>
+        <tbody>${sorted.map(([t, d]) => `
+          <tr style="border-top:1px solid var(--border)">
+            <td style="padding:6px;font-weight:700;color:var(--blue)">${t}</td>
+            <td>${d.trades}</td>
+            <td style="color:${d.wins/d.trades>=0.55?'var(--green)':'var(--red)'}">${d.trades?Math.round(d.wins/d.trades*100):0}%</td>
+            <td style="color:${d.pnl>=0?'var(--green)':'var(--red)'};font-weight:700">${d.pnl>=0?'+':''}$${d.pnl.toFixed(2)}</td>
+          </tr>`).join('')}
+        </tbody>
+      </table>`;
+
+    // Trade log
+    document.getElementById('bt-trade-count').textContent = data.trades.length;
+    document.getElementById('bt-trade-log').innerHTML = data.trades.slice(0, 100).map(t =>
+      `<div class="log-entry"><span class="log-time">${t.date}</span> <span style="color:${t.optionType==='put'?'var(--red)':'var(--blue)'}">${t.ticker} ${t.optionType.toUpperCase()}</span> | entry $${t.entry} exit $${t.exit} | <span style="color:${t.pnl>=0?'var(--green)':'var(--red)'}">${t.pnl>=0?'+':''}$${t.pnl.toFixed(2)} (${t.pct}%)</span> | ${t.reason} | ${t.daysHeld}d</div>`
+    ).join('');
+
+  } catch(e) {
+    status.textContent = 'Error: ' + e.message;
+  }
+  btn.disabled = false;
+  btn.textContent = '▶ RUN BACKTEST';
+}
+
 async function resetMonth() {
   if (!confirm("Reset month? This resets cash to $5,000 and clears today's trade count.")) return;
   await fetch('/api/reset-month', {method:'POST'});
