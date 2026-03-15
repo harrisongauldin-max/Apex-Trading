@@ -113,7 +113,7 @@ input[type=text]:focus{border-color:var(--blue)}
     <div class="logo-icon">▲</div>
     <div class="logo-text">
       <h1>APEX</h1>
-      <p>PROFESSIONAL OPTIONS AGENT v2.0 · ALPACA PAPER</p>
+      <p>PROFESSIONAL OPTIONS AGENT v3.0 · ALPACA PAPER</p>
     </div>
   </div>
   <div class="header-right">
@@ -218,6 +218,58 @@ input[type=text]:focus{border-color:var(--blue)}
       <div class="sub" id="var-95">VaR 95%: --</div>
     </div>
   </div>
+
+  <!-- Regime + Benchmark Row -->
+  <div class="grid4" style="margin-bottom:12px">
+    <div class="card">
+      <div class="card-title">Market Regime</div>
+      <div class="metric-sm" style="font-size:13px" id="regime-name">--</div>
+      <div class="sub" id="regime-action">--</div>
+    </div>
+    <div class="card">
+      <div class="card-title">Regime Confidence</div>
+      <div class="metric-sm" id="regime-conf">--%</div>
+      <div class="sub" id="regime-detail">--</div>
+    </div>
+    <div class="card">
+      <div class="card-title">vs SPY (Alpha)</div>
+      <div class="metric-sm" id="alpha">--</div>
+      <div class="sub" id="benchmark-sub">--</div>
+    </div>
+    <div class="card">
+      <div class="card-title">Drawdown Protocol</div>
+      <div class="metric-sm" style="font-size:13px" id="dd-protocol">NORMAL</div>
+      <div class="sub" id="dd-protocol-sub">Full sizing active</div>
+    </div>
+  </div>
+
+  <!-- Monte Carlo + Kelly Row -->
+  <div class="grid4" style="margin-bottom:12px">
+    <div class="card">
+      <div class="card-title">Monte Carlo (3mo)</div>
+      <div class="metric-sm" id="mc-median">--</div>
+      <div class="sub" id="mc-prob">-- % chance of profit</div>
+    </div>
+    <div class="card">
+      <div class="card-title">MC 5th / 95th %ile</div>
+      <div class="metric-sm" style="font-size:12px" id="mc-range">-- / --</div>
+      <div class="sub">worst / best case</div>
+    </div>
+    <div class="card">
+      <div class="card-title">Kelly Criterion</div>
+      <div class="metric-sm" id="kelly-contracts">--x</div>
+      <div class="sub" id="kelly-detail">-- win rate · -- payoff</div>
+    </div>
+    <div class="card">
+      <div class="card-title">Kelly Factor</div>
+      <div class="metric-sm" id="kelly-factor">--</div>
+      <div class="sub" id="kelly-half">half-Kelly: --</div>
+    </div>
+  </div>
+
+  <!-- Concentration + Stress Test -->
+  <div id="concentration-alerts" style="margin-bottom:12px"></div>
+  <div id="stress-test-wrap" style="margin-bottom:12px"></div>
 
   <!-- Macro News Banner -->
   <div id="macro-banner" style="background:var(--panel);border:1px solid var(--border);border-radius:8px;padding:10px 14px;margin-bottom:12px;display:none">
@@ -607,6 +659,84 @@ function renderMetrics() {
     el2('sector-leading').textContent = sr.leading || '--';
     el2('sector-lagging').textContent = `lagging: ${sr.lagging || '--'}`;
   }
+  // Regime
+  const regime = state.regime || { regime: "neutral", confidence: 50, action: "Normal operations.", details: {} };
+  const regimeColors = { trending_bull:"var(--green)", trending_bear:"var(--red)", choppy:"var(--gold)", breakdown:"#ff3333", neutral:"var(--text)", unknown:"var(--muted)" };
+  const regimeEl = document.getElementById("regime-name");
+  if (regimeEl) { regimeEl.textContent = (regime.regime||"neutral").replace("_"," ").toUpperCase(); regimeEl.style.color = regimeColors[regime.regime] || "var(--text)"; }
+  const regimeAct = document.getElementById("regime-action");
+  if (regimeAct) regimeAct.textContent = regime.action || "--";
+  const regimeConf = document.getElementById("regime-conf");
+  if (regimeConf) { regimeConf.textContent = (regime.confidence||0) + "%"; regimeConf.style.color = (regime.confidence||0) > 70 ? "var(--green)" : "var(--gold)"; }
+  const regimeDet = document.getElementById("regime-detail");
+  if (regimeDet && regime.details) regimeDet.textContent = `ADX:${regime.details.adx||"--"} Vol:${regime.details.stdDev||"--"}%`;
+
+  // Benchmark
+  const bm = state.benchmark;
+  const alphaEl = document.getElementById("alpha");
+  if (alphaEl && bm) {
+    alphaEl.textContent = (bm.alpha >= 0 ? "+" : "") + bm.alpha + "%";
+    alphaEl.style.color = bm.alpha >= 0 ? "var(--green)" : "var(--red)";
+    document.getElementById("benchmark-sub").textContent = `APEX:${bm.apexReturn >= 0 ? "+" : ""}${bm.apexReturn}% SPY:${bm.spyReturn >= 0 ? "+" : ""}${bm.spyReturn}%`;
+  }
+
+  // Drawdown protocol
+  const ddp = state.drawdownProtocol || { level: "normal", message: "Normal operations." };
+  const ddEl = document.getElementById("dd-protocol");
+  const ddColors = { normal:"var(--green)", caution:"var(--gold)", severe:"var(--orange)", critical:"var(--red)" };
+  if (ddEl) { ddEl.textContent = ddp.level.toUpperCase(); ddEl.style.color = ddColors[ddp.level] || "var(--text)"; }
+  const ddSub = document.getElementById("dd-protocol-sub");
+  if (ddSub) ddSub.textContent = ddp.message || "--";
+
+  // Concentration alerts
+  const concEl = document.getElementById("concentration-alerts");
+  const alerts = (state.concentration || {}).alerts || [];
+  if (concEl) {
+    if (alerts.length > 0) {
+      concEl.innerHTML = alerts.map(a => `<div class="alert alert-red" style="margin-bottom:4px">⚠ ${a}</div>`).join("");
+    } else {
+      concEl.innerHTML = "";
+    }
+  }
+
+  // Stress test
+  const stressEl = document.getElementById("stress-test-wrap");
+  const stress   = state.stressTest || [];
+  if (stressEl && stress.length > 0) {
+    stressEl.innerHTML = `
+      <div class="section-title">Stress Test</div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap">
+        ${stress.map(s => `<div class="card" style="min-width:130px">
+          <div class="card-title">${s.scenario}</div>
+          <div style="font-weight:700;color:${s.impact>=0?"var(--green)":"var(--red)"}">${s.impact>=0?"+":""}$${s.impact.toFixed(0)}</div>
+          <div style="font-size:10px;color:var(--muted)">${s.pct>=0?"+":""}${s.pct}%</div>
+        </div>`).join("")}
+      </div>`;
+  }
+
+  // Monte Carlo
+  const mc = state.monteCarlo || {};
+  const mcMed = document.getElementById("mc-median");
+  if (mcMed && mc.median !== undefined) {
+    mcMed.textContent = (mc.median >= 0 ? "+" : "") + "$" + Math.abs(mc.median).toFixed(0);
+    mcMed.style.color = mc.median >= 0 ? "var(--green)" : "var(--red)";
+    document.getElementById("mc-prob").textContent = (mc.probProfit || 0) + "% chance of profit";
+    document.getElementById("mc-range").textContent = "$" + (mc.percentile5||0).toFixed(0) + " / +" + "$" + (mc.percentile95||0).toFixed(0);
+    document.getElementById("mc-range").style.color = "var(--muted)";
+  }
+
+  // Kelly
+  const kelly = state.kelly || {};
+  const kellyEl = document.getElementById("kelly-contracts");
+  if (kellyEl && kelly.contracts !== undefined) {
+    kellyEl.textContent = kelly.contracts + "x contracts";
+    kellyEl.style.color = kelly.winRate >= 55 ? "var(--green)" : "var(--gold)";
+    document.getElementById("kelly-detail").textContent = kelly.winRate + "% win rate · " + kelly.payoffRatio + "x payoff";
+    document.getElementById("kelly-factor").textContent = kelly.kelly || "--";
+    document.getElementById("kelly-factor").style.color = (kelly.kelly||0) > 0 ? "var(--green)" : "var(--red)";
+    document.getElementById("kelly-half").textContent = "half-Kelly: " + (kelly.halfKelly || "--");
+  }
+
   // Beta-weighted delta
   const bwd = state.betaWeightedDelta || 0;
   const bwdEl = document.getElementById('g-betadelta');
