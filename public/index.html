@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8"/>
 <meta name="viewport" content="width=device-width,initial-scale=1"/>
-<title>APEX v3.0 — Professional Options Agent</title>
+<title>APEX v3.5 — Professional Options Agent</title>
 <style>
 :root{
   --bg:#07101f;--panel:#0a1628;--border:#0d3050;--text:#cce8ff;--muted:#336688;
@@ -113,7 +113,7 @@ input[type=text]:focus{border-color:var(--blue)}
     <div class="logo-icon">▲</div>
     <div class="logo-text">
       <h1>APEX</h1>
-      <p>PROFESSIONAL OPTIONS AGENT v3.0 · ALPACA PAPER</p>
+      <p>PROFESSIONAL OPTIONS AGENT v3.5 · ALPACA PAPER</p>
     </div>
   </div>
   <div class="header-right">
@@ -135,6 +135,7 @@ input[type=text]:focus{border-color:var(--blue)}
   <div class="tab" onclick="switchTab('report')">REPORT</div>
   <div class="tab" onclick="switchTab('log')">SERVER LOG</div>
   <div class="tab" onclick="switchTab('backtest')">BACKTEST</div>
+  <div class="tab" onclick="switchTab('sim')">SIM</div>
 </div>
 
 <!-- ═══════════════ TRADING TAB ═══════════════ -->
@@ -264,6 +265,54 @@ input[type=text]:focus{border-color:var(--blue)}
       <div class="card-title">Kelly Factor</div>
       <div class="metric-sm" id="kelly-factor">--</div>
       <div class="sub" id="kelly-half">half-Kelly: --</div>
+    </div>
+  </div>
+
+  <!-- Advanced Metrics Row -->
+  <div class="grid4" style="margin-bottom:12px">
+    <div class="card">
+      <div class="card-title">Calmar Ratio</div>
+      <div class="metric-sm" id="calmar">--</div>
+      <div class="sub">return / max drawdown</div>
+    </div>
+    <div class="card">
+      <div class="card-title">Information Ratio</div>
+      <div class="metric-sm" id="info-ratio">--</div>
+      <div class="sub">alpha / tracking error</div>
+    </div>
+    <div class="card">
+      <div class="card-title">Risk of Ruin</div>
+      <div class="metric-sm" id="ror">--%</div>
+      <div class="sub" id="ror-msg">--</div>
+    </div>
+    <div class="card">
+      <div class="card-title">Global Market</div>
+      <div class="metric-sm" style="font-size:13px" id="global-signal">--</div>
+      <div class="sub" id="global-detail">QQQ/IWM/EEM</div>
+    </div>
+  </div>
+
+  <!-- Streak + Drawdown Duration Row -->
+  <div class="grid4" style="margin-bottom:12px">
+    <div class="card">
+      <div class="card-title">Current Streak</div>
+      <div class="metric-sm" id="streak-current">--</div>
+      <div class="sub" id="streak-type">--</div>
+    </div>
+    <div class="card">
+      <div class="card-title">Max Win / Loss Streak</div>
+      <div class="metric-sm" style="font-size:13px" id="streak-max">-- / --</div>
+      <div class="sub">all time records</div>
+    </div>
+    <div class="card">
+      <div class="card-title">Drawdown Duration</div>
+      <div class="metric-sm" id="dd-duration">-- days</div>
+      <div class="sub" id="dd-duration-sub">avg recovery</div>
+    </div>
+    <div class="card">
+      <div class="card-title">Return Autocorrelation</div>
+      <div class="metric-sm" style="font-size:12px" id="autocorr">--</div>
+      <div class="sub" id="autocorr-signal">--</div>
     </div>
   </div>
 
@@ -519,6 +568,64 @@ input[type=text]:focus{border-color:var(--blue)}
   <div class="log-box" id="server-log" style="height:500px"></div>
 </div>
 
+<!-- SIM TAB -->
+<div id="tab-sim" class="content">
+  <div style="display:flex;align-items:center;gap:12px;margin-bottom:16px;flex-wrap:wrap">
+    <div>
+      <label style="font-size:11px;color:var(--muted)">SCENARIO:</label>
+      <select id="sim-scenario" style="background:var(--panel);border:1px solid var(--border);color:var(--text);padding:6px 10px;border-radius:6px;font-family:var(--font);font-size:11px;margin-left:6px">
+        <option value="normal">Normal Market</option>
+        <option value="bull_run">Bull Run</option>
+        <option value="bear_crash">Bear Crash</option>
+        <option value="choppy">Choppy / Sideways</option>
+        <option value="recovery">Recovery Rally</option>
+        <option value="black_swan">Black Swan Event</option>
+      </select>
+    </div>
+    <div>
+      <label style="font-size:11px;color:var(--muted)">SPEED:</label>
+      <select id="sim-speed" style="background:var(--panel);border:1px solid var(--border);color:var(--text);padding:6px 10px;border-radius:6px;font-family:var(--font);font-size:11px;margin-left:6px">
+        <option value="fast">Fast (15s)</option>
+        <option value="normal" selected>Normal (30s)</option>
+        <option value="slow">Slow (80s)</option>
+      </select>
+    </div>
+    <button class="btn btn-green" id="sim-start-btn" onclick="startSim()">&#9654; START SIM</button>
+    <button class="btn btn-red" id="sim-stop-btn" onclick="stopSim()" style="display:none">&#9632; STOP</button>
+  </div>
+
+  <!-- Sim Metrics -->
+  <div class="grid4" style="margin-bottom:12px" id="sim-metrics" style="display:none">
+    <div class="card">
+      <div class="card-title">Sim Cash</div>
+      <div class="metric-sm" id="sim-cash">$--</div>
+      <div class="sub" id="sim-pnl">P&L: --</div>
+    </div>
+    <div class="card">
+      <div class="card-title">Sim Trades</div>
+      <div class="metric-sm" id="sim-trades">0</div>
+      <div class="sub" id="sim-wr">Win rate: --%</div>
+    </div>
+    <div class="card">
+      <div class="card-title">Sim VIX</div>
+      <div class="metric-sm" id="sim-vix">--</div>
+      <div class="sub" id="sim-circuit">Circuit: OPEN</div>
+    </div>
+    <div class="card">
+      <div class="card-title">Sim Positions</div>
+      <div class="metric-sm" id="sim-positions">0</div>
+      <div class="sub">open options</div>
+    </div>
+  </div>
+
+  <!-- Sim Positions -->
+  <div id="sim-pos-wrap" style="margin-bottom:12px"></div>
+
+  <!-- Sim Log -->
+  <div class="section-title">Simulation Log</div>
+  <div class="log-box" id="sim-log" style="max-height:400px"></div>
+</div>
+
 <!-- BACKTEST TAB -->
 <div id="tab-backtest" class="content">
   <div style="display:flex;align-items:center;gap:12px;margin-bottom:16px;flex-wrap:wrap">
@@ -640,10 +747,10 @@ function renderMetrics() {
   document.getElementById('last-scan').textContent = fmtTime(state.lastScan);
 
   // Market context cards
-  const mc = health.marketContext || {};
-  const fg = mc.fearGreed || { score: 50, rating: 'neutral' };
-  const br = mc.breadth   || { advancing: 0, declining: 0, breadthPct: 50 };
-  const sr = mc.sectorRotation || { leading: '--', lagging: '--' };
+  const mctx = health.marketContext || {};
+  const fg = mctx.fearGreed || { score: 50, rating: 'neutral' };
+  const br = mctx.breadth   || { advancing: 0, declining: 0, breadthPct: 50 };
+  const sr = mctx.sectorRotation || { leading: '--', lagging: '--' };
   const el2 = id => document.getElementById(id);
   if (el2('fg-score')) {
     el2('fg-score').textContent = fg.score;
@@ -714,8 +821,48 @@ function renderMetrics() {
       </div>`;
   }
 
+  // Calmar, Info Ratio, Risk of Ruin, Global Market
+  const calEl = document.getElementById("calmar");
+  if (calEl) { calEl.textContent = state.calmar || "--"; calEl.style.color = (state.calmar||0) > 1 ? "var(--green)" : (state.calmar||0) > 0 ? "var(--gold)" : "var(--red)"; }
+  const irEl = document.getElementById("info-ratio");
+  if (irEl) { irEl.textContent = state.informationRatio || "--"; irEl.style.color = (state.informationRatio||0) > 0.5 ? "var(--green)" : (state.informationRatio||0) > 0 ? "var(--gold)" : "var(--red)"; }
+  const rorEl = document.getElementById("ror");
+  const ror   = state.riskOfRuin || { probability: 0, message: "--" };
+  if (rorEl) { rorEl.textContent = ror.probability + "%"; rorEl.style.color = ror.probability < 5 ? "var(--green)" : ror.probability < 20 ? "var(--gold)" : "var(--red)"; }
+  const rorMsg = document.getElementById("ror-msg");
+  if (rorMsg) rorMsg.textContent = ror.message || "--";
+
+  const gm = state.globalMarket || { signal: "neutral", qqqChg: 0, iwmChg: 0, eemChg: 0 };
+  const gmEl = document.getElementById("global-signal");
+  if (gmEl) { gmEl.textContent = (gm.signal||"neutral").toUpperCase(); gmEl.style.color = gm.signal === "risk-on" ? "var(--green)" : gm.signal === "risk-off" ? "var(--red)" : "var(--muted)"; }
+  const gmDet = document.getElementById("global-detail");
+  if (gmDet) gmDet.textContent = `QQQ:${gm.qqqChg>=0?"+":""}${gm.qqqChg}% IWM:${gm.iwmChg>=0?"+":""}${gm.iwmChg}%`;
+
+  // Streaks
+  const str = state.streaks || { currentStreak: 0, currentType: null, maxWinStreak: 0, maxLossStreak: 0 };
+  const strEl = document.getElementById("streak-current");
+  if (strEl) { strEl.textContent = str.currentStreak + "x"; strEl.style.color = str.currentType === "win" ? "var(--green)" : str.currentType === "loss" ? "var(--red)" : "var(--muted)"; }
+  const strType = document.getElementById("streak-type");
+  if (strType) { strType.textContent = str.currentType ? str.currentType + " streak" : "--"; }
+  const strMax = document.getElementById("streak-max");
+  if (strMax) strMax.textContent = str.maxWinStreak + " / " + str.maxLossStreak;
+
+  // Drawdown duration
+  const ddd   = state.drawdownDuration || { avgDuration: 0, maxDuration: 0, currentDuration: 0 };
+  const dddEl = document.getElementById("dd-duration");
+  if (dddEl) { dddEl.textContent = ddd.currentDuration > 0 ? ddd.currentDuration + "d (active)" : "None active"; dddEl.style.color = ddd.currentDuration > 7 ? "var(--red)" : "var(--green)"; }
+  const dddSub = document.getElementById("dd-duration-sub");
+  if (dddSub) dddSub.textContent = `avg:${ddd.avgDuration}d max:${ddd.maxDuration}d`;
+
+  // Autocorrelation
+  const ac    = state.autocorrelation || { value: 0, signal: "--" };
+  const acEl  = document.getElementById("autocorr");
+  if (acEl) { acEl.textContent = ac.value || "--"; acEl.style.color = Math.abs(ac.value||0) > 0.2 ? "var(--gold)" : "var(--muted)"; }
+  const acSig = document.getElementById("autocorr-signal");
+  if (acSig) acSig.textContent = ac.signal || "--";
+
   // Monte Carlo
-  const mc = state.monteCarlo || {};
+  const mc = state.monteCarlo || {}; // mc = monteCarlo
   const mcMed = document.getElementById("mc-median");
   if (mcMed && mc.median !== undefined) {
     mcMed.textContent = (mc.median >= 0 ? "+" : "") + "$" + Math.abs(mc.median).toFixed(0);
@@ -743,7 +890,7 @@ function renderMetrics() {
   if (bwdEl) { bwdEl.textContent = bwd.toFixed(2); bwdEl.style.color = bwd > 0 ? 'var(--green)' : bwd < 0 ? 'var(--red)' : 'var(--text)'; }
 
   // Macro calendar
-  const calEl = document.getElementById('g-macrocal');
+  const macroCalEl = document.getElementById('g-macrocal');
   const events = state.upcomingEvents || [];
   if (calEl) {
     if (events.length > 0) {
@@ -1181,6 +1328,79 @@ async function resetCircuit() {
   await fetch('/api/reset-circuit', {method:'POST'});
   location.reload();
 }
+let simPollInterval = null;
+
+async function startSim() {
+  const scenario = document.getElementById('sim-scenario').value;
+  const speed    = document.getElementById('sim-speed').value;
+  document.getElementById('sim-start-btn').style.display = 'none';
+  document.getElementById('sim-stop-btn').style.display  = 'inline-block';
+  document.getElementById('sim-metrics').style.display   = 'grid';
+
+  await fetch('/api/sim/start', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ scenario, speed }) });
+
+  // Poll for updates
+  simPollInterval = setInterval(async () => {
+    try {
+      const res  = await fetch('/api/sim/status');
+      const data = await res.json();
+      updateSimDisplay(data);
+      if (!data.running) {
+        clearInterval(simPollInterval);
+        document.getElementById('sim-start-btn').style.display = 'inline-block';
+        document.getElementById('sim-stop-btn').style.display  = 'none';
+      }
+    } catch(e) { console.error('Sim poll error:', e); }
+  }, 500);
+}
+
+async function stopSim() {
+  await fetch('/api/sim/stop', { method: 'POST' });
+  clearInterval(simPollInterval);
+  document.getElementById('sim-start-btn').style.display = 'inline-block';
+  document.getElementById('sim-stop-btn').style.display  = 'none';
+}
+
+function updateSimDisplay(data) {
+  const pnl = data.totalPnL || 0;
+  const el  = id => document.getElementById(id);
+  if (el('sim-cash'))    { el('sim-cash').textContent = '$' + (data.cash||0).toFixed(2); el('sim-cash').style.color = pnl >= 0 ? 'var(--green)' : 'var(--red)'; }
+  if (el('sim-pnl'))     { el('sim-pnl').textContent  = 'P&L: ' + (pnl >= 0 ? '+' : '') + '$' + pnl.toFixed(2); el('sim-pnl').style.color = pnl >= 0 ? 'var(--green)' : 'var(--red)'; }
+  if (el('sim-trades'))  { el('sim-trades').textContent = data.trades || 0; }
+  if (el('sim-wr'))      { el('sim-wr').textContent = 'Win rate: ' + (data.winRate || 0) + '%'; el('sim-wr').style.color = (data.winRate||0) >= 55 ? 'var(--green)' : 'var(--red)'; }
+  if (el('sim-vix'))     { el('sim-vix').textContent = data.vix || '--'; el('sim-vix').style.color = (data.vix||0) > 30 ? 'var(--red)' : 'var(--green)'; }
+  if (el('sim-circuit')) { el('sim-circuit').textContent = 'Circuit: ' + (data.circuitOpen ? 'OPEN' : 'TRIPPED'); el('sim-circuit').style.color = data.circuitOpen ? 'var(--green)' : 'var(--red)'; }
+  if (el('sim-positions')){ el('sim-positions').textContent = (data.positions||[]).length; }
+
+  // Render sim positions
+  const posWrap = el('sim-pos-wrap');
+  if (posWrap && (data.positions||[]).length > 0) {
+    posWrap.innerHTML = '<div class="section-title">Open Positions</div>' +
+      data.positions.map(p => {
+        const chg = p.currentPrice && p.premium ? ((p.currentPrice - p.premium) / p.premium * 100).toFixed(1) : 0;
+        return `<div class="card" style="margin-bottom:8px;border-left:3px solid ${parseFloat(chg)>=0?'var(--green)':'var(--red)'}">
+          <div style="display:flex;justify-content:space-between">
+            <span style="font-weight:700;color:var(--blue)">${p.ticker}</span>
+            <span style="color:${p.optionType==='put'?'var(--red)':'var(--green)'}">${p.optionType?.toUpperCase()}</span>
+            <span style="color:${parseFloat(chg)>=0?'var(--green)':'var(--red)'}">${parseFloat(chg)>=0?'+':''}${chg}%</span>
+          </div>
+          <div style="font-size:10px;color:var(--muted)">Entry $${p.premium} | Current $${(p.currentPrice||p.premium).toFixed(2)} | ${p.contracts}x | Score ${p.score}</div>
+        </div>`;
+      }).join('');
+  } else if (posWrap) {
+    posWrap.innerHTML = '';
+  }
+
+  // Render log
+  const logEl = el('sim-log');
+  if (logEl && data.log) {
+    logEl.innerHTML = data.log.map(e => {
+      const color = e.type === 'trade' ? 'var(--green)' : e.type === 'circuit' ? 'var(--red)' : e.type === 'warn' ? 'var(--orange)' : 'var(--muted)';
+      return `<div class="log-entry"><span class="log-time">${new Date(e.time).toLocaleTimeString()}</span> <span style="color:${color}">[${e.type.toUpperCase()}]</span> ${e.message}</div>`;
+    }).join('');
+  }
+}
+
 async function runBacktest() {
   const months  = document.getElementById('bt-months').value;
   const btn     = document.getElementById('bt-run-btn');
