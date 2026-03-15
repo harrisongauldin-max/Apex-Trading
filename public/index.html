@@ -240,6 +240,7 @@ input[type=text]:focus{border-color:var(--blue)}
     <div class="greek-chip"><span class="greek-label">GAMMA</span><span class="greek-val" id="g-gamma">--</span></div>
     <div class="greek-chip"><span class="greek-label">VEGA</span><span class="greek-val" id="g-vega">--</span></div>
     <div class="greek-chip"><span class="greek-label">BETA-Δ</span><span class="greek-val" id="g-betadelta">--</span></div>
+    <div class="greek-chip"><span class="greek-label">MACRO CAL</span><span class="greek-val" id="g-macrocal" style="color:var(--gold)">--</span></div>
   </div>
 
   <div class="section-title">Quick Actions</div>
@@ -572,6 +573,25 @@ function renderMetrics() {
     el2('sector-leading').textContent = sr.leading || '--';
     el2('sector-lagging').textContent = `lagging: ${sr.lagging || '--'}`;
   }
+  // Beta-weighted delta
+  const bwd = state.betaWeightedDelta || 0;
+  const bwdEl = document.getElementById('g-betadelta');
+  if (bwdEl) { bwdEl.textContent = bwd.toFixed(2); bwdEl.style.color = bwd > 0 ? 'var(--green)' : bwd < 0 ? 'var(--red)' : 'var(--text)'; }
+
+  // Macro calendar
+  const calEl = document.getElementById('g-macrocal');
+  const events = state.upcomingEvents || [];
+  if (calEl) {
+    if (events.length > 0) {
+      const next = events[0];
+      calEl.textContent = next.daysTo === 0 ? `${next.event} TODAY` : `${next.event} in ${next.daysTo}d`;
+      calEl.style.color = next.daysTo === 0 ? 'var(--red)' : next.daysTo <= 1 ? 'var(--orange)' : 'var(--gold)';
+    } else {
+      calEl.textContent = 'No events 7d';
+      calEl.style.color = 'var(--muted)';
+    }
+  }
+
   if (el2('sharpe-ratio')) {
     const sharpe = health.sharpe || 0;
     const var95  = health.var95  || 0;
