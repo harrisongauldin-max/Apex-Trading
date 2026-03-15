@@ -3162,13 +3162,13 @@ function simLogEvent(type, message) {
 
 function simNextPrice(currentPrice, scenario) {
   const params = {
-    bull_run:   { drift:  0.002,  vol: 0.012 },
-    bear_crash: { drift: -0.003,  vol: 0.025 },
-    choppy:     { drift:  0.000,  vol: 0.008 },
-    recovery:   { drift:  0.001,  vol: 0.018 },
-    black_swan: { drift: -0.015,  vol: 0.045 },
-    normal:     { drift:  0.0005, vol: 0.015 },
-  }[scenario] || { drift: 0.0005, vol: 0.015 };
+    bull_run:   { drift:  0.004,  vol: 0.022 },  // strong uptrend, moderate vol
+    bear_crash: { drift: -0.006,  vol: 0.038 },  // sustained selling, high vol
+    choppy:     { drift:  0.000,  vol: 0.018 },  // no direction, enough noise to trigger stops
+    recovery:   { drift:  0.003,  vol: 0.028 },  // bounce with whipsaw vol
+    black_swan: { drift: -0.025,  vol: 0.065 },  // violent crash
+    normal:     { drift:  0.001,  vol: 0.022 },  // realistic intraday movement
+  }[scenario] || { drift: 0.001, vol: 0.022 };
   const u1 = Math.random(), u2 = Math.random();
   const z  = Math.sqrt(-2 * Math.log(u1)) * Math.cos(2 * Math.PI * u2);
   return parseFloat((currentPrice * (1 + params.drift + params.vol * z)).toFixed(2));
@@ -3191,10 +3191,12 @@ async function runSimTick(scenario, simPrices, tick) {
   for (const pos of [...simState.positions]) {
     const price = simPrices[pos.ticker];
     if (!price) continue;
-    const dte  = Math.max(1, pos.expiryDays - Math.floor(tick / 8));
+    // Each tick = ~half trading day for meaningful option aging
+    const daysElapsed = Math.floor(tick / 4);
+    const dte  = Math.max(1, pos.expiryDays - daysElapsed);
     const curP = parseFloat((price * pos.iv * Math.sqrt(dte / 365) * 0.4 + 0.1).toFixed(2));
     const chg  = (curP - pos.premium) / pos.premium;
-    const hrs  = tick * 0.5;
+    const hrs  = tick * 4; // each tick ~ 4 hours
     pos.currentPrice = curP;
     pos.price        = price;
     if (curP > pos.peakPremium) pos.peakPremium = curP;
@@ -3241,7 +3243,8 @@ async function runSimTick(scenario, simPrices, tick) {
       const putS     = scorePutSetup(simStock, 0.98, 22, 1200000, 900000);
       const best     = Math.max(callS.score, putS.score);
       const optType  = putS.score > callS.score ? "put" : "call";
-      if (best < MIN_SCORE) continue;
+      // Use lower threshold in sim so trades fire — real threshold applies in live trading
+      if (best < 60) continue;
       const iv       = 0.25 + stock.ivr * 0.003;
       const premium  = parseFloat((price * iv * Math.sqrt(30 / 365) * 0.4 + 0.3).toFixed(2));
       const contr    = Math.max(1, Math.floor((simState.cash * 0.08) / (premium * 100)));
@@ -3277,8 +3280,8 @@ function startSimulation(scenario = "normal", speed = "normal") {
   for (const stock of WATCHLIST) simPrices[stock.ticker] = SIM_BASE_PRICES[stock.ticker] || 100;
   simPrices["SPY"] = SIM_BASE_PRICES["SPY"];
 
-  const intervalMs = speed === "fast" ? 150 : speed === "slow" ? 2000 : 500;
-  const maxTicks   = speed === "fast" ? 100 : speed === "slow" ? 40   : 60;
+  const intervalMs = speed === "fast" ? 150 : speed === "slow" ? 1500 : 400;
+  const maxTicks   = speed === "fast" ? 120 : speed === "slow" ? 80   : 100;
   let tick         = 0;
 
   simLogEvent("scan", `=== SIMULATION START === Scenario:${scenario} | Speed:${speed} | Ticks:${maxTicks}`);
