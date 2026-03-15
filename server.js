@@ -788,7 +788,355 @@ function getMacroCalendarModifier() {
   return { modifier: 0, events };
 }
 
-// - Macro News Scanner -
+// ── Relative Value Screening ─────────────────────────────────────────────
+function getRelativeValueScreening() {
+  const bySector = {};
+  for (const stock of WATCHLIST) {
+    if (!bySector[stock.sector]) bySector[stock.sector] = [];
+    bySector[stock.sector].push({ ticker: stock.ticker, ivr: stock.ivr, beta: stock.beta });
+  }
+  const results = {};
+  for (const [sector, stocks] of Object.entries(bySector)) {
+    const sorted = [...stocks].sort((a, b) => a.ivr - b.ivr);
+    results[sector] = {
+      cheapest:      sorted[0],
+      mostExpensive: sorted[sorted.length - 1],
+      avgIVR:        parseFloat((stocks.reduce((s, st) => s + st.ivr, 0) / stocks.length).toFixed(1)),
+      stocks:        sorted,
+    };
+  }
+  return results;
+}
+
+// ── Earnings Quality Scoring ──────────────────────────────────────────────
+async function getEarningsQualityScore(ticker, bars) {
+  try {
+    if (!bars || bars.length < 30) return { score: 50, signal: "unknown" };
+    const bigMoves = [];
+    for (let i = 1; i < bars.length; i++) {
+      const move = Math.abs((bars[i].c - bars[i-1].c) / bars[i-1].c * 100);
+      if (move > 3) bigMoves.push({ move, direction: bars[i].c > bars[i-1].c ? 1 : -1 });
+    }
+    if (!bigMoves.length) return { score: 50, signal: "neutral" };
+    const positiveMoves = bigMoves.filter(m => m.direction > 0).length;
+    const score = Math.round((positiveMoves / bigMoves.length) * 100);
+    return { score, signal: score >= 65 ? "positive" : score <= 35 ? "negative" : "mixed", bigMoves: bigMoves.length, positiveReactions: positiveMoves };
+  } catch(e) { return { score: 50, signal: "unknown" }; }
+}
+
+// ── Factor Model ──────────────────────────────────────────────────────────
+function calcFactorScore(stock, signals, relStrength, newsModifier, analystModifier) {
+  const factors = {};
+  factors.momentum    = signals.momentum === "strong" ? 25 : signals.momentum === "steady" ? 15 : 5;
+  const rsi           = signals.rsi || 50;
+  factors.trend       = rsi >= 50 && rsi <= 65 ? 20 : rsi >= 45 && rsi < 50 ? 12 : rsi > 65 && rsi <= 75 ? 8 : 5;
+  factors.relStrength = relStrength > 1.05 ? 20 : relStrength > 1.02 ? 15 : relStrength > 1.0 ? 10 : 5;
+  const ivr           = signals.ivr || stock.ivr || 50;
+  factors.value       = ivr < 25 ? 20 : ivr < 40 ? 15 : ivr < 55 ? 10 : 5;
+  const sentimentRaw  = (newsModifier || 0) + (analystModifier || 0);
+  factors.sentiment   = parseFloat(Math.min(15, Math.max(0, 7 + sentimentRaw / 3)).toFixed(1));
+  const total         = Object.values(factors).reduce((s, v) => s + v, 0);
+  return { total: Math.min(100, Math.round(total)), factors };
+}
+
+// ── Monte Carlo Simulation ────────────────────────────────────────────────
+function runMonteCarlo(iterations = 1000) {
+  const trades = state.closedTrades || [];
+  if (trades.length < 10) return { median: 0, percentile5: 0, percentile95: 0, probProfit: 0, message: "Need 10+ closed trades" };
+  const returns   = trades.map(t => t.pnl || 0);
+  const avgReturn = returns.reduce((s, r) => s + r, 0) / returns.length;
+  const stdDev    = Math.sqrt(returns.reduce((s, r) => s + Math.pow(r - avgReturn, 2), 0) / returns.length);
+  const simResults = [];
+  const tradesPerSim = Math.max(5, Math.round(returns.length / 2)) * 3;
+  for (let i = 0; i < iterations; i++) {
+    let cash = state.cash;
+    for (let t = 0; t < tradesPerSim; t++) {
+      const u1 = Math.random(), u2 = Math.random();
+      const pnl = avgReturn + stdDev * Math.sqrt(-2 * Math.log(u1)) * Math.cos(2 * Math.PI * u2);
+      cash += pnl;
+      if (cash < CAPITAL_FLOOR) { cash = CAPITAL_FLOOR; break; }
+    }
+    simResults.push(parseFloat((cash - state.cash).toFixed(2)));
+  }
+  simResults.sort((a, b) => a - b);
+  return {
+    iterations,
+    median:       simResults[Math.floor(iterations * 0.50)],
+    percentile5:  simResults[Math.floor(iterations * 0.05)],
+    percentile25: simResults[Math.floor(iterations * 0.25)],
+    percentile75: simResults[Math.floor(iterations * 0.75)],
+    percentile95: simResults[Math.floor(iterations * 0.95)],
+    probProfit:   Math.round(simResults.filter(r => r > 0).length / iterations * 100),
+    message:      `Based on ${trades.length} historical trades`,
+  };
+}
+
+// ── Kelly Criterion ───────────────────────────────────────────────────────
+function calcKellySize(recentTrades = 20) {
+  const trades  = (state.closedTrades || []).slice(0, recentTrades);
+  if (trades.length < 5) return { contracts: 1, kelly: 0, halfKelly: 0, winRate: 0, payoffRatio: 0 };
+  const wins      = trades.filter(t => t.pnl > 0);
+  const losses    = trades.filter(t => t.pnl <= 0);
+  const winRate   = wins.length / trades.length;
+  const avgWin    = wins.length   ? wins.reduce((s, t) => s + t.pnl, 0) / wins.length : 0;
+  const avgLoss   = losses.length ? Math.abs(losses.reduce((s, t) => s + t.pnl, 0) / losses.length) : 1;
+  const payoff    = avgLoss > 0 ? avgWin / avgLoss : 1;
+  const kelly     = winRate - (1 - winRate) / payoff;
+  const halfKelly = Math.max(0, kelly * 0.5);
+  const contracts = Math.min(3, Math.max(1, Math.round(halfKelly * 10)));
+  return { contracts, kelly: parseFloat(kelly.toFixed(3)), halfKelly: parseFloat(halfKelly.toFixed(3)), winRate: parseFloat((winRate*100).toFixed(1)), payoffRatio: parseFloat(payoff.toFixed(2)) };
+}
+
+// ── Regime Detection ─────────────────────────────────────────────────────
+// Identifies current market regime: trending_bull, trending_bear, choppy, breakdown
+async function detectMarketRegime() {
+  try {
+    const bars  = await getStockBars("SPY", 60);
+    if (bars.length < 50) return { regime: "unknown", confidence: 0, details: {} };
+
+    const closes  = bars.map(b => b.c);
+    const highs   = bars.map(b => b.h);
+    const lows    = bars.map(b => b.l);
+
+    // Calculate key indicators
+    const sma20   = closes.slice(-20).reduce((s, c) => s + c, 0) / 20;
+    const sma50   = closes.slice(-50).reduce((s, c) => s + c, 0) / 50;
+    const current = closes[closes.length - 1];
+    const adx     = calcADX(bars);
+
+    // 20-day volatility (annualized)
+    const returns  = closes.slice(-20).map((c, i) => i > 0 ? Math.log(c / closes[closes.length - 21 + i]) : 0).slice(1);
+    const stdDev   = Math.sqrt(returns.reduce((s, r) => s + r * r, 0) / returns.length) * Math.sqrt(252) * 100;
+
+    // Recent momentum
+    const mom5   = (current - closes[closes.length - 5])  / closes[closes.length - 5]  * 100;
+    const mom20  = (current - closes[closes.length - 20]) / closes[closes.length - 20] * 100;
+
+    // Determine regime
+    let regime, confidence, action;
+
+    if (current > sma20 && sma20 > sma50 && adx > 25 && mom20 > 2) {
+      regime     = "trending_bull";
+      confidence = Math.min(100, Math.round(adx + mom20 * 3));
+      action     = "Full position sizing. Favor calls. Aggressive entries.";
+    } else if (current < sma20 && sma20 < sma50 && adx > 25 && mom20 < -2) {
+      regime     = "trending_bear";
+      confidence = Math.min(100, Math.round(adx + Math.abs(mom20) * 3));
+      action     = "Reduced sizing. Favor puts. Avoid new calls.";
+    } else if (adx < 20 && stdDev < 15) {
+      regime     = "choppy";
+      confidence = Math.min(100, Math.round((20 - adx) * 3));
+      action     = "Minimal entries. Wait for breakout. Tighten stops.";
+    } else if (mom5 < -3 && stdDev > 25) {
+      regime     = "breakdown";
+      confidence = Math.min(100, Math.round(stdDev + Math.abs(mom5) * 5));
+      action     = "Defensive mode. Close calls. Consider puts only.";
+    } else {
+      regime     = "neutral";
+      confidence = 50;
+      action     = "Normal operations. Standard position sizing.";
+    }
+
+    return {
+      regime, confidence, action,
+      details: { sma20: sma20.toFixed(2), sma50: sma50.toFixed(2), adx: adx.toFixed(1), stdDev: stdDev.toFixed(1), mom5: mom5.toFixed(1), mom20: mom20.toFixed(1), current: current.toFixed(2) }
+    };
+  } catch(e) { return { regime: "unknown", confidence: 0, action: "Normal operations.", details: {} }; }
+}
+
+// Regime-based score modifier
+function getRegimeModifier(regime, optionType) {
+  const modifiers = {
+    trending_bull: { call: 15,  put: -15 },
+    trending_bear: { call: -15, put: 15  },
+    choppy:        { call: -10, put: -10 },
+    breakdown:     { call: -25, put: 10  },
+    neutral:       { call: 0,   put: 0   },
+    unknown:       { call: 0,   put: 0   },
+  };
+  return (modifiers[regime] || modifiers.neutral)[optionType] || 0;
+}
+
+// ── Stress Test ───────────────────────────────────────────────────────────
+function runStressTest() {
+  const scenarios = [
+    { name: "Market -5%",  move: -0.05 },
+    { name: "Market -10%", move: -0.10 },
+    { name: "Market -20%", move: -0.20 },
+    { name: "Market +5%",  move:  0.05 },
+    { name: "Market +10%", move:  0.10 },
+    { name: "VIX Spike +15", vixSpike: 15 },
+  ];
+
+  return scenarios.map(scenario => {
+    let portfolioImpact = 0;
+    for (const pos of state.positions) {
+      const delta  = parseFloat(pos.greeks?.delta || 0.35);
+      const gamma  = parseFloat(pos.greeks?.gamma || 0.01);
+      const vega   = parseFloat(pos.greeks?.vega  || 0.10);
+      const price  = pos.price || 100;
+      const contracts = pos.contracts || 1;
+      const mult   = pos.optionType === "put" ? -1 : 1;
+
+      let impact = 0;
+      if (scenario.move !== undefined) {
+        const priceMove  = price * scenario.move;
+        // Delta + gamma approximation
+        impact = (delta * mult * priceMove + 0.5 * gamma * priceMove * priceMove) * 100 * contracts;
+      } else if (scenario.vixSpike !== undefined) {
+        // Vega impact from IV spike
+        impact = vega * scenario.vixSpike * 100 * contracts * mult;
+      }
+      portfolioImpact += impact;
+    }
+    return {
+      scenario: scenario.name,
+      impact:   parseFloat(portfolioImpact.toFixed(2)),
+      newCash:  parseFloat((state.cash + portfolioImpact).toFixed(2)),
+      pct:      state.cash > 0 ? parseFloat((portfolioImpact / (state.cash + portfolioImpact) * 100).toFixed(1)) : 0,
+    };
+  });
+}
+
+// ── Time of Day Analysis ──────────────────────────────────────────────────
+function getTimeOfDayAnalysis() {
+  const trades = state.closedTrades || [];
+  if (trades.length < 5) return { best: "insufficient data", hourly: [] };
+
+  const hourly = {};
+  for (const trade of trades) {
+    if (!trade.openDate) continue;
+    const hour = new Date(trade.openDate).getHours();
+    if (!hourly[hour]) hourly[hour] = { wins: 0, losses: 0, pnl: 0, trades: 0 };
+    hourly[hour].trades++;
+    hourly[hour].pnl += trade.pnl || 0;
+    if ((trade.pnl || 0) > 0) hourly[hour].wins++;
+    else hourly[hour].losses++;
+  }
+
+  const sorted = Object.entries(hourly)
+    .map(([h, d]) => ({ hour: parseInt(h), ...d, winRate: d.trades ? Math.round(d.wins / d.trades * 100) : 0 }))
+    .sort((a, b) => b.pnl - a.pnl);
+
+  return {
+    best:   sorted[0] ? `${sorted[0].hour}:00 ET (${sorted[0].winRate}% WR, $${sorted[0].pnl.toFixed(0)} P&L)` : "insufficient data",
+    worst:  sorted[sorted.length-1] ? `${sorted[sorted.length-1].hour}:00 ET` : "--",
+    hourly: sorted,
+  };
+}
+
+// ── Concentration Risk ────────────────────────────────────────────────────
+function checkConcentrationRisk() {
+  const positions  = state.positions || [];
+  const totalValue = state.cash + positions.reduce((s, p) => s + p.cost, 0);
+  const alerts     = [];
+
+  // Check single position concentration
+  for (const pos of positions) {
+    const pct = pos.cost / totalValue * 100;
+    if (pct > 20) alerts.push(`${pos.ticker} is ${pct.toFixed(1)}% of portfolio - oversized`);
+  }
+
+  // Check sector concentration
+  const sectorTotals = {};
+  for (const pos of positions) {
+    sectorTotals[pos.sector] = (sectorTotals[pos.sector] || 0) + pos.cost;
+  }
+  for (const [sector, val] of Object.entries(sectorTotals)) {
+    const pct = val / totalValue * 100;
+    if (pct > 40) alerts.push(`${sector} sector is ${pct.toFixed(1)}% of portfolio - concentrated`);
+  }
+
+  // Check call vs put balance
+  const calls = positions.filter(p => p.optionType === "call").reduce((s, p) => s + p.cost, 0);
+  const puts  = positions.filter(p => p.optionType === "put").reduce((s, p) => s + p.cost, 0);
+  const total = calls + puts;
+  if (total > 0) {
+    const callPct = calls / total * 100;
+    if (callPct > 85) alerts.push(`Portfolio is ${callPct.toFixed(0)}% calls - consider hedging with puts`);
+    if (callPct < 15) alerts.push(`Portfolio is ${(100-callPct).toFixed(0)}% puts - very bearish positioning`);
+  }
+
+  return { alerts, sectorTotals, callPct: total > 0 ? parseFloat((calls/total*100).toFixed(1)) : 100 };
+}
+
+// ── Drawdown Recovery Protocol ────────────────────────────────────────────
+function getDrawdownProtocol() {
+  const peak      = state.peakCash || MONTHLY_BUDGET;
+  const current   = state.cash + (state.positions || []).reduce((s, p) => s + p.cost, 0);
+  const drawdown  = (current - peak) / peak * 100;
+  const losses    = state.consecutiveLosses || 0;
+
+  if (drawdown <= -20 || losses >= 5) {
+    return { level: "critical", sizeMultiplier: 0.25, message: "CRITICAL - 25% position sizing. Calls only on A+ setups (85+).", minScore: 85 };
+  } else if (drawdown <= -15 || losses >= 4) {
+    return { level: "severe",   sizeMultiplier: 0.50, message: "SEVERE - 50% position sizing. Score threshold raised to 80.", minScore: 80 };
+  } else if (drawdown <= -10 || losses >= 3) {
+    return { level: "caution",  sizeMultiplier: 0.75, message: "CAUTION - 75% position sizing. Score threshold raised to 75.", minScore: 75 };
+  }
+  return { level: "normal", sizeMultiplier: 1.0, message: "Normal operations.", minScore: MIN_SCORE };
+}
+
+// ── Benchmark Comparison ──────────────────────────────────────────────────
+async function getBenchmarkComparison() {
+  try {
+    const spyBars = await getStockBars("SPY", 30);
+    if (spyBars.length < 2) return null;
+    const spyReturn   = (spyBars[spyBars.length-1].c - spyBars[0].c) / spyBars[0].c * 100;
+    const apexReturn  = ((state.cash + (state.positions||[]).reduce((s,p)=>s+p.cost,0)) - MONTHLY_BUDGET) / MONTHLY_BUDGET * 100;
+    const alpha       = apexReturn - spyReturn;
+    return {
+      spyReturn:  parseFloat(spyReturn.toFixed(2)),
+      apexReturn: parseFloat(apexReturn.toFixed(2)),
+      alpha:      parseFloat(alpha.toFixed(2)),
+      beating:    alpha > 0,
+    };
+  } catch(e) { return null; }
+}
+
+// ── Tail Risk Hedge ───────────────────────────────────────────────────────
+async function checkTailRiskHedge() {
+  // Auto-buy cheap OTM SPY puts when VIX is low and we have large call exposure
+  const vix       = state.vix || 15;
+  const positions = state.positions || [];
+  const callValue = positions.filter(p => p.optionType === "call").reduce((s, p) => s + p.cost, 0);
+  const hasPutHedge = positions.some(p => p.ticker === "SPY" && p.optionType === "put");
+
+  // Only hedge when VIX is low (cheap puts) and we have significant call exposure
+  if (vix < 18 && callValue > 2000 && !hasPutHedge && isEntryWindow()) {
+    logEvent("risk", `Tail risk hedge triggered - VIX:${vix} call exposure:${fmt(callValue)} - adding SPY put hedge`);
+    const spyPrice = await getStockQuote("SPY");
+    if (spyPrice) {
+      const spyStock = { ticker:"SPY", sector:"Index", momentum:"steady", rsi:50, macd:"neutral", ivr:22, beta:1.0, earningsDate:null, expiryDays:30 };
+      await executeTrade(spyStock, spyPrice, 70, ["Tail risk hedge"], vix, "put");
+    }
+  }
+}
+
+// ── Position Scaling ──────────────────────────────────────────────────────
+// Enter half position first, add second half if trade confirms (+5% in 24hrs)
+async function checkScaleIns() {
+  for (const pos of state.positions) {
+    if (!pos.halfPosition || pos.partialClosed) continue;
+    const hoursOpen = (Date.now() - new Date(pos.openDate).getTime()) / 3600000;
+    if (hoursOpen < 24) continue;
+    const curPrice = await getStockQuote(pos.ticker);
+    if (!curPrice) continue;
+    const dte   = Math.max(1, Math.round((new Date(pos.expDate) - new Date()) / 86400000));
+    const curP  = parseFloat((curPrice * pos.iv * Math.sqrt(dte/365) * 0.4 + 0.1).toFixed(2));
+    const chg   = (curP - pos.premium) / pos.premium;
+    // If up 5%+ in first 24hrs, add second half
+    if (chg >= 0.05 && state.cash > CAPITAL_FLOOR + pos.cost) {
+      state.cash     -= pos.cost;
+      pos.contracts  += pos.contracts;
+      pos.halfPosition = false;
+      logEvent("trade", `SCALE IN ${pos.ticker} - up ${(chg*100).toFixed(1)}% - doubled to ${pos.contracts}x contracts`);
+      await saveState();
+    }
+  }
+}
+
+// ── Macro News Scanner -
 const MACRO_BEARISH_KEYWORDS = [
   "fed rate hike", "rate hike", "hawkish", "tightening", "quantitative tightening",
   "inflation surge", "cpi beat", "inflation hot", "tariff", "trade war", "sanctions",
@@ -1456,7 +1804,12 @@ async function executeTrade(stock, price, score, scoreReasons, vix, optionType =
   }
 
   // Position sizing based on real premium
-  const contracts = calcPositionSize(contract.premium, score, vix);
+  const ddMult    = (marketContext.drawdownProtocol || {}).sizeMultiplier || 1.0;
+  const kellyData = calcKellySize(20);
+  // Blend standard sizing with Kelly - weight 50/50
+  const stdSize   = calcPositionSize(contract.premium, score, vix);
+  const blended   = Math.round((stdSize + kellyData.contracts) / 2);
+  const contracts = Math.max(1, Math.floor(blended * ddMult));
   if (contracts < 1) {
     logEvent("skip", `${stock.ticker} - position size too small`);
     return false;
@@ -1706,9 +2059,17 @@ let marketContext = {
   dxy:            { trend: "neutral", change: 0 },
   yieldCurve:     { signal: "normal" },
   putCallRatio:   { ratio: 1.0, signal: "neutral" },
-  macro:          { signal: "neutral", scoreModifier: 0, mode: "normal", triggers: [], sectorBearish: [], sectorBullish: [], headlines: [] },
-  macroCalendar:  { modifier: 0, events: [], message: "" },
+  macro:             { signal: "neutral", scoreModifier: 0, mode: "normal", triggers: [], sectorBearish: [], sectorBullish: [], headlines: [] },
+  macroCalendar:     { modifier: 0, events: [], message: "" },
   betaWeightedDelta: 0,
+  regime:            { regime: "neutral", confidence: 50, action: "Normal operations.", details: {} },
+  concentration:     { alerts: [], sectorTotals: {}, callPct: 100 },
+  benchmark:         null,
+  stressTest:        [],
+  drawdownProtocol:  { level: "normal", sizeMultiplier: 1.0, message: "Normal operations.", minScore: 70 },
+  monteCarlo:        { median: 0, percentile5: 0, percentile95: 0, probProfit: 0, message: "Insufficient data" },
+  kelly:             { contracts: 1, kelly: 0, halfKelly: 0, winRate: 0, payoffRatio: 0 },
+  relativeValue:     {},
 };
 
 async function runScan() {
@@ -1751,7 +2112,40 @@ async function runScan() {
     if (calMod.events.length > 0) {
       logEvent("macro", `Calendar: ${calMod.message || calMod.events.map(e => e.event + " in " + e.daysTo + "d").join(", ")}`);
     }
-    logEvent("scan", `[5min] Breadth:${breadth.breadthPct}% | Leading:${rotation.leading} | BWD:${marketContext.betaWeightedDelta}`);
+    // Regime detection
+    const regime = await detectMarketRegime();
+    marketContext.regime = regime;
+
+    // Concentration risk check
+    marketContext.concentration = checkConcentrationRisk();
+    if (marketContext.concentration.alerts.length > 0) {
+      marketContext.concentration.alerts.forEach(a => logEvent("risk", a));
+    }
+
+    // Drawdown protocol
+    marketContext.drawdownProtocol = getDrawdownProtocol();
+    if (marketContext.drawdownProtocol.level !== "normal") {
+      logEvent("risk", `Drawdown protocol: ${marketContext.drawdownProtocol.message}`);
+    }
+
+    // Stress test
+    marketContext.stressTest = runStressTest();
+
+    // Benchmark comparison
+    marketContext.benchmark = await getBenchmarkComparison();
+
+    // Check tail risk hedge
+    await checkTailRiskHedge();
+
+    // Check scale-ins on half positions
+    await checkScaleIns();
+
+    // Monte Carlo + Kelly + Relative Value
+    marketContext.monteCarlo   = runMonteCarlo(500);
+    marketContext.kelly        = calcKellySize(20);
+    marketContext.relativeValue= getRelativeValueScreening();
+
+    logEvent("scan", `[5min] Regime:${regime.regime}(${regime.confidence}%) | Kelly:${marketContext.kelly.contracts}x | MC prob profit:${marketContext.monteCarlo.probProfit}%`);
   }
 
   // -- SLOW TIER (every 15 minutes) --
@@ -1962,6 +2356,9 @@ async function runScan() {
     // Dynamic signals - calculated live from real price bars
     const signals = await getDynamicSignals(stock.ticker, bars);
 
+    // Earnings quality score
+    const eqScore = await getEarningsQualityScore(stock.ticker, bars);
+
     // VWAP - skip calls if price below VWAP (weak intraday)
     const vwap = calcVWAP(bars.slice(-5));
     if (vwap > 0 && price < vwap * 0.99) {
@@ -2015,6 +2412,17 @@ async function runScan() {
       }
     }
 
+    // Earnings quality modifier
+    if (eqScore.signal === "positive") { callSetup.score = Math.min(100, callSetup.score + 8);  callSetup.reasons.push("Positive earnings history (+8)"); }
+    if (eqScore.signal === "negative") { callSetup.score = Math.max(0,   callSetup.score - 8);  putSetup.score = Math.min(100, putSetup.score + 8); }
+
+    // Factor model cross-check - use as secondary confirmation
+    const factorResult = calcFactorScore(liveStock, signals, relStrength, newsSentiment.modifier, analystData.modifier);
+    if (factorResult.total >= 70 && callSetup.score >= MIN_SCORE) {
+      callSetup.score = Math.min(100, callSetup.score + 5);
+      callSetup.reasons.push(`Factor model: ${factorResult.total}/100 (+5)`);
+    }
+
     // Apply short squeeze signal
     if (shortSignal.modifier > 0) {
       callSetup.score = Math.min(100, Math.max(0, callSetup.score + shortSignal.modifier));
@@ -2027,6 +2435,18 @@ async function runScan() {
       callSetup.score = Math.min(100, Math.max(0, callSetup.score + calMod));
       putSetup.score  = Math.min(100, Math.max(0, putSetup.score  + calMod));
     }
+
+    // Apply regime modifier
+    const regimeMod   = getRegimeModifier(marketContext.regime?.regime || "neutral", "call");
+    const regimePutMod= getRegimeModifier(marketContext.regime?.regime || "neutral", "put");
+    callSetup.score   = Math.min(100, Math.max(0, callSetup.score + regimeMod));
+    putSetup.score    = Math.min(100, Math.max(0, putSetup.score  + regimePutMod));
+    if (regimeMod !== 0) {
+      callSetup.reasons.push(`Regime ${marketContext.regime?.regime}: ${regimeMod > 0 ? "+" : ""}${regimeMod}`);
+    }
+
+    // Apply drawdown protocol min score
+    const ddProtocol  = marketContext.drawdownProtocol || { minScore: MIN_SCORE, sizeMultiplier: 1.0 };
 
     // Apply macro modifier - boosts or suppresses all entries based on current events
     const macro       = marketContext.macro || { scoreModifier: 0, sectorBearish: [], sectorBullish: [] };
@@ -2055,8 +2475,9 @@ async function runScan() {
     const optionType = putSetup.score > callSetup.score ? "put" : "call";
     const bestReasons = optionType === "put" ? putSetup.reasons : callSetup.reasons;
 
-    if (bestScore < MIN_SCORE) {
-      logEvent("filter", `${stock.ticker} call:${callSetup.score} put:${putSetup.score} - both below ${MIN_SCORE} - skip`);
+    const effectiveMinScore = ddProtocol.minScore || MIN_SCORE;
+    if (bestScore < effectiveMinScore) {
+      logEvent("filter", `${stock.ticker} call:${callSetup.score} put:${putSetup.score} - below ${effectiveMinScore} (${ddProtocol.level} protocol) - skip`);
       continue;
     }
 
@@ -2347,6 +2768,18 @@ app.get("/api/state", async (req, res) => {
     betaWeightedDelta:  calcBetaWeightedDelta(),
     macroCalendar:      marketContext.macroCalendar,
     upcomingEvents:     getUpcomingMacroEvents(7),
+    regime:             marketContext.regime,
+    concentration:      marketContext.concentration,
+    stressTest:         marketContext.stressTest,
+    drawdownProtocol:   marketContext.drawdownProtocol,
+    benchmark:          marketContext.benchmark,
+    timeOfDay:          getTimeOfDayAnalysis(),
+    monteCarlo:         marketContext.monteCarlo,
+    kelly:              marketContext.kelly,
+    relativeValue:      marketContext.relativeValue,
+    monteCarlo:         marketContext.monteCarlo,
+    kelly:              marketContext.kelly,
+    relativeValue:      marketContext.relativeValue,
   });
 });
 
