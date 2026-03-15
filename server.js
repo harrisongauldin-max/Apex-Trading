@@ -3251,7 +3251,14 @@ async function runSimTick(scenario, simPrices, tick) {
       const cost     = parseFloat((premium * 100 * contr).toFixed(2));
       if (cost > simState.cash - CAPITAL_FLOOR) continue;
       simState.cash -= cost;
-      const strike   = optType === "put" ? Math.round(price * 0.96 / 5) * 5 : Math.round(price * 1.04 / 5) * 5;
+      // Scenario-aware strike selection
+      // Bull run = closer to money (1-2% OTM) so price movement helps faster
+      // Bear crash = slightly deeper OTM puts for leverage
+      // Normal/choppy = standard 3-4% OTM
+      const simOTM = scenario === "bull_run" ? 0.015 : scenario === "bear_crash" ? 0.025 : scenario === "black_swan" ? 0.02 : 0.035;
+      const strike = optType === "put"
+        ? Math.round(price * (1 - simOTM) / 5) * 5
+        : Math.round(price * (1 + simOTM) / 5) * 5;
       simState.positions.push({
         ticker: stock.ticker, sector: stock.sector, optionType: optType,
         premium, contracts: contr, cost, iv, expiryDays: 30,
@@ -3265,7 +3272,14 @@ async function runSimTick(scenario, simPrices, tick) {
     }
   }
 
-  simLogEvent("scan", `Tick ${tick} | VIX:${simState.vix} | Cash:${fmt(simState.cash)} | Pos:${simState.positions.length} | Heat:${(heat*100).toFixed(0)}%`);
+  // Log a sample stock price every 10 ticks so we can see market movement
+  if (tick % 10 === 0) {
+    const spyPrice  = simPrices["SPY"]  || 0;
+    const nvdaPrice = simPrices["NVDA"] || 0;
+    simLogEvent("scan", `Tick ${tick} | SPY:$${spyPrice.toFixed(0)} NVDA:$${nvdaPrice.toFixed(0)} | VIX:${simState.vix} | Cash:${fmt(simState.cash)} | Pos:${simState.positions.length} | Heat:${(heat*100).toFixed(0)}%`);
+  } else {
+    simLogEvent("scan", `Tick ${tick} | VIX:${simState.vix} | Cash:${fmt(simState.cash)} | Pos:${simState.positions.length} | Heat:${(heat*100).toFixed(0)}%`);
+  }
 }
 
 const SIM_BASE_PRICES = { NVDA:875, AAPL:195, MSFT:415, AMZN:185, META:505, GOOGL:172, TSLA:175, AMD:165, SPY:505, QQQ:438, JPM:205, GS:465, NFLX:615, CRM:285, UBER:75, ARM:115, COIN:185, SMCI:45 };
