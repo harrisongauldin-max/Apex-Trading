@@ -1,5 +1,5 @@
 // -
-// APEX v3.0 - Professional Options Trading Agent
+// APEX v3.5 - Professional Options Trading Agent
 // Alpaca Paper Trading Edition
 // -
 const express    = require("express");
@@ -1589,8 +1589,28 @@ async function checkAllFilters(stock, price) {
   const sectorCount = state.positions.filter(p=>p.sector===stock.sector).length;
   if (sectorCount >= 2) return { pass:false, reason:`Already have 2 positions in ${stock.sector}` };
 
-  // 10. IVR
-  if (stock.ivr > IVR_MAX) return { pass:false, reason:`IVR ${stock.ivr} > ${IVR_MAX}` };
+  // 10. Dynamic vol filter — realized vs implied gap (replaces static IVR_MAX)
+  // If implied vol >> realized vol, options are overpriced — skip
+  // If implied vol ≈ realized vol or implied < realized, options are fairly priced or cheap — enter
+  try {
+    const volBars = await getStockBars(stock.ticker, 21);
+    if (volBars.length >= 10) {
+      const closes   = volBars.map(b => b.c);
+      const returns  = closes.slice(1).map((c, i) => Math.log(c / closes[i]));
+      const realized = Math.sqrt(returns.reduce((s, r) => s + r * r, 0) / returns.length) * Math.sqrt(252) * 100;
+      const implied  = stock.ivr * 0.4 + 15; // approximate IV from IVR (IVR=50 → ~35% IV)
+      const volGap   = implied - realized;
+      // Skip if implied vol is more than 20 points above realized (options too expensive)
+      if (volGap > 20) return { pass: false, reason: `Vol gap ${volGap.toFixed(1)}pts — implied ${implied.toFixed(0)}% vs realized ${realized.toFixed(0)}% — options expensive` };
+      // Bonus signal: if realized > implied, options are cheap (underpriced) — log as positive
+      if (realized > implied + 5) logEvent("filter", `${stock.ticker} vol gap FAVORABLE — realized ${realized.toFixed(0)}% > implied ${implied.toFixed(0)}%`);
+    } else {
+      // Fallback to static IVR check if not enough bars
+      if (stock.ivr > IVR_MAX) return { pass: false, reason: `IVR ${stock.ivr} > ${IVR_MAX} (fallback)` };
+    }
+  } catch(e) {
+    if (stock.ivr > IVR_MAX) return { pass: false, reason: `IVR ${stock.ivr} > ${IVR_MAX}` };
+  }
 
   // 11. Earnings
   if (stock.earningsDate) {
@@ -1647,27 +1667,50 @@ async function checkAllFilters(stock, price) {
 }
 
 // - Position Sizing -
+// ── Unified Kelly-Primary Sizing ─────────────────────────────────────────
+// Single source of truth for position sizing. Kelly is primary.
+// Standard sizing is removed — Kelly adapts to actual edge automatically.
 function calcPositionSize(premium, score, vix) {
-  // Kelly Criterion base
-  const winRate  = 0.55; // assumed 55% win rate for moderate strategy
-  const avgWin   = TAKE_PROFIT_PCT;
-  const avgLoss  = STOP_LOSS_PCT;
-  const kelly    = (winRate * avgWin - (1-winRate) * avgLoss) / avgWin;
-  const halfKelly= kelly * 0.5;
+  // Step 1: Kelly base from actual trade history (dynamic)
+  const recentTrades = (state.closedTrades || []).slice(0, 30);
+  let kellyBase;
 
-  // Score-based sizing
-  const scoreMult = score >= FULL_KELLY_SCORE ? halfKelly : halfKelly * 0.6;
+  if (recentTrades.length >= 10) {
+    // Use real historical Kelly when we have enough data
+    const wins    = recentTrades.filter(t => t.pnl > 0);
+    const losses  = recentTrades.filter(t => t.pnl <= 0);
+    const winRate = wins.length / recentTrades.length;
+    const avgWin  = wins.length   ? wins.reduce((s,t) => s+t.pnl,0) / wins.length   : TAKE_PROFIT_PCT * premium * 100;
+    const avgLoss = losses.length ? Math.abs(losses.reduce((s,t) => s+t.pnl,0) / losses.length) : STOP_LOSS_PCT * premium * 100;
+    const payoff  = avgLoss > 0 ? avgWin / avgLoss : 1;
+    const kelly   = winRate - (1 - winRate) / payoff;
+    kellyBase     = Math.max(0.05, Math.min(0.25, kelly * 0.5)); // half-Kelly, capped 5-25% of capital
+  } else {
+    // Bootstrap: use conservative fixed fraction until we have real data
+    // Blend toward real Kelly as trades accumulate (70% bootstrap, 30% real when <10 trades)
+    const bootstrapKelly = 0.08; // conservative 8% of capital
+    kellyBase = bootstrapKelly;
+  }
 
-  // VIX-based sizing reduction
-  const vixMult = vix >= VIX_REDUCE50 ? 0.5 : vix >= VIX_REDUCE25 ? 0.75 : 1.0;
+  // Step 2: Score conviction multiplier
+  // Higher score = more conviction = size up within Kelly bounds
+  const convictionMult = score >= 85 ? 1.25 : score >= 75 ? 1.0 : score >= 70 ? 0.80 : 0.60;
 
-  // Drawdown recovery mode - reduce sizing 25%
-  const recoveryMult = isDrawdownRecovery() ? (1 - DRAWDOWN_SIZING_REDUCE) : 1.0;
-  if (isDrawdownRecovery()) logEvent("warn", "Drawdown recovery mode active - sizing reduced 25%");
+  // Step 3: VIX adjustment — options are more expensive in high vol, size down
+  const vixMult = vix >= VIX_REDUCE50 ? 0.50 : vix >= VIX_REDUCE25 ? 0.75 : 1.0;
 
-  // Max per position
-  const maxCost    = Math.min(state.cash * scoreMult * vixMult * recoveryMult, state.cash * 0.25, MAX_LOSS_PER_TRADE / STOP_LOSS_PCT);
-  const contracts  = Math.max(1, Math.min(5, Math.floor(maxCost / (premium * 100))));
+  // Step 4: Drawdown protocol from marketContext
+  const ddMult = (marketContext?.drawdownProtocol?.sizeMultiplier) || 1.0;
+
+  // Step 5: Combine into single sizing decision
+  const effectiveFraction = kellyBase * convictionMult * vixMult * ddMult;
+  const maxCost           = Math.min(
+    state.cash * effectiveFraction,
+    state.cash * 0.20,                     // hard cap: never more than 20% per trade
+    MAX_LOSS_PER_TRADE / STOP_LOSS_PCT     // risk-based cap
+  );
+
+  const contracts = Math.max(1, Math.min(5, Math.floor(maxCost / (premium * 100))));
   return contracts;
 }
 
@@ -1804,12 +1847,8 @@ async function executeTrade(stock, price, score, scoreReasons, vix, optionType =
   }
 
   // Position sizing based on real premium
-  const ddMult    = (marketContext.drawdownProtocol || {}).sizeMultiplier || 1.0;
-  const kellyData = calcKellySize(20);
-  // Blend standard sizing with Kelly - weight 50/50
-  const stdSize   = calcPositionSize(contract.premium, score, vix);
-  const blended   = Math.round((stdSize + kellyData.contracts) / 2);
-  const contracts = Math.max(1, Math.floor(blended * ddMult));
+  // Unified Kelly-primary sizing — single call, all adjustments inside
+  const contracts = calcPositionSize(contract.premium, score, vix);
   if (contracts < 1) {
     logEvent("skip", `${stock.ticker} - position size too small`);
     return false;
@@ -1863,12 +1902,14 @@ async function executeTrade(stock, price, score, scoreReasons, vix, optionType =
     halfPosition:   false,
     price,
     optionType,
-    expiryType:     contract.expiryType,
-    currentPrice:   contract.premium,
-    contractSymbol: contract.symbol,
-    bid:            contract.bid,
-    ask:            contract.ask,
-    realData:       !!contract.symbol,
+    expiryType:      contract.expiryType,
+    currentPrice:    contract.premium,
+    contractSymbol:  contract.symbol,
+    bid:             contract.bid,
+    ask:             contract.ask,
+    realData:        !!contract.symbol,
+    entryRSI:        stock.rsi || 52,        // capture entry signal for decay detection
+    entryMomentum:   stock.momentum || "steady",
   };
 
   state.positions.push(position);
@@ -2070,6 +2111,8 @@ let marketContext = {
   monteCarlo:        { median: 0, percentile5: 0, percentile95: 0, probProfit: 0, message: "Insufficient data" },
   kelly:             { contracts: 1, kelly: 0, halfKelly: 0, winRate: 0, payoffRatio: 0 },
   relativeValue:     {},
+  globalMarket:      { signal: "neutral", modifier: 0, qqqChg: 0, iwmChg: 0, eemChg: 0 },
+  streaks:           { currentStreak: 0, currentType: null, maxWinStreak: 0, maxLossStreak: 0 },
 };
 
 async function runScan() {
@@ -2141,11 +2184,13 @@ async function runScan() {
     await checkScaleIns();
 
     // Monte Carlo + Kelly + Relative Value
-    marketContext.monteCarlo   = runMonteCarlo(500);
-    marketContext.kelly        = calcKellySize(20);
-    marketContext.relativeValue= getRelativeValueScreening();
+    marketContext.monteCarlo    = runMonteCarlo(500);
+    marketContext.kelly         = calcKellySize(20);
+    marketContext.relativeValue = getRelativeValueScreening();
+    marketContext.globalMarket  = await getGlobalMarketSignal();
+    marketContext.streaks       = getStreakAnalysis();
 
-    logEvent("scan", `[5min] Regime:${regime.regime}(${regime.confidence}%) | Kelly:${marketContext.kelly.contracts}x | MC prob profit:${marketContext.monteCarlo.probProfit}%`);
+    logEvent("scan", `[5min] Regime:${regime.regime}(${regime.confidence}%) | Kelly:${marketContext.kelly.contracts}x | Global:${marketContext.globalMarket.signal} | Streak:${marketContext.streaks.currentStreak}x${marketContext.streaks.currentType}`);
   }
 
   // -- SLOW TIER (every 15 minutes) --
@@ -2227,13 +2272,33 @@ async function runScan() {
       closePosition(pos.ticker, "stop"); continue;
     }
 
-    // Trailing stop - activate at +30%
+    // Trailing stop with signal decay tightening
     if (chg >= TRAIL_ACTIVATE_PCT) {
-      const trailStop = pos.peakPremium * (1 - TRAIL_STOP_PCT);
+      // Base trail percentage
+      let trailPct = TRAIL_STOP_PCT;
+
+      // Signal decay check — if entry conditions have deteriorated, tighten the trail
+      // Re-score current conditions vs entry conditions
+      const currentRSI      = pos.entryRSI || 55;
+      const entryMomentum   = pos.entryMomentum || "steady";
+      const liveRSI         = signals ? signals.rsi : currentRSI;
+
+      // If RSI has crossed from bullish zone to bearish zone since entry, tighten trail
+      if (pos.optionType === "call" && liveRSI < 45 && currentRSI >= 50) {
+        trailPct = TRAIL_STOP_PCT * 0.6; // tighten to 9% trail instead of 15%
+        logEvent("scan", `${pos.ticker} signal decay detected — RSI dropped to ${liveRSI} — tightening trail to ${(trailPct*100).toFixed(0)}%`);
+      }
+      // If put and RSI has recovered, tighten trail on the put
+      if (pos.optionType === "put" && liveRSI > 55 && currentRSI <= 50) {
+        trailPct = TRAIL_STOP_PCT * 0.6;
+        logEvent("scan", `${pos.ticker} signal decay (put) — RSI recovered to ${liveRSI} — tightening trail`);
+      }
+
+      const trailStop = pos.peakPremium * (1 - trailPct);
       pos.trailStop   = trailStop;
       if (curP <= trailStop) {
         logEvent("scan", `${pos.ticker} trailing stop hit - peak $${pos.peakPremium.toFixed(2)} trail $${trailStop.toFixed(2)}`);
-        closePosition(pos.ticker, "trail"); continue;
+        await closePosition(pos.ticker, "trail"); continue;
       }
     }
 
@@ -2353,6 +2418,10 @@ async function runScan() {
       if (gap > MAX_GAP_PCT) { logEvent("filter", `${stock.ticker} gap ${(gap*100).toFixed(1)}% - skip`); continue; }
     }
 
+    // Anomaly detection — skip if unusual price movement detected
+    const anomaly = detectPriceAnomaly(bars);
+    if (anomaly.anomaly) { logEvent("filter", `${stock.ticker} price anomaly: ${anomaly.reason} - skip`); continue; }
+
     // Dynamic signals - calculated live from real price bars
     const signals = await getDynamicSignals(stock.ticker, bars);
 
@@ -2434,6 +2503,13 @@ async function runScan() {
     if (calMod !== 0) {
       callSetup.score = Math.min(100, Math.max(0, callSetup.score + calMod));
       putSetup.score  = Math.min(100, Math.max(0, putSetup.score  + calMod));
+    }
+
+    // Apply global market signal modifier
+    const globalMod   = (marketContext.globalMarket || {}).modifier || 0;
+    if (globalMod !== 0) {
+      callSetup.score = Math.min(100, Math.max(0, callSetup.score + globalMod));
+      putSetup.score  = Math.min(100, Math.max(0, putSetup.score  - globalMod));
     }
 
     // Apply regime modifier
@@ -2777,9 +2853,23 @@ app.get("/api/state", async (req, res) => {
     monteCarlo:         marketContext.monteCarlo,
     kelly:              marketContext.kelly,
     relativeValue:      marketContext.relativeValue,
+    globalMarket:       marketContext.globalMarket,
+    streaks:            marketContext.streaks,
+    calmar:             calcCalmarRatio(),
+    informationRatio:   calcInformationRatio(),
+    drawdownDuration:   calcDrawdownDuration(),
+    autocorrelation:    calcAutocorrelation(),
+    riskOfRuin:         calcRiskOfRuin(),
     monteCarlo:         marketContext.monteCarlo,
     kelly:              marketContext.kelly,
     relativeValue:      marketContext.relativeValue,
+    globalMarket:       marketContext.globalMarket,
+    streaks:            marketContext.streaks,
+    calmar:             calcCalmarRatio(),
+    informationRatio:   calcInformationRatio(),
+    drawdownDuration:   calcDrawdownDuration(),
+    autocorrelation:    calcAutocorrelation(),
+    riskOfRuin:         calcRiskOfRuin(),
   });
 });
 
@@ -2842,6 +2932,408 @@ app.get("/api/journal",      (req,res) => res.json(state.tradeJournal.slice(0,50
 app.get("/api/report",       (req,res) => res.json({report:buildMonthlyReport()}));
 
 // - New Feature Endpoints -
+
+// ── Safe Reporting Metrics ───────────────────────────────────────────────
+
+// Calmar Ratio — annualized return / max drawdown
+function calcCalmarRatio() {
+  const trades    = state.closedTrades || [];
+  if (trades.length < 5) return 0;
+  const totalPnL  = trades.reduce((s, t) => s + t.pnl, 0);
+  const startDate = new Date(trades[trades.length-1]?.date || Date.now());
+  const years     = Math.max(0.1, (Date.now() - startDate.getTime()) / (365 * 86400000));
+  const annReturn = (totalPnL / MONTHLY_BUDGET) / years * 100;
+  const peak      = state.peakCash || MONTHLY_BUDGET;
+  const maxDD     = Math.abs(Math.min(0, (state.cash - peak) / peak * 100));
+  return maxDD > 0 ? parseFloat((annReturn / maxDD).toFixed(2)) : 0;
+}
+
+// Information Ratio — alpha / tracking error vs SPY
+function calcInformationRatio() {
+  const trades = state.closedTrades || [];
+  if (trades.length < 5) return 0;
+  const returns    = trades.map(t => (t.pct || 0) / 100);
+  const spyDaily   = 0.0004; // approximate SPY daily return
+  const alphas     = returns.map(r => r - spyDaily);
+  const avgAlpha   = alphas.reduce((s, a) => s + a, 0) / alphas.length;
+  const trackErr   = Math.sqrt(alphas.reduce((s, a) => s + Math.pow(a - avgAlpha, 2), 0) / alphas.length);
+  return trackErr > 0 ? parseFloat((avgAlpha / trackErr).toFixed(2)) : 0;
+}
+
+// Drawdown Duration Analysis
+function calcDrawdownDuration() {
+  const trades = state.closedTrades || [];
+  if (trades.length < 3) return { avgDuration: 0, maxDuration: 0, currentDuration: 0 };
+  let inDrawdown    = false;
+  let ddStart       = null;
+  let durations     = [];
+  let runningPnL    = 0;
+  let peak          = 0;
+
+  for (const trade of [...trades].reverse()) {
+    runningPnL += trade.pnl || 0;
+    if (runningPnL > peak) {
+      if (inDrawdown && ddStart) {
+        durations.push(Math.round((new Date(trade.date) - new Date(ddStart)) / 86400000));
+      }
+      peak      = runningPnL;
+      inDrawdown = false;
+      ddStart    = null;
+    } else if (runningPnL < peak && !inDrawdown) {
+      inDrawdown = true;
+      ddStart    = trade.date;
+    }
+  }
+
+  const currentDuration = inDrawdown && ddStart
+    ? Math.round((Date.now() - new Date(ddStart).getTime()) / 86400000) : 0;
+
+  return {
+    avgDuration:     durations.length ? Math.round(durations.reduce((s, d) => s + d, 0) / durations.length) : 0,
+    maxDuration:     durations.length ? Math.max(...durations) : 0,
+    currentDuration,
+    inDrawdown,
+    count:           durations.length,
+  };
+}
+
+// Autocorrelation of Returns — are wins/losses clustered?
+function calcAutocorrelation() {
+  const trades = state.closedTrades || [];
+  if (trades.length < 10) return { value: 0, signal: "insufficient data" };
+  const returns = trades.slice(0, 30).map(t => t.pnl || 0);
+  const mean    = returns.reduce((s, r) => s + r, 0) / returns.length;
+  let num = 0, den = 0;
+  for (let i = 1; i < returns.length; i++) {
+    num += (returns[i] - mean) * (returns[i-1] - mean);
+    den += Math.pow(returns[i] - mean, 2);
+  }
+  const ac = den > 0 ? parseFloat((num / den).toFixed(3)) : 0;
+  return {
+    value:  ac,
+    signal: ac > 0.2 ? "clustered (streaky)" : ac < -0.2 ? "mean-reverting" : "random",
+  };
+}
+
+// Win/Loss Streak Tracking
+function getStreakAnalysis() {
+  const trades = state.closedTrades || [];
+  if (!trades.length) return { currentStreak: 0, currentType: null, maxWinStreak: 0, maxLossStreak: 0 };
+  let currentStreak = 1;
+  let currentType   = trades[0].pnl > 0 ? "win" : "loss";
+  let maxWin = 0, maxLoss = 0, tempStreak = 1;
+  let tempType = currentType;
+
+  for (let i = 1; i < trades.length; i++) {
+    const type = trades[i].pnl > 0 ? "win" : "loss";
+    if (type === tempType) {
+      tempStreak++;
+    } else {
+      if (tempType === "win")  maxWin  = Math.max(maxWin,  tempStreak);
+      if (tempType === "loss") maxLoss = Math.max(maxLoss, tempStreak);
+      tempStreak = 1;
+      tempType   = type;
+    }
+  }
+  if (tempType === "win")  maxWin  = Math.max(maxWin,  tempStreak);
+  if (tempType === "loss") maxLoss = Math.max(maxLoss, tempStreak);
+
+  // Current streak from most recent trades
+  let curr = 1;
+  const currType = trades[0].pnl > 0 ? "win" : "loss";
+  for (let i = 1; i < trades.length; i++) {
+    if ((trades[i].pnl > 0 ? "win" : "loss") === currType) curr++;
+    else break;
+  }
+
+  return { currentStreak: curr, currentType: currType, maxWinStreak: maxWin, maxLossStreak: maxLoss };
+}
+
+// Greeks Ladder — greeks at different price levels
+function calcGreeksLadder(pos) {
+  if (!pos) return [];
+  const levels = [-0.15, -0.10, -0.05, 0, 0.05, 0.10, 0.15];
+  return levels.map(pct => {
+    const simPrice = pos.price * (1 + pct);
+    const dte      = Math.max(1, Math.round((new Date(pos.expDate) - new Date()) / 86400000));
+    const greeks   = calcGreeks(simPrice, pos.strike, dte, pos.iv || 0.3);
+    const simPrem  = parseFloat((simPrice * (pos.iv||0.3) * Math.sqrt(dte/365) * 0.4 + 0.1).toFixed(2));
+    return {
+      priceMove: (pct * 100).toFixed(0) + "%",
+      price:     simPrice.toFixed(2),
+      premium:   simPrem,
+      pnl:       parseFloat(((simPrem - pos.premium) * 100 * pos.contracts).toFixed(2)),
+      delta:     greeks.delta,
+      gamma:     greeks.gamma,
+    };
+  });
+}
+
+// Risk of Ruin
+function calcRiskOfRuin() {
+  const trades  = state.closedTrades || [];
+  if (trades.length < 10) return { probability: 0, message: "Insufficient data" };
+  const wins    = trades.filter(t => t.pnl > 0);
+  const losses  = trades.filter(t => t.pnl <= 0);
+  const winRate = wins.length / trades.length;
+  const avgWin  = wins.length   ? wins.reduce((s, t) => s + t.pnl, 0) / wins.length   : 0;
+  const avgLoss = losses.length ? Math.abs(losses.reduce((s, t) => s + t.pnl, 0) / losses.length) : 1;
+  const edge    = winRate * avgWin - (1 - winRate) * avgLoss;
+  const riskPct = avgLoss / (state.cash || MONTHLY_BUDGET);
+  // Simplified risk of ruin formula
+  if (edge <= 0) return { probability: 99, message: "Negative edge — high ruin risk" };
+  const ror = Math.pow((1 - winRate) / winRate, (state.cash || MONTHLY_BUDGET) / avgLoss);
+  return {
+    probability: parseFloat(Math.min(99, ror * 100).toFixed(1)),
+    edge:        parseFloat(edge.toFixed(2)),
+    message:     ror < 0.01 ? "Very low ruin risk" : ror < 0.05 ? "Low ruin risk" : ror < 0.15 ? "Moderate ruin risk" : "High ruin risk",
+  };
+}
+
+// Expected Move Calculation
+// The options market's implied expected move = stock price * IV * sqrt(DTE/365)
+function calcExpectedMove(ticker, price, iv, dte) {
+  const expectedMove = price * iv * Math.sqrt(dte / 365);
+  return {
+    ticker,
+    price:        parseFloat(price.toFixed(2)),
+    oneSigmaUp:   parseFloat((price + expectedMove).toFixed(2)),
+    oneSigmaDown: parseFloat((price - expectedMove).toFixed(2)),
+    expectedMovePct: parseFloat((expectedMove / price * 100).toFixed(1)),
+    dte,
+  };
+}
+
+// Global Market Correlation — overnight futures as pre-market signal
+async function getGlobalMarketSignal() {
+  try {
+    // Use overnight price change in broad ETFs as proxy
+    // QQQ and SPY pre-market signal via their overnight moves
+    const [qqqBars, iwmBars, eemBars] = await Promise.all([
+      getStockBars("QQQ", 3),
+      getStockBars("IWM", 3), // Russell 2000 - risk appetite
+      getStockBars("EEM", 3), // Emerging markets - global risk
+    ]);
+
+    const signals = [];
+    const getChg = bars => bars.length >= 2 ? (bars[bars.length-1].c - bars[bars.length-2].c) / bars[bars.length-2].c * 100 : 0;
+
+    const qqqChg = getChg(qqqBars);
+    const iwmChg = getChg(iwmBars);
+    const eemChg = getChg(eemBars);
+
+    // If small caps (IWM) and emerging markets (EEM) moving together with QQQ = broad risk-on
+    const avgChg = (qqqChg + iwmChg + eemChg) / 3;
+    const signal = avgChg > 0.5 ? "risk-on" : avgChg < -0.5 ? "risk-off" : "neutral";
+    const modifier = avgChg > 1 ? 8 : avgChg > 0.5 ? 4 : avgChg < -1 ? -8 : avgChg < -0.5 ? -4 : 0;
+
+    return { signal, modifier, qqqChg: parseFloat(qqqChg.toFixed(2)), iwmChg: parseFloat(iwmChg.toFixed(2)), eemChg: parseFloat(eemChg.toFixed(2)), avgChg: parseFloat(avgChg.toFixed(2)) };
+  } catch(e) { return { signal: "neutral", modifier: 0, qqqChg: 0, iwmChg: 0, eemChg: 0, avgChg: 0 }; }
+}
+
+// Anomaly Detection — flag unusual price movements before acting
+function detectPriceAnomaly(bars) {
+  if (!bars || bars.length < 20) return { anomaly: false, reason: null };
+  const closes  = bars.map(b => b.c);
+  const returns = closes.slice(1).map((c, i) => (c - closes[i]) / closes[i]);
+  const mean    = returns.reduce((s, r) => s + r, 0) / returns.length;
+  const stdDev  = Math.sqrt(returns.reduce((s, r) => s + Math.pow(r - mean, 2), 0) / returns.length);
+  const latest  = returns[returns.length - 1];
+  const zScore  = stdDev > 0 ? (latest - mean) / stdDev : 0;
+
+  if (Math.abs(zScore) > 3) {
+    return { anomaly: true, reason: `${zScore > 0 ? "Unusual spike" : "Unusual drop"} — ${Math.abs(zScore).toFixed(1)} std devs from mean`, zScore };
+  }
+  return { anomaly: false, zScore: parseFloat(zScore.toFixed(2)) };
+}
+
+// ── Simulation Engine ─────────────────────────────────────────────────────
+let simRunning  = false;
+let simLog      = [];
+let simState    = null;
+let simInterval = null;
+
+function simLogEvent(type, message) {
+  const entry = { time: new Date().toISOString(), type, message };
+  simLog.unshift(entry);
+  if (simLog.length > 200) simLog = simLog.slice(0, 200);
+  console.log(`[SIM:${type.toUpperCase()}] ${message}`);
+}
+
+function simNextPrice(currentPrice, scenario) {
+  const params = {
+    bull_run:   { drift:  0.002,  vol: 0.012 },
+    bear_crash: { drift: -0.003,  vol: 0.025 },
+    choppy:     { drift:  0.000,  vol: 0.008 },
+    recovery:   { drift:  0.001,  vol: 0.018 },
+    black_swan: { drift: -0.015,  vol: 0.045 },
+    normal:     { drift:  0.0005, vol: 0.015 },
+  }[scenario] || { drift: 0.0005, vol: 0.015 };
+  const u1 = Math.random(), u2 = Math.random();
+  const z  = Math.sqrt(-2 * Math.log(u1)) * Math.cos(2 * Math.PI * u2);
+  return parseFloat((currentPrice * (1 + params.drift + params.vol * z)).toFixed(2));
+}
+
+function simNextVIX(scenario, currentVIX) {
+  const targets = { bull_run: 12, bear_crash: 45, choppy: 22, recovery: 28, black_swan: 65, normal: 18 };
+  const target  = targets[scenario] || 18;
+  const move    = (target - currentVIX) * 0.1 + (Math.random() - 0.5) * 2;
+  return Math.max(8, Math.min(80, parseFloat((currentVIX + move).toFixed(1))));
+}
+
+async function runSimTick(scenario, simPrices, tick) {
+  for (const ticker of Object.keys(simPrices)) {
+    simPrices[ticker] = simNextPrice(simPrices[ticker], scenario);
+  }
+  simState.vix = simNextVIX(scenario, simState.vix);
+
+  // Manage positions
+  for (const pos of [...simState.positions]) {
+    const price = simPrices[pos.ticker];
+    if (!price) continue;
+    const dte  = Math.max(1, pos.expiryDays - Math.floor(tick / 8));
+    const curP = parseFloat((price * pos.iv * Math.sqrt(dte / 365) * 0.4 + 0.1).toFixed(2));
+    const chg  = (curP - pos.premium) / pos.premium;
+    const hrs  = tick * 0.5;
+    pos.currentPrice = curP;
+    pos.price        = price;
+    if (curP > pos.peakPremium) pos.peakPremium = curP;
+
+    let exitReason = null;
+    if (chg <= -STOP_LOSS_PCT)                                                  exitReason = "stop";
+    else if (hrs <= 48 && chg <= -FAST_STOP_PCT)                               exitReason = "fast-stop";
+    else if (hrs <= 48 && chg >= 0.40)                                         exitReason = "fast-profit";
+    else if (chg >= TAKE_PROFIT_PCT)                                            exitReason = "target";
+    else if (hrs >= TIME_STOP_DAYS * 24 && Math.abs(chg) < TIME_STOP_MOVE)    exitReason = "time-stop";
+
+    if (exitReason) {
+      const pnl = parseFloat(((curP - pos.premium) * 100 * pos.contracts).toFixed(2));
+      simState.cash += pos.cost + pnl;
+      simState.positions.splice(simState.positions.indexOf(pos), 1);
+      simState.closedTrades.push({ ticker: pos.ticker, pnl, pct: chg * 100, reason: exitReason, date: new Date().toISOString() });
+      simLogEvent("trade", `CLOSE ${pos.ticker} ${pos.optionType?.toUpperCase()} | ${exitReason} | ${pnl >= 0 ? "+" : ""}$${pnl.toFixed(2)} (${(chg*100).toFixed(1)}%)`);
+    }
+  }
+
+  // Circuit breaker
+  const portfolio = simState.cash + simState.positions.reduce((s, p) => s + p.cost, 0);
+  const dailyPnL  = portfolio - (simState.dayStartCash || MONTHLY_BUDGET);
+  if (dailyPnL / MONTHLY_BUDGET <= -0.15 && simState.circuitOpen) {
+    simState.circuitOpen = false;
+    simLogEvent("circuit", `CIRCUIT BREAKER TRIPPED - loss ${fmt(Math.abs(dailyPnL))}`);
+  }
+
+  if (simState.vix > 35) { simLogEvent("warn", `VIX ${simState.vix} - pausing new entries`); }
+
+  // New entries
+  const heat = simState.positions.reduce((s, p) => s + p.cost, 0) / MONTHLY_BUDGET;
+  if (heat < MAX_HEAT && simState.cash > CAPITAL_FLOOR && simState.circuitOpen && simState.vix <= 35 && simState.positions.length < 4) {
+    const scenarioRSI  = scenario === "bull_run" ? 58 : scenario === "bear_crash" ? 38 : 52;
+    const scenarioMACD = scenario === "bull_run" ? "bullish" : scenario === "bear_crash" ? "bearish crossover" : "neutral";
+
+    for (const stock of WATCHLIST.slice(0, 8)) {
+      if (simState.positions.find(p => p.ticker === stock.ticker)) continue;
+      if (simState.positions.length >= 4) break;
+      const price    = simPrices[stock.ticker];
+      if (!price) continue;
+      const simStock = { ...stock, rsi: scenarioRSI + (Math.random() - 0.5) * 10, macd: scenarioMACD };
+      const callS    = scoreSetup(simStock, 1.02, 22, 1200000, 900000);
+      const putS     = scorePutSetup(simStock, 0.98, 22, 1200000, 900000);
+      const best     = Math.max(callS.score, putS.score);
+      const optType  = putS.score > callS.score ? "put" : "call";
+      if (best < MIN_SCORE) continue;
+      const iv       = 0.25 + stock.ivr * 0.003;
+      const premium  = parseFloat((price * iv * Math.sqrt(30 / 365) * 0.4 + 0.3).toFixed(2));
+      const contr    = Math.max(1, Math.floor((simState.cash * 0.08) / (premium * 100)));
+      const cost     = parseFloat((premium * 100 * contr).toFixed(2));
+      if (cost > simState.cash - CAPITAL_FLOOR) continue;
+      simState.cash -= cost;
+      const strike   = optType === "put" ? Math.round(price * 0.96 / 5) * 5 : Math.round(price * 1.04 / 5) * 5;
+      simState.positions.push({
+        ticker: stock.ticker, sector: stock.sector, optionType: optType,
+        premium, contracts: contr, cost, iv, expiryDays: 30,
+        expDate: new Date(Date.now() + 30 * 86400000).toLocaleDateString(),
+        peakPremium: premium, partialClosed: false,
+        openDate: new Date().toISOString(), score: best,
+        greeks: calcGreeks(price, strike, 30, iv),
+        price, currentPrice: premium, beta: stock.beta || 1,
+      });
+      simLogEvent("trade", `BUY ${stock.ticker} $${strike}${optType === "put" ? "P" : "C"} | ${contr}x @ $${premium} | score ${best} | cash ${fmt(simState.cash)}`);
+    }
+  }
+
+  simLogEvent("scan", `Tick ${tick} | VIX:${simState.vix} | Cash:${fmt(simState.cash)} | Pos:${simState.positions.length} | Heat:${(heat*100).toFixed(0)}%`);
+}
+
+const SIM_BASE_PRICES = { NVDA:875, AAPL:195, MSFT:415, AMZN:185, META:505, GOOGL:172, TSLA:175, AMD:165, SPY:505, QQQ:438, JPM:205, GS:465, NFLX:615, CRM:285, UBER:75, ARM:115, COIN:185, SMCI:45 };
+
+function startSimulation(scenario = "normal", speed = "normal") {
+  if (simRunning) return { error: "Simulation already running" };
+  simRunning = true;
+  simLog     = [];
+  simState   = { cash: MONTHLY_BUDGET, positions: [], closedTrades: [], vix: 18, circuitOpen: true, weeklyCircuitOpen: true, consecutiveLosses: 0, dayStartCash: MONTHLY_BUDGET };
+
+  const simPrices = {};
+  for (const stock of WATCHLIST) simPrices[stock.ticker] = SIM_BASE_PRICES[stock.ticker] || 100;
+  simPrices["SPY"] = SIM_BASE_PRICES["SPY"];
+
+  const intervalMs = speed === "fast" ? 150 : speed === "slow" ? 2000 : 500;
+  const maxTicks   = speed === "fast" ? 100 : speed === "slow" ? 40   : 60;
+  let tick         = 0;
+
+  simLogEvent("scan", `=== SIMULATION START === Scenario:${scenario} | Speed:${speed} | Ticks:${maxTicks}`);
+
+  simInterval = setInterval(async () => {
+    if (tick >= maxTicks || !simRunning) {
+      clearInterval(simInterval);
+      simRunning = false;
+      const trades = simState.closedTrades || [];
+      const wins   = trades.filter(t => t.pnl > 0);
+      const pnl    = parseFloat((simState.cash - MONTHLY_BUDGET).toFixed(2));
+      simLogEvent("scan", `=== SIMULATION COMPLETE ===`);
+      simLogEvent("scan", `Trades:${trades.length} | Wins:${wins.length} | WR:${trades.length ? Math.round(wins.length/trades.length*100) : 0}% | P&L:${pnl >= 0 ? "+" : ""}$${pnl.toFixed(2)}`);
+      simLogEvent("scan", `Open at close:${simState.positions.length} | Final cash:${fmt(simState.cash)}`);
+      return;
+    }
+    await runSimTick(scenario, simPrices, tick);
+    tick++;
+  }, intervalMs);
+
+  return { ok: true, scenario, speed, maxTicks };
+}
+
+function stopSimulation() {
+  if (simInterval) clearInterval(simInterval);
+  simRunning = false;
+  simLogEvent("scan", "Simulation stopped manually");
+  return { ok: true };
+}
+
+app.post("/api/sim/start", (req, res) => {
+  const { scenario = "normal", speed = "normal" } = req.body || {};
+  res.json(startSimulation(scenario, speed));
+});
+
+app.post("/api/sim/stop", (req, res) => res.json(stopSimulation()));
+
+app.get("/api/sim/status", (req, res) => {
+  const trades = simState?.closedTrades || [];
+  const wins   = trades.filter(t => t.pnl > 0);
+  res.json({
+    running:     simRunning,
+    log:         simLog.slice(0, 50),
+    cash:        simState?.cash || MONTHLY_BUDGET,
+    positions:   simState?.positions || [],
+    closedTrades:trades,
+    totalPnL:    simState ? parseFloat((simState.cash - MONTHLY_BUDGET).toFixed(2)) : 0,
+    trades:      trades.length,
+    wins:        wins.length,
+    winRate:     trades.length ? Math.round(wins.length / trades.length * 100) : 0,
+    vix:         simState?.vix || 0,
+    circuitOpen: simState?.circuitOpen ?? true,
+  });
+});
+
 // -- Backtesting Engine --
 async function runBacktest(months = 6) {
   logEvent("scan", `Backtest started - ${months} months of historical data`);
@@ -3086,7 +3578,7 @@ app.get("/health",           (req,res) => res.json({status:"ok",uptime:process.u
 // Boot sequence - load state from Redis then start server
 initState().then(() => {
   app.listen(PORT, () => {
-    console.log(`APEX v3.0 running on port ${PORT}`);
+    console.log(`APEX v3.5 running on port ${PORT}`);
     console.log(`Alpaca key:  ${ALPACA_KEY?"SET":"NOT SET"}`);
     console.log(`Gmail:       ${GMAIL_USER||"NOT SET"}`);
     console.log(`Redis:       ${REDIS_URL?"SET":"NOT SET - using file fallback"}`);
