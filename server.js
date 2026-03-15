@@ -2428,12 +2428,22 @@ async function runBacktest(months = 6) {
     const limit   = months * 22;
     const allBars = {};
     for (const stock of WATCHLIST) {
-      const bars = await getStockBars(stock.ticker, limit);
+      let bars = await getStockBars(stock.ticker, limit);
+      // Retry once with longer delay and smaller limit if empty
+      if (!bars.length) {
+        await new Promise(r => setTimeout(r, 2000));
+        bars = await getStockBars(stock.ticker, Math.min(limit, 60));
+      }
       if (bars.length > 10) allBars[stock.ticker] = bars;
-      await new Promise(r => setTimeout(r, 150));
+      await new Promise(r => setTimeout(r, 500)); // longer rate limit buffer
     }
-    const spyBars = await getStockBars("SPY", limit);
-    if (!spyBars.length) throw new Error("Could not fetch SPY bars");
+    await new Promise(r => setTimeout(r, 1000));
+    let spyBars = await getStockBars("SPY", limit);
+    if (!spyBars.length) {
+      await new Promise(r => setTimeout(r, 2000));
+      spyBars = await getStockBars("SPY", Math.min(limit, 60));
+    }
+    if (!spyBars.length) throw new Error("Could not fetch SPY bars — check Alpaca subscription is active");
 
     const minLen = Math.min(...Object.values(allBars).map(b => b.length), spyBars.length);
     if (minLen < 20) throw new Error("Not enough historical data");
