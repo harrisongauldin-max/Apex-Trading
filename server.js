@@ -3193,8 +3193,13 @@ async function runSimTick(scenario, simPrices, tick) {
     if (!price) continue;
     // Each tick = ~half trading day for meaningful option aging
     const daysElapsed = Math.floor(tick / 4);
-    const dte  = Math.max(1, pos.expiryDays - daysElapsed);
-    const curP = parseFloat((price * pos.iv * Math.sqrt(dte / 365) * 0.4 + 0.1).toFixed(2));
+    const dte        = Math.max(1, pos.expiryDays - daysElapsed);
+    const timeValue  = parseFloat((price * pos.iv * Math.sqrt(dte / 365) * 0.4 + 0.1).toFixed(2));
+    // Add intrinsic value — the real driver of option profit in directional moves
+    const intrinsic  = pos.optionType === "put"
+      ? Math.max(0, pos.strike - price)   // put intrinsic: strike - stock price
+      : Math.max(0, price - pos.strike);  // call intrinsic: stock price - strike
+    const curP       = parseFloat((timeValue + intrinsic).toFixed(2));
     const chg  = (curP - pos.premium) / pos.premium;
     const hrs  = tick * 4; // each tick ~ 4 hours
     pos.currentPrice = curP;
