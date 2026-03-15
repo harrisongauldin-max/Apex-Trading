@@ -223,6 +223,94 @@ function logEvent(type, message) {
   console.log(`[${type.toUpperCase()}] ${message}`);
 }
 
+// - Dynamic Signal Calculators -
+// Calculate RSI from price bars
+function calcRSI(bars, period = 14) {
+  if (bars.length < period + 1) return 50;
+  let gains = 0, losses = 0;
+  for (let i = bars.length - period; i < bars.length; i++) {
+    const change = bars[i].c - bars[i-1].c;
+    if (change > 0) gains  += change;
+    else            losses -= change;
+  }
+  const avgGain = gains  / period;
+  const avgLoss = losses / period;
+  if (avgLoss === 0) return 100;
+  const rs  = avgGain / avgLoss;
+  return parseFloat((100 - 100 / (1 + rs)).toFixed(1));
+}
+
+// Calculate EMA from array of closes
+function calcEMA(closes, period) {
+  const k = 2 / (period + 1);
+  let ema = closes[0];
+  for (let i = 1; i < closes.length; i++) ema = closes[i] * k + ema * (1 - k);
+  return ema;
+}
+
+// Calculate MACD signal from price bars
+function calcMACD(bars) {
+  if (bars.length < 26) return { signal: "neutral", value: 0 };
+  const closes  = bars.map(b => b.c);
+  const ema12   = calcEMA(closes.slice(-12), 12);
+  const ema26   = calcEMA(closes.slice(-26), 26);
+  const macdVal = ema12 - ema26;
+  const signal  = calcEMA(
+    bars.slice(-9).map((_, i) => {
+      const e12 = calcEMA(closes.slice(-(26 - 8 + i)), 12);
+      const e26 = calcEMA(closes.slice(-(26)), 26);
+      return e12 - e26;
+    }), 9
+  );
+  const histogram = macdVal - signal;
+  if (histogram > 0.5)       return { signal: "bullish crossover", value: macdVal };
+  if (histogram > 0)         return { signal: "bullish",           value: macdVal };
+  if (histogram < -0.5)      return { signal: "bearish crossover", value: macdVal };
+  if (histogram < 0)         return { signal: "bearish",           value: macdVal };
+  return { signal: "neutral", value: macdVal };
+}
+
+// Determine momentum from bars
+function calcMomentum(bars) {
+  if (bars.length < 20) return "steady";
+  const recent5  = (bars[bars.length-1].c - bars[bars.length-5].c)  / bars[bars.length-5].c;
+  const recent20 = (bars[bars.length-1].c - bars[bars.length-20].c) / bars[bars.length-20].c;
+  if (recent5 > 0.03 && recent20 > 0.05)  return "strong";
+  if (recent5 < -0.03 || recent20 < -0.05) return "recovering";
+  return "steady";
+}
+
+// Calculate IV Rank - where is current IV vs 52-week range
+function calcIVRank(currentIV, bars) {
+  if (bars.length < 30) return 50;
+  // Approximate historical vol from price bars
+  const returns = [];
+  for (let i = 1; i < bars.length; i++) {
+    returns.push(Math.abs(Math.log(bars[i].c / bars[i-1].c)));
+  }
+  const avgVol  = returns.reduce((s, r) => s + r, 0) / returns.length;
+  const annVol  = avgVol * Math.sqrt(252) * 100;
+  const minVol  = Math.min(...returns) * Math.sqrt(252) * 100;
+  const maxVol  = Math.max(...returns) * Math.sqrt(252) * 100;
+  const ivr     = maxVol > minVol ? ((currentIV * 100 - minVol) / (maxVol - minVol)) * 100 : 50;
+  return Math.min(Math.max(parseFloat(ivr.toFixed(0)), 0), 100);
+}
+
+// Full dynamic signal analysis for a stock
+async function getDynamicSignals(ticker, bars) {
+  const rsi      = calcRSI(bars);
+  const macd     = calcMACD(bars);
+  const momentum = calcMomentum(bars);
+  const adx      = calcADX(bars);
+  // Approximate current IV from recent price action
+  const recentBars = bars.slice(-20);
+  const returns    = recentBars.slice(1).map((b, i) => Math.log(b.c / recentBars[i].c));
+  const stdDev     = Math.sqrt(returns.reduce((s, r) => s + r * r, 0) / returns.length);
+  const currentIV  = stdDev * Math.sqrt(252);
+  const ivr        = calcIVRank(currentIV, bars);
+  return { rsi, macd: macd.signal, momentum, adx, ivr };
+}
+
 // - Helpers -
 const fmt         = n  => "$" + parseFloat(n).toFixed(2);
 const totalCap    = () => (state.customBudget || MONTHLY_BUDGET) + (state.extraBudget || 0);
@@ -513,20 +601,379 @@ async function getVIX() {
   return 15; // default to low VIX if unavailable
 }
 
-// Get options chain for a ticker
-async function getOptionsChain(ticker, expDate, strikePrice) {
+// Get real options chain from Alpaca OPRA feed
+// Returns best contract matching our delta target and expiry window
+// - Earnings Calendar -
+async function getEarningsDate(ticker) {
   try {
-    const url = `/options/contracts?underlying_symbol=${ticker}&expiration_date_gte=${expDate}&strike_price_gte=${strikePrice * 0.95}&strike_price_lte=${strikePrice * 1.05}&type=call&limit=10`;
-    const data = await alpacaGet(url, ALPACA_DATA);
-    return data && data.option_contracts ? data.option_contracts : [];
+    const today = getETTime().toISOString().split("T")[0];
+    const end   = new Date(Date.now() + 60 * 86400000).toISOString().split("T")[0];
+    const data  = await alpacaGet(`/corporate_actions/announcements?ca_types=Earnings&symbols=${ticker}&since=${today}&until=${end}`, ALPACA_DATA);
+    if (data && data.announcements && data.announcements.length > 0) {
+      return data.announcements[0].ex_date || null;
+    }
+    return null;
+  } catch(e) { return null; }
+}
+
+// - News Feed -
+async function getNewsForTicker(ticker) {
+  try {
+    const data = await alpacaGet(`/news?symbols=${ticker}&limit=5`, ALPACA_DATA);
+    return data && data.news ? data.news : [];
   } catch(e) { return []; }
 }
 
-// Get options snapshot for greeks and IV
-async function getOptionsSnapshot(symbol) {
+function analyzeNews(articles) {
+  if (!articles || !articles.length) return { modifier: 0, signal: "neutral", headlines: [] };
+  const bullishWords = ["beat","beats","raised","upgrade","strong","surge","record","growth","positive","bullish","buy","outperform","exceeds"];
+  const bearishWords = ["miss","misses","cut","downgrade","weak","falls","concern","negative","bearish","sell","underperform","below","warning","recall","investigation","lawsuit","fraud"];
+  let bullCount = 0, bearCount = 0;
+  const headlines = [];
+  for (const article of articles.slice(0, 5)) {
+    const text = (article.headline + " " + (article.summary || "")).toLowerCase();
+    if (bullishWords.some(w => text.includes(w))) bullCount++;
+    if (bearishWords.some(w => text.includes(w))) bearCount++;
+    headlines.push(article.headline);
+  }
+  const net = bullCount - bearCount;
+  if (net >= 2)  return { modifier: 10,  signal: "bullish",      headlines };
+  if (net === 1) return { modifier: 5,   signal: "mild bullish", headlines };
+  if (net <= -2) return { modifier: -15, signal: "bearish",      headlines };
+  if (net === -1)return { modifier: -8,  signal: "mild bearish", headlines };
+  return { modifier: 0, signal: "neutral", headlines };
+}
+
+// - VIX Velocity -
+let lastVIXReading = 15;
+function checkVIXVelocity(currentVIX) {
+  const delta    = currentVIX - lastVIXReading;
+  lastVIXReading = currentVIX;
+  if (delta >= 8) {
+    logEvent("circuit", `VIX VELOCITY ALERT - jumped ${delta.toFixed(1)} points to ${currentVIX} - closing all positions`);
+    return true;
+  }
+  return false;
+}
+
+// - Macro News Scanner -
+const MACRO_BEARISH_KEYWORDS = [
+  "fed rate hike", "rate hike", "hawkish", "tightening", "quantitative tightening",
+  "inflation surge", "cpi beat", "inflation hot", "tariff", "trade war", "sanctions",
+  "war", "military strike", "invasion", "conflict escalation", "strait", "blockade",
+  "recession", "gdp miss", "gdp contraction", "unemployment rise", "jobless claims surge",
+  "bank failure", "credit crunch", "debt ceiling", "default", "downgrade",
+  "oil spike", "energy crisis", "supply shock", "shortage"
+];
+
+const MACRO_BULLISH_KEYWORDS = [
+  "fed rate cut", "rate cut", "dovish", "easing", "quantitative easing", "stimulus",
+  "soft landing", "inflation cooling", "cpi miss", "inflation slows",
+  "strong jobs", "unemployment falls", "gdp beat", "gdp growth",
+  "trade deal", "ceasefire", "peace talks", "sanctions lifted",
+  "oil falls", "energy prices drop", "supply chain recovery"
+];
+
+// Sector-specific impact from macro events
+const SECTOR_MACRO_IMPACT = {
+  "rate hike":     { bearish: ["Technology", "Financial"], bullish: [] },
+  "rate cut":      { bearish: [], bullish: ["Technology", "Financial"] },
+  "oil spike":     { bearish: ["Consumer", "Technology"], bullish: ["Energy"] },
+  "oil falls":     { bearish: [], bullish: ["Consumer", "Technology"] },
+  "tariff":        { bearish: ["Technology", "Consumer"], bullish: [] },
+  "trade deal":    { bearish: [], bullish: ["Technology", "Consumer"] },
+  "recession":     { bearish: ["Financial", "Consumer", "Technology"], bullish: [] },
+  "stimulus":      { bearish: [], bullish: ["Technology", "Financial", "Consumer"] },
+};
+
+async function getMacroNews() {
   try {
-    const data = await alpacaGet(`/options/snapshots/${symbol}`, ALPACA_DATA);
-    return data || null;
+    // Pull general market news from Alpaca - no ticker filter = macro headlines
+    const data = await alpacaGet(`/news?limit=20`, ALPACA_DATA);
+    const articles = data && data.news ? data.news : [];
+
+    let bearishScore = 0;
+    let bullishScore = 0;
+    const triggers   = [];
+    const headlines  = [];
+    const sectorImpact = { bearish: new Set(), bullish: new Set() };
+
+    for (const article of articles) {
+      const text = (article.headline + " " + (article.summary || "")).toLowerCase();
+      headlines.push(article.headline);
+
+      // Check bearish keywords
+      for (const kw of MACRO_BEARISH_KEYWORDS) {
+        if (text.includes(kw)) {
+          bearishScore++;
+          triggers.push(kw);
+          // Check sector impact
+          for (const [key, impact] of Object.entries(SECTOR_MACRO_IMPACT)) {
+            if (kw.includes(key)) {
+              impact.bearish.forEach(s => sectorImpact.bearish.add(s));
+              impact.bullish.forEach(s => sectorImpact.bullish.add(s));
+            }
+          }
+        }
+      }
+
+      // Check bullish keywords
+      for (const kw of MACRO_BULLISH_KEYWORDS) {
+        if (text.includes(kw)) {
+          bullishScore++;
+          triggers.push(kw);
+          for (const [key, impact] of Object.entries(SECTOR_MACRO_IMPACT)) {
+            if (kw.includes(key)) {
+              impact.bullish.forEach(s => sectorImpact.bullish.add(s));
+              impact.bearish.forEach(s => sectorImpact.bearish.add(s));
+            }
+          }
+        }
+      }
+    }
+
+    const net = bullishScore - bearishScore;
+    let signal = "neutral";
+    let scoreModifier = 0;
+    let mode = "normal";
+
+    if (net <= -4)      { signal = "strongly bearish"; scoreModifier = -20; mode = "defensive"; }
+    else if (net <= -2) { signal = "bearish";          scoreModifier = -10; mode = "cautious";  }
+    else if (net <= -1) { signal = "mild bearish";     scoreModifier = -5;  mode = "cautious";  }
+    else if (net >= 4)  { signal = "strongly bullish"; scoreModifier = 15;  mode = "aggressive";}
+    else if (net >= 2)  { signal = "bullish";          scoreModifier = 8;   mode = "normal";    }
+    else if (net >= 1)  { signal = "mild bullish";     scoreModifier = 4;   mode = "normal";    }
+
+    const uniqueTriggers = [...new Set(triggers)].slice(0, 5);
+    if (uniqueTriggers.length > 0) {
+      logEvent("macro", `Macro signal: ${signal} | triggers: ${uniqueTriggers.join(", ")} | modifier: ${scoreModifier > 0 ? "+" : ""}${scoreModifier}`);
+    }
+
+    return {
+      signal, scoreModifier, mode,
+      bearishScore, bullishScore,
+      triggers: uniqueTriggers,
+      sectorBearish: [...sectorImpact.bearish],
+      sectorBullish: [...sectorImpact.bullish],
+      headlines: headlines.slice(0, 5),
+      updatedAt: new Date().toISOString(),
+    };
+  } catch(e) {
+    logEvent("error", `getMacroNews: ${e.message}`);
+    return { signal: "neutral", scoreModifier: 0, mode: "normal", triggers: [], sectorBearish: [], sectorBullish: [] };
+  }
+}
+
+// - Fear & Greed -
+async function getFearAndGreed() {
+  try {
+    const res  = await withTimeout(fetch("https://production.dataviz.cnn.io/index/fearandgreed/graphdata"), 5000);
+    const data = await res.json();
+    const score  = data?.fear_and_greed?.score || 50;
+    const rating = data?.fear_and_greed?.rating || "neutral";
+    return { score: parseFloat(parseFloat(score).toFixed(0)), rating };
+  } catch(e) { return { score: 50, rating: "neutral" }; }
+}
+
+// - Market Breadth -
+async function getMarketBreadth() {
+  try {
+    const sectors = ["XLK","XLF","XLE","XLV","XLI","XLY","XLP","XLU","XLB","XLRE"];
+    let advancing = 0, declining = 0;
+    for (const etf of sectors) {
+      const bars = await getStockBars(etf, 2);
+      if (bars.length >= 2) {
+        if (bars[bars.length-1].c > bars[bars.length-2].c) advancing++;
+        else declining++;
+      }
+    }
+    const total      = advancing + declining;
+    const breadthPct = total > 0 ? (advancing / total) * 100 : 50;
+    return { advancing, declining, breadthPct: parseFloat(breadthPct.toFixed(0)) };
+  } catch(e) { return { advancing: 5, declining: 5, breadthPct: 50 }; }
+}
+
+// - DXY proxy via UUP ETF -
+async function getDXY() {
+  try {
+    const bars = await getStockBars("UUP", 5);
+    if (bars.length < 2) return { trend: "neutral", change: 0 };
+    const change = (bars[bars.length-1].c - bars[0].c) / bars[0].c * 100;
+    return {
+      trend:  change > 0.3 ? "strengthening" : change < -0.3 ? "weakening" : "neutral",
+      change: parseFloat(change.toFixed(2))
+    };
+  } catch(e) { return { trend: "neutral", change: 0 }; }
+}
+
+// - Yield Curve via TLT/SHY -
+async function getYieldCurve() {
+  try {
+    const tlt = await getStockBars("TLT", 5);
+    const shy = await getStockBars("SHY", 5);
+    if (!tlt.length || !shy.length) return { signal: "normal" };
+    const tltChange = (tlt[tlt.length-1].c - tlt[0].c) / tlt[0].c;
+    const shyChange = (shy[shy.length-1].c - shy[0].c) / shy[0].c;
+    if (tltChange < shyChange - 0.005) return { signal: "steepening" };
+    if (tltChange > shyChange + 0.005) return { signal: "flattening" };
+    return { signal: "normal" };
+  } catch(e) { return { signal: "normal" }; }
+}
+
+// - VWAP -
+function calcVWAP(bars) {
+  if (!bars || !bars.length) return 0;
+  let cumTPV = 0, cumVol = 0;
+  for (const bar of bars) {
+    const tp = (bar.h + bar.l + bar.c) / 3;
+    cumTPV += tp * bar.v;
+    cumVol += bar.v;
+  }
+  return cumVol > 0 ? parseFloat((cumTPV / cumVol).toFixed(2)) : 0;
+}
+
+// - Sharpe Ratio -
+function calcSharpeRatio() {
+  const trades = state.closedTrades || [];
+  if (trades.length < 5) return 0;
+  const returns  = trades.map(t => t.pct || 0);
+  const avg      = returns.reduce((s, r) => s + r, 0) / returns.length;
+  const variance = returns.reduce((s, r) => s + Math.pow(r - avg, 2), 0) / returns.length;
+  const stdDev   = Math.sqrt(variance);
+  const riskFree = 0.05 / 252;
+  return stdDev > 0 ? parseFloat(((avg - riskFree) / stdDev).toFixed(2)) : 0;
+}
+
+// - Value at Risk (95%) -
+function calcVaR() {
+  const trades = state.closedTrades || [];
+  if (trades.length < 10) return 0;
+  const losses = trades.map(t => t.pnl).sort((a, b) => a - b);
+  return Math.abs(losses[Math.floor(losses.length * 0.05)] || 0);
+}
+
+// - Max Adverse Excursion -
+function calcMAE() {
+  const losses = (state.closedTrades || []).filter(t => t.pnl < 0).map(t => Math.abs(t.pnl));
+  return losses.length ? Math.max(...losses) : 0;
+}
+
+// - Sector Rotation -
+async function getSectorRotation() {
+  try {
+    const sectorETFs = { Technology:"XLK", Financial:"XLF", Consumer:"XLY", Energy:"XLE", Health:"XLV" };
+    const perf = {};
+    for (const [sector, etf] of Object.entries(sectorETFs)) {
+      const bars = await getStockBars(etf, 5);
+      if (bars.length >= 2) perf[sector] = (bars[bars.length-1].c - bars[0].c) / bars[0].c * 100;
+    }
+    const sorted  = Object.entries(perf).sort((a, b) => b[1] - a[1]);
+    return {
+      leading:     sorted[0]?.[0] || "Technology",
+      lagging:     sorted[sorted.length-1]?.[0] || "Energy",
+      performance: perf
+    };
+  } catch(e) { return { leading: "Technology", lagging: "Energy", performance: {} }; }
+}
+
+async function getRealOptionsContract(ticker, price, optionType, score, vix, earningsDate) {
+  try {
+    // Determine target expiry window
+    const { expDate: targetExpDate, expDays: targetExpDays, expiryType } = selectExpiry(score, vix, optionType, earningsDate);
+
+    // Format date for API: YYYY-MM-DD
+    const today     = getETTime();
+    const minExpiry = new Date(today.getTime() + 7  * 86400000).toISOString().split("T")[0];
+    const maxExpiry = new Date(today.getTime() + 90 * 86400000).toISOString().split("T")[0];
+
+    // Strike range - look 10% around current price
+    const strikeLow  = (price * 0.90).toFixed(0);
+    const strikeHigh = (price * 1.10).toFixed(0);
+
+    const url = `/options/contracts?underlying_symbol=${ticker}` +
+      `&expiration_date_gte=${minExpiry}&expiration_date_lte=${maxExpiry}` +
+      `&strike_price_gte=${strikeLow}&strike_price_lte=${strikeHigh}` +
+      `&type=${optionType}&limit=50`;
+
+    const data = await alpacaGet(url, ALPACA_DATA);
+    if (!data || !data.option_contracts || !data.option_contracts.length) return null;
+
+    // Get snapshots for the contracts to get real greeks + IV + quotes
+    const symbols   = data.option_contracts.slice(0, 20).map(c => c.symbol).join(",");
+    const snapData  = await alpacaGet(`/options/snapshots?symbols=${symbols}`, ALPACA_DATA);
+    const snapshots = snapData && snapData.snapshots ? snapData.snapshots : {};
+
+    // Score each contract — find best delta match in 0.28-0.42 range
+    // and best liquidity (open interest + volume)
+    let best = null;
+    let bestScore = -1;
+
+    for (const contract of data.option_contracts) {
+      const snap    = snapshots[contract.symbol];
+      if (!snap) continue;
+
+      const greeks  = snap.greeks || {};
+      const quote   = snap.latestQuote || {};
+      const delta   = Math.abs(parseFloat(greeks.delta || 0));
+      const iv      = parseFloat(greeks.implied_volatility || greeks.iv || 0.3);
+      const bid     = parseFloat(quote.bp || 0);
+      const ask     = parseFloat(quote.ap || 0);
+      const mid     = (bid + ask) / 2;
+      const spread  = ask > 0 ? (ask - bid) / ask : 1;
+      const oi      = parseInt(snap.openInterest || snap.open_interest || 0);
+      const vol     = parseInt(snap.day?.volume || 0);
+
+      // Skip illiquid contracts
+      if (bid <= 0 || ask <= 0) continue;
+      if (spread > MAX_SPREAD_PCT) continue;
+      if (oi < MIN_OPEN_INTEREST) continue;
+
+      // Skip if delta outside target range
+      if (delta < TARGET_DELTA_MIN || delta > TARGET_DELTA_MAX) continue;
+
+      // Score this contract - closer to 0.35 delta is better
+      const deltaScore  = 1 - Math.abs(delta - 0.35) / 0.35;
+      const liquidScore = Math.min(oi / 5000, 1);
+      const contractScore = deltaScore * 0.6 + liquidScore * 0.4;
+
+      if (contractScore > bestScore) {
+        bestScore = contractScore;
+        best = {
+          symbol:     contract.symbol,
+          strike:     parseFloat(contract.strike_price),
+          expDate:    new Date(contract.expiration_date).toLocaleDateString("en-US", {month:"short",day:"2-digit",year:"numeric"}),
+          expDays:    Math.round((new Date(contract.expiration_date) - today) / 86400000),
+          expiryType,
+          premium:    parseFloat(mid.toFixed(2)),
+          bid, ask, spread,
+          greeks: {
+            delta:  parseFloat(greeks.delta || 0).toFixed(3),
+            theta:  parseFloat(greeks.theta || 0).toFixed(3),
+            gamma:  parseFloat(greeks.gamma || 0).toFixed(4),
+            vega:   parseFloat(greeks.vega  || 0).toFixed(3),
+          },
+          iv, oi, vol, optionType,
+        };
+      }
+    }
+
+    return best;
+  } catch(e) {
+    logEvent("error", `getRealOptionsContract(${ticker}): ${e.message}`);
+    return null;
+  }
+}
+
+// Get current market price of an options contract
+async function getOptionsPrice(symbol) {
+  try {
+    const data = await alpacaGet(`/options/snapshots?symbols=${symbol}`, ALPACA_DATA);
+    if (!data || !data.snapshots || !data.snapshots[symbol]) return null;
+    const snap  = data.snapshots[symbol];
+    const quote = snap.latestQuote || {};
+    const bid   = parseFloat(quote.bp || 0);
+    const ask   = parseFloat(quote.ap || 0);
+    return bid > 0 && ask > 0 ? (bid + ask) / 2 : null;
   } catch(e) { return null; }
 }
 
@@ -856,38 +1303,87 @@ function buildCard(stock, price, contracts, iv, optionType = "call", score = 75,
 
 // - Execute Trade -
 async function executeTrade(stock, price, score, scoreReasons, vix, optionType = "call") {
-  const iv        = 0.25 + stock.ivr * 0.003;
-  const contracts = calcPositionSize(price * iv * Math.sqrt(stock.expiryDays/365) * 0.4 + 0.3, score, vix);
-  const t         = buildCard(stock, price, contracts, iv, optionType, score, vix);
+  // Try to get real options contract from Alpaca OPRA feed
+  let contract = await getRealOptionsContract(stock.ticker, price, optionType, score, vix, stock.earningsDate);
 
-  // Ensure liquid cash - liquidate BIL if needed before checking
-  await ensureLiquidCash(t.cost + CAPITAL_FLOOR);
+  // Fallback to estimated contract if real data unavailable
+  if (!contract) {
+    logEvent("warn", `${stock.ticker} - no real options contract found, using estimate`);
+    const iv       = 0.25 + stock.ivr * 0.003;
+    const { expDate, expDays, expiryType } = selectExpiry(score, vix, optionType, stock.earningsDate);
+    const otmPct   = stock.momentum === "strong" ? 0.035 : 0.045;
+    const strike   = optionType === "put"
+      ? Math.round(price * (1 - otmPct) / 5) * 5
+      : Math.round(price * (1 + otmPct) / 5) * 5;
+    const t        = expDays / 365;
+    const premium  = parseFloat((price * iv * Math.sqrt(t) * 0.4 + 0.3).toFixed(2));
+    const greeks   = calcGreeks(price, strike, expDays, iv);
+    contract = { symbol: null, strike, expDate, expDays, expiryType,
+      premium, bid: premium * 0.95, ask: premium * 1.05,
+      greeks, iv, oi: 0, vol: 0, optionType };
+  }
 
-  if (t.cost > state.cash - CAPITAL_FLOOR || t.contracts < 1) {
-    logEvent("skip", `${stock.ticker} - insufficient cash after floor (need ${fmt(t.cost)})`);
+  // Position sizing based on real premium
+  const contracts = calcPositionSize(contract.premium, score, vix);
+  if (contracts < 1) {
+    logEvent("skip", `${stock.ticker} - position size too small`);
     return false;
   }
 
-  // Delta check
-  if (t.greeks.delta < TARGET_DELTA_MIN || t.greeks.delta > TARGET_DELTA_MAX) {
-    logEvent("filter", `${stock.ticker} - delta ${t.greeks.delta} outside 0.30-0.40 target`);
+  const cost      = parseFloat((contract.premium * 100 * contracts).toFixed(2));
+  const target    = parseFloat((contract.premium * (1 + TAKE_PROFIT_PCT)).toFixed(2));
+  const stop      = parseFloat((contract.premium * (1 - STOP_LOSS_PCT)).toFixed(2));
+  const breakeven = optionType === "put"
+    ? parseFloat((contract.strike - contract.premium).toFixed(2))
+    : parseFloat((contract.strike + contract.premium).toFixed(2));
+
+  // Ensure liquid cash
+  await ensureLiquidCash(cost + CAPITAL_FLOOR);
+
+  if (cost > state.cash - CAPITAL_FLOOR) {
+    logEvent("skip", `${stock.ticker} - insufficient cash after floor (need ${fmt(cost)})`);
+    return false;
   }
 
-  state.cash = parseFloat((state.cash - t.cost).toFixed(2));
+  // Delta check - already filtered in getRealOptionsContract but double check estimate fallback
+  const delta = parseFloat(contract.greeks.delta || 0);
+  if (Math.abs(delta) < TARGET_DELTA_MIN || Math.abs(delta) > TARGET_DELTA_MAX) {
+    logEvent("filter", `${stock.ticker} - delta ${delta} outside target range`);
+    return false;
+  }
+
+  state.cash = parseFloat((state.cash - cost).toFixed(2));
   state.todayTrades++;
 
   const position = {
-    ticker:t.ticker, sector:t.sector, strike:t.strike, premium:t.premium,
-    contracts:t.contracts, cost:t.cost, expDate:t.expDate, expiryDays:t.expDays,
-    target:t.target, stop:t.stop, breakeven:t.breakeven,
-    partialClosed:false, openDate:new Date().toISOString(),
-    ivr:stock.ivr, iv:t.iv, greeks:t.greeks, beta:stock.beta||1,
-    peakPremium:t.premium, trailStop:null, breakevenLocked:false,
-    score, halfPosition: false,
-    price:        price,           // underlying stock price — updated each scan
-    optionType:   optionType,      // "call" or "put"
-    expiryType:   t.expiryType,    // "weekly" or "monthly"
-    currentPrice: t.premium,       // current option price — updated each scan
+    ticker:         stock.ticker,
+    sector:         stock.sector,
+    strike:         contract.strike,
+    premium:        contract.premium,
+    contracts,
+    cost,
+    expDate:        contract.expDate,
+    expiryDays:     contract.expDays,
+    target, stop, breakeven,
+    partialClosed:  false,
+    openDate:       new Date().toISOString(),
+    ivr:            stock.ivr,
+    iv:             contract.iv,
+    greeks:         contract.greeks,
+    beta:           stock.beta || 1,
+    peakPremium:    contract.premium,
+    trailStop:      null,
+    breakevenLocked: false,
+    score,
+    halfPosition:   false,
+    price,
+    optionType,
+    expiryType:     contract.expiryType,
+    currentPrice:   contract.premium,
+    contractSymbol: contract.symbol,
+    bid:            contract.bid,
+    ask:            contract.ask,
+    realData:       !!contract.symbol,
   };
 
   state.positions.push(position);
@@ -895,16 +1391,16 @@ async function executeTrade(stock, price, score, scoreReasons, vix, optionType =
   // Trade journal entry
   state.tradeJournal.unshift({
     time:      new Date().toISOString(),
-    ticker:    t.ticker,
+    ticker:    stock.ticker,
     action:    "OPEN",
-    strike:    t.strike,
-    expDate:   t.expDate,
-    premium:   t.premium,
-    contracts: t.contracts,
-    cost:      t.cost,
+    strike:    contract.strike,
+    expDate:   contract.expDate,
+    premium:   contract.premium,
+    contracts,
+    cost,
     score,
     scoreReasons,
-    delta:     t.greeks.delta,
+    delta:     contract.greeks.delta,
     iv:        parseFloat((t.iv*100).toFixed(1)),
     vix,
     catalyst:  stock.catalyst,
@@ -913,9 +1409,10 @@ async function executeTrade(stock, price, score, scoreReasons, vix, optionType =
   if (state.tradeJournal.length > 200) state.tradeJournal = state.tradeJournal.slice(0,200);
 
   const typeLabel = optionType === "put" ? "P" : "C";
+  const dataLabel = contract.symbol ? "REAL" : "EST";
   logEvent("trade",
-    `BUY ${t.ticker} $${t.strike}${typeLabel} exp ${t.expDate} | ${t.contracts}x @ $${t.premium} | ` +
-    `cost ${fmt(t.cost)} | score ${score} | delta ${t.greeks.delta} | cash ${fmt(state.cash)} | heat ${(heatPct()*100).toFixed(0)}%`
+    `BUY ${stock.ticker} $${contract.strike}${typeLabel} exp ${contract.expDate} | ${contracts}x @ $${contract.premium} | ` +
+    `cost ${fmt(cost)} | score ${score} | delta ${contract.greeks.delta} | [${dataLabel}] | cash ${fmt(state.cash)} | heat ${(heatPct()*100).toFixed(0)}%`
   );
   await saveState();
   return true;
@@ -1064,23 +1561,87 @@ async function manageStockPositions() {
 }
 
 // - Main Scan Engine -
-let scanRunning = false;
+let scanRunning  = false;
+let lastMedScan  = 0;  // 5 minute tier
+let lastSlowScan = 0;  // 15 minute tier
+let lastHourScan = 0;  // 60 minute tier
+
+// Shared market context updated on tiers
+let marketContext = {
+  fearGreed:      { score: 50, rating: "neutral" },
+  breadth:        { advancing: 5, declining: 5, breadthPct: 50 },
+  sectorRotation: { leading: "Technology", lagging: "Energy", performance: {} },
+  dxy:            { trend: "neutral", change: 0 },
+  yieldCurve:     { signal: "normal" },
+  putCallRatio:   { ratio: 1.0, signal: "neutral" },
+  macro:          { signal: "neutral", scoreModifier: 0, mode: "normal", triggers: [], sectorBearish: [], sectorBullish: [], headlines: [] },
+};
+
 async function runScan() {
   if (scanRunning) { logEvent("scan", "Scan skipped — previous scan still running"); return; }
   scanRunning = true;
   try {
   if (!ALPACA_KEY) { logEvent("warn", "No ALPACA_API_KEY set - check Railway variables"); return; }
-  logEvent("scan", `Scan triggered | market: ${isMarketHours()} | entry window: ${isEntryWindow()} | VIX: ${state.vix} | cash: ${fmt(state.cash)} | positions: ${state.positions.length}`);
   if (!isMarketHours()) { logEvent("scan", "Outside market hours - skipping trade logic"); return; }
 
-  // Update VIX
-  state.vix = await getVIX() || state.vix;
-
-  // Rebalance idle cash into BIL ETF — only every 5 minutes to reduce API load
   const now = Date.now();
-  if (!state.lastRebalance || now - state.lastRebalance > 5 * 60 * 1000) {
+
+  // Update VIX and check velocity
+  const newVIX  = await getVIX() || state.vix;
+  const isBlackSwan = checkVIXVelocity(newVIX);
+  state.vix     = newVIX;
+
+  // Emergency close all on VIX velocity spike
+  if (isBlackSwan) {
+    for (const pos of [...state.positions]) await closePosition(pos.ticker, "vix-spike");
+    await saveState();
+    scanRunning = false;
+    return;
+  }
+
+  logEvent("scan", `Scan | VIX:${state.vix} | cash:${fmt(state.cash)} | positions:${state.positions.length} | breadth:${marketContext.breadth.breadthPct}% | F&G:${marketContext.fearGreed.score}`);
+
+  // -- MEDIUM TIER (every 5 minutes) --
+  if (now - lastMedScan > 5 * 60 * 1000) {
+    lastMedScan = now;
+    const [breadth, rotation] = await Promise.all([getMarketBreadth(), getSectorRotation()]);
+    marketContext.breadth        = breadth;
+    marketContext.sectorRotation = rotation;
+    // Rebalance BIL ETF
     await rebalanceCashETF();
     state.lastRebalance = now;
+    logEvent("scan", `[5min] Breadth:${breadth.breadthPct}% | Leading:${rotation.leading} | Lagging:${rotation.lagging}`);
+  }
+
+  // -- SLOW TIER (every 15 minutes) --
+  if (now - lastSlowScan > 15 * 60 * 1000) {
+    lastSlowScan = now;
+    const [fg, dxy, yc, macro] = await Promise.all([getFearAndGreed(), getDXY(), getYieldCurve(), getMacroNews()]);
+    marketContext.fearGreed   = fg;
+    marketContext.dxy         = dxy;
+    marketContext.yieldCurve  = yc;
+    marketContext.macro       = macro;
+    marketContext.putCallRatio = state.vix > 30 ? { ratio: 1.3, signal: "fear" } : state.vix > 20 ? { ratio: 1.0, signal: "neutral" } : { ratio: 0.7, signal: "greed" };
+    logEvent("scan", `[15min] Macro:${macro.signal}(${macro.scoreModifier > 0 ? "+" : ""}${macro.scoreModifier}) | F&G:${fg.score} | DXY:${dxy.trend} | Yield:${yc.signal}`);
+
+    // If macro is strongly bearish - close all calls immediately
+    if (macro.mode === "defensive" && state.circuitOpen) {
+      logEvent("macro", `DEFENSIVE MODE - macro strongly bearish: ${macro.triggers.join(", ")} - closing call positions`);
+      for (const pos of [...state.positions]) {
+        if (pos.optionType === "call") await closePosition(pos.ticker, "macro-defensive");
+      }
+    }
+  }
+
+  // -- HOUR TIER (every 60 minutes) --
+  if (now - lastHourScan > 60 * 60 * 1000) {
+    lastHourScan = now;
+    // Update earnings dates for all watchlist stocks
+    for (const stock of WATCHLIST) {
+      const ed = await getEarningsDate(stock.ticker);
+      if (ed) stock.earningsDate = ed;
+    }
+    logEvent("scan", `[1hr] Earnings calendar updated for ${WATCHLIST.length} stocks`);
   }
 
   // Manage stock positions
@@ -1093,7 +1654,15 @@ async function runScan() {
 
     const dte      = Math.max(1, Math.round((new Date(pos.expDate)-new Date())/86400000));
     const t        = dte / 365;
-    const curP     = parseFloat((price * pos.iv * Math.sqrt(t) * 0.4 + 0.1).toFixed(2));
+    // Use real options price if we have a contract symbol, else estimate
+    let curP;
+    if (pos.contractSymbol) {
+      const realPrice = await getOptionsPrice(pos.contractSymbol);
+      curP = realPrice ? parseFloat(realPrice.toFixed(2)) : parseFloat((price * pos.iv * Math.sqrt(t) * 0.4 + 0.1).toFixed(2));
+      if (realPrice) pos.realData = true;
+    } else {
+      curP = parseFloat((price * pos.iv * Math.sqrt(t) * 0.4 + 0.1).toFixed(2));
+    }
     const chg      = (curP - pos.premium) / pos.premium;
     const hoursOpen= (new Date() - new Date(pos.openDate)) / 3600000;
     const daysOpen = hoursOpen / 24;
@@ -1235,7 +1804,7 @@ async function runScan() {
     const { pass, reason } = await checkAllFilters(stock, price);
     if (!pass) { logEvent("filter", `${stock.ticker} filter fail: ${reason}`); continue; }
 
-    const bars     = await getStockBars(stock.ticker, 30);
+    const bars     = await getStockBars(stock.ticker, 60);
     const avgVol   = bars.length ? bars.slice(0,-1).reduce((s,b)=>s+b.v,0)/Math.max(bars.length-1,1) : 0;
     const todayVol = bars.length ? bars[bars.length-1].v : 0;
 
@@ -1243,18 +1812,67 @@ async function runScan() {
     const stockReturn  = bars.length >= 5 ? (bars[bars.length-1].c - bars[0].o) / bars[0].o : 0;
     const relStrength  = spyReturn !== 0 ? (1 + stockReturn) / (1 + spyReturn) : 1;
 
-    // ADX approximation from price bars
-    const adx = bars.length >= 14 ? calcADX(bars) : 20;
-
     // Gap check on individual stock
     if (bars.length >= 2) {
       const gap = Math.abs(bars[bars.length-1].o - bars[bars.length-2].c) / bars[bars.length-2].c;
       if (gap > MAX_GAP_PCT) { logEvent("filter", `${stock.ticker} gap ${(gap*100).toFixed(1)}% - skip`); continue; }
     }
 
-    // Score both call and put setups - pick the better one
-    const callSetup = scoreSetup(stock, relStrength, adx, todayVol, avgVol);
-    const putSetup  = scorePutSetup(stock, relStrength, adx, todayVol, avgVol);
+    // Dynamic signals - calculated live from real price bars
+    const signals = await getDynamicSignals(stock.ticker, bars);
+
+    // VWAP check - skip if price is below VWAP for calls (weak intraday trend)
+    const vwap = calcVWAP(bars.slice(-5));
+    const price60 = await getStockQuote(stock.ticker);
+
+    // News sentiment
+    const newsArticles = await getNewsForTicker(stock.ticker);
+    const newsSentiment = analyzeNews(newsArticles);
+
+    // Merge live signals into stock object
+    const liveStock = {
+      ...stock,
+      rsi:      signals.rsi,
+      macd:     signals.macd,
+      momentum: signals.momentum,
+      ivr:      signals.ivr,
+      newsSentiment: newsSentiment.signal,
+    };
+
+    // Score both call and put setups using live signals
+    const callSetup = scoreSetup(liveStock, relStrength, signals.adx, todayVol, avgVol);
+    const putSetup  = scorePutSetup(liveStock, relStrength, signals.adx, todayVol, avgVol);
+
+    // Apply stock-level news modifier
+    callSetup.score = Math.min(100, Math.max(0, callSetup.score + (newsSentiment.modifier || 0)));
+    putSetup.score  = Math.min(100, Math.max(0, putSetup.score  - (newsSentiment.modifier || 0)));
+
+    if (newsSentiment.signal !== "neutral") {
+      logEvent("news", `${stock.ticker} news: ${newsSentiment.signal} | modifier: ${newsSentiment.modifier > 0 ? "+" : ""}${newsSentiment.modifier}`);
+    }
+
+    // Apply macro modifier - boosts or suppresses all entries based on current events
+    const macro       = marketContext.macro || { scoreModifier: 0, sectorBearish: [], sectorBullish: [] };
+    let macroCallMod  = macro.scoreModifier || 0;
+    let macroPutMod   = -(macro.scoreModifier || 0); // puts benefit from bearish macro
+
+    // Extra sector-specific adjustment
+    if (macro.sectorBearish.includes(stock.sector)) { macroCallMod -= 10; macroPutMod += 10; }
+    if (macro.sectorBullish.includes(stock.sector)) { macroCallMod += 8;  macroPutMod -= 8; }
+
+    callSetup.score = Math.min(100, Math.max(0, callSetup.score + macroCallMod));
+    putSetup.score  = Math.min(100, Math.max(0, putSetup.score  + macroPutMod));
+
+    if (macroCallMod !== 0) {
+      callSetup.reasons.push(`Macro ${macro.signal}: ${macroCallMod > 0 ? "+" : ""}${macroCallMod}`);
+      putSetup.reasons.push(`Macro ${macro.signal}: ${macroPutMod > 0 ? "+" : ""}${macroPutMod}`);
+    }
+
+    // In defensive mode - skip all call entries
+    if (macro.mode === "defensive" && optionType === "call") {
+      logEvent("filter", `${stock.ticker} - macro defensive mode - skipping calls`);
+      continue;
+    }
 
     const bestScore = Math.max(callSetup.score, putSetup.score);
     const optionType = putSetup.score > callSetup.score ? "put" : "call";
@@ -1265,8 +1883,8 @@ async function runScan() {
       continue;
     }
 
-    logEvent("filter", `${stock.ticker} best setup: ${optionType.toUpperCase()} score ${bestScore}`);
-    scored.push({ stock, price, score: bestScore, reasons: bestReasons, optionType });
+    logEvent("filter", `${stock.ticker} best setup: ${optionType.toUpperCase()} score ${bestScore} | RSI:${signals.rsi} MACD:${signals.macd} MOM:${signals.momentum}`);
+    scored.push({ stock: liveStock, price, score: bestScore, reasons: bestReasons, optionType });
     await new Promise(r=>setTimeout(r,200));
   }
 
@@ -1489,6 +2107,24 @@ cron.schedule("0 13 * * 1-5", async () => {
 // EOD email 20:05 UTC = 4:05 PM EDT (UTC-4)
 cron.schedule("5 20 * * 1-5", () => { sendEmail("eod"); });
 
+// Health check every 15 minutes during market hours
+cron.schedule("*/15 13-20 * * 1-5", async () => {
+  if (!isMarketHours()) return;
+  const lastScan    = state.lastScan ? new Date(state.lastScan) : null;
+  const minsSinceLastScan = lastScan ? (Date.now() - lastScan.getTime()) / 60000 : 999;
+  if (minsSinceLastScan > 15 && GMAIL_USER && GMAIL_PASS) {
+    logEvent("warn", `Health check: no scan in ${minsSinceLastScan.toFixed(0)} minutes - sending alert`);
+    mailer.sendMail({
+      from: GMAIL_USER,
+      to:   GMAIL_USER,
+      subject: "APEX ALERT - Scanner may be down",
+      html: `<p>APEX has not scanned in ${minsSinceLastScan.toFixed(0)} minutes during market hours.</p>
+             <p>Last scan: ${state.lastScan || "unknown"}</p>
+             <p>Check Railway logs immediately.</p>`
+    }).catch(e => console.error("Health alert email failed:", e.message));
+  }
+});
+
 // Weekly reset Monday morning
 cron.schedule("0 13 * * 1", async () => {
   state.weekStartCash     = state.cash;
@@ -1541,6 +2177,36 @@ app.post("/api/close/:tkr",  (req,res) => {
   closePosition(t,"manual");
   res.json({ok:true});
 });
+// Emergency close all positions
+app.post("/api/emergency-close", async (req, res) => {
+  const count = state.positions.length;
+  for (const pos of [...state.positions]) {
+    await closePosition(pos.ticker, "emergency-manual");
+  }
+  logEvent("circuit", `EMERGENCY CLOSE ALL - ${count} positions closed manually`);
+  await saveState();
+  res.json({ ok: true, closed: count });
+});
+
+// Health check endpoint
+app.get("/api/health", (req, res) => {
+  const lastScan = state.lastScan ? new Date(state.lastScan) : null;
+  const msSinceLastScan = lastScan ? Date.now() - lastScan.getTime() : 999999;
+  res.json({
+    status:        "ok",
+    uptime:        process.uptime(),
+    lastScan:      state.lastScan,
+    msSinceLastScan,
+    positions:     state.positions.length,
+    cash:          state.cash,
+    vix:           state.vix,
+    marketContext,
+    sharpe:        calcSharpeRatio(),
+    var95:         calcVaR(),
+    mae:           calcMAE(),
+  });
+});
+
 // Reset circuit breakers without wiping everything else
 app.post("/api/reset-circuit", async (req, res) => {
   state.circuitOpen       = true;
