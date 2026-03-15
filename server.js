@@ -2395,6 +2395,171 @@ app.get("/api/journal",      (req,res) => res.json(state.tradeJournal.slice(0,50
 app.get("/api/report",       (req,res) => res.json({report:buildMonthlyReport()}));
 
 // - New Feature Endpoints -
+// -- Backtesting Engine --
+async function runBacktest(months = 6) {
+  logEvent("scan", `Backtest started - ${months} months of historical data`);
+  const results = {
+    trades:      [],
+    monthlyPnL:  {},
+    byTicker:    {},
+    startCash:   MONTHLY_BUDGET,
+    endCash:     MONTHLY_BUDGET,
+    peakCash:    MONTHLY_BUDGET,
+    maxDrawdown: 0,
+    startDate:   null,
+    endDate:     null,
+  };
+
+  try {
+    const limit   = months * 22;
+    const allBars = {};
+    for (const stock of WATCHLIST) {
+      const bars = await getStockBars(stock.ticker, limit);
+      if (bars.length > 10) allBars[stock.ticker] = bars;
+      await new Promise(r => setTimeout(r, 150));
+    }
+    const spyBars = await getStockBars("SPY", limit);
+    if (!spyBars.length) throw new Error("Could not fetch SPY bars");
+
+    const minLen = Math.min(...Object.values(allBars).map(b => b.length), spyBars.length);
+    if (minLen < 20) throw new Error("Not enough historical data");
+
+    results.startDate = allBars[WATCHLIST[0].ticker]?.[0]?.t?.split("T")[0] || "unknown";
+    results.endDate   = allBars[WATCHLIST[0].ticker]?.slice(-1)[0]?.t?.split("T")[0] || "unknown";
+
+    let cash            = MONTHLY_BUDGET;
+    let peakCash        = MONTHLY_BUDGET;
+    const openPositions = [];
+
+    for (let dayIdx = 20; dayIdx < minLen; dayIdx++) {
+      const spySlice  = spyBars.slice(0, dayIdx);
+      const spyReturn = spySlice.length >= 5
+        ? (spySlice[spySlice.length-1].c - spySlice[0].c) / spySlice[0].c : 0;
+      const currentDate = spyBars[dayIdx]?.t?.split("T")[0] || "";
+
+      // Manage open positions
+      for (let i = openPositions.length - 1; i >= 0; i--) {
+        const pos      = openPositions[i];
+        const bars     = allBars[pos.ticker];
+        if (!bars || dayIdx >= bars.length) continue;
+        const curPrice = bars[dayIdx].c;
+        const dte      = Math.max(1, pos.expDays - (dayIdx - pos.entryDay));
+        const curP     = parseFloat((curPrice * pos.iv * Math.sqrt(dte / 365) * 0.4 + 0.1).toFixed(2));
+        const chg      = (curP - pos.premium) / pos.premium;
+        const daysOpen = dayIdx - pos.entryDay;
+        let exitReason = null;
+
+        if (chg <= -STOP_LOSS_PCT)                                         exitReason = "stop";
+        else if (daysOpen <= 2 && chg <= -FAST_STOP_PCT)                  exitReason = "fast-stop";
+        else if (daysOpen <= 2 && chg >= 0.40)                            exitReason = "fast-profit";
+        else if (chg >= TAKE_PROFIT_PCT)                                   exitReason = "target";
+        else if (daysOpen >= TIME_STOP_DAYS && Math.abs(chg) < TIME_STOP_MOVE) exitReason = "time-stop";
+        else if (dte <= 5)                                                 exitReason = "expiry";
+
+        if (exitReason) {
+          const pnl    = parseFloat(((curP - pos.premium) * 100 * pos.contracts).toFixed(2));
+          cash        += pos.cost + pnl;
+          peakCash     = Math.max(peakCash, cash);
+          const dd     = (cash - peakCash) / peakCash * 100;
+          results.maxDrawdown = Math.min(results.maxDrawdown, dd);
+          const month  = currentDate.slice(0, 7);
+          results.monthlyPnL[month] = (results.monthlyPnL[month] || 0) + pnl;
+          if (!results.byTicker[pos.ticker]) results.byTicker[pos.ticker] = { wins:0, losses:0, pnl:0, trades:0 };
+          results.byTicker[pos.ticker].trades++;
+          results.byTicker[pos.ticker].pnl += pnl;
+          if (pnl > 0) results.byTicker[pos.ticker].wins++;
+          else results.byTicker[pos.ticker].losses++;
+          results.trades.push({
+            ticker: pos.ticker, optionType: pos.optionType,
+            entry: pos.premium, exit: curP, pnl,
+            pct: parseFloat((chg * 100).toFixed(1)),
+            daysHeld: daysOpen, reason: exitReason,
+            date: currentDate, score: pos.score,
+          });
+          openPositions.splice(i, 1);
+        }
+      }
+
+      // New entries
+      const heat = openPositions.reduce((s, p) => s + p.cost, 0) / totalCap();
+      if (heat >= MAX_HEAT || cash <= CAPITAL_FLOOR || openPositions.length >= 5) continue;
+
+      for (const stock of WATCHLIST) {
+        const bars = allBars[stock.ticker];
+        if (!bars || dayIdx >= bars.length) continue;
+        if (openPositions.find(p => p.ticker === stock.ticker)) continue;
+        const slice     = bars.slice(0, dayIdx + 1);
+        const stockRet  = slice.length >= 5 ? (slice[slice.length-1].c - slice[0].c) / slice[0].c : 0;
+        const relStr    = spyReturn !== 0 ? (1 + stockRet) / (1 + spyReturn) : 1;
+        const rsi       = calcRSI(slice);
+        const macdData  = calcMACD(slice);
+        const momentum  = calcMomentum(slice);
+        const adx       = calcADX(slice);
+        const avgVol    = slice.slice(-20).reduce((s, b) => s + b.v, 0) / Math.min(20, slice.length);
+        const todayVol  = slice[slice.length-1].v;
+        const liveStock = { ...stock, rsi, macd: macdData.signal, momentum };
+        const callSetup = scoreSetup(liveStock, relStr, adx, todayVol, avgVol);
+        const putSetup  = scorePutSetup(liveStock, relStr, adx, todayVol, avgVol);
+        const bestScore = Math.max(callSetup.score, putSetup.score);
+        const optionType= putSetup.score > callSetup.score ? "put" : "call";
+        if (bestScore < MIN_SCORE) continue;
+        const price     = bars[dayIdx].c;
+        const iv        = 0.25 + stock.ivr * 0.003;
+        const expDays   = stock.expiryDays || 30;
+        const premium   = parseFloat((price * iv * Math.sqrt(expDays / 365) * 0.4 + 0.3).toFixed(2));
+        const contracts = Math.max(1, Math.floor((cash * 0.10) / (premium * 100)));
+        const cost      = parseFloat((premium * 100 * contracts).toFixed(2));
+        if (cost > cash - CAPITAL_FLOOR) continue;
+        cash -= cost;
+        openPositions.push({ ticker: stock.ticker, optionType, premium, contracts, cost, iv, expDays, entryDay: dayIdx, score: bestScore });
+        if (openPositions.length >= 3) break;
+      }
+    }
+
+    // Close remaining positions at breakeven
+    for (const pos of openPositions) cash += pos.cost;
+    results.endCash     = cash;
+    results.peakCash    = peakCash;
+    results.maxDrawdown = parseFloat(results.maxDrawdown.toFixed(2));
+
+    const wins    = results.trades.filter(t => t.pnl > 0);
+    const losses  = results.trades.filter(t => t.pnl <= 0);
+    const grossW  = wins.reduce((s, t) => s + t.pnl, 0);
+    const grossL  = Math.abs(losses.reduce((s, t) => s + t.pnl, 0));
+
+    results.summary = {
+      totalTrades:  results.trades.length,
+      wins:         wins.length,
+      losses:       losses.length,
+      winRate:      results.trades.length ? parseFloat((wins.length / results.trades.length * 100).toFixed(1)) : 0,
+      totalPnL:     parseFloat((results.endCash - results.startCash).toFixed(2)),
+      totalReturn:  parseFloat(((results.endCash - results.startCash) / results.startCash * 100).toFixed(1)),
+      profitFactor: grossL > 0 ? parseFloat((grossW / grossL).toFixed(2)) : 0,
+      avgWin:       wins.length   ? parseFloat((grossW / wins.length).toFixed(2))   : 0,
+      avgLoss:      losses.length ? parseFloat((grossL / losses.length).toFixed(2)) : 0,
+      maxDrawdown:  results.maxDrawdown,
+      callTrades:   results.trades.filter(t => t.optionType === "call").length,
+      putTrades:    results.trades.filter(t => t.optionType === "put").length,
+      startDate:    results.startDate,
+      endDate:      results.endDate,
+      months,
+    };
+
+    logEvent("scan", `Backtest complete: ${results.summary.totalTrades} trades | ${results.summary.winRate}% WR | ${results.summary.totalReturn}% return | PF:${results.summary.profitFactor}`);
+    return results;
+
+  } catch(e) {
+    logEvent("error", `Backtest failed: ${e.message}`);
+    return { error: e.message, trades: [], summary: null };
+  }
+}
+
+app.get("/api/backtest", async (req, res) => {
+  const months = Math.min(parseInt(req.query.months || "6"), 12);
+  const results = await runBacktest(months);
+  res.json(results);
+});
+
 app.get("/api/attribution",  (req,res) => res.json({
   byTicker:     getPnLByTicker(),
   bySector:     getPnLBySector(),
