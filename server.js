@@ -590,8 +590,22 @@ async function getStockQuote(ticker) {
 
 // Get stock bars for volume and MA calculation
 async function getStockBars(ticker, limit = 60) {
-  const data = await alpacaGet(`/stocks/${ticker}/bars?timeframe=1Day&limit=${limit}`, ALPACA_DATA);
-  return data && data.bars ? data.bars : [];
+  try {
+    // For large requests use date range instead of limit to avoid API errors
+    let url;
+    if (limit > 60) {
+      const end   = new Date().toISOString().split("T")[0];
+      const start = new Date(Date.now() - limit * 1.5 * 86400000).toISOString().split("T")[0];
+      url = `/stocks/${ticker}/bars?timeframe=1Day&start=${start}&end=${end}&limit=${limit}&feed=iex`;
+    } else {
+      url = `/stocks/${ticker}/bars?timeframe=1Day&limit=${limit}&feed=iex`;
+    }
+    const data = await alpacaGet(url, ALPACA_DATA);
+    if (data && data.bars) return data.bars;
+    // Fallback without feed param
+    const fallback = await alpacaGet(`/stocks/${ticker}/bars?timeframe=1Day&limit=${Math.min(limit,100)}`, ALPACA_DATA);
+    return fallback && fallback.bars ? fallback.bars : [];
+  } catch(e) { return []; }
 }
 
 // Get VIX
