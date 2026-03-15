@@ -20,6 +20,9 @@ const ALPACA_DATA       = "https://data.alpaca.markets/v2";
 const GMAIL_USER        = process.env.GMAIL_USER        || "";
 const GMAIL_PASS        = process.env.GMAIL_APP_PASSWORD|| "";
 const STATE_FILE        = path.join(__dirname, "state.json");
+const REDIS_URL         = process.env.UPSTASH_REDIS_REST_URL  || "";
+const REDIS_TOKEN       = process.env.UPSTASH_REDIS_REST_TOKEN || "";
+const REDIS_KEY         = "apex:state";
 
 // - Trading Constants -
 const MONTHLY_BUDGET      = 10000;
@@ -127,16 +130,12 @@ const WATCHLIST = [
   { ticker:"SMCI",  sector:"Technology",  momentum:"recovering", rsi:45, macd:"neutral",           trend:"testing 50MA",       catalyst:"AI server infrastructure",       expiryDays:42,  ivr:60, beta:2.1, earningsDate:null },
 ];
 
-// - State -
-function loadState() {
-  try {
-    if (fs.existsSync(STATE_FILE))
-      return JSON.parse(fs.readFileSync(STATE_FILE, "utf8"));
-  } catch(e) { console.error("State load error:", e.message); }
+// - Default State -
+function defaultState() {
   return {
     cash:             MONTHLY_BUDGET,
     extraBudget:      0,
-    customBudget:     0,   // set by dashboard - persists across restarts
+    customBudget:     0,
     totalRevenue:     0,
     positions:        [],
     stockPositions:   [],
@@ -162,19 +161,66 @@ function loadState() {
   };
 }
 
-function saveState() {
-  try { fs.writeFileSync(STATE_FILE, JSON.stringify(state, null, 2)); }
-  catch(e) { console.error("State save error:", e.message); }
+// - Redis Helpers -
+async function redisSave(data) {
+  if (!REDIS_URL || !REDIS_TOKEN) {
+    // Fallback to file if Redis not configured
+    try { fs.writeFileSync(STATE_FILE, JSON.stringify(data, null, 2)); } catch(e) {}
+    return;
+  }
+  try {
+    await fetch(`${REDIS_URL}/set/${REDIS_KEY}`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${REDIS_TOKEN}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ value: JSON.stringify(data) })
+    });
+  } catch(e) { console.error("Redis save error:", e.message); }
 }
 
-let state = loadState();
+async function redisLoad() {
+  if (!REDIS_URL || !REDIS_TOKEN) {
+    // Fallback to file
+    try {
+      if (fs.existsSync(STATE_FILE)) return JSON.parse(fs.readFileSync(STATE_FILE, "utf8"));
+    } catch(e) {}
+    return null;
+  }
+  try {
+    const res  = await fetch(`${REDIS_URL}/get/${REDIS_KEY}`, {
+      headers: { Authorization: `Bearer ${REDIS_TOKEN}` }
+    });
+    const data = await res.json();
+    if (data && data.result) return JSON.parse(data.result);
+  } catch(e) { console.error("Redis load error:", e.message); }
+  return null;
+}
+
+// saveState is now async - writes to Redis
+async function saveState() {
+  await redisSave(state);
+}
+
+// State initialized async on startup
+let state = defaultState();
+async function initState() {
+  const saved = await redisLoad();
+  if (saved) {
+    state = { ...defaultState(), ...saved };
+    console.log("State loaded from Redis | cash:", state.cash, "| positions:", state.positions.length);
+  } else {
+    console.log("No saved state found - starting fresh");
+  }
+  // Apply custom budget if set
+  if (state.customBudget && state.customBudget > 0) {
+    state.cash = state.customBudget;
+  }
+}
 
 function logEvent(type, message) {
   const entry = { time: new Date().toISOString(), type, message };
   state.tradeLog.unshift(entry);
   if (state.tradeLog.length > 500) state.tradeLog = state.tradeLog.slice(0, 500);
   console.log(`[${type.toUpperCase()}] ${message}`);
-  saveState();
 }
 
 // - Helpers -
@@ -519,7 +565,7 @@ async function rebalanceCashETF() {
     state.cashETFValue   = parseFloat((state.cashETFShares * bilPrice).toFixed(2));
     state.cashETFPrice   = bilPrice;
     logEvent("etf", `BIL rebalance - bought ${sharesToBuy} shares @ $${bilPrice.toFixed(2)} | ETF floor: ${fmt(state.cashETFValue)} | liquid: ${fmt(state.cash)}`);
-    saveState();
+    await saveState();
 
   } else if (diff < 0 && currentShares > 0) {
     // Sell excess BIL back to cash
@@ -530,7 +576,7 @@ async function rebalanceCashETF() {
     state.cashETFShares  = currentShares - sharesToSell;
     state.cashETFValue   = parseFloat((state.cashETFShares * bilPrice).toFixed(2));
     logEvent("etf", `BIL rebalance - sold ${sharesToSell} shares | ETF floor: ${fmt(state.cashETFValue)} | liquid: ${fmt(state.cash)}`);
-    saveState();
+    await saveState();
   }
 }
 
@@ -546,7 +592,7 @@ async function ensureLiquidCash(needed) {
   state.cashETFShares  = (state.cashETFShares || 0) - sharesToSell;
   state.cashETFValue   = parseFloat((state.cashETFShares * bilPrice).toFixed(2));
   logEvent("etf", `BIL liquidated ${fmt(proceeds)} to fund trade | liquid: ${fmt(state.cash)}`);
-  saveState();
+  await saveState();
 }
 
 // - Pre-market Analysis -
@@ -871,12 +917,12 @@ async function executeTrade(stock, price, score, scoreReasons, vix, optionType =
     `BUY ${t.ticker} $${t.strike}${typeLabel} exp ${t.expDate} | ${t.contracts}x @ $${t.premium} | ` +
     `cost ${fmt(t.cost)} | score ${score} | delta ${t.greeks.delta} | cash ${fmt(state.cash)} | heat ${(heatPct()*100).toFixed(0)}%`
   );
-  saveState();
+  await saveState();
   return true;
 }
 
 // - Close Position -
-function closePosition(ticker, reason, exitPremium = null) {
+async function closePosition(ticker, reason, exitPremium = null) {
   const idx = state.positions.findIndex(p => p.ticker === ticker);
   if (idx === -1) return;
   const pos  = state.positions[idx];
@@ -944,11 +990,11 @@ function closePosition(ticker, reason, exitPremium = null) {
     `${reason.toUpperCase()} ${ticker} | exit $${ep} | P&L ${pnl>=0?"+":""}${fmt(pnl)} (${pct}%) | ` +
     `cash ${fmt(state.cash)} | consec losses: ${state.consecutiveLosses}`
   );
-  saveState();
+  await saveState();
 }
 
 // - Partial Close -
-function partialClose(ticker) {
+async function partialClose(ticker) {
   const pos = state.positions.find(p => p.ticker === ticker);
   if (!pos || pos.partialClosed) return;
   pos.partialClosed = true;
@@ -960,7 +1006,7 @@ function partialClose(ticker) {
   state.monthlyProfit = parseFloat((state.monthlyProfit + pnl).toFixed(2));
   state.closedTrades.push({ ticker, pnl, pct:((pnl/(pos.cost*0.5))*100).toFixed(1), date:new Date().toLocaleDateString(), reason:"partial" });
   logEvent("partial", `PARTIAL ${ticker} - ${half}/${pos.contracts} @ +50% | +${fmt(pnl)} | cash ${fmt(state.cash)}`);
-  saveState();
+  await saveState();
 }
 
 // - Stock Portfolio Management -
@@ -996,7 +1042,7 @@ async function checkStockBuys() {
       buyDate:new Date().toLocaleDateString(),
     });
     logEvent("stock", `BUY STOCK ${stock.ticker} - ${shares} shares @ $${price} | cost ${fmt(cost)} | triggered by monthly profit ${fmt(state.monthlyProfit)}`);
-    saveState();
+    await saveState();
     break; // one stock buy per check
   }
 }
@@ -1012,7 +1058,7 @@ async function manageStockPositions() {
       state.stockPositions.splice(state.stockPositions.indexOf(pos), 1);
       state.stockTrades.push({ ticker:pos.ticker, pnl, date:new Date().toLocaleDateString(), reason:"stop" });
       logEvent("stock", `STOP LOSS STOCK ${pos.ticker} - sold ${pos.shares} shares @ $${price} | P&L ${fmt(pnl)}`);
-      saveState();
+      await saveState();
     }
   }
 }
@@ -1149,7 +1195,7 @@ async function runScan() {
     pos.price        = price;
     pos.currentPrice = curP;
     logEvent("scan", `${pos.ticker} | chg:${(chg*100).toFixed(1)}% | cur:$${curP} | peak:$${pos.peakPremium.toFixed(2)} | DTE:${dte} | HOLD`);
-    saveState();
+    await saveState();
   }
 
   // 2. New entries
@@ -1243,7 +1289,7 @@ async function runScan() {
   await checkStockBuys();
 
   state.lastScan = new Date().toISOString();
-  saveState();
+  await saveState();
   } catch(e) {
     logEvent("error", `runScan crashed: ${e.message}`);
   } finally {
@@ -1431,12 +1477,12 @@ setInterval(() => {
 
 // Morning reset + email 13:00 UTC = 9:00 AM EDT (UTC-4, DST in effect Mar-Nov)
 // Note: becomes 14:00 UTC = 9:00 AM EST in winter (Nov-Mar)
-cron.schedule("0 13 * * 1-5", () => {
+cron.schedule("0 13 * * 1-5", async () => {
   state.dayStartCash      = state.cash;
   state.todayTrades       = 0;
   state.consecutiveLosses = 0;
   state.circuitOpen       = true;
-  saveState();
+  await saveState();
   sendEmail("morning");
 });
 
@@ -1444,15 +1490,15 @@ cron.schedule("0 13 * * 1-5", () => {
 cron.schedule("5 20 * * 1-5", () => { sendEmail("eod"); });
 
 // Weekly reset Monday morning
-cron.schedule("0 13 * * 1", () => {
+cron.schedule("0 13 * * 1", async () => {
   state.weekStartCash     = state.cash;
   state.weeklyCircuitOpen = true;
-  saveState();
+  await saveState();
   logEvent("reset", "Weekly circuit breaker reset");
 });
 
 // Monthly report - runs every Monday, checks inside if it is the first Monday of the month
-cron.schedule("0 13 * * 1", () => {
+cron.schedule("0 13 * * 1", async () => {
   const et  = getETTime();
   const day = et.getDate();
   if (day > 7) return; // only first Monday of month
@@ -1460,7 +1506,7 @@ cron.schedule("0 13 * * 1", () => {
   logEvent("monthly", report);
   state.monthlyProfit = 0;
   state.monthStart    = new Date().toLocaleDateString();
-  saveState();
+  await saveState();
   if (GMAIL_USER && GMAIL_PASS) {
     mailer.sendMail({
       from:GMAIL_USER, to:GMAIL_USER,
@@ -1474,7 +1520,7 @@ cron.schedule("0 13 * * 1", () => {
 app.use(express.json());
 app.use(express.static(path.join(__dirname, "public")));
 
-app.get("/api/state", (req, res) => {
+app.get("/api/state", async (req, res) => {
   res.json({
     ...state,
     heatPct:       parseFloat((heatPct()*100).toFixed(1)),
@@ -1496,18 +1542,18 @@ app.post("/api/close/:tkr",  (req,res) => {
   res.json({ok:true});
 });
 // Reset circuit breakers without wiping everything else
-app.post("/api/reset-circuit", (req, res) => {
+app.post("/api/reset-circuit", async (req, res) => {
   state.circuitOpen       = true;
   state.weeklyCircuitOpen = true;
   state.consecutiveLosses = 0;
   state.dayStartCash      = state.cash + openRisk();
   state.weekStartCash     = state.cash + openRisk();
-  saveState();
+  await saveState();
   logEvent("reset", "Circuit breakers manually reset");
   res.json({ ok: true });
 });
 
-app.post("/api/reset-month", (req,res) => {
+app.post("/api/reset-month", async (req, res) => {
   state.cash=MONTHLY_BUDGET+state.extraBudget; state.todayTrades=0;
   state.monthStart=new Date().toLocaleDateString(); state.dayStartCash=state.cash;
   state.circuitOpen=true; state.weeklyCircuitOpen=true; state.monthlyProfit=0;
@@ -1567,7 +1613,7 @@ app.get("/api/drawdown",     (req,res) => {
     sizingReduction: isDrawdownRecovery() ? `${DRAWDOWN_SIZING_REDUCE*100}%` : "None",
   });
 });
-app.post("/api/set-budget", (req,res) => {
+app.post("/api/set-budget", async (req, res) => {
   const { budget } = req.body;
   const amount = parseFloat(budget);
   if (!amount || amount < 100 || amount > 1000000) { res.status(400).json({error:"Invalid budget"}); return; }
@@ -1578,16 +1624,21 @@ app.post("/api/set-budget", (req,res) => {
   state.weekStartCash  = state.cash;
   state.peakCash       = Math.max(state.peakCash || 0, state.cash);
   logEvent("reset", `Budget updated to ${fmt(amount)}`);
-  saveState();
+  await saveState();
   res.json({ok:true, cash:state.cash});
 });
 app.get("/health",           (req,res) => res.json({status:"ok",uptime:process.uptime(),vix:state.vix,positions:state.positions.length}));
 
-app.listen(PORT, () => {
-  console.log(`APEX v2.0 running on port ${PORT}`);
-  console.log(`Alpaca key: ${ALPACA_KEY?"SET -":"NOT SET"}`);
-  console.log(`Gmail:      ${GMAIL_USER||"NOT SET"}`);
-  console.log(`Budget:     $${MONTHLY_BUDGET} | Floor: $${CAPITAL_FLOOR}`);
-  console.log(`Scan:       every minute, 9AM-4PM ET Mon-Fri`);
-  console.log(`Entry window: 10AM-3:30PM ET`);
+// Boot sequence - load state from Redis then start server
+initState().then(() => {
+  app.listen(PORT, () => {
+    console.log(`APEX v2.0 running on port ${PORT}`);
+    console.log(`Alpaca key:  ${ALPACA_KEY?"SET":"NOT SET"}`);
+    console.log(`Gmail:       ${GMAIL_USER||"NOT SET"}`);
+    console.log(`Redis:       ${REDIS_URL?"SET":"NOT SET - using file fallback"}`);
+    console.log(`Budget:      $${state.cash} | Floor: $${CAPITAL_FLOOR}`);
+    console.log(`Positions:   ${state.positions.length} open`);
+    console.log(`Scan:        every 30 seconds, 9AM-4PM ET Mon-Fri`);
+    console.log(`Entry window: 10AM-3:30PM ET`);
+  });
 });
