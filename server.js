@@ -656,6 +656,124 @@ function checkVIXVelocity(currentVIX) {
   return false;
 }
 
+// - Pre-Market Gap Scanner -
+async function getPreMarketData(ticker) {
+  try {
+    // Get latest quote - pre-market activity shows in extended hours
+    const snap = await alpacaGet(`/stocks/${ticker}/snapshot`, ALPACA_DATA);
+    if (!snap) return null;
+    const prevClose   = snap.prevDailyBar  ? snap.prevDailyBar.c  : null;
+    const preMarket   = snap.minuteBar     ? snap.minuteBar.c     : null;
+    const dailyOpen   = snap.dailyBar      ? snap.dailyBar.o      : null;
+    if (!prevClose || !preMarket) return null;
+    const gapPct      = (preMarket - prevClose) / prevClose * 100;
+    return { prevClose, preMarket, gapPct: parseFloat(gapPct.toFixed(2)) };
+  } catch(e) { return null; }
+}
+
+// - Beta-Weighted Portfolio Delta -
+function calcBetaWeightedDelta() {
+  if (!state.positions || !state.positions.length) return 0;
+  const spyPrice = 500; // approximate - updated dynamically when available
+  let totalBWD   = 0;
+  for (const pos of state.positions) {
+    const delta    = parseFloat(pos.greeks?.delta || 0);
+    const beta     = pos.beta || 1;
+    const price    = pos.price || 100;
+    const contracts= pos.contracts || 1;
+    // Beta-weighted delta = delta * beta * (stock price / SPY price) * 100 * contracts
+    const bwd      = delta * beta * (price / spyPrice) * 100 * contracts;
+    totalBWD      += pos.optionType === "put" ? -bwd : bwd;
+  }
+  return parseFloat(totalBWD.toFixed(2));
+}
+
+// - Analyst Upgrades/Downgrades via Alpaca news -
+async function getAnalystActivity(ticker) {
+  try {
+    const data = await alpacaGet(`/news?symbols=${ticker}&limit=10`, ALPACA_DATA);
+    const articles = data && data.news ? data.news : [];
+    const upgrades   = [];
+    const downgrades = [];
+    const upgradeKW  = ["upgrade", "upgraded", "outperform", "overweight", "buy rating", "price target raised", "pt raised"];
+    const downgradeKW= ["downgrade", "downgraded", "underperform", "underweight", "sell rating", "price target cut", "pt cut", "pt lowered"];
+    for (const a of articles) {
+      const text = (a.headline + " " + (a.summary || "")).toLowerCase();
+      if (upgradeKW.some(k => text.includes(k)))   upgrades.push(a.headline);
+      if (downgradeKW.some(k => text.includes(k))) downgrades.push(a.headline);
+    }
+    return { upgrades, downgrades,
+      signal: upgrades.length > downgrades.length ? "bullish" : downgrades.length > upgrades.length ? "bearish" : "neutral",
+      modifier: (upgrades.length - downgrades.length) * 5
+    };
+  } catch(e) { return { upgrades: [], downgrades: [], signal: "neutral", modifier: 0 }; }
+}
+
+// - Short Interest (FINRA publishes bi-monthly, approximate via price action) -
+async function getShortInterestSignal(ticker, bars) {
+  // True short interest requires paid data feed
+  // Approximate squeeze potential from: price momentum + volume spike + RSI
+  try {
+    if (!bars || bars.length < 10) return { squeezeRisk: "low", modifier: 0 };
+    const recentVol  = bars.slice(-5).reduce((s, b) => s + b.v, 0) / 5;
+    const avgVol     = bars.slice(-20).reduce((s, b) => s + b.v, 0) / 20;
+    const volRatio   = avgVol > 0 ? recentVol / avgVol : 1;
+    const priceMove  = bars.length >= 5 ? (bars[bars.length-1].c - bars[bars.length-5].c) / bars[bars.length-5].c : 0;
+    // High volume + strong upward move = potential short squeeze
+    if (volRatio > 2.5 && priceMove > 0.05)  return { squeezeRisk: "high",   modifier: 15 };
+    if (volRatio > 1.5 && priceMove > 0.02)  return { squeezeRisk: "medium", modifier: 8  };
+    return { squeezeRisk: "low", modifier: 0 };
+  } catch(e) { return { squeezeRisk: "low", modifier: 0 }; }
+}
+
+// - Macro Calendar -
+const MACRO_EVENTS_2025 = [
+  // FOMC meetings 2025
+  { date: "2025-03-19", event: "FOMC Meeting", impact: "high",   type: "fed"       },
+  { date: "2025-05-07", event: "FOMC Meeting", impact: "high",   type: "fed"       },
+  { date: "2025-06-18", event: "FOMC Meeting", impact: "high",   type: "fed"       },
+  { date: "2025-07-30", event: "FOMC Meeting", impact: "high",   type: "fed"       },
+  { date: "2025-09-17", event: "FOMC Meeting", impact: "high",   type: "fed"       },
+  { date: "2025-11-05", event: "FOMC Meeting", impact: "high",   type: "fed"       },
+  { date: "2025-12-17", event: "FOMC Meeting", impact: "high",   type: "fed"       },
+  // FOMC 2026
+  { date: "2026-01-29", event: "FOMC Meeting", impact: "high",   type: "fed"       },
+  { date: "2026-03-18", event: "FOMC Meeting", impact: "high",   type: "fed"       },
+  { date: "2026-04-29", event: "FOMC Meeting", impact: "high",   type: "fed"       },
+  { date: "2026-06-17", event: "FOMC Meeting", impact: "high",   type: "fed"       },
+  { date: "2026-07-29", event: "FOMC Meeting", impact: "high",   type: "fed"       },
+  { date: "2026-09-16", event: "FOMC Meeting", impact: "high",   type: "fed"       },
+  { date: "2026-11-04", event: "FOMC Meeting", impact: "high",   type: "fed"       },
+  { date: "2026-12-16", event: "FOMC Meeting", impact: "high",   type: "fed"       },
+];
+
+function getUpcomingMacroEvents(daysAhead = 7) {
+  const today  = getETTime();
+  const events = [];
+  for (const ev of MACRO_EVENTS_2025) {
+    const evDate = new Date(ev.date);
+    const daysTo = Math.round((evDate - today) / 86400000);
+    if (daysTo >= 0 && daysTo <= daysAhead) {
+      events.push({ ...ev, daysTo });
+    }
+  }
+  return events;
+}
+
+function getMacroCalendarModifier() {
+  const events = getUpcomingMacroEvents(3);
+  if (!events.length) return { modifier: 0, events: [] };
+  const highImpact = events.filter(e => e.impact === "high");
+  // Within 3 days of FOMC - reduce position sizing, avoid new entries day-of
+  if (highImpact.length > 0) {
+    const soonest = highImpact.sort((a, b) => a.daysTo - b.daysTo)[0];
+    if (soonest.daysTo === 0) return { modifier: -25, events, message: `${soonest.event} TODAY — minimal new entries` };
+    if (soonest.daysTo <= 1) return { modifier: -15, events, message: `${soonest.event} tomorrow — reduced sizing` };
+    if (soonest.daysTo <= 3) return { modifier: -8,  events, message: `${soonest.event} in ${soonest.daysTo} days — caution` };
+  }
+  return { modifier: 0, events };
+}
+
 // - Macro News Scanner -
 const MACRO_BEARISH_KEYWORDS = [
   "fed rate hike", "rate hike", "hawkish", "tightening", "quantitative tightening",
@@ -1575,6 +1693,8 @@ let marketContext = {
   yieldCurve:     { signal: "normal" },
   putCallRatio:   { ratio: 1.0, signal: "neutral" },
   macro:          { signal: "neutral", scoreModifier: 0, mode: "normal", triggers: [], sectorBearish: [], sectorBullish: [], headlines: [] },
+  macroCalendar:  { modifier: 0, events: [], message: "" },
+  betaWeightedDelta: 0,
 };
 
 async function runScan() {
@@ -1610,7 +1730,14 @@ async function runScan() {
     // Rebalance BIL ETF
     await rebalanceCashETF();
     state.lastRebalance = now;
-    logEvent("scan", `[5min] Breadth:${breadth.breadthPct}% | Leading:${rotation.leading} | Lagging:${rotation.lagging}`);
+    // Update macro calendar and beta-weighted delta
+    const calMod = getMacroCalendarModifier();
+    marketContext.macroCalendar      = calMod;
+    marketContext.betaWeightedDelta  = calcBetaWeightedDelta();
+    if (calMod.events.length > 0) {
+      logEvent("macro", `Calendar: ${calMod.message || calMod.events.map(e => e.event + " in " + e.daysTo + "d").join(", ")}`);
+    }
+    logEvent("scan", `[5min] Breadth:${breadth.breadthPct}% | Leading:${rotation.leading} | BWD:${marketContext.betaWeightedDelta}`);
   }
 
   // -- SLOW TIER (every 15 minutes) --
@@ -1821,12 +1948,26 @@ async function runScan() {
     // Dynamic signals - calculated live from real price bars
     const signals = await getDynamicSignals(stock.ticker, bars);
 
-    // VWAP check - skip if price is below VWAP for calls (weak intraday trend)
+    // VWAP - skip calls if price below VWAP (weak intraday)
     const vwap = calcVWAP(bars.slice(-5));
-    const price60 = await getStockQuote(stock.ticker);
+    if (vwap > 0 && price < vwap * 0.99) {
+      logEvent("filter", `${stock.ticker} price $${price} below VWAP $${vwap} - weak intraday`);
+    }
+
+    // Pre-market gap check
+    const preMarket = await getPreMarketData(stock.ticker);
+    if (preMarket && Math.abs(preMarket.gapPct) > 3) {
+      logEvent("filter", `${stock.ticker} pre-market gap ${preMarket.gapPct > 0 ? "+" : ""}${preMarket.gapPct}%`);
+    }
+
+    // Analyst activity
+    const analystData = await getAnalystActivity(stock.ticker);
+
+    // Short interest / squeeze signal
+    const shortSignal = await getShortInterestSignal(stock.ticker, bars);
 
     // News sentiment
-    const newsArticles = await getNewsForTicker(stock.ticker);
+    const newsArticles  = await getNewsForTicker(stock.ticker);
     const newsSentiment = analyzeNews(newsArticles);
 
     // Merge live signals into stock object
@@ -1849,6 +1990,28 @@ async function runScan() {
 
     if (newsSentiment.signal !== "neutral") {
       logEvent("news", `${stock.ticker} news: ${newsSentiment.signal} | modifier: ${newsSentiment.modifier > 0 ? "+" : ""}${newsSentiment.modifier}`);
+    }
+
+    // Apply analyst modifier
+    if (analystData.modifier !== 0) {
+      callSetup.score = Math.min(100, Math.max(0, callSetup.score + analystData.modifier));
+      putSetup.score  = Math.min(100, Math.max(0, putSetup.score  - analystData.modifier));
+      if (analystData.signal !== "neutral") {
+        logEvent("news", `${stock.ticker} analyst: ${analystData.signal} | ${analystData.upgrades.length} upgrades / ${analystData.downgrades.length} downgrades`);
+      }
+    }
+
+    // Apply short squeeze signal
+    if (shortSignal.modifier > 0) {
+      callSetup.score = Math.min(100, Math.max(0, callSetup.score + shortSignal.modifier));
+      logEvent("filter", `${stock.ticker} squeeze potential: ${shortSignal.squeezeRisk} (+${shortSignal.modifier})`);
+    }
+
+    // Apply macro calendar modifier
+    const calMod = (marketContext.macroCalendar || {}).modifier || 0;
+    if (calMod !== 0) {
+      callSetup.score = Math.min(100, Math.max(0, callSetup.score + calMod));
+      putSetup.score  = Math.min(100, Math.max(0, putSetup.score  + calMod));
     }
 
     // Apply macro modifier - boosts or suppresses all entries based on current events
@@ -2163,10 +2326,13 @@ app.get("/api/state", async (req, res) => {
     realizedPnL:   parseFloat(realizedPnL().toFixed(2)),
     totalCap:      totalCap(),
     stockValue:    parseFloat(stockValue().toFixed(2)),
-    isMarketHours: isMarketHours(),
-    isEntryWindow: isEntryWindow(),
-    lastUpdated:   new Date().toISOString(),
-    uptime:        process.uptime(),
+    isMarketHours:      isMarketHours(),
+    isEntryWindow:      isEntryWindow(),
+    lastUpdated:        new Date().toISOString(),
+    uptime:             process.uptime(),
+    betaWeightedDelta:  calcBetaWeightedDelta(),
+    macroCalendar:      marketContext.macroCalendar,
+    upcomingEvents:     getUpcomingMacroEvents(7),
   });
 });
 
