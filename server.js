@@ -3277,6 +3277,7 @@ async function runSimTick(scenario, simPrices, tick) {
       simState.positions.push({
         ticker: stock.ticker, sector: stock.sector, optionType: optType,
         premium, contracts: contr, cost, iv, expiryDays: 30,
+        strike,
         expDate: new Date(Date.now() + 30 * 86400000).toLocaleDateString(),
         peakPremium: premium, partialClosed: false,
         openDate: new Date().toISOString(), score: best,
