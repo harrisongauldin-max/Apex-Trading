@@ -2965,35 +2965,40 @@ app.get("/api/test-options/:ticker", async (req, res) => {
 
   const params = `?underlying_symbol=${ticker}&expiration_date_gte=${minExpiry}&expiration_date_lte=${maxExpiry}&strike_price_gte=${strikeLow}&strike_price_lte=${strikeHigh}&type=call&limit=5`;
 
-  // Try all possible endpoint paths
-  const paths = [
+  // Try all possible base URL + path combinations
+  const bases = [
+    "https://data.alpaca.markets/v2",
+    "https://data.alpaca.markets/v1beta1",
+    "https://data.alpaca.markets",
+    "https://paper-api.alpaca.markets/v2",
+    "https://api.alpaca.markets/v2",
+  ];
+  const pathSuffixes = [
     `/options/contracts${params}`,
-    `/v1beta1/options/contracts${params}`,
     `/v2/options/contracts${params}`,
   ];
 
   const results = {};
-  for (const path of paths) {
-    const data = await alpacaGet(path, ALPACA_DATA);
-    results[path] = data;
-    if (data && data.option_contracts && data.option_contracts.length > 0) {
-      // Found working endpoint — test snapshot too
-      const sym      = data.option_contracts[0].symbol;
-      const snapPaths = [
-        `/options/snapshots?symbols=${sym}&feed=indicative`,
-        `/v1beta1/options/snapshots?symbols=${sym}&feed=indicative`,
-        `/options/snapshots?symbols=${sym}`,
-      ];
-      const snapResults = {};
-      for (const sp of snapPaths) {
-        snapResults[sp] = await alpacaGet(sp, ALPACA_DATA);
+  for (const base of bases) {
+    for (const path of pathSuffixes) {
+      const key  = base + path;
+      try {
+        const res2 = await withTimeout(fetch(key, { headers: alpacaHeaders() }), 5000);
+        const text = await res2.text();
+        let parsed;
+        try { parsed = JSON.parse(text); } catch(e) { parsed = { raw: text.slice(0, 100) }; }
+        results[key] = { status: res2.status, data: parsed };
+        if (parsed && parsed.option_contracts && parsed.option_contracts.length > 0) {
+          return res.json({
+            workingBase: base,
+            workingPath: path,
+            contractsFound: parsed.option_contracts.length,
+            firstContract:  parsed.option_contracts[0],
+          });
+        }
+      } catch(e) {
+        results[base + path] = { error: e.message };
       }
-      return res.json({
-        workingContractsPath: path,
-        contractsFound: data.option_contracts.length,
-        firstContract:  data.option_contracts[0],
-        snapshotTests:  snapResults,
-      });
     }
   }
   return res.json({ error: "No working endpoint found", results });
