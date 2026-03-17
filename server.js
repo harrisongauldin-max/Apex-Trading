@@ -554,6 +554,23 @@ const alpacaHeaders = () => ({
   "Content-Type":        "application/json",
 });
 
+// Rate limit tracker
+let apiCallsThisMinute = 0;
+let apiWindowStart     = Date.now();
+
+function trackAPICall() {
+  const now = Date.now();
+  if (now - apiWindowStart > 60000) {
+    apiCallsThisMinute = 0;
+    apiWindowStart     = now;
+  }
+  apiCallsThisMinute++;
+  // Warn at 150, pause briefly at 180
+  if (apiCallsThisMinute === 150) logEvent("warn", "Approaching API rate limit (150/min)");
+  if (apiCallsThisMinute >= 180) return false; // signal to slow down
+  return true;
+}
+
 // Timeout wrapper — kills hung API calls after 5 seconds
 function withTimeout(promise, ms = 5000) {
   return Promise.race([
@@ -564,8 +581,17 @@ function withTimeout(promise, ms = 5000) {
 
 async function alpacaGet(endpoint, base = ALPACA_BASE) {
   try {
-    const res = await withTimeout(fetch(`${base}${endpoint}`, { headers: alpacaHeaders() }));
-    return await res.json();
+    trackAPICall();
+    const res  = await withTimeout(fetch(`${base}${endpoint}`, { headers: alpacaHeaders() }));
+    const text = await res.text();
+    if (text.startsWith("<")) {
+      // HTML response = rate limit or auth error
+      if (res.status === 429) { logEvent("warn", `Rate limit hit: ${endpoint} — slowing down`); await new Promise(r => setTimeout(r, 2000)); }
+      else if (res.status === 401 || res.status === 403) { logEvent("error", `Auth error ${res.status} on ${endpoint} — check API keys`); }
+      else { logEvent("warn", `API returned HTML on ${endpoint} (status ${res.status}) — skipping`); }
+      return null;
+    }
+    return JSON.parse(text);
   } catch(e) { logEvent("error", `alpacaGet(${endpoint}): ${e.message}`); return null; }
 }
 
@@ -2423,7 +2449,12 @@ async function runScan() {
     if (anomaly.anomaly) { logEvent("filter", `${stock.ticker} price anomaly: ${anomaly.reason} - skip`); continue; }
 
     // Dynamic signals - calculated live from real price bars
+    if (bars.length < 10) {
+      logEvent("filter", `${stock.ticker} insufficient bars (${bars.length}) for dynamic signals - skip`);
+      continue;
+    }
     const signals = await getDynamicSignals(stock.ticker, bars);
+    logEvent("filter", `${stock.ticker} signals | RSI:${signals.rsi} MACD:${signals.macd} MOM:${signals.momentum} IVR:${signals.ivr} bars:${bars.length}`);
 
     // Earnings quality score
     const eqScore = await getEarningsQualityScore(stock.ticker, bars);
@@ -2559,7 +2590,7 @@ async function runScan() {
 
     logEvent("filter", `${stock.ticker} best setup: ${optionType.toUpperCase()} score ${bestScore} | RSI:${signals.rsi} MACD:${signals.macd} MOM:${signals.momentum}`);
     scored.push({ stock: liveStock, price, score: bestScore, reasons: bestReasons, optionType });
-    await new Promise(r=>setTimeout(r,200));
+    await new Promise(r=>setTimeout(r,400));
   }
 
   // Sort by score
@@ -3206,6 +3237,11 @@ async function runSimTick(scenario, simPrices, tick) {
     pos.price        = price;
     if (curP > pos.peakPremium) pos.peakPremium = curP;
 
+    // Verbose logging every 5 ticks to debug pricing
+    if (tick % 5 === 0) {
+      simLogEvent("scan", `  ${pos.ticker} | stock:$${price.toFixed(0)} strike:$${pos.strike} ITM:$${intrinsic.toFixed(0)} | prem:$${curP} entry:$${pos.premium} chg:${(chg*100).toFixed(1)}%`);
+    }
+
     let exitReason = null;
 
     // Update trailing stop — activates at +30%, trails 15% below peak
@@ -3228,6 +3264,10 @@ async function runSimTick(scenario, simPrices, tick) {
       simState.cash += pos.cost + pnl;
       simState.positions.splice(simState.positions.indexOf(pos), 1);
       simState.closedTrades.push({ ticker: pos.ticker, pnl, pct: chg * 100, reason: exitReason, date: new Date().toISOString() });
+      // Record cooldown on stops to prevent immediate re-entry
+      if (exitReason === "stop" || exitReason === "fast-stop") {
+        simState.recentStops[pos.ticker] = tick;
+      }
       simLogEvent("trade", `CLOSE ${pos.ticker} ${pos.optionType?.toUpperCase()} | ${exitReason} | ${pnl >= 0 ? "+" : ""}$${pnl.toFixed(2)} (${(chg*100).toFixed(1)}%)`);
     }
   }
@@ -3251,6 +3291,9 @@ async function runSimTick(scenario, simPrices, tick) {
     for (const stock of WATCHLIST.slice(0, 8)) {
       if (simState.positions.find(p => p.ticker === stock.ticker)) continue;
       if (simState.positions.length >= 4) break;
+      // 10 tick cooldown after a stop on this ticker
+      const lastStop = (simState.recentStops || {})[stock.ticker];
+      if (lastStop && tick - lastStop < 10) continue;
       const price    = simPrices[stock.ticker];
       if (!price) continue;
       const simStock = { ...stock, rsi: scenarioRSI + (Math.random() - 0.5) * 10, macd: scenarioMACD };
@@ -3304,7 +3347,7 @@ function startSimulation(scenario = "normal", speed = "normal") {
   if (simRunning) return { error: "Simulation already running" };
   simRunning = true;
   simLog     = [];
-  simState   = { cash: MONTHLY_BUDGET, positions: [], closedTrades: [], vix: 18, circuitOpen: true, weeklyCircuitOpen: true, consecutiveLosses: 0, dayStartCash: MONTHLY_BUDGET };
+  simState   = { cash: MONTHLY_BUDGET, positions: [], closedTrades: [], vix: 18, circuitOpen: true, weeklyCircuitOpen: true, consecutiveLosses: 0, dayStartCash: MONTHLY_BUDGET, recentStops: {} };
 
   const simPrices = {};
   for (const stock of WATCHLIST) simPrices[stock.ticker] = SIM_BASE_PRICES[stock.ticker] || 100;
