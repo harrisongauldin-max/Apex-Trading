@@ -17,7 +17,8 @@ const ALPACA_KEY        = process.env.ALPACA_API_KEY    || "";
 const ALPACA_SECRET     = process.env.ALPACA_SECRET_KEY || "";
 const ALPACA_BASE       = "https://paper-api.alpaca.markets/v2";
 const ALPACA_DATA       = "https://data.alpaca.markets/v2";
-const ALPACA_OPTIONS    = "https://paper-api.alpaca.markets/v2";  // confirmed working for options contracts
+const ALPACA_OPTIONS    = "https://paper-api.alpaca.markets/v2";    // confirmed: options contracts
+const ALPACA_OPT_SNAP   = "https://data.alpaca.markets/v1beta1";    // confirmed: options snapshots/greeks
 const GMAIL_USER        = process.env.GMAIL_USER        || "";
 const GMAIL_PASS        = process.env.GMAIL_APP_PASSWORD|| "";
 const STATE_FILE        = path.join(__dirname, "state.json");
@@ -1413,31 +1414,11 @@ async function getRealOptionsContract(ticker, price, optionType, score, vix, ear
 
     // Get snapshots for the contracts to get real greeks + IV + quotes
     const symbols   = data.option_contracts.slice(0, 20).map(c => c.symbol).join(",");
-    // Try paper API first for snapshots, fall back to data API
-    let snapData = await alpacaGet(`/options/snapshots?symbols=${symbols}&feed=indicative`, ALPACA_OPTIONS);
-    if (!snapData || !snapData.snapshots || Object.keys(snapData.snapshots).length === 0) {
-      snapData = await alpacaGet(`/options/snapshots?symbols=${symbols}&feed=indicative`, ALPACA_DATA);
-    }
-    if (!snapData || !snapData.snapshots || Object.keys(snapData.snapshots).length === 0) {
-      snapData = await alpacaGet(`/options/snapshots?symbols=${symbols}`, ALPACA_OPTIONS);
-    }
+    // Use confirmed working snapshot endpoint
+    const snapData  = await alpacaGet(`/options/snapshots?symbols=${symbols}&feed=indicative`, ALPACA_OPT_SNAP);
     const snapshots = snapData && snapData.snapshots ? snapData.snapshots : {};
 
-    logEvent("scan", `${ticker} options chain: ${data.option_contracts.length} contracts | ${Object.keys(snapshots).length} snapshots`);
-
-    // Log first snapshot structure to debug field names
-    if (Object.keys(snapshots).length > 0) {
-      const firstKey  = Object.keys(snapshots)[0];
-      const firstSnap = snapshots[firstKey];
-      logEvent("scan", `${ticker} snapshot sample fields: ${Object.keys(firstSnap).join(", ")}`);
-      if (firstSnap.greeks) logEvent("scan", `${ticker} greeks fields: ${Object.keys(firstSnap.greeks).join(", ")}`);
-      if (firstSnap.latestQuote) logEvent("scan", `${ticker} quote fields: ${Object.keys(firstSnap.latestQuote).join(", ")}`);
-    } else {
-      // Try alternate snapshot endpoint
-      logEvent("warn", `${ticker} no snapshots returned - trying alternate endpoint`);
-      const altSnap = await alpacaGet(`/options/snapshots?underlying_symbols=${ticker}&feed=indicative&limit=20`, ALPACA_DATA);
-      logEvent("scan", `${ticker} alt snapshot response: ${JSON.stringify(altSnap).slice(0, 200)}`);
-    }
+    logEvent("scan", `${ticker} options chain: ${data.option_contracts.length} contracts | ${Object.keys(snapshots).length} snapshots with greeks`);
 
     // Score each contract — find best delta match in 0.28-0.42 range
     let best       = null;
@@ -1449,17 +1430,18 @@ async function getRealOptionsContract(ticker, price, optionType, score, vix, ear
       if (!snap) { skipped++; continue; }
 
       // Handle both v1 and v2 Alpaca options snapshot field names
-      const greeks = snap.greeks || snap.Greeks || {};
-      const quote  = snap.latestQuote || snap.latest_quote || snap.quote || {};
+      // Confirmed field structure from Alpaca v1beta1 snapshots
+      const greeks = snap.greeks || {};
+      const quote  = snap.latestQuote || {};
       const day    = snap.dailyBar || snap.day || {};
 
-      const delta  = Math.abs(parseFloat(greeks.delta || greeks.Delta || 0));
-      const iv     = parseFloat(greeks.implied_volatility || greeks.impliedVolatility || greeks.iv || 0.3);
-      const bid    = parseFloat(quote.bp || quote.bid_price || quote.b || 0);
-      const ask    = parseFloat(quote.ap || quote.ask_price || quote.a || 0);
+      const delta  = Math.abs(parseFloat(greeks.delta || 0));
+      const iv     = parseFloat(snap.impliedVolatility || greeks.impliedVolatility || 0.3);
+      const bid    = parseFloat(quote.bp || 0);
+      const ask    = parseFloat(quote.ap || 0);
       const mid    = bid > 0 && ask > 0 ? (bid + ask) / 2 : 0;
       const spread = ask > 0 ? (ask - bid) / ask : 1;
-      const oi     = parseInt(snap.openInterest || snap.open_interest || snap.oi || 0);
+      const oi     = parseInt(snap.openInterest || quote.as || 0); // use ask size as OI proxy if needed
       const vol    = parseInt(day.v || day.volume || 0);
 
       // Skip illiquid
@@ -1483,10 +1465,10 @@ async function getRealOptionsContract(ticker, price, optionType, score, vix, ear
           premium: parseFloat(mid.toFixed(2)),
           bid, ask, spread,
           greeks: {
-            delta: parseFloat(greeks.delta || greeks.Delta || 0).toFixed(3),
-            theta: parseFloat(greeks.theta || greeks.Theta || 0).toFixed(3),
-            gamma: parseFloat(greeks.gamma || greeks.Gamma || 0).toFixed(4),
-            vega:  parseFloat(greeks.vega  || greeks.Vega  || 0).toFixed(3),
+            delta: parseFloat(greeks.delta || 0).toFixed(3),
+            theta: parseFloat(greeks.theta || 0).toFixed(3),
+            gamma: parseFloat(greeks.gamma || 0).toFixed(4),
+            vega:  parseFloat(greeks.vega  || 0).toFixed(3),
           },
           iv, oi, vol, optionType,
         };
@@ -1509,10 +1491,7 @@ async function getRealOptionsContract(ticker, price, optionType, score, vix, ear
 // Get current market price of an options contract
 async function getOptionsPrice(symbol) {
   try {
-    let data = await alpacaGet(`/options/snapshots?symbols=${symbol}&feed=indicative`, ALPACA_OPTIONS);
-    if (!data || !data.snapshots) {
-      data = await alpacaGet(`/options/snapshots?symbols=${symbol}`, ALPACA_OPTIONS);
-    }
+    const data = await alpacaGet(`/options/snapshots?symbols=${symbol}&feed=indicative`, ALPACA_OPT_SNAP);
     if (!data || !data.snapshots || !data.snapshots[symbol]) return null;
     const snap  = data.snapshots[symbol];
     const quote = snap.latestQuote || snap.latest_quote || snap.quote || {};
