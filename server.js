@@ -4037,6 +4037,35 @@ app.get("/api/backtest", async (req, res) => {
   res.json(results);
 });
 
+// Test historical bars access
+app.get("/api/test-bars/:ticker", async (req, res) => {
+  const ticker = req.params.ticker.toUpperCase();
+  const months = parseInt(req.query.months || "3");
+  const limit  = months * 22;
+  const end    = new Date().toISOString().split("T")[0];
+  const start  = new Date(Date.now() - limit * 1.6 * 86400000).toISOString().split("T")[0];
+
+  const results = {};
+  const tests = [
+    { name: "sip_feed",    url: `/stocks/${ticker}/bars?timeframe=1Day&start=${start}&end=${end}&limit=${limit}&feed=sip` },
+    { name: "iex_feed",    url: `/stocks/${ticker}/bars?timeframe=1Day&start=${start}&end=${end}&limit=${limit}&feed=iex` },
+    { name: "no_feed",     url: `/stocks/${ticker}/bars?timeframe=1Day&start=${start}&end=${end}&limit=${limit}` },
+    { name: "simple",      url: `/stocks/${ticker}/bars?timeframe=1Day&limit=10` },
+  ];
+
+  for (const test of tests) {
+    const data = await alpacaGet(test.url, ALPACA_DATA);
+    results[test.name] = {
+      barsReturned: data?.bars?.length || 0,
+      firstBar:     data?.bars?.[0] || null,
+      lastBar:      data?.bars?.[data?.bars?.length-1] || null,
+      error:        data?.message || null,
+    };
+  }
+
+  res.json({ ticker, start, end, limit, results });
+});
+
 app.get("/api/attribution",  (req,res) => res.json({
   byTicker:     getPnLByTicker(),
   bySector:     getPnLBySector(),
