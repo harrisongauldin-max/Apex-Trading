@@ -2584,14 +2584,16 @@ async function runScan() {
   const spyBars   = await getStockBars("SPY", 5);
   const spyReturn = spyBars.length >= 5 ? (spyBars[spyBars.length-1].c - spyBars[0].o) / spyBars[0].o : 0;
 
-  // Gap detection - check SPY for market-wide gap
+  // Gap detection - large gap down = put opportunity, gap up = call opportunity
+  let marketGapDirection = null;
   if (spyBars.length >= 2) {
     const todayOpen = spyBars[spyBars.length-1].o;
     const prevClose = spyBars[spyBars.length-2].c;
-    const gapPct    = Math.abs(todayOpen - prevClose) / prevClose;
-    if (gapPct > MAX_GAP_PCT) {
-      logEvent("filter", `Market gap detected (${(gapPct*100).toFixed(1)}%) - skipping new entries today`);
-      return;
+    const gapPct    = (todayOpen - prevClose) / prevClose;
+    if (Math.abs(gapPct) > MAX_GAP_PCT) {
+      marketGapDirection = gapPct < 0 ? "down" : "up";
+      logEvent("filter", `Market gap ${marketGapDirection} ${(Math.abs(gapPct)*100).toFixed(1)}% — blocking calls, allowing puts only`);
+      // Don't return — allow puts to be evaluated on gap down days
     }
   }
 
@@ -2599,6 +2601,9 @@ async function runScan() {
   const scored = [];
   for (const stock of WATCHLIST) {
     if (state.positions.find(p=>p.ticker===stock.ticker)) continue;
+    // On gap down days, only evaluate puts
+    // On gap up days, only evaluate calls
+    // This is applied after scoring so we still collect all signals
 
     // Fetch price FIRST before running filters
     const price = await getStockQuote(stock.ticker);
@@ -2792,8 +2797,11 @@ async function runScan() {
     // Apply macro calendar modifier
     const calMod = (marketContext.macroCalendar || {}).modifier || 0;
     if (calMod !== 0) {
+      // FOMC/macro calendar reduces calls but puts can still fire on event days
+      // Market weakness on FOMC day = valid put opportunity
       callSetup.score = Math.min(100, Math.max(0, callSetup.score + calMod));
-      putSetup.score  = Math.min(100, Math.max(0, putSetup.score  + calMod));
+      // Only apply half the penalty to puts on macro event days
+      putSetup.score  = Math.min(100, Math.max(0, putSetup.score  + Math.round(calMod / 2)));
     }
 
     // Apply global market signal modifier
@@ -2838,8 +2846,14 @@ async function runScan() {
       continue;
     }
 
-    const bestScore = Math.max(callSetup.score, putSetup.score);
-    const optionType = putSetup.score > callSetup.score ? "put" : "call";
+    // Apply gap direction constraint
+    let callScore = callSetup.score;
+    let putScore  = putSetup.score;
+    if (marketGapDirection === "down") callScore = 0; // gap down = puts only
+    if (marketGapDirection === "up")   putScore  = 0; // gap up = calls only
+
+    const bestScore = Math.max(callScore, putScore);
+    const optionType = putScore > callScore ? "put" : "call";
     const bestReasons = optionType === "put" ? putSetup.reasons : callSetup.reasons;
 
     const effectiveMinScore = ddProtocol.minScore || MIN_SCORE;
