@@ -2950,6 +2950,40 @@ app.post("/api/emergency-close", async (req, res) => {
   res.json({ ok: true, closed: count });
 });
 
+// Test options chain endpoint — verify Pro data access
+app.get("/api/test-options/:ticker", async (req, res) => {
+  const ticker = req.params.ticker.toUpperCase();
+  const price  = await getStockQuote(ticker);
+  if (!price) return res.json({ error: "Could not get stock price" });
+
+  // Test raw options contracts endpoint
+  const today      = getETTime();
+  const minExpiry  = new Date(today.getTime() + 7  * 86400000).toISOString().split("T")[0];
+  const maxExpiry  = new Date(today.getTime() + 60 * 86400000).toISOString().split("T")[0];
+  const strikeLow  = (price * 0.95).toFixed(0);
+  const strikeHigh = (price * 1.05).toFixed(0);
+
+  const contractsUrl = `/options/contracts?underlying_symbol=${ticker}&expiration_date_gte=${minExpiry}&expiration_date_lte=${maxExpiry}&strike_price_gte=${strikeLow}&strike_price_lte=${strikeHigh}&type=call&limit=5`;
+  const contracts    = await alpacaGet(contractsUrl, ALPACA_DATA);
+
+  if (!contracts || !contracts.option_contracts || !contracts.option_contracts.length) {
+    return res.json({ error: "No contracts returned", raw: contracts, url: contractsUrl });
+  }
+
+  // Test snapshot on first contract
+  const sym      = contracts.option_contracts[0].symbol;
+  const snapData = await alpacaGet(`/options/snapshots?symbols=${sym}&feed=indicative`, ALPACA_DATA);
+
+  res.json({
+    ticker, price,
+    contractsFound: contracts.option_contracts.length,
+    firstContract:  contracts.option_contracts[0],
+    snapshot:       snapData,
+    hasGreeks:      !!(snapData?.snapshots?.[sym]?.greeks),
+    hasQuote:       !!(snapData?.snapshots?.[sym]?.latestQuote),
+  });
+});
+
 // Health check endpoint
 app.get("/api/health", (req, res) => {
   const lastScan = state.lastScan ? new Date(state.lastScan) : null;
