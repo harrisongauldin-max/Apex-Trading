@@ -617,20 +617,19 @@ async function getStockQuote(ticker) {
 // Get stock bars for volume and MA calculation
 async function getStockBars(ticker, limit = 60) {
   try {
-    // For large requests use date range instead of limit to avoid API errors
-    let url;
-    if (limit > 60) {
-      const end   = new Date().toISOString().split("T")[0];
-      const start = new Date(Date.now() - limit * 1.5 * 86400000).toISOString().split("T")[0];
-      url = `/stocks/${ticker}/bars?timeframe=1Day&start=${start}&end=${end}&limit=${limit}&feed=iex`;
-    } else {
-      url = `/stocks/${ticker}/bars?timeframe=1Day&limit=${limit}&feed=iex`;
+    // Always use date range — more reliable than limit param across all Alpaca tiers
+    const end   = new Date().toISOString().split("T")[0];
+    const start = new Date(Date.now() - Math.ceil(limit * 1.6) * 86400000).toISOString().split("T")[0];
+    // Try SIP feed first (Pro tier), fall back to IEX (free tier)
+    const feeds = ["sip", "iex"];
+    for (const feed of feeds) {
+      const url  = `/stocks/${ticker}/bars?timeframe=1Day&start=${start}&end=${end}&limit=${limit}&feed=${feed}`;
+      const data = await alpacaGet(url, ALPACA_DATA);
+      if (data && data.bars && data.bars.length > 1) return data.bars;
     }
-    const data = await alpacaGet(url, ALPACA_DATA);
-    if (data && data.bars) return data.bars;
-    // Fallback without feed param
-    const fallback = await alpacaGet(`/stocks/${ticker}/bars?timeframe=1Day&limit=${Math.min(limit,100)}`, ALPACA_DATA);
-    return fallback && fallback.bars ? fallback.bars : [];
+    // Last resort — no feed param
+    const last = await alpacaGet(`/stocks/${ticker}/bars?timeframe=1Day&start=${start}&end=${end}&limit=${limit}`, ALPACA_DATA);
+    return last && last.bars ? last.bars : [];
   } catch(e) { return []; }
 }
 
@@ -1088,10 +1087,17 @@ function checkConcentrationRisk() {
 
 // ── Drawdown Recovery Protocol ────────────────────────────────────────────
 function getDrawdownProtocol() {
+  const trades    = state.closedTrades || [];
   const peak      = state.peakCash || MONTHLY_BUDGET;
   const current   = state.cash + (state.positions || []).reduce((s, p) => s + p.cost, 0);
   const drawdown  = (current - peak) / peak * 100;
   const losses    = state.consecutiveLosses || 0;
+
+  // Only trigger drawdown protocol if we have actual trade history
+  // Prevents false triggers on fresh accounts or after restarts
+  if (trades.length < 3 && losses === 0) {
+    return { level: "normal", sizeMultiplier: 1.0, message: "Normal operations.", minScore: MIN_SCORE };
+  }
 
   if (drawdown <= -20 || losses >= 5) {
     return { level: "critical", sizeMultiplier: 0.25, message: "CRITICAL - 25% position sizing. Calls only on A+ setups (85+).", minScore: 85 };
