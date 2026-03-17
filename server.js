@@ -17,7 +17,7 @@ const ALPACA_KEY        = process.env.ALPACA_API_KEY    || "";
 const ALPACA_SECRET     = process.env.ALPACA_SECRET_KEY || "";
 const ALPACA_BASE       = "https://paper-api.alpaca.markets/v2";
 const ALPACA_DATA       = "https://data.alpaca.markets/v2";
-const ALPACA_OPTIONS    = "https://paper-api.alpaca.markets/v2";  // options contracts live on trading API
+const ALPACA_OPTIONS    = "https://paper-api.alpaca.markets/v2";  // confirmed working for options contracts
 const GMAIL_USER        = process.env.GMAIL_USER        || "";
 const GMAIL_PASS        = process.env.GMAIL_APP_PASSWORD|| "";
 const STATE_FILE        = path.join(__dirname, "state.json");
@@ -1413,7 +1413,14 @@ async function getRealOptionsContract(ticker, price, optionType, score, vix, ear
 
     // Get snapshots for the contracts to get real greeks + IV + quotes
     const symbols   = data.option_contracts.slice(0, 20).map(c => c.symbol).join(",");
-    const snapData  = await alpacaGet(`/options/snapshots?symbols=${symbols}&feed=indicative`, ALPACA_DATA);
+    // Try paper API first for snapshots, fall back to data API
+    let snapData = await alpacaGet(`/options/snapshots?symbols=${symbols}&feed=indicative`, ALPACA_OPTIONS);
+    if (!snapData || !snapData.snapshots || Object.keys(snapData.snapshots).length === 0) {
+      snapData = await alpacaGet(`/options/snapshots?symbols=${symbols}&feed=indicative`, ALPACA_DATA);
+    }
+    if (!snapData || !snapData.snapshots || Object.keys(snapData.snapshots).length === 0) {
+      snapData = await alpacaGet(`/options/snapshots?symbols=${symbols}`, ALPACA_OPTIONS);
+    }
     const snapshots = snapData && snapData.snapshots ? snapData.snapshots : {};
 
     logEvent("scan", `${ticker} options chain: ${data.option_contracts.length} contracts | ${Object.keys(snapshots).length} snapshots`);
@@ -1502,7 +1509,10 @@ async function getRealOptionsContract(ticker, price, optionType, score, vix, ear
 // Get current market price of an options contract
 async function getOptionsPrice(symbol) {
   try {
-    const data = await alpacaGet(`/options/snapshots?symbols=${symbol}&feed=indicative`, ALPACA_DATA);
+    let data = await alpacaGet(`/options/snapshots?symbols=${symbol}&feed=indicative`, ALPACA_OPTIONS);
+    if (!data || !data.snapshots) {
+      data = await alpacaGet(`/options/snapshots?symbols=${symbol}`, ALPACA_OPTIONS);
+    }
     if (!data || !data.snapshots || !data.snapshots[symbol]) return null;
     const snap  = data.snapshots[symbol];
     const quote = snap.latestQuote || snap.latest_quote || snap.quote || {};
@@ -2990,11 +3000,18 @@ app.get("/api/test-options/:ticker", async (req, res) => {
         try { parsed = JSON.parse(text); } catch(e) { parsed = { raw: text.slice(0, 100) }; }
         results[key] = { status: res2.status, data: parsed };
         if (parsed && parsed.option_contracts && parsed.option_contracts.length > 0) {
+          const sym  = parsed.option_contracts[0].symbol;
+          const sn1  = await alpacaGet(`/options/snapshots?symbols=${sym}&feed=indicative`, base);
+          const sn2  = await alpacaGet(`/options/snapshots?symbols=${sym}`, base);
+          const sn3  = await alpacaGet(`/options/snapshots?symbols=${sym}&feed=indicative`, "https://data.alpaca.markets/v2");
           return res.json({
-            workingBase: base,
-            workingPath: path,
-            contractsFound: parsed.option_contracts.length,
-            firstContract:  parsed.option_contracts[0],
+            workingBase:      base,
+            workingPath:      path,
+            contractsFound:   parsed.option_contracts.length,
+            firstContract:    parsed.option_contracts[0],
+            snap_paperWithFeed: sn1,
+            snap_paperNoFeed:   sn2,
+            snap_dataWithFeed:  sn3,
           });
         }
       } catch(e) {
