@@ -3879,24 +3879,37 @@ async function runBacktest(months = 6) {
 
   try {
     const limit   = months * 22;
+    // Always use date range for backtest — confirmed working with Pro tier
+    const end   = new Date().toISOString().split("T")[0];
+    const start = new Date(Date.now() - Math.ceil(limit * 1.6) * 86400000).toISOString().split("T")[0];
+
+    logEvent("scan", `Backtest fetching ${months} months (${limit} bars) from ${start} to ${end}`);
+
+    async function fetchBarsForBacktest(ticker) {
+      const data = await alpacaGet(
+        `/stocks/${ticker}/bars?timeframe=1Day&start=${start}&end=${end}&limit=${limit}&feed=sip`,
+        ALPACA_DATA
+      );
+      if (data && data.bars && data.bars.length > 1) return data.bars;
+      // Fallback to iex
+      const data2 = await alpacaGet(
+        `/stocks/${ticker}/bars?timeframe=1Day&start=${start}&end=${end}&limit=${limit}&feed=iex`,
+        ALPACA_DATA
+      );
+      return data2 && data2.bars ? data2.bars : [];
+    }
+
     const allBars = {};
     for (const stock of WATCHLIST) {
-      let bars = await getStockBars(stock.ticker, limit);
-      // Retry once with longer delay and smaller limit if empty
-      if (!bars.length) {
-        await new Promise(r => setTimeout(r, 2000));
-        bars = await getStockBars(stock.ticker, Math.min(limit, 60));
-      }
+      const bars = await fetchBarsForBacktest(stock.ticker);
       if (bars.length > 10) allBars[stock.ticker] = bars;
-      await new Promise(r => setTimeout(r, 500)); // longer rate limit buffer
+      logEvent("scan", `Backtest bars: ${stock.ticker} → ${bars.length} bars`);
+      await new Promise(r => setTimeout(r, 300));
     }
-    await new Promise(r => setTimeout(r, 1000));
-    let spyBars = await getStockBars("SPY", limit);
-    if (!spyBars.length) {
-      await new Promise(r => setTimeout(r, 2000));
-      spyBars = await getStockBars("SPY", Math.min(limit, 60));
-    }
-    if (!spyBars.length) throw new Error("Could not fetch SPY bars — check Alpaca subscription is active");
+
+    const spyBars = await fetchBarsForBacktest("SPY");
+    if (!spyBars.length) throw new Error("Could not fetch SPY bars");
+    logEvent("scan", `Backtest SPY bars: ${spyBars.length}`);
 
     const minLen = Math.min(...Object.values(allBars).map(b => b.length), spyBars.length);
     if (minLen < 20) throw new Error("Not enough historical data");
