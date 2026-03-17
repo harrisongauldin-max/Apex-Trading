@@ -51,7 +51,8 @@ const EARNINGS_SKIP_DAYS  = 5;
 const MIN_OPTIONS_VOLUME  = 10000;
 const MIN_OPEN_INTEREST   = 500;
 const MIN_STOCK_PRICE     = 20;
-const MAX_SPREAD_PCT      = 0.10;
+const MAX_SPREAD_PCT      = 0.10;  // max bid/ask spread as % of ask
+const EARLY_SPREAD_PCT    = 0.08;  // tighter spread required for early 9:45AM put entries
 const MAX_GAP_PCT         = 0.03;
 const TARGET_DELTA_MIN    = 0.28;
 const TARGET_DELTA_MAX    = 0.42;
@@ -455,7 +456,7 @@ function getTaxLog() {
     return {
       id:          i + 1,
       ticker:      t.ticker,
-      type:        "Call Option",
+      type:        openJ?.optionType === "put" ? "Put Option" : "Call Option",
       openDate:    openJ  ? new Date(openJ.time).toLocaleDateString()  : t.date,
       closeDate:   t.date,
       costBasis:   openJ  ? parseFloat((openJ.premium * 100 * (openJ.contracts||1)).toFixed(2)) : 0,
@@ -473,13 +474,36 @@ function getETTime(date) {
   return new Date(str);
 }
 
-function isEntryWindow() {
-  const et = getETTime();
-  const h = et.getHours(), m = et.getMinutes();
-  const day = et.getDay(); // 0=Sun, 6=Sat
-  if (day === 0 || day === 6) return false; // no weekends
-  return (h > ENTRY_START_HOUR || (h === ENTRY_START_HOUR && m >= 0)) &&
-         (h < ENTRY_END_HOUR   || (h === ENTRY_END_HOUR && m <= ENTRY_END_MIN));
+function isEntryWindow(optionType = null) {
+  const et  = getETTime();
+  const h   = et.getHours(), m = et.getMinutes();
+  const day = et.getDay();
+  if (day === 0 || day === 6) return false;
+
+  const minsSinceMidnight = h * 60 + m;
+  const marketClose       = 15 * 60 + 30; // 3:30 PM
+
+  // Puts can enter from 9:45 AM when conditions warrant (gap down, high VIX, sector weakness)
+  const putEarlyStart     = 9 * 60 + 45;  // 9:45 AM
+  const callStart         = 10 * 60;       // 10:00 AM
+
+  if (minsSinceMidnight > marketClose) return false; // after 3:30 PM always false
+
+  if (optionType === "put") {
+    // Allow puts from 9:45 AM but only when market shows weakness
+    const isEarlyWindow  = minsSinceMidnight >= putEarlyStart && minsSinceMidnight < callStart;
+    if (isEarlyWindow) {
+      const vix        = state.vix || 15;
+      const macro      = marketContext?.macroCalendar?.modifier || 0;
+      // Only allow early puts when VIX elevated OR macro event day
+      // Spread check happens at contract selection — MAX_SPREAD_PCT tightened to 8% for early window
+      return vix >= 25 || macro < 0;
+    }
+    return minsSinceMidnight >= callStart;
+  }
+
+  // Calls always wait for 10 AM
+  return minsSinceMidnight >= callStart;
 }
 
 function isDST(date) {
@@ -505,13 +529,15 @@ function erf(x) {
   return x >= 0 ? y : -y;
 }
 
-function calcGreeks(price, strike, daysToExpiry, iv) {
+function calcGreeks(price, strike, daysToExpiry, iv, optionType = "call") {
   const t   = Math.max(daysToExpiry, 1) / 365;
   const d1  = (Math.log(price/strike) + (0.05 + iv*iv/2)*t) / (iv*Math.sqrt(t));
   const nd1 = Math.exp(-d1*d1/2) / Math.sqrt(2*Math.PI);
   const Nd1 = 0.5*(1+erf(d1/Math.sqrt(2)));
+  // Put delta = Nd1 - 1 (negative), call delta = Nd1 (positive)
+  const rawDelta = optionType === "put" ? Nd1 - 1 : Nd1;
   return {
-    delta: parseFloat(Math.max(0.01, Math.min(0.99, Nd1)).toFixed(3)),
+    delta: parseFloat(Math.max(-0.99, Math.min(0.99, rawDelta)).toFixed(3)),
     gamma: parseFloat((nd1 / (price * iv * Math.sqrt(t))).toFixed(4)),
     vega:  parseFloat((price * nd1 * Math.sqrt(t) * 0.01).toFixed(2)),
     theta: parseFloat((-(price * nd1 * iv) / (2*Math.sqrt(t)) / 365).toFixed(2)),
@@ -657,13 +683,19 @@ async function alpacaGet(endpoint, base = ALPACA_BASE) {
   } catch(e) { logEvent("error", `alpacaGet(${endpoint}): ${e.message}`); return null; }
 }
 
-async function alpacaPost(endpoint, body) {
+async function alpacaPost(endpoint, body, method = "POST") {
   try {
-    const res = await fetch(`${ALPACA_BASE}${endpoint}`, {
-      method: "POST", headers: alpacaHeaders(), body: JSON.stringify(body),
-    });
-    return await res.json();
+    const opts = { method, headers: alpacaHeaders() };
+    if (body && Object.keys(body).length > 0) opts.body = JSON.stringify(body);
+    const res = await withTimeout(fetch(`${ALPACA_BASE}${endpoint}`, opts), 8000);
+    const text = await res.text();
+    if (!text || text.trim() === "") return { ok: true }; // DELETE returns empty
+    return JSON.parse(text);
   } catch(e) { logEvent("error", `alpacaPost(${endpoint}): ${e.message}`); return null; }
+}
+
+async function alpacaDelete(endpoint) {
+  return alpacaPost(endpoint, {}, "DELETE");
 }
 
 // Get latest stock quote
@@ -777,7 +809,7 @@ async function getPreMarketData(ticker) {
 // - Beta-Weighted Portfolio Delta -
 function calcBetaWeightedDelta() {
   if (!state.positions || !state.positions.length) return 0;
-  const spyPrice = 500; // approximate - updated dynamically when available
+  const spyPrice = (state.positions.find(p => p.ticker === "SPY")?.price) || 560; // use live SPY if held, else current approx
   let totalBWD   = 0;
   for (const pos of state.positions) {
     const delta    = parseFloat(pos.greeks?.delta || 0);
@@ -851,11 +883,13 @@ const MACRO_EVENTS_2025 = [
 ];
 
 function getUpcomingMacroEvents(daysAhead = 7) {
-  const today  = getETTime();
+  // Compare date strings to avoid timezone/time-of-day issues
+  const todayStr = getETTime().toISOString().split("T")[0]; // "2026-03-17"
+  const todayDate = new Date(todayStr);
   const events = [];
   for (const ev of MACRO_EVENTS_2025) {
     const evDate = new Date(ev.date);
-    const daysTo = Math.round((evDate - today) / 86400000);
+    const daysTo = Math.round((evDate - todayDate) / 86400000);
     if (daysTo >= 0 && daysTo <= daysAhead) {
       events.push({ ...ev, daysTo });
     }
@@ -1060,21 +1094,23 @@ function runStressTest() {
   return scenarios.map(scenario => {
     let portfolioImpact = 0;
     for (const pos of state.positions) {
-      const delta  = parseFloat(pos.greeks?.delta || 0.35);
+      // Use abs(delta) — direction is handled by mult separately
+      const delta  = Math.abs(parseFloat(pos.greeks?.delta || 0.35));
       const gamma  = parseFloat(pos.greeks?.gamma || 0.01);
       const vega   = parseFloat(pos.greeks?.vega  || 0.10);
       const price  = pos.price || 100;
       const contracts = pos.contracts || 1;
+      // Puts benefit from down moves, calls from up moves
       const mult   = pos.optionType === "put" ? -1 : 1;
 
       let impact = 0;
       if (scenario.move !== undefined) {
         const priceMove  = price * scenario.move;
-        // Delta + gamma approximation
+        // Delta + gamma approximation (delta always positive, mult handles direction)
         impact = (delta * mult * priceMove + 0.5 * gamma * priceMove * priceMove) * 100 * contracts;
       } else if (scenario.vixSpike !== undefined) {
-        // Vega impact from IV spike
-        impact = vega * scenario.vixSpike * 100 * contracts * mult;
+        // Vega benefits both calls and puts (IV spike increases option value)
+        impact = vega * scenario.vixSpike * 100 * contracts;
       }
       portfolioImpact += impact;
     }
@@ -1199,7 +1235,7 @@ async function checkTailRiskHedge() {
   const hasPutHedge = positions.some(p => p.ticker === "SPY" && p.optionType === "put");
 
   // Only hedge when VIX is low (cheap puts) and we have significant call exposure
-  if (vix < 18 && callValue > 2000 && !hasPutHedge && isEntryWindow()) {
+  if (vix < 18 && callValue > 2000 && !hasPutHedge && isEntryWindow("put")) {
     logEvent("risk", `Tail risk hedge triggered - VIX:${vix} call exposure:${fmt(callValue)} - adding SPY put hedge`);
     const spyPrice = await getStockQuote("SPY");
     if (spyPrice) {
@@ -1216,17 +1252,45 @@ async function checkScaleIns() {
     if (!pos.halfPosition || pos.partialClosed) continue;
     const hoursOpen = (Date.now() - new Date(pos.openDate).getTime()) / 3600000;
     if (hoursOpen < 24) continue;
-    const curPrice = await getStockQuote(pos.ticker);
-    if (!curPrice) continue;
-    const dte   = Math.max(1, Math.round((new Date(pos.expDate) - new Date()) / 86400000));
-    const curP  = parseFloat((curPrice * pos.iv * Math.sqrt(dte/365) * 0.4 + 0.1).toFixed(2));
-    const chg   = (curP - pos.premium) / pos.premium;
-    // If up 5%+ in first 24hrs, add second half
-    if (chg >= 0.05 && state.cash > CAPITAL_FLOOR + pos.cost) {
-      state.cash     -= pos.cost;
-      pos.contracts  += pos.contracts;
+
+    // Use real options price for scale-in decision
+    let curP = pos.currentPrice || pos.premium;
+    if (pos.contractSymbol) {
+      const realP = await getOptionsPrice(pos.contractSymbol);
+      if (realP) curP = realP;
+    }
+    const chg = (curP - pos.premium) / pos.premium;
+
+    // If up 5%+ after 24hrs, add second half at current market price
+    const addContracts = pos.contracts;
+    const addCost      = parseFloat((curP * 100 * addContracts).toFixed(2));
+
+    if (chg >= 0.05 && state.cash > CAPITAL_FLOOR + addCost) {
+      // Submit scale-in order to Alpaca
+      if (pos.contractSymbol && pos.ask > 0) {
+        try {
+          const scaleBody = {
+            symbol:        pos.contractSymbol,
+            qty:           addContracts,
+            side:          "buy",
+            type:          "limit",
+            time_in_force: "day",
+            limit_price:   parseFloat(pos.ask.toFixed(2)),
+          };
+          const scaleResp = await alpacaPost("/orders", scaleBody);
+          if (scaleResp && scaleResp.id) {
+            logEvent("trade", `Alpaca scale-in: ${scaleResp.id} | ${pos.contractSymbol} | +${addContracts}x`);
+          } else {
+            logEvent("warn", `Alpaca scale-in failed: ${JSON.stringify(scaleResp)?.slice(0,100)}`);
+          }
+        } catch(e) { logEvent("error", `Scale-in order error: ${e.message}`); }
+      }
+
+      state.cash       = parseFloat((state.cash - addCost).toFixed(2));
+      pos.contracts   += addContracts;
+      pos.cost         = parseFloat((pos.cost + addCost).toFixed(2));
       pos.halfPosition = false;
-      logEvent("trade", `SCALE IN ${pos.ticker} - up ${(chg*100).toFixed(1)}% - doubled to ${pos.contracts}x contracts`);
+      logEvent("trade", `SCALE IN ${pos.ticker} - up ${(chg*100).toFixed(1)}% - total ${pos.contracts}x contracts`);
       await saveStateNow();
     }
   }
@@ -1517,11 +1581,17 @@ async function getRealOptionsContract(ticker, price, optionType, score, vix, ear
 
       // Skip illiquid
       if (mid <= 0) continue;
-      if (spread > MAX_SPREAD_PCT) continue;
+      // Tighter spread requirement during early put window (9:45-10AM)
+      const etH = getETTime().getHours() + getETTime().getMinutes() / 60;
+      const isEarlyPutWindow = optionType === "put" && etH >= 9.75 && etH < 10.0;
+      const maxSpread = isEarlyPutWindow ? EARLY_SPREAD_PCT : MAX_SPREAD_PCT;
+      if (spread > maxSpread) continue;
       if (oi < MIN_OPEN_INTEREST) continue;
       if (delta < deltaMin || delta > deltaMax) continue;
 
-      const deltaScore    = 1 - Math.abs(delta - 0.35) / 0.35;
+      const deltaTarget   = (deltaMin + deltaMax) / 2; // midpoint of actual target range
+      const deltaRange    = (deltaMax - deltaMin) / 2;
+      const deltaScore    = Math.max(0, 1 - Math.abs(delta - deltaTarget) / deltaRange);
       const liquidScore   = Math.min(oi / 5000, 1);
       const contractScore = deltaScore * 0.6 + liquidScore * 0.4;
 
@@ -1547,7 +1617,9 @@ async function getRealOptionsContract(ticker, price, optionType, score, vix, ear
     }
 
     if (best) {
-      logEvent("scan", `${ticker} best contract: ${best.symbol} | $${best.premium} bid/ask $${best.bid}/$${best.ask} | delta:${best.greeks.delta} | OI:${best.oi} [REAL DATA]`);
+      const etH2 = getETTime().getHours() + getETTime().getMinutes() / 60;
+      const earlyTag = optionType === "put" && etH2 >= 9.75 && etH2 < 10.0 ? " [EARLY WINDOW]" : "";
+      logEvent("scan", `${ticker} best contract: ${best.symbol} | $${best.premium} bid/ask $${best.bid}/$${best.ask} | delta:${best.greeks.delta} | spread:${(best.spread*100).toFixed(1)}% | OI:${best.oi} [REAL DATA]${earlyTag}`);
     } else {
       logEvent("warn", `${ticker} no valid contract found (${data.option_contracts.length} contracts, ${skipped} missing snapshots)`);
     }
@@ -1602,7 +1674,7 @@ async function rebalanceCashETF() {
     const sharesToBuy = Math.floor(diff / bilPrice);
     if (sharesToBuy < 1) return;
     const cost = sharesToBuy * bilPrice;
-    state.cash          -= cost;
+    state.cash          = parseFloat((state.cash - cost).toFixed(2));
     state.cashETFShares  = currentShares + sharesToBuy;
     state.cashETFValue   = parseFloat((state.cashETFShares * bilPrice).toFixed(2));
     state.cashETFPrice   = bilPrice;
@@ -1614,7 +1686,7 @@ async function rebalanceCashETF() {
     const sharesToSell = Math.min(currentShares, Math.ceil(Math.abs(diff) / bilPrice));
     if (sharesToSell < 1) return;
     const proceeds = parseFloat((sharesToSell * bilPrice).toFixed(2));
-    state.cash          += proceeds;
+    state.cash          = parseFloat((state.cash + proceeds).toFixed(2));
     state.cashETFShares  = currentShares - sharesToSell;
     state.cashETFValue   = parseFloat((state.cashETFShares * bilPrice).toFixed(2));
     logEvent("etf", `BIL rebalance - sold ${sharesToSell} shares | ETF floor: ${fmt(state.cashETFValue)} | liquid: ${fmt(state.cash)}`);
@@ -1630,21 +1702,11 @@ async function ensureLiquidCash(needed) {
   const sharesToSell = Math.min(state.cashETFShares || 0, Math.ceil(shortfall / bilPrice));
   if (sharesToSell < 1) return;
   const proceeds = parseFloat((sharesToSell * bilPrice).toFixed(2));
-  state.cash          += proceeds;
+  state.cash          = parseFloat((state.cash + proceeds).toFixed(2));
   state.cashETFShares  = (state.cashETFShares || 0) - sharesToSell;
   state.cashETFValue   = parseFloat((state.cashETFShares * bilPrice).toFixed(2));
   logEvent("etf", `BIL liquidated ${fmt(proceeds)} to fund trade | liquid: ${fmt(state.cash)}`);
   await saveStateNow();
-}
-
-// - Pre-market Analysis -
-async function getPremarketData(ticker) {
-  try {
-    const data = await alpacaGet(`/stocks/${ticker}/quotes/latest`, ALPACA_DATA);
-    if (!data || !data.quote) return null;
-    const prePrice = parseFloat(data.quote.ap || data.quote.bp || 0);
-    return prePrice;
-  } catch(e) { return null; }
 }
 
 // - Sector ETF Confirmation -
@@ -1674,8 +1736,9 @@ async function checkSectorETF(stock) {
 async function checkAllFilters(stock, price) {
   const fails = [];
 
-  // 1. Entry window
-  if (!isEntryWindow()) return { pass:false, reason:"Outside entry window (10AM-3:30PM ET)" };
+  // 1. Entry window — optionType passed separately since it's determined after scoring
+  // During pre-scoring filter check, optionType may be null — default to checking both
+  if (!isEntryWindow(null)) return { pass:false, reason:"Outside entry window" };
 
   // 2. Circuit breakers
   if (!state.circuitOpen)       return { pass:false, reason:"Daily circuit breaker tripped" };
@@ -1943,7 +2006,7 @@ function buildCard(stock, price, contracts, iv, optionType = "call", score = 75,
   const t         = expDays / 365;
   const premium   = parseFloat((price * ivVal * Math.sqrt(t) * 0.4 + 0.3).toFixed(2));
   const cost      = parseFloat((premium * 100 * contracts).toFixed(2));
-  const greeks    = calcGreeks(price, strike, expDays, ivVal);
+  const greeks    = calcGreeks(price, strike, expDays, ivVal, optionType);
   const target    = parseFloat((premium*(1+TAKE_PROFIT_PCT)).toFixed(2));
   const stop      = parseFloat((premium*(1-STOP_LOSS_PCT)).toFixed(2));
   const breakeven = optionType === "put"
@@ -1971,7 +2034,7 @@ async function executeTrade(stock, price, score, scoreReasons, vix, optionType =
       : Math.round(price * (1 + otmPct) / 5) * 5;
     const t        = expDays / 365;
     const premium  = parseFloat((price * iv * Math.sqrt(t) * 0.4 + 0.3).toFixed(2));
-    const greeks   = calcGreeks(price, strike, expDays, iv);
+    const greeks   = calcGreeks(price, strike, expDays, iv, optionType);
     contract = { symbol: null, strike, expDate, expDays, expiryType,
       premium, bid: premium * 0.95, ask: premium * 1.05,
       greeks, iv, oi: 0, vol: 0, optionType };
@@ -2012,7 +2075,58 @@ async function executeTrade(stock, price, score, scoreReasons, vix, optionType =
     return false;
   }
 
-  state.cash = parseFloat((state.cash - cost).toFixed(2));
+  // Submit order to Alpaca paper trading
+  // Only submit if we have a real contract symbol (not an estimate)
+  let alpacaOrderId = null;
+  if (contract.symbol && contract.ask > 0) {
+    try {
+      const limitPrice = parseFloat(contract.ask.toFixed(2)); // number not string
+      const orderBody = {
+        symbol:        contract.symbol,
+        qty:           contracts,              // number not string
+        side:          "buy",
+        type:          "limit",
+        time_in_force: "day",
+        limit_price:   limitPrice,
+      };
+      const orderResp = await alpacaPost("/orders", orderBody);
+      if (orderResp && orderResp.id) {
+        alpacaOrderId = orderResp.id;
+        logEvent("trade", `Alpaca order submitted: ${orderResp.id} | ${contract.symbol} | ${contracts}x @ $${limitPrice}`);
+        // Use actual fill price if immediately filled — recalculate cost/target/stop
+        if (orderResp.filled_avg_price && parseFloat(orderResp.filled_avg_price) > 0) {
+          contract.premium = parseFloat(parseFloat(orderResp.filled_avg_price).toFixed(2));
+        }
+      } else {
+        logEvent("warn", `Alpaca order failed for ${contract.symbol}: ${JSON.stringify(orderResp)?.slice(0, 150)}`);
+      }
+    } catch(e) {
+      logEvent("error", `Alpaca order submission error: ${e.message}`);
+    }
+  }
+
+  // Recalculate cost/target/stop using final premium (may have been updated by fill)
+  const finalCost     = parseFloat((contract.premium * 100 * contracts).toFixed(2));
+  const finalTarget   = parseFloat((contract.premium * (1 + TAKE_PROFIT_PCT)).toFixed(2));
+  const finalStop     = parseFloat((contract.premium * (1 - STOP_LOSS_PCT)).toFixed(2));
+  const finalBreakeven = optionType === "put"
+    ? parseFloat((contract.strike - contract.premium).toFixed(2))
+    : parseFloat((contract.strike + contract.premium).toFixed(2));
+
+  // Re-check cash with final cost (fill might be slightly different from ask)
+  if (finalCost > state.cash - CAPITAL_FLOOR) {
+    logEvent("skip", `${stock.ticker} - insufficient cash after fill price adjustment`);
+    // Cancel the Alpaca order if we submitted one
+    if (alpacaOrderId) {
+      try {
+        await alpacaDelete(`/orders/${alpacaOrderId}`);
+        logEvent("trade", `Alpaca order ${alpacaOrderId} cancelled - insufficient cash`);
+      } catch(e) { logEvent("error", `Failed to cancel order ${alpacaOrderId}: ${e.message}`); }
+    }
+    return false;
+  }
+
+  state.cash = parseFloat((state.cash - finalCost).toFixed(2));
   state.todayTrades++;
 
   const position = {
@@ -2021,10 +2135,12 @@ async function executeTrade(stock, price, score, scoreReasons, vix, optionType =
     strike:         contract.strike,
     premium:        contract.premium,
     contracts,
-    cost,
     expDate:        contract.expDate,
     expiryDays:     contract.expDays,
-    target, stop, breakeven,
+    target:         finalTarget,
+    stop:           finalStop,
+    breakeven:      finalBreakeven,
+    cost:           finalCost,
     partialClosed:  false,
     openDate:       new Date().toISOString(),
     ivr:            stock.ivr,
@@ -2041,6 +2157,7 @@ async function executeTrade(stock, price, score, scoreReasons, vix, optionType =
     expiryType:      contract.expiryType,
     currentPrice:    contract.premium,
     contractSymbol:  contract.symbol,
+    alpacaOrderId:   alpacaOrderId,
     bid:             contract.bid,
     ask:             contract.ask,
     realData:        !!contract.symbol,
@@ -2063,7 +2180,8 @@ async function executeTrade(stock, price, score, scoreReasons, vix, optionType =
     expDate:   contract.expDate,
     premium:   contract.premium,
     contracts,
-    cost,
+    cost:      finalCost,
+    alpacaOrderId,
     score,
     scoreReasons,
     delta:     contract.greeks.delta,
@@ -2079,7 +2197,7 @@ async function executeTrade(stock, price, score, scoreReasons, vix, optionType =
   await saveStateNow(); // critical — persist trade immediately
   logEvent("trade",
     `BUY ${stock.ticker} $${contract.strike}${typeLabel} exp ${contract.expDate} | ${contracts}x @ $${contract.premium} | ` +
-    `cost ${fmt(cost)} | score ${score} | delta ${contract.greeks.delta} | [${dataLabel}] | cash ${fmt(state.cash)} | heat ${(heatPct()*100).toFixed(0)}%`
+    `cost ${fmt(finalCost)} | score ${score} | delta ${contract.greeks.delta} | [${dataLabel}] | cash ${fmt(state.cash)} | heat ${(heatPct()*100).toFixed(0)}%`
   );
   return true;
 }
@@ -2091,20 +2209,76 @@ async function closePosition(ticker, reason, exitPremium = null) {
   const pos  = state.positions[idx];
   const mult = pos.partialClosed ? 0.5 : 1.0;
 
-  const g    = exitPremium !== null ? (exitPremium - pos.premium) / pos.premium
-             : reason === "stop"        ? -(0.30 + Math.random()*0.08)
-             : reason === "fast-stop"   ? -(0.18 + Math.random()*0.05)
-             : reason === "target"      ? (0.62  + Math.random()*0.06)
-             : reason === "trail"       ? (0.28  + Math.random()*0.08)
-             : reason === "expiry-roll" ? (0.15  + Math.random()*0.10)
-             : (Math.random()*0.4-0.08);
-
-  const ep   = parseFloat((pos.premium*(1+g)).toFixed(2));
+  // Use real exit price in order of priority:
+  // 1. Explicitly passed exitPremium
+  // 2. Real-time options price from Alpaca
+  // 3. Tracked currentPrice from last scan
+  // 4. Estimated based on reason (last resort)
+  let ep;
+  if (exitPremium !== null) {
+    ep = exitPremium;
+  } else {
+    // Try real-time price first
+    if (pos.contractSymbol) {
+      const realP = await getOptionsPrice(pos.contractSymbol);
+      if (realP) ep = realP;
+    }
+    // Fall back to last tracked price
+    if (!ep && pos.currentPrice && pos.currentPrice > 0) {
+      ep = pos.currentPrice;
+    }
+    // Last resort — use fixed estimates based on reason (no random — deterministic P&L)
+    if (!ep) {
+      const g = reason === "stop"        ? -STOP_LOSS_PCT
+              : reason === "fast-stop"   ? -FAST_STOP_PCT
+              : reason === "target"      ? TAKE_PROFIT_PCT
+              : reason === "trail"       ? TRAIL_ACTIVATE_PCT
+              : reason === "expiry-roll" ? 0.15
+              : reason === "fast-target" ? FAST_PROFIT_PCT
+              : 0; // all other exits — use entry premium (breakeven)
+      ep = parseFloat((pos.premium * (1 + g)).toFixed(2));
+      logEvent("warn", `${pos.ticker} using estimated exit price (no real data available) | reason:${reason} | ep:$${ep}`);
+    }
+  }
+  ep = parseFloat(ep.toFixed(2));
   const ev   = parseFloat((ep*100*pos.contracts*mult).toFixed(2));
   const pnl  = parseFloat((ev - pos.cost*mult).toFixed(2));
   const pct  = ((pnl/(pos.cost*mult))*100).toFixed(1);
   const nr   = state.totalRevenue + (pnl > 0 ? pnl : 0);
   const bonus= state.totalRevenue < REVENUE_THRESHOLD && nr >= REVENUE_THRESHOLD;
+
+  // Submit close order to Alpaca if we have a contract symbol
+  // For partial closes (mult=0.5), sell half; for full closes (mult=1.0), sell all
+  // But minimum 1 contract — if only 1 contract, full close regardless
+  const contractsToSell = pos.contracts === 1 ? 1 : Math.max(1, Math.floor(pos.contracts * mult));
+  const closeQty = contractsToSell;
+  if (pos.contractSymbol && closeQty > 0) {
+    try {
+      // Use real bid if available, else use ep (mid) as limit
+      // Real bid from position tracking is more reliable than derived estimate
+      const bidPrice = parseFloat((pos.bid > 0 ? pos.bid : ep * 0.98).toFixed(2));
+      const closeBody = {
+        symbol:        pos.contractSymbol,
+        qty:           closeQty,           // number not string
+        side:          "sell",
+        type:          "limit",
+        time_in_force: "day",
+        limit_price:   bidPrice,
+      };
+      const closeResp = await alpacaPost("/orders", closeBody);
+      if (closeResp && closeResp.id) {
+        logEvent("trade", `Alpaca close order: ${closeResp.id} | ${pos.contractSymbol} | ${closeQty}x | reason:${reason}`);
+        // Use actual fill price if immediately available
+        if (closeResp.filled_avg_price && parseFloat(closeResp.filled_avg_price) > 0) {
+          ep = parseFloat(parseFloat(closeResp.filled_avg_price).toFixed(2));
+        }
+      } else {
+        logEvent("warn", `Alpaca close order failed for ${pos.contractSymbol}: ${JSON.stringify(closeResp)?.slice(0,150)}`);
+      }
+    } catch(e) {
+      logEvent("error", `Alpaca close order error: ${e.message}`);
+    }
+  }
 
   state.cash          = parseFloat((state.cash + ev + (bonus?BONUS_AMOUNT:0)).toFixed(2));
   state.extraBudget  += bonus ? BONUS_AMOUNT : 0;
@@ -2126,18 +2300,13 @@ async function closePosition(ticker, reason, exitPremium = null) {
   const dailyPnL  = portfolioValue - state.dayStartCash;
   const weeklyPnL = portfolioValue - state.weekStartCash;
 
-  // Daily max loss — 15% of DEPLOYED capital (not total portfolio)
-  // A $240 loss on $3k deployed shouldn't trip a $10k portfolio circuit
-  const deployedCapital = Math.max(openRisk(), totalCap() * 0.10); // at least 10% of total
+  // Daily max loss — 15% of deployed capital
+  const deployedCapital = Math.max(openRisk(), totalCap() * 0.10);
   if (dailyPnL / deployedCapital <= -0.15 && state.circuitOpen) {
     state.circuitOpen = false;
     logEvent("circuit", `DAILY MAX LOSS circuit - lost ${fmt(Math.abs(dailyPnL))} (${(dailyPnL/deployedCapital*100).toFixed(1)}% of deployed capital)`);
   }
-  // Weekly circuit — 25% of total capital
-  if (dailyPnL / totalCap() <= -0.15 && state.circuitOpen) {
-    state.circuitOpen = false;
-    logEvent("circuit", `DAILY circuit breaker - loss ${fmt(Math.abs(dailyPnL))}`);
-  }
+  // Weekly circuit — 25% of total capital using weeklyPnL
   if (weeklyPnL / totalCap() <= -WEEKLY_DD_LIMIT && state.weeklyCircuitOpen) {
     state.weeklyCircuitOpen = false;
     logEvent("circuit", `WEEKLY circuit breaker - loss ${fmt(Math.abs(weeklyPnL))} (${(WEEKLY_DD_LIMIT*100)}% limit)`);
@@ -2170,14 +2339,47 @@ async function partialClose(ticker) {
   const pos = state.positions.find(p => p.ticker === ticker);
   if (!pos || pos.partialClosed) return;
   pos.partialClosed = true;
-  const ep   = parseFloat((pos.premium * 1.5).toFixed(2));
+  // Use real options price if available, otherwise use current tracked price
+  let ep = pos.currentPrice || pos.premium * 1.5;
+  if (pos.contractSymbol) {
+    const realP = await getOptionsPrice(pos.contractSymbol);
+    if (realP) ep = realP;
+  }
+  ep = parseFloat(ep.toFixed(2));
   const half = Math.max(1, Math.floor(pos.contracts / 2));
+
+  // Submit partial close order to Alpaca
+  if (pos.contractSymbol && half > 0) {
+    try {
+      const bidPrice = parseFloat((pos.bid > 0 ? pos.bid : ep * 0.98).toFixed(2));
+      const partialBody = {
+        symbol:        pos.contractSymbol,
+        qty:           half,
+        side:          "sell",
+        type:          "limit",
+        time_in_force: "day",
+        limit_price:   bidPrice,
+      };
+      const partialResp = await alpacaPost("/orders", partialBody);
+      if (partialResp && partialResp.id) {
+        logEvent("partial", `Alpaca partial close: ${partialResp.id} | ${pos.contractSymbol} | ${half}x`);
+        if (partialResp.filled_avg_price && parseFloat(partialResp.filled_avg_price) > 0) {
+          ep = parseFloat(parseFloat(partialResp.filled_avg_price).toFixed(2));
+        }
+      } else {
+        logEvent("warn", `Alpaca partial close failed for ${pos.contractSymbol}: ${JSON.stringify(partialResp)?.slice(0,100)}`);
+      }
+    } catch(e) {
+      logEvent("error", `Alpaca partial close error: ${e.message}`);
+    }
+  }
+
   const ev   = parseFloat((ep * 100 * half).toFixed(2));
   const pnl  = parseFloat(((ep - pos.premium) * 100 * half).toFixed(2));
   state.cash = parseFloat((state.cash + ev).toFixed(2));
   state.monthlyProfit = parseFloat((state.monthlyProfit + pnl).toFixed(2));
   state.closedTrades.push({ ticker, pnl, pct:((pnl/(pos.cost*0.5))*100).toFixed(1), date:new Date().toLocaleDateString(), reason:"partial" });
-  logEvent("partial", `PARTIAL ${ticker} - ${half}/${pos.contracts} @ +50% | +${fmt(pnl)} | cash ${fmt(state.cash)}`);
+  logEvent("partial", `PARTIAL ${ticker} - ${half}/${pos.contracts} @ $${ep} | +${fmt(pnl)} | cash ${fmt(state.cash)}`);
   await saveStateNow();
 }
 
@@ -2268,8 +2470,8 @@ async function runScan() {
   if (scanRunning) { logEvent("scan", "Scan skipped — previous scan still running"); return; }
   scanRunning = true;
   try {
-  if (!ALPACA_KEY) { logEvent("warn", "No ALPACA_API_KEY set - check Railway variables"); return; }
-  if (!isMarketHours()) { logEvent("scan", "Outside market hours - skipping trade logic"); return; }
+  if (!ALPACA_KEY) { logEvent("warn", "No ALPACA_API_KEY set - check Railway variables"); scanRunning = false; return; }
+  if (!isMarketHours()) { logEvent("scan", "Outside market hours - skipping trade logic"); scanRunning = false; return; }
 
   const now = Date.now();
 
@@ -2346,7 +2548,7 @@ async function runScan() {
     logEvent("scan", `[5min] Regime:${regime.regime}(${regime.confidence}%) | Kelly:${marketContext.kelly.contracts}x | Global:${marketContext.globalMarket.signal} | Streak:${marketContext.streaks.currentStreak}x${marketContext.streaks.currentType}`);
   }
 
-  logEvent("scan", `Checkpoint: entering new entries loop | entryWindow:${isEntryWindow()} | circuit:${state.circuitOpen} | cash:${fmt(state.cash)} | losses:${state.consecutiveLosses}`);
+
 
   // -- SLOW TIER (every 15 minutes) --
   if (now - lastSlowScan > 15 * 60 * 1000) {
@@ -2400,8 +2602,16 @@ async function runScan() {
     // Use real options price if we have a contract symbol, else estimate
     let curP;
     if (pos.contractSymbol) {
-      const realPrice = await getOptionsPrice(pos.contractSymbol);
-      curP = realPrice ? parseFloat(realPrice.toFixed(2)) : parseFloat((price * pos.iv * Math.sqrt(t) * 0.4 + 0.1).toFixed(2));
+      const snapData = await alpacaGet(`/options/snapshots?symbols=${pos.contractSymbol}&feed=indicative`, ALPACA_OPT_SNAP);
+      const snap     = snapData?.snapshots?.[pos.contractSymbol];
+      const quote    = snap?.latestQuote || {};
+      const bid      = parseFloat(quote.bp || 0);
+      const ask      = parseFloat(quote.ap || 0);
+      const realPrice = bid > 0 && ask > 0 ? parseFloat(((bid + ask) / 2).toFixed(2)) : null;
+      // Update live bid/ask on position for close order accuracy
+      if (bid > 0) pos.bid = bid;
+      if (ask > 0) pos.ask = ask;
+      curP = realPrice ? realPrice : parseFloat((price * pos.iv * Math.sqrt(t) * 0.4 + 0.1).toFixed(2));
       if (realPrice) pos.realData = true;
     } else {
       curP = parseFloat((price * pos.iv * Math.sqrt(t) * 0.4 + 0.1).toFixed(2));
@@ -2416,13 +2626,13 @@ async function runScan() {
     // Fast stop - -20% in first 48 hours
     if (hoursOpen <= FAST_STOP_HOURS && chg <= -FAST_STOP_PCT) {
       logEvent("scan", `${pos.ticker} fast stop - down ${(chg*100).toFixed(0)}% in ${hoursOpen.toFixed(0)}hrs`);
-      closePosition(pos.ticker, "fast-stop"); continue;
+      await closePosition(pos.ticker, "fast-stop"); continue;
     }
 
     // Profit target acceleration - if +40% in first 48hrs, take it now
     if (hoursOpen <= FAST_PROFIT_HOURS && chg >= FAST_PROFIT_PCT && !pos.partialClosed) {
       logEvent("scan", `${pos.ticker} ACCELERATED PROFIT - +${(chg*100).toFixed(0)}% in ${hoursOpen.toFixed(0)}hrs - taking gains early`);
-      closePosition(pos.ticker, "fast-target"); continue;
+      await closePosition(pos.ticker, "fast-target"); continue;
     }
 
     // Update peak cash for drawdown tracking
@@ -2432,7 +2642,7 @@ async function runScan() {
     // Hard stop loss
     if (chg <= -STOP_LOSS_PCT) {
       logEvent("scan", `${pos.ticker} stop loss - down ${(chg*100).toFixed(0)}%`);
-      closePosition(pos.ticker, "stop"); continue;
+      await closePosition(pos.ticker, "stop"); continue;
     }
 
     // Trailing stop with signal decay tightening
@@ -2444,7 +2654,12 @@ async function runScan() {
       // Re-score current conditions vs entry conditions
       const currentRSI      = pos.entryRSI || 55;
       const entryMomentum   = pos.entryMomentum || "steady";
-      const liveRSI         = signals ? signals.rsi : currentRSI;
+      // Fetch current RSI for signal decay detection
+      let liveRSI = currentRSI;
+      try {
+        const posBars = await getStockBars(pos.ticker, 20);
+        if (posBars.length >= 15) liveRSI = calcRSI(posBars);
+      } catch(e) {}
 
       // If RSI has crossed from bullish zone to bearish zone since entry, tighten trail
       if (pos.optionType === "call" && liveRSI < 45 && currentRSI >= 50) {
@@ -2475,31 +2690,31 @@ async function runScan() {
     // Partial close at +50%
     if (!pos.partialClosed && chg >= PARTIAL_CLOSE_PCT) {
       logEvent("scan", `${pos.ticker} partial close at +50%`);
-      partialClose(pos.ticker);
+      await partialClose(pos.ticker);
     }
 
     // Let remainder ride to +100% after partial
     if (pos.partialClosed && chg >= RIDE_TARGET_PCT) {
       logEvent("scan", `${pos.ticker} remainder hit +100% target`);
-      closePosition(pos.ticker, "target"); continue;
+      await closePosition(pos.ticker, "target"); continue;
     }
 
     // Full target (if no partial close)
     if (!pos.partialClosed && chg >= TAKE_PROFIT_PCT) {
       logEvent("scan", `${pos.ticker} take profit +${(chg*100).toFixed(0)}%`);
-      closePosition(pos.ticker, "target"); continue;
+      await closePosition(pos.ticker, "target"); continue;
     }
 
     // Time stop
     if (daysOpen >= TIME_STOP_DAYS && Math.abs(chg) < TIME_STOP_MOVE) {
       logEvent("scan", `${pos.ticker} time stop - ${daysOpen.toFixed(0)} days, only ${(chg*100).toFixed(1)}% move`);
-      closePosition(pos.ticker, "time-stop"); continue;
+      await closePosition(pos.ticker, "time-stop"); continue;
     }
 
     // 50MA break
     if (price < pos.strike / 1.035 * (1-MA50_BUFFER)) {
       logEvent("scan", `${pos.ticker} broke 50MA - price $${price}`);
-      closePosition(pos.ticker, "50ma-break"); continue;
+      await closePosition(pos.ticker, "50ma-break"); continue;
     }
 
     // IV collapse
@@ -2575,8 +2790,10 @@ async function runScan() {
     markDirty(); // will be flushed at end of scan, not every tick
   }
 
-  // 2. New entries
-  if (!isEntryWindow()) return;
+  // 2. New entries — check if any entry type is valid
+  const callsAllowed = isEntryWindow("call");
+  const putsAllowed  = isEntryWindow("put");
+  if (!callsAllowed && !putsAllowed) return;
   if (state.circuitOpen === false || state.weeklyCircuitOpen === false) return;
   if (state.consecutiveLosses >= CONSEC_LOSS_LIMIT) return;
   if (state.cash <= CAPITAL_FLOOR) return;
@@ -2662,11 +2879,10 @@ async function runScan() {
 
     // Dynamic signals - calculated live from real price bars
     if (bars.length < 10) {
-      logEvent("filter", `${stock.ticker} insufficient bars (${bars.length}) for dynamic signals - skip`);
+      logEvent("filter", `${stock.ticker} insufficient bars (${bars.length}) - skip`);
       continue;
     }
     const signals = await getDynamicSignals(stock.ticker, bars);
-    logEvent("filter", `${stock.ticker} signals | RSI:${signals.rsi} MACD:${signals.macd} MOM:${signals.momentum} IVR:${signals.ivr} bars:${bars.length}`);
 
     // Earnings quality score
     const eqScore = await getEarningsQualityScore(stock.ticker, bars);
@@ -2842,20 +3058,25 @@ async function runScan() {
       putSetup.reasons.push(`Macro ${macro.signal}: ${macroPutMod > 0 ? "+" : ""}${macroPutMod}`);
     }
 
-    // In defensive mode - skip all call entries
-    if (macro.mode === "defensive" && optionType === "call") {
-      logEvent("filter", `${stock.ticker} - macro defensive mode - skipping calls`);
-      continue;
-    }
-
     // Apply gap direction constraint
     let callScore = callSetup.score;
     let putScore  = putSetup.score;
     if (marketGapDirection === "down") callScore = 0; // gap down = puts only
     if (marketGapDirection === "up")   putScore  = 0; // gap up = calls only
+    // Apply entry window constraint
+    if (!callsAllowed) callScore = 0;
+    if (!putsAllowed)  putScore  = 0;
+    // In defensive mode - zero out call scores
+    if (macro.mode === "defensive") callScore = 0;
 
     const bestScore = Math.max(callScore, putScore);
     const optionType = putScore > callScore ? "put" : "call";
+
+    // Skip if defensive and best setup is still a call
+    if (macro.mode === "defensive" && optionType === "call") {
+      logEvent("filter", `${stock.ticker} - macro defensive mode - skipping calls`);
+      continue;
+    }
     const bestReasons = optionType === "put" ? putSetup.reasons : callSetup.reasons;
 
     const effectiveMinScore = ddProtocol.minScore || MIN_SCORE;
@@ -3202,10 +3423,10 @@ app.get("/api/state", async (req, res) => {
 });
 
 app.post("/api/scan",        async (req,res) => { res.json({ok:true}); runScan(); });
-app.post("/api/close/:tkr",  (req,res) => {
+app.post("/api/close/:tkr",  async (req,res) => {
   const t = req.params.tkr.toUpperCase();
   if (!state.positions.find(p=>p.ticker===t)) { res.status(404).json({error:"No position"}); return; }
-  closePosition(t,"manual");
+  await closePosition(t,"manual");
   res.json({ok:true});
 });
 // Emergency close all positions
@@ -3355,8 +3576,10 @@ const EARNINGS_PLAY_MAX_IVR  = 45;  // only when options are still cheap
 const EARNINGS_PLAY_EXIT_DTE = 2;   // exit 2 days before earnings
 
 async function checkEarningsPlays() {
-  if (!isEntryWindow()) return;
+  // Straddle needs both legs — require full entry window (10AM+)
+  if (!isEntryWindow("call")) return;
   if (heatPct() >= MAX_HEAT * 0.8) return; // need room for straddle (2 positions)
+  if (!state.circuitOpen) return;
 
   for (const stock of WATCHLIST) {
     if (!stock.earningsDate) continue;
@@ -3372,28 +3595,24 @@ async function checkEarningsPlays() {
       continue;
     }
 
-    // Skip if already have a position in this ticker
+    // Skip if already have any position in this ticker
     if (state.positions.find(p => p.ticker === stock.ticker)) continue;
 
-    // Skip if not enough cash for both legs
+    // Ensure enough cash for both legs
+    if (state.cash <= CAPITAL_FLOOR * 1.5) continue;
+
     const price = await getStockQuote(stock.ticker);
     if (!price) continue;
 
     logEvent("scan", `${stock.ticker} EARNINGS PLAY detected - ${daysToEarnings} days to earnings | IVR:${stock.ivr}`);
 
-    // Enter call leg
-    const callContract = await getRealOptionsContract(stock.ticker, price, "call", 75, state.vix, null);
-    if (callContract) {
-      const callStock = { ...stock, earningsDate: null }; // clear earnings date so it doesn't extend expiry
-      await executeTrade(callStock, price, 75, [`Earnings play call - ${daysToEarnings}d to earnings`], state.vix, "call");
-    }
+    // Enter call leg — executeTrade handles contract selection internally
+    const callStock = { ...stock, earningsDate: null };
+    await executeTrade(callStock, price, 75, [`Earnings play call - ${daysToEarnings}d to earnings`], state.vix, "call");
 
     // Enter put leg
-    const putContract = await getRealOptionsContract(stock.ticker, price, "put", 75, state.vix, null);
-    if (putContract) {
-      const putStock = { ...stock, earningsDate: null };
-      await executeTrade(putStock, price, 75, [`Earnings play put - ${daysToEarnings}d to earnings`], state.vix, "put");
-    }
+    const putStock = { ...stock, earningsDate: null };
+    await executeTrade(putStock, price, 75, [`Earnings play put - ${daysToEarnings}d to earnings`], state.vix, "put");
 
     await new Promise(r => setTimeout(r, 500));
   }
@@ -3688,11 +3907,6 @@ async function runSimTick(scenario, simPrices, tick) {
     pos.currentPrice = curP;
     pos.price        = price;
     if (curP > pos.peakPremium) pos.peakPremium = curP;
-
-    // Verbose logging every 5 ticks to debug pricing
-    if (tick % 5 === 0) {
-      simLogEvent("scan", `  ${pos.ticker} | stock:$${price.toFixed(0)} strike:$${pos.strike} ITM:$${intrinsic.toFixed(0)} | prem:$${curP} entry:$${pos.premium} chg:${(chg*100).toFixed(1)}%`);
-    }
 
     let exitReason = null;
 
