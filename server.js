@@ -746,8 +746,10 @@ function analyzeNews(articles) {
 }
 
 // - VIX Velocity -
-let lastVIXReading = 15;
+let lastVIXReading = 0; // 0 = uninitialized, will be set from state on first scan
 function checkVIXVelocity(currentVIX) {
+  // Initialize from current VIX on first call to prevent false trigger on restart
+  if (lastVIXReading === 0) { lastVIXReading = currentVIX; return false; }
   const delta    = currentVIX - lastVIXReading;
   lastVIXReading = currentVIX;
   if (delta >= 8) {
@@ -1456,9 +1458,13 @@ async function getRealOptionsContract(ticker, price, optionType, score, vix, ear
     const { expDate: targetExpDate, expDays: targetExpDays, expiryType } = selectExpiry(score, vix, optionType, earningsDate, ticker);
   // LEAPS use deeper ITM delta (0.70-0.80) for better intrinsic value retention
   const isLeaps      = expiryType === "leaps";
-  const deltaMin     = isLeaps ? 0.65 : TARGET_DELTA_MIN;
-  const deltaMax     = isLeaps ? 0.85 : TARGET_DELTA_MAX;
-  const strikeRange  = isLeaps ? 0.15 : 0.10; // wider strike range for LEAPS
+  // For puts on high-priced stocks ($500+), widen delta range slightly
+  // ATM puts on expensive stocks have delta around 0.50, OTM around 0.25-0.45
+  const isPut        = optionType === "put";
+  const isExpensive  = price > 400;
+  const deltaMin     = isLeaps ? 0.65 : (isPut && isExpensive ? 0.20 : TARGET_DELTA_MIN);
+  const deltaMax     = isLeaps ? 0.85 : (isPut && isExpensive ? 0.55 : TARGET_DELTA_MAX);
+  const strikeRange  = isLeaps ? 0.15 : (isExpensive ? 0.12 : 0.10);
 
     // Format date for API: YYYY-MM-DD
     const today     = getETTime();
@@ -2061,10 +2067,10 @@ async function executeTrade(stock, price, score, scoreReasons, vix, optionType =
     score,
     scoreReasons,
     delta:     contract.greeks.delta,
-    iv:        parseFloat((t.iv*100).toFixed(1)),
+    iv:        parseFloat(((contract.iv||0.3)*100).toFixed(1)),
     vix,
     catalyst:  stock.catalyst,
-    reasoning: `Score ${score}/100. ${scoreReasons.slice(0,3).join(". ")}. Catalyst: ${stock.catalyst}. Delta ${t.greeks.delta} within 0.30-0.40 target.`,
+    reasoning: `Score ${score}/100. ${scoreReasons.slice(0,3).join(". ")}. Catalyst: ${stock.catalyst}. Delta ${contract.greeks.delta} within target range.`,
   });
   if (state.tradeJournal.length > 200) state.tradeJournal = state.tradeJournal.slice(0,200);
 
@@ -3091,7 +3097,7 @@ cron.schedule("*/15 13-20 * * 1-5", async () => {
   if (!isMarketHours()) return;
   const lastScan    = state.lastScan ? new Date(state.lastScan) : null;
   const minsSinceLastScan = lastScan ? (Date.now() - lastScan.getTime()) / 60000 : 999;
-  if (minsSinceLastScan > 15 && GMAIL_USER && GMAIL_PASS) {
+  if (minsSinceLastScan > 15 && minsSinceLastScan < 999 && GMAIL_USER && GMAIL_PASS) {
     logEvent("warn", `Health check: no scan in ${minsSinceLastScan.toFixed(0)} minutes - sending alert`);
     mailer.sendMail({
       from: GMAIL_USER,
