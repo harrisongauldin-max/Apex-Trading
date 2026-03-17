@@ -2346,6 +2346,8 @@ async function runScan() {
     logEvent("scan", `[5min] Regime:${regime.regime}(${regime.confidence}%) | Kelly:${marketContext.kelly.contracts}x | Global:${marketContext.globalMarket.signal} | Streak:${marketContext.streaks.currentStreak}x${marketContext.streaks.currentType}`);
   }
 
+  logEvent("scan", `Checkpoint: entering new entries loop | entryWindow:${isEntryWindow()} | circuit:${state.circuitOpen} | cash:${fmt(state.cash)} | losses:${state.consecutiveLosses}`);
+
   // -- SLOW TIER (every 15 minutes) --
   if (now - lastSlowScan > 15 * 60 * 1000) {
     lastSlowScan = now;
@@ -2908,7 +2910,7 @@ async function runScan() {
   state.lastScan = new Date().toISOString();
   await flushStateIfDirty();
   } catch(e) {
-    logEvent("error", `runScan crashed: ${e.message}`);
+    logEvent("error", `runScan crashed: ${e.message} | stack: ${e.stack?.split("\n")[1]?.trim() || "unknown"}`);
   } finally {
     scanRunning = false;
   }
