@@ -17,6 +17,7 @@ const ALPACA_KEY        = process.env.ALPACA_API_KEY    || "";
 const ALPACA_SECRET     = process.env.ALPACA_SECRET_KEY || "";
 const ALPACA_BASE       = "https://paper-api.alpaca.markets/v2";
 const ALPACA_DATA       = "https://data.alpaca.markets/v2";
+const ALPACA_OPTIONS    = "https://paper-api.alpaca.markets/v2";  // options contracts live on trading API
 const GMAIL_USER        = process.env.GMAIL_USER        || "";
 const GMAIL_PASS        = process.env.GMAIL_APP_PASSWORD|| "";
 const STATE_FILE        = path.join(__dirname, "state.json");
@@ -1407,7 +1408,7 @@ async function getRealOptionsContract(ticker, price, optionType, score, vix, ear
       `&strike_price_gte=${strikeLow}&strike_price_lte=${strikeHigh}` +
       `&type=${optionType}&limit=50`;
 
-    const data = await alpacaGet(url, ALPACA_DATA);
+    const data = await alpacaGet(url, ALPACA_OPTIONS);
     if (!data || !data.option_contracts || !data.option_contracts.length) return null;
 
     // Get snapshots for the contracts to get real greeks + IV + quotes
@@ -2967,15 +2968,15 @@ app.get("/api/test-options/:ticker", async (req, res) => {
 
   // Try all possible base URL + path combinations
   const bases = [
+    "https://paper-api.alpaca.markets/v2",
+    "https://paper-api.alpaca.markets/v1beta1",
     "https://data.alpaca.markets/v2",
     "https://data.alpaca.markets/v1beta1",
-    "https://data.alpaca.markets",
-    "https://paper-api.alpaca.markets/v2",
     "https://api.alpaca.markets/v2",
   ];
   const pathSuffixes = [
     `/options/contracts${params}`,
-    `/v2/options/contracts${params}`,
+    `/options/contracts/search${params}`,
   ];
 
   const results = {};
