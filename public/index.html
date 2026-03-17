@@ -190,6 +190,11 @@ input[type=text]:focus{border-color:var(--blue)}
       <div class="metric-sm" style="font-size:11px" id="last-scan">--</div>
       <div class="sub">30-sec frequency</div>
     </div>
+    <div class="card">
+      <div class="card-title">Data Quality</div>
+      <div class="metric-sm" style="font-size:13px" id="dq-pct">--%</div>
+      <div class="sub" id="dq-detail">-- real / -- estimated</div>
+    </div>
   </div>
 
   <div id="vix-alert" class="alert alert-green" style="margin-bottom:12px">
@@ -746,6 +751,16 @@ function renderMetrics() {
   document.getElementById('consec-loss').style.color = (state.consecutiveLosses||0) >= 2 ? 'var(--red)' : 'var(--text)';
   document.getElementById('last-scan').textContent = fmtTime(state.lastScan);
 
+  // Data quality
+  const dq    = state.dataQuality || { realTrades: 0, estimatedTrades: 0, totalTrades: 0 };
+  const dqPct = dq.totalTrades > 0 ? Math.round(dq.realTrades / dq.totalTrades * 100) : 100;
+  const dqEl  = document.getElementById('dq-pct');
+  if (dqEl) {
+    dqEl.textContent = dqPct + '% real';
+    dqEl.style.color = dqPct >= 90 ? 'var(--green)' : dqPct >= 70 ? 'var(--gold)' : 'var(--red)';
+    document.getElementById('dq-detail').textContent = `${dq.realTrades} real / ${dq.estimatedTrades} estimated`;
+  }
+
   // Market context cards
   const mctx = health.marketContext || {};
   const fg = mctx.fearGreed || { score: 50, rating: 'neutral' };
@@ -978,7 +993,8 @@ function renderPositions() {
         <div style="display:flex;align-items:center;gap:10px">
           <span style="font-size:16px;font-weight:700;color:var(--blue)">${p.ticker}</span>
           <span style="font-size:11px;color:var(--muted)">$${p.strike}${p.optionType==='put'?'P':'C'} · ${p.expDate}</span>
-          <span style="font-size:9px;padding:2px 6px;border-radius:10px;background:${p.expiryType==='weekly'?'rgba(255,215,0,.15)':'rgba(100,100,100,.2)'};color:${p.expiryType==='weekly'?'var(--gold)':'var(--muted)'}">${(p.expiryType||'monthly').toUpperCase()}</span>
+          <span style="font-size:9px;padding:2px 6px;border-radius:10px;background:${p.expiryType==='weekly'?'rgba(255,215,0,.15)':p.expiryType==='leaps'?'rgba(148,0,211,.2)':'rgba(100,100,100,.2)'};color:${p.expiryType==='weekly'?'var(--gold)':p.expiryType==='leaps'?'#cc44ff':'var(--muted)'}">${(p.expiryType||'monthly').toUpperCase()}</span>
+          ${p.earningsPlay?'<span style="font-size:9px;padding:2px 6px;border-radius:10px;background:rgba(255,165,0,.2);color:orange">EARNINGS</span>':''}
           <span style="font-size:9px;padding:2px 6px;border-radius:10px;background:${p.optionType==='put'?'rgba(255,80,80,.15)':'rgba(0,196,255,.1)'};color:${p.optionType==='put'?'#ff5050':'var(--blue)'}">${p.optionType==='put'?'PUT':'CALL'}</span>
           <span style="font-size:9px;padding:2px 6px;border-radius:10px;background:rgba(0,196,255,.1);color:var(--blue)">${p.sector}</span>
           ${p.partialClosed ? '<span style="font-size:9px;padding:2px 6px;border-radius:10px;background:rgba(255,215,0,.1);color:var(--gold)">PARTIAL</span>' : ''}
