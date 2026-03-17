@@ -2866,7 +2866,17 @@ async function runScan() {
     if (state.cash <= CAPITAL_FLOOR) break;
 
     const { pass, reason } = await checkAllFilters(stock, price);
-    if (!pass) { logEvent("filter", `${stock.ticker} - ${reason}`); continue; }
+    if (!pass) {
+      // For put trades, sector ETF weakness and support breakdown are valid entry signals
+      // Don't block puts just because calls are blocked
+      const putBypassReasons = ["sector ETF", "support", "VWAP", "breakdown"];
+      const canBypassForPut  = optionType === "put" && putBypassReasons.some(r => reason?.includes(r));
+      if (!canBypassForPut) {
+        logEvent("filter", `${stock.ticker} - ${reason}`);
+        continue;
+      }
+      logEvent("filter", `${stock.ticker} - bypassing filter for PUT: ${reason}`);
+    }
 
     const entered = await executeTrade(stock, price, score, reasons, state.vix, optionType);
     if (entered) await new Promise(r=>setTimeout(r,500));
