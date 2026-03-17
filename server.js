@@ -1412,61 +1412,83 @@ async function getRealOptionsContract(ticker, price, optionType, score, vix, ear
 
     // Get snapshots for the contracts to get real greeks + IV + quotes
     const symbols   = data.option_contracts.slice(0, 20).map(c => c.symbol).join(",");
-    const snapData  = await alpacaGet(`/options/snapshots?symbols=${symbols}`, ALPACA_DATA);
+    const snapData  = await alpacaGet(`/options/snapshots?symbols=${symbols}&feed=indicative`, ALPACA_DATA);
     const snapshots = snapData && snapData.snapshots ? snapData.snapshots : {};
 
+    logEvent("scan", `${ticker} options chain: ${data.option_contracts.length} contracts | ${Object.keys(snapshots).length} snapshots`);
+
+    // Log first snapshot structure to debug field names
+    if (Object.keys(snapshots).length > 0) {
+      const firstKey  = Object.keys(snapshots)[0];
+      const firstSnap = snapshots[firstKey];
+      logEvent("scan", `${ticker} snapshot sample fields: ${Object.keys(firstSnap).join(", ")}`);
+      if (firstSnap.greeks) logEvent("scan", `${ticker} greeks fields: ${Object.keys(firstSnap.greeks).join(", ")}`);
+      if (firstSnap.latestQuote) logEvent("scan", `${ticker} quote fields: ${Object.keys(firstSnap.latestQuote).join(", ")}`);
+    } else {
+      // Try alternate snapshot endpoint
+      logEvent("warn", `${ticker} no snapshots returned - trying alternate endpoint`);
+      const altSnap = await alpacaGet(`/options/snapshots?underlying_symbols=${ticker}&feed=indicative&limit=20`, ALPACA_DATA);
+      logEvent("scan", `${ticker} alt snapshot response: ${JSON.stringify(altSnap).slice(0, 200)}`);
+    }
+
     // Score each contract — find best delta match in 0.28-0.42 range
-    // and best liquidity (open interest + volume)
-    let best = null;
-    let bestScore = -1;
+    let best       = null;
+    let bestScore  = -1;
+    let skipped    = 0;
 
     for (const contract of data.option_contracts) {
-      const snap    = snapshots[contract.symbol];
-      if (!snap) continue;
+      const snap = snapshots[contract.symbol];
+      if (!snap) { skipped++; continue; }
 
-      const greeks  = snap.greeks || {};
-      const quote   = snap.latestQuote || {};
-      const delta   = Math.abs(parseFloat(greeks.delta || 0));
-      const iv      = parseFloat(greeks.implied_volatility || greeks.iv || 0.3);
-      const bid     = parseFloat(quote.bp || 0);
-      const ask     = parseFloat(quote.ap || 0);
-      const mid     = (bid + ask) / 2;
-      const spread  = ask > 0 ? (ask - bid) / ask : 1;
-      const oi      = parseInt(snap.openInterest || snap.open_interest || 0);
-      const vol     = parseInt(snap.day?.volume || 0);
+      // Handle both v1 and v2 Alpaca options snapshot field names
+      const greeks = snap.greeks || snap.Greeks || {};
+      const quote  = snap.latestQuote || snap.latest_quote || snap.quote || {};
+      const day    = snap.dailyBar || snap.day || {};
 
-      // Skip illiquid contracts
-      if (bid <= 0 || ask <= 0) continue;
+      const delta  = Math.abs(parseFloat(greeks.delta || greeks.Delta || 0));
+      const iv     = parseFloat(greeks.implied_volatility || greeks.impliedVolatility || greeks.iv || 0.3);
+      const bid    = parseFloat(quote.bp || quote.bid_price || quote.b || 0);
+      const ask    = parseFloat(quote.ap || quote.ask_price || quote.a || 0);
+      const mid    = bid > 0 && ask > 0 ? (bid + ask) / 2 : 0;
+      const spread = ask > 0 ? (ask - bid) / ask : 1;
+      const oi     = parseInt(snap.openInterest || snap.open_interest || snap.oi || 0);
+      const vol    = parseInt(day.v || day.volume || 0);
+
+      // Skip illiquid
+      if (mid <= 0) continue;
       if (spread > MAX_SPREAD_PCT) continue;
       if (oi < MIN_OPEN_INTEREST) continue;
-
-      // Skip if delta outside target range
       if (delta < TARGET_DELTA_MIN || delta > TARGET_DELTA_MAX) continue;
 
-      // Score this contract - closer to 0.35 delta is better
-      const deltaScore  = 1 - Math.abs(delta - 0.35) / 0.35;
-      const liquidScore = Math.min(oi / 5000, 1);
+      const deltaScore    = 1 - Math.abs(delta - 0.35) / 0.35;
+      const liquidScore   = Math.min(oi / 5000, 1);
       const contractScore = deltaScore * 0.6 + liquidScore * 0.4;
 
       if (contractScore > bestScore) {
         bestScore = contractScore;
         best = {
-          symbol:     contract.symbol,
-          strike:     parseFloat(contract.strike_price),
-          expDate:    new Date(contract.expiration_date).toLocaleDateString("en-US", {month:"short",day:"2-digit",year:"numeric"}),
-          expDays:    Math.round((new Date(contract.expiration_date) - today) / 86400000),
+          symbol:  contract.symbol,
+          strike:  parseFloat(contract.strike_price),
+          expDate: new Date(contract.expiration_date).toLocaleDateString("en-US", {month:"short",day:"2-digit",year:"numeric"}),
+          expDays: Math.round((new Date(contract.expiration_date) - today) / 86400000),
           expiryType,
-          premium:    parseFloat(mid.toFixed(2)),
+          premium: parseFloat(mid.toFixed(2)),
           bid, ask, spread,
           greeks: {
-            delta:  parseFloat(greeks.delta || 0).toFixed(3),
-            theta:  parseFloat(greeks.theta || 0).toFixed(3),
-            gamma:  parseFloat(greeks.gamma || 0).toFixed(4),
-            vega:   parseFloat(greeks.vega  || 0).toFixed(3),
+            delta: parseFloat(greeks.delta || greeks.Delta || 0).toFixed(3),
+            theta: parseFloat(greeks.theta || greeks.Theta || 0).toFixed(3),
+            gamma: parseFloat(greeks.gamma || greeks.Gamma || 0).toFixed(4),
+            vega:  parseFloat(greeks.vega  || greeks.Vega  || 0).toFixed(3),
           },
           iv, oi, vol, optionType,
         };
       }
+    }
+
+    if (best) {
+      logEvent("scan", `${ticker} best contract: ${best.symbol} | $${best.premium} bid/ask $${best.bid}/$${best.ask} | delta:${best.greeks.delta} | OI:${best.oi} [REAL DATA]`);
+    } else {
+      logEvent("warn", `${ticker} no valid contract found (${data.option_contracts.length} contracts, ${skipped} missing snapshots)`);
     }
 
     return best;
@@ -1479,12 +1501,12 @@ async function getRealOptionsContract(ticker, price, optionType, score, vix, ear
 // Get current market price of an options contract
 async function getOptionsPrice(symbol) {
   try {
-    const data = await alpacaGet(`/options/snapshots?symbols=${symbol}`, ALPACA_DATA);
+    const data = await alpacaGet(`/options/snapshots?symbols=${symbol}&feed=indicative`, ALPACA_DATA);
     if (!data || !data.snapshots || !data.snapshots[symbol]) return null;
     const snap  = data.snapshots[symbol];
-    const quote = snap.latestQuote || {};
-    const bid   = parseFloat(quote.bp || 0);
-    const ask   = parseFloat(quote.ap || 0);
+    const quote = snap.latestQuote || snap.latest_quote || snap.quote || {};
+    const bid   = parseFloat(quote.bp || quote.bid_price || quote.b || 0);
+    const ask   = parseFloat(quote.ap || quote.ask_price || quote.a || 0);
     return bid > 0 && ask > 0 ? (bid + ask) / 2 : null;
   } catch(e) { return null; }
 }
