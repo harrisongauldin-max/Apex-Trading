@@ -93,11 +93,14 @@ const SUPPORT_BUFFER           = 0.03;  // skip if within 3% of support breaking
 
 // Correlation groups - max 1 position per group
 const CORRELATION_GROUPS = [
-  ["NVDA", "AMD", "SMCI", "ARM"],   // Semiconductors
-  ["AAPL", "MSFT", "GOOGL", "CRM"], // Mega-cap tech
-  ["AMZN", "META"],                  // Ad/cloud
-  ["JPM", "GS", "COIN"],             // Financials
-  ["TSLA", "UBER"],                  // Consumer mobility
+  ["NVDA", "AMD", "SMCI", "ARM", "AVGO", "MU"],      // Semiconductors
+  ["AAPL", "MSFT", "GOOGL", "CRM", "NOW", "SNOW"],   // Mega-cap / cloud tech
+  ["AMZN", "META", "TTD"],                             // Ad / cloud / e-commerce
+  ["JPM", "GS", "COIN", "HOOD", "SOFI", "MSTR"],     // Financials / crypto
+  ["TSLA", "UBER", "RIVN"],                            // Consumer mobility / EV
+  ["CRWD", "PANW", "NET"],                             // Cybersecurity
+  ["NFLX", "SHOP", "DKNG"],                           // Consumer / retail
+  ["PLTR", "PYPL"],                                    // High momentum / fintech
 ];
 
 // Sector ETF confirmation map
@@ -108,28 +111,55 @@ const SECTOR_ETF_MAP = {
   "Index":      null,  // no confirmation needed for indexes
 };
 // Always check SMH for semiconductor stocks
-const SEMIS = ["NVDA", "AMD", "SMCI", "ARM"];
+const SEMIS = ["NVDA", "AMD", "SMCI", "ARM", "AVGO", "MU"];
 
-// - Watchlist (18 high-liquidity stocks) -
+// - Watchlist (36 high-liquidity stocks) -
 const WATCHLIST = [
-  { ticker:"NVDA",  sector:"Technology",  momentum:"strong",     rsi:58, macd:"bullish crossover", trend:"above 50MA",         catalyst:"AI infrastructure demand",      expiryDays:14,  ivr:52, beta:1.8, earningsDate:null },
-  { ticker:"AAPL",  sector:"Technology",  momentum:"steady",     rsi:52, macd:"mild bullish",      trend:"above all MAs",      catalyst:"Services revenue growth",        expiryDays:42,  ivr:28, beta:1.1, earningsDate:null },
-  { ticker:"MSFT",  sector:"Technology",  momentum:"strong",     rsi:56, macd:"bullish",           trend:"above all MAs",      catalyst:"Copilot enterprise adoption",    expiryDays:35,  ivr:30, beta:1.2, earningsDate:null },
-  { ticker:"AMZN",  sector:"Technology",  momentum:"strong",     rsi:61, macd:"bullish",           trend:"above 50MA",         catalyst:"AWS acceleration",               expiryDays:28,  ivr:35, beta:1.3, earningsDate:null },
-  { ticker:"META",  sector:"Technology",  momentum:"strong",     rsi:63, macd:"bullish",           trend:"trending up",        catalyst:"AI ad revenue momentum",         expiryDays:28,  ivr:40, beta:1.4, earningsDate:null },
-  { ticker:"GOOGL", sector:"Technology",  momentum:"steady",     rsi:54, macd:"mild bullish",      trend:"above 50MA",         catalyst:"Search + cloud strength",        expiryDays:35,  ivr:32, beta:1.2, earningsDate:null },
-  { ticker:"TSLA",  sector:"Consumer",    momentum:"recovering", rsi:44, macd:"neutral",           trend:"testing 200MA",      catalyst:"Q1 delivery data",               expiryDays:56,  ivr:61, beta:2.0, earningsDate:null },
-  { ticker:"AMD",   sector:"Technology",  momentum:"recovering", rsi:47, macd:"forming base",      trend:"near 50MA",          catalyst:"MI300X server demand",           expiryDays:56,  ivr:55, beta:1.7, earningsDate:null },
-  { ticker:"SPY",   sector:"Index",       momentum:"steady",     rsi:53, macd:"neutral",           trend:"near all-time high", catalyst:"Fed policy direction",           expiryDays:14,  ivr:22, beta:1.0, earningsDate:null },
-  { ticker:"QQQ",   sector:"Index",       momentum:"steady",     rsi:55, macd:"mild bullish",      trend:"above 50MA",         catalyst:"Tech sector leadership",         expiryDays:14,  ivr:24, beta:1.1, earningsDate:null },
-  { ticker:"JPM",   sector:"Financial",   momentum:"strong",     rsi:57, macd:"bullish",           trend:"above all MAs",      catalyst:"Net interest income strength",   expiryDays:28,  ivr:28, beta:1.1, earningsDate:null },
-  { ticker:"GS",    sector:"Financial",   momentum:"strong",     rsi:59, macd:"bullish",           trend:"above 50MA",         catalyst:"Investment banking recovery",    expiryDays:28,  ivr:30, beta:1.3, earningsDate:null },
-  { ticker:"NFLX",  sector:"Consumer",    momentum:"strong",     rsi:60, macd:"bullish",           trend:"trending up",        catalyst:"Ad-supported tier growth",       expiryDays:28,  ivr:38, beta:1.4, earningsDate:null },
-  { ticker:"CRM",   sector:"Technology",  momentum:"steady",     rsi:51, macd:"mild bullish",      trend:"above 50MA",         catalyst:"AI CRM integration",             expiryDays:42,  ivr:33, beta:1.3, earningsDate:null },
-  { ticker:"UBER",  sector:"Consumer",    momentum:"strong",     rsi:58, macd:"bullish",           trend:"above all MAs",      catalyst:"Profitability milestone",        expiryDays:28,  ivr:35, beta:1.5, earningsDate:null },
-  { ticker:"ARM",   sector:"Technology",  momentum:"strong",     rsi:62, macd:"bullish crossover", trend:"trending up",        catalyst:"AI chip architecture demand",    expiryDays:21,  ivr:58, beta:1.9, earningsDate:null },
-  { ticker:"COIN",  sector:"Financial",   momentum:"recovering", rsi:48, macd:"forming base",      trend:"near 50MA",          catalyst:"Crypto market recovery",         expiryDays:42,  ivr:65, beta:2.2, earningsDate:null },
-  { ticker:"SMCI",  sector:"Technology",  momentum:"recovering", rsi:45, macd:"neutral",           trend:"testing 50MA",       catalyst:"AI server infrastructure",       expiryDays:42,  ivr:60, beta:2.1, earningsDate:null },
+  // -- Mega Cap Tech --
+  { ticker:"NVDA",  sector:"Technology",  momentum:"strong",     rsi:58, macd:"bullish crossover", trend:"above 50MA",         catalyst:"AI infrastructure demand",       expiryDays:14,  ivr:52, beta:1.8, earningsDate:null },
+  { ticker:"AAPL",  sector:"Technology",  momentum:"steady",     rsi:52, macd:"mild bullish",      trend:"above all MAs",      catalyst:"Services revenue growth",         expiryDays:42,  ivr:28, beta:1.1, earningsDate:null },
+  { ticker:"MSFT",  sector:"Technology",  momentum:"strong",     rsi:56, macd:"bullish",           trend:"above all MAs",      catalyst:"Copilot enterprise adoption",     expiryDays:35,  ivr:30, beta:1.2, earningsDate:null },
+  { ticker:"AMZN",  sector:"Technology",  momentum:"strong",     rsi:61, macd:"bullish",           trend:"above 50MA",         catalyst:"AWS acceleration",                expiryDays:28,  ivr:35, beta:1.3, earningsDate:null },
+  { ticker:"META",  sector:"Technology",  momentum:"strong",     rsi:63, macd:"bullish",           trend:"trending up",        catalyst:"AI ad revenue momentum",          expiryDays:28,  ivr:40, beta:1.4, earningsDate:null },
+  { ticker:"GOOGL", sector:"Technology",  momentum:"steady",     rsi:54, macd:"mild bullish",      trend:"above 50MA",         catalyst:"Search + cloud strength",         expiryDays:35,  ivr:32, beta:1.2, earningsDate:null },
+  // -- Semiconductors --
+  { ticker:"AMD",   sector:"Technology",  momentum:"recovering", rsi:47, macd:"forming base",      trend:"near 50MA",          catalyst:"MI300X server demand",            expiryDays:56,  ivr:55, beta:1.7, earningsDate:null },
+  { ticker:"ARM",   sector:"Technology",  momentum:"strong",     rsi:62, macd:"bullish crossover", trend:"trending up",        catalyst:"AI chip architecture demand",     expiryDays:21,  ivr:58, beta:1.9, earningsDate:null },
+  { ticker:"AVGO",  sector:"Technology",  momentum:"strong",     rsi:57, macd:"bullish",           trend:"above 50MA",         catalyst:"AI networking chips",             expiryDays:28,  ivr:38, beta:1.4, earningsDate:null },
+  { ticker:"MU",    sector:"Technology",  momentum:"recovering", rsi:48, macd:"neutral",           trend:"near 50MA",          catalyst:"HBM memory for AI",               expiryDays:35,  ivr:52, beta:1.6, earningsDate:null },
+  { ticker:"SMCI",  sector:"Technology",  momentum:"recovering", rsi:45, macd:"neutral",           trend:"testing 50MA",       catalyst:"AI server infrastructure",        expiryDays:42,  ivr:60, beta:2.1, earningsDate:null },
+  // -- Cloud & Enterprise Software --
+  { ticker:"CRM",   sector:"Technology",  momentum:"steady",     rsi:51, macd:"mild bullish",      trend:"above 50MA",         catalyst:"AI CRM integration",              expiryDays:42,  ivr:33, beta:1.3, earningsDate:null },
+  { ticker:"NOW",   sector:"Technology",  momentum:"strong",     rsi:58, macd:"bullish",           trend:"above all MAs",      catalyst:"AI workflow automation",          expiryDays:28,  ivr:35, beta:1.3, earningsDate:null },
+  { ticker:"SNOW",  sector:"Technology",  momentum:"steady",     rsi:50, macd:"neutral",           trend:"near 50MA",          catalyst:"Data cloud growth",               expiryDays:42,  ivr:55, beta:1.5, earningsDate:null },
+  // -- Cybersecurity --
+  { ticker:"CRWD",  sector:"Technology",  momentum:"strong",     rsi:60, macd:"bullish",           trend:"trending up",        catalyst:"Cybersecurity spending surge",     expiryDays:28,  ivr:48, beta:1.6, earningsDate:null },
+  { ticker:"PANW",  sector:"Technology",  momentum:"strong",     rsi:57, macd:"bullish",           trend:"above 50MA",         catalyst:"Platform consolidation wins",     expiryDays:35,  ivr:40, beta:1.4, earningsDate:null },
+  { ticker:"NET",   sector:"Technology",  momentum:"steady",     rsi:52, macd:"mild bullish",      trend:"above 50MA",         catalyst:"Zero trust adoption",             expiryDays:35,  ivr:50, beta:1.5, earningsDate:null },
+  // -- Indexes --
+  { ticker:"SPY",   sector:"Index",       momentum:"steady",     rsi:53, macd:"neutral",           trend:"near all-time high", catalyst:"Fed policy direction",            expiryDays:14,  ivr:22, beta:1.0, earningsDate:null },
+  { ticker:"QQQ",   sector:"Index",       momentum:"steady",     rsi:55, macd:"mild bullish",      trend:"above 50MA",         catalyst:"Tech sector leadership",          expiryDays:14,  ivr:24, beta:1.1, earningsDate:null },
+  { ticker:"IWM",   sector:"Index",       momentum:"steady",     rsi:50, macd:"neutral",           trend:"near 50MA",          catalyst:"Small cap rate sensitivity",      expiryDays:21,  ivr:28, beta:1.2, earningsDate:null },
+  // -- Financials --
+  { ticker:"JPM",   sector:"Financial",   momentum:"strong",     rsi:57, macd:"bullish",           trend:"above all MAs",      catalyst:"Net interest income strength",    expiryDays:28,  ivr:28, beta:1.1, earningsDate:null },
+  { ticker:"GS",    sector:"Financial",   momentum:"strong",     rsi:59, macd:"bullish",           trend:"above 50MA",         catalyst:"Investment banking recovery",     expiryDays:28,  ivr:30, beta:1.3, earningsDate:null },
+  { ticker:"COIN",  sector:"Financial",   momentum:"recovering", rsi:48, macd:"forming base",      trend:"near 50MA",          catalyst:"Crypto market recovery",          expiryDays:42,  ivr:65, beta:2.2, earningsDate:null },
+  { ticker:"HOOD",  sector:"Financial",   momentum:"recovering", rsi:46, macd:"neutral",           trend:"near 50MA",          catalyst:"Retail trading volume recovery",  expiryDays:35,  ivr:68, beta:2.0, earningsDate:null },
+  { ticker:"SOFI",  sector:"Financial",   momentum:"recovering", rsi:44, macd:"forming base",      trend:"testing 50MA",       catalyst:"Student loan refinancing growth", expiryDays:42,  ivr:62, beta:1.8, earningsDate:null },
+  // -- Consumer & E-commerce --
+  { ticker:"TSLA",  sector:"Consumer",    momentum:"recovering", rsi:44, macd:"neutral",           trend:"testing 200MA",      catalyst:"Q1 delivery data",                expiryDays:56,  ivr:61, beta:2.0, earningsDate:null },
+  { ticker:"NFLX",  sector:"Consumer",    momentum:"strong",     rsi:60, macd:"bullish",           trend:"trending up",        catalyst:"Ad-supported tier growth",        expiryDays:28,  ivr:38, beta:1.4, earningsDate:null },
+  { ticker:"UBER",  sector:"Consumer",    momentum:"strong",     rsi:58, macd:"bullish",           trend:"above all MAs",      catalyst:"Profitability milestone",         expiryDays:28,  ivr:35, beta:1.5, earningsDate:null },
+  { ticker:"SHOP",  sector:"Consumer",    momentum:"steady",     rsi:52, macd:"mild bullish",      trend:"above 50MA",         catalyst:"E-commerce market share gains",   expiryDays:35,  ivr:52, beta:1.6, earningsDate:null },
+  { ticker:"DKNG",  sector:"Consumer",    momentum:"steady",     rsi:50, macd:"neutral",           trend:"near 50MA",          catalyst:"Sports betting expansion",        expiryDays:35,  ivr:58, beta:1.7, earningsDate:null },
+  // -- Fintech --
+  { ticker:"PYPL",  sector:"Financial",   momentum:"recovering", rsi:47, macd:"neutral",           trend:"near 50MA",          catalyst:"Venmo monetization growth",       expiryDays:35,  ivr:45, beta:1.4, earningsDate:null },
+  // -- High Momentum / Speculative --
+  { ticker:"PLTR",  sector:"Technology",  momentum:"strong",     rsi:65, macd:"bullish crossover", trend:"trending up",        catalyst:"Government AI contracts",         expiryDays:21,  ivr:62, beta:2.0, earningsDate:null },
+  { ticker:"MSTR",  sector:"Financial",   momentum:"recovering", rsi:48, macd:"forming base",      trend:"near 50MA",          catalyst:"Bitcoin treasury strategy",       expiryDays:21,  ivr:80, beta:3.0, earningsDate:null },
+  { ticker:"RIVN",  sector:"Consumer",    momentum:"recovering", rsi:40, macd:"bearish",           trend:"testing 200MA",      catalyst:"EV production ramp",              expiryDays:42,  ivr:72, beta:2.2, earningsDate:null },
+  // -- Ad Tech --
+  { ticker:"TTD",   sector:"Technology",  momentum:"steady",     rsi:53, macd:"mild bullish",      trend:"above 50MA",         catalyst:"Programmatic ad recovery",        expiryDays:35,  ivr:55, beta:1.7, earningsDate:null },
 ];
 
 // - Default State -
@@ -197,9 +227,41 @@ async function redisLoad() {
   return null;
 }
 
-// saveState is now async - writes to Redis
+// Throttled saveState — only writes to Redis when state changes
+// Prevents burning through Upstash free tier (10k commands/day)
+let stateDirty    = false;
+let lastRedisSave = 0;
+const REDIS_SAVE_INTERVAL = 120000; // minimum 2 minutes between Redis writes (~240/day, well under 10k limit)
+
+function markDirty() {
+  stateDirty = true;
+}
+
 async function saveState() {
+  stateDirty = true;
+  // Only write to Redis if enough time has passed
+  const now = Date.now();
+  if (now - lastRedisSave >= REDIS_SAVE_INTERVAL) {
+    await redisSave(state);
+    lastRedisSave = now;
+    stateDirty    = false;
+  }
+}
+
+// Force save — used for critical state changes (trade open/close, circuit breaker)
+async function saveStateNow() {
   await redisSave(state);
+  lastRedisSave = Date.now();
+  stateDirty    = false;
+}
+
+// Periodic flush — saves if dirty but not recently saved
+async function flushStateIfDirty() {
+  if (stateDirty && Date.now() - lastRedisSave >= REDIS_SAVE_INTERVAL) {
+    await redisSave(state);
+    lastRedisSave = Date.now();
+    stateDirty    = false;
+  }
 }
 
 // State initialized async on startup
@@ -556,7 +618,7 @@ const alpacaHeaders = () => ({
   "Content-Type":        "application/json",
 });
 
-// Rate limit tracker
+// API call tracking — informational only, Pro tier has no rate limit
 let apiCallsThisMinute = 0;
 let apiWindowStart     = Date.now();
 
@@ -567,9 +629,6 @@ function trackAPICall() {
     apiWindowStart     = now;
   }
   apiCallsThisMinute++;
-  // Warn at 150, pause briefly at 180
-  if (apiCallsThisMinute === 150) logEvent("warn", "Approaching API rate limit (150/min)");
-  if (apiCallsThisMinute >= 180) return false; // signal to slow down
   return true;
 }
 
@@ -1165,7 +1224,7 @@ async function checkScaleIns() {
       pos.contracts  += pos.contracts;
       pos.halfPosition = false;
       logEvent("trade", `SCALE IN ${pos.ticker} - up ${(chg*100).toFixed(1)}% - doubled to ${pos.contracts}x contracts`);
-      await saveState();
+      await saveStateNow();
     }
   }
 }
@@ -1536,7 +1595,7 @@ async function rebalanceCashETF() {
     state.cashETFValue   = parseFloat((state.cashETFShares * bilPrice).toFixed(2));
     state.cashETFPrice   = bilPrice;
     logEvent("etf", `BIL rebalance - bought ${sharesToBuy} shares @ $${bilPrice.toFixed(2)} | ETF floor: ${fmt(state.cashETFValue)} | liquid: ${fmt(state.cash)}`);
-    await saveState();
+    await saveStateNow();
 
   } else if (diff < 0 && currentShares > 0) {
     // Sell excess BIL back to cash
@@ -1547,7 +1606,7 @@ async function rebalanceCashETF() {
     state.cashETFShares  = currentShares - sharesToSell;
     state.cashETFValue   = parseFloat((state.cashETFShares * bilPrice).toFixed(2));
     logEvent("etf", `BIL rebalance - sold ${sharesToSell} shares | ETF floor: ${fmt(state.cashETFValue)} | liquid: ${fmt(state.cash)}`);
-    await saveState();
+    await saveStateNow();
   }
 }
 
@@ -1563,7 +1622,7 @@ async function ensureLiquidCash(needed) {
   state.cashETFShares  = (state.cashETFShares || 0) - sharesToSell;
   state.cashETFValue   = parseFloat((state.cashETFShares * bilPrice).toFixed(2));
   logEvent("etf", `BIL liquidated ${fmt(proceeds)} to fund trade | liquid: ${fmt(state.cash)}`);
-  await saveState();
+  await saveStateNow();
 }
 
 // - Pre-market Analysis -
@@ -1980,11 +2039,11 @@ async function executeTrade(stock, price, score, scoreReasons, vix, optionType =
 
   const typeLabel = optionType === "put" ? "P" : "C";
   const dataLabel = contract.symbol ? "REAL" : "EST";
+  await saveStateNow(); // critical — persist trade immediately
   logEvent("trade",
     `BUY ${stock.ticker} $${contract.strike}${typeLabel} exp ${contract.expDate} | ${contracts}x @ $${contract.premium} | ` +
     `cost ${fmt(cost)} | score ${score} | delta ${contract.greeks.delta} | [${dataLabel}] | cash ${fmt(state.cash)} | heat ${(heatPct()*100).toFixed(0)}%`
   );
-  await saveState();
   return true;
 }
 
@@ -2016,6 +2075,7 @@ async function closePosition(ticker, reason, exitPremium = null) {
   state.monthlyProfit = parseFloat((state.monthlyProfit + pnl).toFixed(2));
   state.positions.splice(idx, 1);
   state.closedTrades.push({ ticker, pnl, pct, date:new Date().toLocaleDateString(), reason, score:pos.score||0 });
+  await saveStateNow(); // force immediate save on trade close
 
   // Update consecutive losses
   if (pnl < 0) state.consecutiveLosses++;
@@ -2057,7 +2117,7 @@ async function closePosition(ticker, reason, exitPremium = null) {
     `${reason.toUpperCase()} ${ticker} | exit $${ep} | P&L ${pnl>=0?"+":""}${fmt(pnl)} (${pct}%) | ` +
     `cash ${fmt(state.cash)} | consec losses: ${state.consecutiveLosses}`
   );
-  await saveState();
+  await saveStateNow();
 }
 
 // - Partial Close -
@@ -2073,7 +2133,7 @@ async function partialClose(ticker) {
   state.monthlyProfit = parseFloat((state.monthlyProfit + pnl).toFixed(2));
   state.closedTrades.push({ ticker, pnl, pct:((pnl/(pos.cost*0.5))*100).toFixed(1), date:new Date().toLocaleDateString(), reason:"partial" });
   logEvent("partial", `PARTIAL ${ticker} - ${half}/${pos.contracts} @ +50% | +${fmt(pnl)} | cash ${fmt(state.cash)}`);
-  await saveState();
+  await saveStateNow();
 }
 
 // - Stock Portfolio Management -
@@ -2109,7 +2169,7 @@ async function checkStockBuys() {
       buyDate:new Date().toLocaleDateString(),
     });
     logEvent("stock", `BUY STOCK ${stock.ticker} - ${shares} shares @ $${price} | cost ${fmt(cost)} | triggered by monthly profit ${fmt(state.monthlyProfit)}`);
-    await saveState();
+    await saveStateNow();
     break; // one stock buy per check
   }
 }
@@ -2125,7 +2185,7 @@ async function manageStockPositions() {
       state.stockPositions.splice(state.stockPositions.indexOf(pos), 1);
       state.stockTrades.push({ ticker:pos.ticker, pnl, date:new Date().toLocaleDateString(), reason:"stop" });
       logEvent("stock", `STOP LOSS STOCK ${pos.ticker} - sold ${pos.shares} shares @ $${price} | P&L ${fmt(pnl)}`);
-      await saveState();
+      await saveStateNow();
     }
   }
 }
@@ -2176,7 +2236,7 @@ async function runScan() {
   // Emergency close all on VIX velocity spike
   if (isBlackSwan) {
     for (const pos of [...state.positions]) await closePosition(pos.ticker, "vix-spike");
-    await saveState();
+    await saveStateNow();
     scanRunning = false;
     return;
   }
@@ -2408,7 +2468,7 @@ async function runScan() {
     pos.price        = price;
     pos.currentPrice = curP;
     logEvent("scan", `${pos.ticker} | chg:${(chg*100).toFixed(1)}% | cur:$${curP} | peak:$${pos.peakPremium.toFixed(2)} | DTE:${dte} | HOLD`);
-    await saveState();
+    markDirty(); // will be flushed at end of scan, not every tick
   }
 
   // 2. New entries
@@ -2608,7 +2668,7 @@ async function runScan() {
 
     logEvent("filter", `${stock.ticker} best setup: ${optionType.toUpperCase()} score ${bestScore} | RSI:${signals.rsi} MACD:${signals.macd} MOM:${signals.momentum}`);
     scored.push({ stock: liveStock, price, score: bestScore, reasons: bestReasons, optionType });
-    await new Promise(r=>setTimeout(r,400));
+    await new Promise(r=>setTimeout(r,200));
   }
 
   // Sort by score
@@ -2630,7 +2690,7 @@ async function runScan() {
   await checkStockBuys();
 
   state.lastScan = new Date().toISOString();
-  await saveState();
+  await flushStateIfDirty();
   } catch(e) {
     logEvent("error", `runScan crashed: ${e.message}`);
   } finally {
@@ -2823,7 +2883,7 @@ cron.schedule("0 13 * * 1-5", async () => {
   state.todayTrades       = 0;
   state.consecutiveLosses = 0;
   state.circuitOpen       = true;
-  await saveState();
+  await saveStateNow();
   sendEmail("morning");
 });
 
@@ -2852,7 +2912,7 @@ cron.schedule("*/15 13-20 * * 1-5", async () => {
 cron.schedule("0 13 * * 1", async () => {
   state.weekStartCash     = state.cash;
   state.weeklyCircuitOpen = true;
-  await saveState();
+  await saveStateNow();
   logEvent("reset", "Weekly circuit breaker reset");
 });
 
@@ -2865,7 +2925,7 @@ cron.schedule("0 13 * * 1", async () => {
   logEvent("monthly", report);
   state.monthlyProfit = 0;
   state.monthStart    = new Date().toLocaleDateString();
-  await saveState();
+  await saveStateNow();
   if (GMAIL_USER && GMAIL_PASS) {
     mailer.sendMail({
       from:GMAIL_USER, to:GMAIL_USER,
@@ -2936,7 +2996,7 @@ app.post("/api/emergency-close", async (req, res) => {
     await closePosition(pos.ticker, "emergency-manual");
   }
   logEvent("circuit", `EMERGENCY CLOSE ALL - ${count} positions closed manually`);
-  await saveState();
+  await saveStateNow();
   res.json({ ok: true, closed: count });
 });
 
@@ -3050,7 +3110,7 @@ app.post("/api/reset-circuit", async (req, res) => {
   state.consecutiveLosses = 0;
   state.dayStartCash      = state.cash + openRisk();
   state.weekStartCash     = state.cash + openRisk();
-  await saveState();
+  await saveStateNow();
   logEvent("reset", "Circuit breakers manually reset");
   res.json({ ok: true });
 });
@@ -3748,7 +3808,7 @@ app.post("/api/set-budget", async (req, res) => {
   state.weekStartCash  = state.cash;
   state.peakCash       = Math.max(state.peakCash || 0, state.cash);
   logEvent("reset", `Budget updated to ${fmt(amount)}`);
-  await saveState();
+  await saveStateNow();
   res.json({ok:true, cash:state.cash});
 });
 app.get("/health",           (req,res) => res.json({status:"ok",uptime:process.uptime(),vix:state.vix,positions:state.positions.length}));
