@@ -3934,7 +3934,11 @@ async function runBacktest(months = 6) {
         if (!bars || dayIdx >= bars.length) continue;
         const curPrice = bars[dayIdx].c;
         const dte      = Math.max(1, pos.expDays - (dayIdx - pos.entryDay));
-        const curP     = parseFloat((curPrice * pos.iv * Math.sqrt(dte / 365) * 0.4 + 0.1).toFixed(2));
+        const timeVal  = parseFloat((curPrice * pos.iv * Math.sqrt(dte / 365) * 0.4 + 0.1).toFixed(2));
+        const intrinsic = pos.optionType === "put"
+          ? Math.max(0, (pos.strike || curPrice * 0.97) - curPrice)
+          : Math.max(0, curPrice - (pos.strike || curPrice * 1.035));
+        const curP     = parseFloat((timeVal + intrinsic).toFixed(2));
         const chg      = (curP - pos.premium) / pos.premium;
         const daysOpen = dayIdx - pos.entryDay;
         let exitReason = null;
@@ -3978,30 +3982,73 @@ async function runBacktest(months = 6) {
         const bars = allBars[stock.ticker];
         if (!bars || dayIdx >= bars.length) continue;
         if (openPositions.find(p => p.ticker === stock.ticker)) continue;
+
         const slice     = bars.slice(0, dayIdx + 1);
+        const price     = bars[dayIdx].c;
         const stockRet  = slice.length >= 5 ? (slice[slice.length-1].c - slice[0].c) / slice[0].c : 0;
         const relStr    = spyReturn !== 0 ? (1 + stockRet) / (1 + spyReturn) : 1;
+
+        // Fully dynamic signals from historical bars
         const rsi       = calcRSI(slice);
         const macdData  = calcMACD(slice);
         const momentum  = calcMomentum(slice);
         const adx       = calcADX(slice);
         const avgVol    = slice.slice(-20).reduce((s, b) => s + b.v, 0) / Math.min(20, slice.length);
         const todayVol  = slice[slice.length-1].v;
-        const liveStock = { ...stock, rsi, macd: macdData.signal, momentum };
+
+        // Dynamic IV from historical price action (not hardcoded IVR)
+        const recentSlice = slice.slice(-20);
+        const returns     = recentSlice.slice(1).map((b, i) => Math.log(b.c / recentSlice[i].c));
+        const stdDev      = returns.length > 1 ? Math.sqrt(returns.reduce((s, r) => s + r * r, 0) / returns.length) : 0.01;
+        const dynamicIV   = Math.max(0.15, Math.min(1.5, stdDev * Math.sqrt(252)));
+
+        // Dynamic IVR from historical volatility rank
+        const dynamicIVR  = calcIVRank(dynamicIV, slice);
+
+        // Gap check
+        if (slice.length >= 2) {
+          const gap = Math.abs(slice[slice.length-1].o - slice[slice.length-2].c) / slice[slice.length-2].c;
+          if (gap > MAX_GAP_PCT) continue;
+        }
+
+        // Weakness detection for puts — price below 20-day moving average
+        const ma20 = slice.length >= 20 ? slice.slice(-20).reduce((s, b) => s + b.c, 0) / 20 : price;
+        const belowMA20 = price < ma20 * 0.98;
+        const weeklyReturn = slice.length >= 5 ? (price - slice[slice.length-5].c) / slice[slice.length-5].c : 0;
+        const isWeakDay   = weeklyReturn < -0.02; // down 2%+ this week
+
+        const liveStock = { ...stock, rsi, macd: macdData.signal, momentum, ivr: dynamicIVR };
         const callSetup = scoreSetup(liveStock, relStr, adx, todayVol, avgVol);
         const putSetup  = scorePutSetup(liveStock, relStr, adx, todayVol, avgVol);
-        const bestScore = Math.max(callSetup.score, putSetup.score);
-        const optionType= putSetup.score > callSetup.score ? "put" : "call";
+
+        // Apply weakness boost to puts in backtest
+        if (belowMA20)  { putSetup.score = Math.min(100, putSetup.score + 12); }
+        if (isWeakDay)  { putSetup.score = Math.min(100, putSetup.score + 10); }
+        if (spyReturn < -0.01) { putSetup.score = Math.min(100, putSetup.score + 10); } // broad market down
+
+        // Apply trend penalty to calls when market is declining
+        if (spyReturn < -0.02) { callSetup.score = Math.max(0, callSetup.score - 15); }
+        if (belowMA20)  { callSetup.score = Math.max(0, callSetup.score - 10); }
+
+        const bestScore  = Math.max(callSetup.score, putSetup.score);
+        const optionType = putSetup.score > callSetup.score ? "put" : "call";
         if (bestScore < MIN_SCORE) continue;
-        const price     = bars[dayIdx].c;
-        const iv        = 0.25 + stock.ivr * 0.003;
-        const expDays   = stock.expiryDays || 30;
-        const premium   = parseFloat((price * iv * Math.sqrt(expDays / 365) * 0.4 + 0.3).toFixed(2));
+
+        // Use dynamic IV for premium calculation
+        const expDays   = optionType === "put" ? 35 : 30; // puts get slightly more time
+        const otmPct    = optionType === "put" ? 0.03 : (momentum === "strong" ? 0.035 : 0.045);
+        const strike    = optionType === "put"
+          ? Math.round(price * (1 - otmPct) / 5) * 5
+          : Math.round(price * (1 + otmPct) / 5) * 5;
+        const premium   = parseFloat((price * dynamicIV * Math.sqrt(expDays / 365) * 0.4 + 0.3).toFixed(2));
         const contracts = Math.max(1, Math.floor((cash * 0.10) / (premium * 100)));
         const cost      = parseFloat((premium * 100 * contracts).toFixed(2));
         if (cost > cash - CAPITAL_FLOOR) continue;
         cash -= cost;
-        openPositions.push({ ticker: stock.ticker, optionType, premium, contracts, cost, iv, expDays, entryDay: dayIdx, score: bestScore });
+        openPositions.push({
+          ticker: stock.ticker, optionType, premium, contracts, cost,
+          iv: dynamicIV, expDays, entryDay: dayIdx, score: bestScore, strike,
+        });
         if (openPositions.length >= 3) break;
       }
     }
