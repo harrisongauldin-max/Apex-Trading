@@ -1646,23 +1646,22 @@ async function checkSectorETF(stock) {
   const etfMap = { "Technology":"XLK", "Financial":"XLF", "Consumer":"XLY" };
   const etfs   = [];
 
-  // Sector ETF
   if (etfMap[stock.sector]) etfs.push(etfMap[stock.sector]);
-
-  // SMH for semiconductors
   if (SEMIS.includes(stock.ticker)) etfs.push("SMH");
-
-  if (!etfs.length) return { pass: true, reason: null };
+  if (!etfs.length) return { pass: true, reason: null, putBoost: 0 };
 
   for (const etf of etfs) {
     const bars = await getStockBars(etf, 5);
     if (bars.length < 2) continue;
     const etfReturn = (bars[bars.length-1].c - bars[0].o) / bars[0].o;
-    if (etfReturn < -0.01) {
-      return { pass: false, reason: `${etf} sector ETF down ${(etfReturn*100).toFixed(1)}% - sector headwind` };
+    if (etfReturn < -0.015) {
+      // Strong sector weakness — block calls but signal put opportunity
+      return { pass: false, reason: `${etf} sector ETF down ${(etfReturn*100).toFixed(1)}% - sector headwind`, putBoost: 20, etfReturn };
+    } else if (etfReturn < -0.01) {
+      return { pass: false, reason: `${etf} sector ETF down ${(etfReturn*100).toFixed(1)}% - sector headwind`, putBoost: 12, etfReturn };
     }
   }
-  return { pass: true, reason: null };
+  return { pass: true, reason: null, putBoost: 0 };
 }
 
 // - Pre-trade Filters -
@@ -1694,9 +1693,11 @@ async function checkAllFilters(stock, price) {
   const sectorExp = state.positions.filter(p=>p.sector===stock.sector).reduce((s,p)=>s+p.cost,0);
   if (sectorExp / totalCap() >= MAX_SECTOR_PCT) return { pass:false, reason:`${stock.sector} sector at ${MAX_SECTOR_PCT*100}% limit` };
 
-  // 9. Correlated positions (max 2 per sector)
-  const sectorCount = state.positions.filter(p=>p.sector===stock.sector).length;
-  if (sectorCount >= 2) return { pass:false, reason:`Already have 2 positions in ${stock.sector}` };
+  // 9. Correlated positions (max 2 per sector) + no opposite bets
+  const sectorPositions = state.positions.filter(p => p.sector === stock.sector);
+  if (sectorPositions.length >= 2) return { pass:false, reason:`Already have 2 positions in ${stock.sector}` };
+  // Detect opposite sector bets — don't have both calls and puts in same sector
+  // (passed in via optionType from scan loop context)
 
   // 10. Dynamic vol filter — realized vs implied gap (replaces static IVR_MAX)
   // If implied vol >> realized vol, options are overpriced — skip
@@ -2115,10 +2116,18 @@ async function closePosition(ticker, reason, exitPremium = null) {
   if (state.cash > state.peakCash) state.peakCash = state.cash;
 
   // Circuit breaker checks -- use total portfolio value (cash + open positions)
-  // so deploying capital into trades does not falsely trigger the breaker
   const portfolioValue = state.cash + openRisk();
   const dailyPnL  = portfolioValue - state.dayStartCash;
   const weeklyPnL = portfolioValue - state.weekStartCash;
+
+  // Daily max loss — 15% of DEPLOYED capital (not total portfolio)
+  // A $240 loss on $3k deployed shouldn't trip a $10k portfolio circuit
+  const deployedCapital = Math.max(openRisk(), totalCap() * 0.10); // at least 10% of total
+  if (dailyPnL / deployedCapital <= -0.15 && state.circuitOpen) {
+    state.circuitOpen = false;
+    logEvent("circuit", `DAILY MAX LOSS circuit - lost ${fmt(Math.abs(dailyPnL))} (${(dailyPnL/deployedCapital*100).toFixed(1)}% of deployed capital)`);
+  }
+  // Weekly circuit — 25% of total capital
   if (dailyPnL / totalCap() <= -0.15 && state.circuitOpen) {
     state.circuitOpen = false;
     logEvent("circuit", `DAILY circuit breaker - loss ${fmt(Math.abs(dailyPnL))}`);
@@ -2354,12 +2363,20 @@ async function runScan() {
   // -- HOUR TIER (every 60 minutes) --
   if (now - lastHourScan > 60 * 60 * 1000) {
     lastHourScan = now;
-    // Update earnings dates for all watchlist stocks
+    const today  = getETTime().toISOString().split("T")[0];
+    let updated  = 0;
+    let cleared  = 0;
     for (const stock of WATCHLIST) {
+      // Clear stale past earnings dates
+      if (stock.earningsDate && stock.earningsDate < today) {
+        stock.earningsDate = null;
+        cleared++;
+      }
+      // Fetch new upcoming earnings date
       const ed = await getEarningsDate(stock.ticker);
-      if (ed) stock.earningsDate = ed;
+      if (ed) { stock.earningsDate = ed; updated++; }
     }
-    logEvent("scan", `[1hr] Earnings calendar updated for ${WATCHLIST.length} stocks`);
+    logEvent("scan", `[1hr] Earnings: ${updated} updated, ${cleared} stale dates cleared`);
   }
 
   // Manage stock positions
@@ -2480,7 +2497,14 @@ async function runScan() {
     // IV collapse
     if (curP < pos.premium*(1-IV_COLLAPSE_PCT) && price >= pos.strike*0.97) {
       logEvent("scan", `${pos.ticker} IV collapse - option down ${(((pos.premium-curP)/pos.premium)*100).toFixed(0)}%`);
-      closePosition(pos.ticker, "iv-collapse"); continue;
+      await closePosition(pos.ticker, "iv-collapse"); continue;
+    }
+
+    // Delta drift — if delta > 0.85 option is deep ITM acting like a stock, take profits
+    const currentDelta = Math.abs(parseFloat(pos.greeks?.delta || 0));
+    if (currentDelta > 0.85 && chg >= 0.30) {
+      logEvent("scan", `${pos.ticker} delta drift ${currentDelta.toFixed(2)} > 0.85 - deep ITM, taking profits`);
+      await closePosition(pos.ticker, "delta-drift"); continue;
     }
 
     // Mid-trade earnings check
@@ -2488,14 +2512,52 @@ async function runScan() {
       const daysToE = Math.round((new Date(pos.earningsDate)-new Date())/86400000);
       if (daysToE >= 0 && daysToE <= EARNINGS_SKIP_DAYS) {
         logEvent("scan", `${pos.ticker} earnings in ${daysToE} days - closing to avoid IV crush`);
-        closePosition(pos.ticker, "earnings-close"); continue;
+        await closePosition(pos.ticker, "earnings-close"); continue;
       }
+    }
+
+    // News exit — requires BOTH sustained sentiment AND price confirmation
+    // A single headline is not enough — need multiple signals agreeing
+    const newsArts = await getNewsForTicker(pos.ticker);
+    const newsSent = analyzeNews(newsArts);
+
+    if (pos.optionType === "put" && newsSent.signal === "strongly bullish" && chg <= -0.15) {
+      // Put losing AND strongly bullish news with multiple articles — thesis broken
+      logEvent("scan", `${pos.ticker} PUT closing - strongly bullish news confirmed by price action`);
+      await closePosition(pos.ticker, "news-exit"); continue;
+    }
+    if (pos.optionType === "call" && newsSent.signal === "strongly bearish" && chg <= -0.15) {
+      // Call losing AND strongly bearish news — thesis broken
+      logEvent("scan", `${pos.ticker} CALL closing - strongly bearish news confirmed by price action`);
+      await closePosition(pos.ticker, "news-exit"); continue;
     }
 
     // Expiry roll
     if (dte <= 7 && chg > 0) {
       logEvent("scan", `${pos.ticker} near expiry (${dte}d) - closing to avoid gamma risk`);
-      closePosition(pos.ticker, "expiry-roll"); continue;
+      await closePosition(pos.ticker, "expiry-roll"); continue;
+    }
+
+    // Overnight risk — professional position-by-position assessment
+    const etNow2      = getETTime();
+    const etHourNow   = etNow2.getHours() + etNow2.getMinutes() / 60;
+    if (etHourNow >= 15.75 && state.vix >= 30) {
+      // Close losers — theta + overnight risk compounds on losing positions
+      if (chg <= -0.10) {
+        logEvent("scan", `${pos.ticker} overnight risk - closing losing position (${(chg*100).toFixed(0)}%) into close`);
+        await closePosition(pos.ticker, "overnight-risk"); continue;
+      }
+      // Protect winners — move stop to breakeven for positions up 20%+
+      if (chg >= 0.20 && !pos.breakevenLocked) {
+        pos.breakevenLocked = true;
+        pos.stop = pos.premium;
+        logEvent("scan", `${pos.ticker} overnight protection - stop moved to breakeven (up ${(chg*100).toFixed(0)}%)`);
+      }
+      // Close DTE <= 7 regardless — gamma risk overnight is too dangerous
+      if (dte <= 7) {
+        logEvent("scan", `${pos.ticker} overnight risk - DTE ${dte} too short for overnight hold`);
+        await closePosition(pos.ticker, "overnight-risk"); continue;
+      }
     }
 
     // Update current price on position so dashboard shows live data
@@ -2539,8 +2601,33 @@ async function runScan() {
       continue;
     }
 
-    const { pass, reason } = await checkAllFilters(stock, price);
-    if (!pass) { logEvent("filter", `${stock.ticker} filter fail: ${reason}`); continue; }
+    // Check for opposite sector bets before filtering
+    const sectorPositions = state.positions.filter(p => p.sector === stock.sector);
+    const hasSectorCall   = sectorPositions.some(p => p.optionType === "call");
+    const hasSectorPut    = sectorPositions.some(p => p.optionType === "put");
+
+    // Get filter result — even on fail, collect weakness signals for put scoring
+    const filterResult = await checkAllFilters(stock, price);
+    const sectorResult = await checkSectorETF(stock);
+
+    // Collect weakness signals that boost put scores
+    let weaknessBoost = 0;
+    const weaknessReasons = [];
+
+    if (!filterResult.pass) {
+      // On a hard fail that's not a put-relevant signal, skip entirely
+      const putRelevantFails = ["sector ETF", "support", "VWAP", "breakdown"];
+      const isPutRelevant = putRelevantFails.some(f => filterResult.reason?.includes(f));
+
+      if (!isPutRelevant) {
+        logEvent("filter", `${stock.ticker} filter fail: ${filterResult.reason}`);
+        continue;
+      }
+      // Put-relevant failure — collect the weakness signal
+      weaknessBoost += sectorResult.putBoost || 0;
+      if (filterResult.reason?.includes("sector ETF")) { weaknessBoost += 15; weaknessReasons.push(`Sector ETF down (+15)`); }
+      if (filterResult.reason?.includes("support"))    { weaknessBoost += 12; weaknessReasons.push(`Near support breakdown (+12)`); }
+    }
 
     const bars     = await getStockBars(stock.ticker, 60);
     const avgVol   = bars.length ? bars.slice(0,-1).reduce((s,b)=>s+b.v,0)/Math.max(bars.length-1,1) : 0;
@@ -2571,10 +2658,12 @@ async function runScan() {
     // Earnings quality score
     const eqScore = await getEarningsQualityScore(stock.ticker, bars);
 
-    // VWAP - skip calls if price below VWAP (weak intraday)
+    // VWAP — price below VWAP boosts puts, blocks calls
     const vwap = calcVWAP(bars.slice(-5));
     if (vwap > 0 && price < vwap * 0.99) {
-      logEvent("filter", `${stock.ticker} price $${price} below VWAP $${vwap} - weak intraday`);
+      logEvent("filter", `${stock.ticker} price $${price} below VWAP $${vwap} - weak intraday - put boost +10`);
+      weaknessBoost += 10;
+      weaknessReasons.push(`Below VWAP (+10)`);
     }
 
     // Pre-market gap check
@@ -2603,9 +2692,62 @@ async function runScan() {
       newsSentiment: newsSentiment.signal,
     };
 
+    // Time of day adjustment — only penalize late entries when VIX elevated OR volume declining
+    // A strong high-volume breakout at 2:30PM is still worth trading
+    const etHour      = getETTime().getHours() + getETTime().getMinutes() / 60;
+    const isLastHour  = etHour >= 15.0;
+    const isLateDay   = etHour >= 14.5;
+    const volDecline  = todayVol < avgVol * 0.7;
+
+    let timeOfDayMult = 1.0;
+    if (isLastHour && (state.vix >= 25 || volDecline)) timeOfDayMult = 0.80;
+    else if (isLateDay && state.vix >= 30)              timeOfDayMult = 0.90;
+
     // Score both call and put setups using live signals
     const callSetup = scoreSetup(liveStock, relStrength, signals.adx, todayVol, avgVol);
     const putSetup  = scorePutSetup(liveStock, relStrength, signals.adx, todayVol, avgVol);
+
+    // Volume context for puts — high volume confirms distribution, but capitulation
+    // (extreme high volume) can signal reversal. Use nuanced scoring.
+    const volRatio = avgVol > 0 ? todayVol / avgVol : 1;
+    if (volRatio > 2.0) {
+      // Extreme volume — could be capitulation (reversal) or panic (continuation)
+      // Slight put boost but less than moderate high volume
+      putSetup.score = Math.min(100, putSetup.score + 5);
+      putSetup.reasons.push(`Extreme volume - possible capitulation (+5)`);
+    } else if (volRatio > 1.3) {
+      // Above average volume — confirms selling pressure
+      putSetup.score = Math.min(100, putSetup.score + 8);
+      putSetup.reasons.push(`High volume confirms selling pressure (+8)`);
+    } else if (volRatio < 0.6) {
+      // Very low volume selloff — weak conviction, slight penalty
+      putSetup.score = Math.max(0, putSetup.score - 3);
+      putSetup.reasons.push(`Low volume selloff (-3)`);
+    }
+
+    // Apply time of day multiplier
+    callSetup.score = Math.round(callSetup.score * timeOfDayMult);
+    putSetup.score  = Math.round(putSetup.score  * timeOfDayMult);
+    if (timeOfDayMult < 1.0) {
+      callSetup.reasons.push(`Time of day adj x${timeOfDayMult}`);
+      putSetup.reasons.push(`Time of day adj x${timeOfDayMult}`);
+    }
+
+    // Apply weakness boost to puts — filters that block calls become put signals
+    if (weaknessBoost > 0) {
+      putSetup.score = Math.min(100, putSetup.score + weaknessBoost);
+      putSetup.reasons.push(...weaknessReasons);
+      // Block calls when market weakness is detected
+      callSetup.score = Math.max(0, callSetup.score - weaknessBoost);
+      logEvent("filter", `${stock.ticker} weakness signals → put boost +${weaknessBoost}`);
+    }
+
+    // VIX boost for puts
+    if (state.vix >= 25) {
+      const vixPutBoost = state.vix >= 30 ? 10 : 5;
+      putSetup.score = Math.min(100, putSetup.score + vixPutBoost);
+      putSetup.reasons.push(`VIX ${state.vix} put boost (+${vixPutBoost})`);
+    }
 
     // Apply stock-level news modifier
     callSetup.score = Math.min(100, Math.max(0, callSetup.score + (newsSentiment.modifier || 0)));
@@ -2697,6 +2839,16 @@ async function runScan() {
     const effectiveMinScore = ddProtocol.minScore || MIN_SCORE;
     if (bestScore < effectiveMinScore) {
       logEvent("filter", `${stock.ticker} call:${callSetup.score} put:${putSetup.score} - below ${effectiveMinScore} (${ddProtocol.level} protocol) - skip`);
+      continue;
+    }
+
+    // Block same ticker opposite direction only (not same sector — relative value trades are valid)
+    const sameTickerOpposite = state.positions.find(p =>
+      p.ticker === stock.ticker &&
+      p.optionType !== optionType
+    );
+    if (sameTickerOpposite) {
+      logEvent("filter", `${stock.ticker} same ticker opposite direction blocked - already have ${sameTickerOpposite.optionType}`);
       continue;
     }
 
