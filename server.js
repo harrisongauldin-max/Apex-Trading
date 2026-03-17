@@ -3001,17 +3001,40 @@ app.get("/api/test-options/:ticker", async (req, res) => {
         results[key] = { status: res2.status, data: parsed };
         if (parsed && parsed.option_contracts && parsed.option_contracts.length > 0) {
           const sym  = parsed.option_contracts[0].symbol;
-          const sn1  = await alpacaGet(`/options/snapshots?symbols=${sym}&feed=indicative`, base);
-          const sn2  = await alpacaGet(`/options/snapshots?symbols=${sym}`, base);
-          const sn3  = await alpacaGet(`/options/snapshots?symbols=${sym}&feed=indicative`, "https://data.alpaca.markets/v2");
+          // Try every possible snapshot variation
+          const snapTests = {};
+          const snapBases = [
+            "https://paper-api.alpaca.markets/v2",
+            "https://data.alpaca.markets/v2",
+            "https://data.alpaca.markets/v1beta1",
+            "https://api.alpaca.markets/v2",
+          ];
+          const snapFeeds = ["indicative", "opra", "sip", "iex", ""];
+          for (const sb of snapBases) {
+            for (const feed of snapFeeds) {
+              const feedParam = feed ? `&feed=${feed}` : "";
+              const snapUrl   = `/options/snapshots?symbols=${sym}${feedParam}`;
+              const snapResp  = await alpacaGet(snapUrl, sb);
+              if (snapResp && snapResp.snapshots && Object.keys(snapResp.snapshots).length > 0) {
+                return res.json({
+                  workingBase:       base,
+                  workingSnapBase:   sb,
+                  workingSnapFeed:   feed || "none",
+                  workingSnapUrl:    sb + snapUrl,
+                  contractsFound:    parsed.option_contracts.length,
+                  firstContract:     parsed.option_contracts[0],
+                  snapshotData:      snapResp.snapshots[sym],
+                });
+              }
+              snapTests[`${sb}${snapUrl}`] = snapResp;
+            }
+          }
           return res.json({
-            workingBase:      base,
-            workingPath:      path,
-            contractsFound:   parsed.option_contracts.length,
-            firstContract:    parsed.option_contracts[0],
-            snap_paperWithFeed: sn1,
-            snap_paperNoFeed:   sn2,
-            snap_dataWithFeed:  sn3,
+            workingBase:    base,
+            contractsFound: parsed.option_contracts.length,
+            firstContract:  parsed.option_contracts[0],
+            snapshotError:  "No snapshot endpoint returned data",
+            snapTests,
           });
         }
       } catch(e) {
