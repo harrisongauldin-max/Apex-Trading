@@ -190,6 +190,7 @@ function defaultState() {
     cashETFPrice:     91,
     lastScan:         null,
     vix:              15,
+    dataQuality:      { realTrades: 0, estimatedTrades: 0, totalTrades: 0 },
   };
 }
 
@@ -1452,16 +1453,21 @@ async function getSectorRotation() {
 async function getRealOptionsContract(ticker, price, optionType, score, vix, earningsDate) {
   try {
     // Determine target expiry window
-    const { expDate: targetExpDate, expDays: targetExpDays, expiryType } = selectExpiry(score, vix, optionType, earningsDate);
+    const { expDate: targetExpDate, expDays: targetExpDays, expiryType } = selectExpiry(score, vix, optionType, earningsDate, ticker);
+  // LEAPS use deeper ITM delta (0.70-0.80) for better intrinsic value retention
+  const isLeaps      = expiryType === "leaps";
+  const deltaMin     = isLeaps ? 0.65 : TARGET_DELTA_MIN;
+  const deltaMax     = isLeaps ? 0.85 : TARGET_DELTA_MAX;
+  const strikeRange  = isLeaps ? 0.15 : 0.10; // wider strike range for LEAPS
 
     // Format date for API: YYYY-MM-DD
     const today     = getETTime();
     const minExpiry = new Date(today.getTime() + 7  * 86400000).toISOString().split("T")[0];
     const maxExpiry = new Date(today.getTime() + 90 * 86400000).toISOString().split("T")[0];
 
-    // Strike range - look 10% around current price
-    const strikeLow  = (price * 0.90).toFixed(0);
-    const strikeHigh = (price * 1.10).toFixed(0);
+    // Strike range - wider for LEAPS
+    const strikeLow  = (price * (1 - strikeRange)).toFixed(0);
+    const strikeHigh = (price * (1 + strikeRange)).toFixed(0);
 
     const url = `/options/contracts?underlying_symbol=${ticker}` +
       `&expiration_date_gte=${minExpiry}&expiration_date_lte=${maxExpiry}` +
@@ -1507,7 +1513,7 @@ async function getRealOptionsContract(ticker, price, optionType, score, vix, ear
       if (mid <= 0) continue;
       if (spread > MAX_SPREAD_PCT) continue;
       if (oi < MIN_OPEN_INTEREST) continue;
-      if (delta < TARGET_DELTA_MIN || delta > TARGET_DELTA_MAX) continue;
+      if (delta < deltaMin || delta > deltaMax) continue;
 
       const deltaScore    = 1 - Math.abs(delta - 0.35) / 0.35;
       const liquidScore   = Math.min(oi / 5000, 1);
@@ -1840,8 +1846,11 @@ function getThirdFriday(year, month) {
 }
 
 // Smart expiry selection based on score, VIX, and option type
-// Returns { expDate: string, expDays: number, expiryType: "weekly"|"monthly" }
-function selectExpiry(score, vix, optionType, earningsDate) {
+// LEAPS eligible tickers — most liquid with active LEAPS markets
+const LEAPS_ELIGIBLE = ["NVDA","AAPL","MSFT","AMZN","META","GOOGL","SPY","QQQ","TSLA","AMD","PLTR","CRWD","AVGO"];
+
+// Returns { expDate: string, expDays: number, expiryType: "weekly"|"monthly"|"leaps" }
+function selectExpiry(score, vix, optionType, earningsDate, ticker = null) {
   const today  = getETTime();
   const now    = today.getTime();
 
@@ -1849,7 +1858,11 @@ function selectExpiry(score, vix, optionType, earningsDate) {
   let targetDays;
   let expiryType;
 
-  if (score >= 85 && vix < 25 && optionType === "call") {
+  // LEAPS tier — 180-270 days, high conviction + low VIX + LEAPS eligible stock
+  if (score >= 90 && vix < 20 && optionType === "call" && ticker && LEAPS_ELIGIBLE.includes(ticker)) {
+    targetDays = 210; // ~7 months out
+    expiryType = "leaps";
+  } else if (score >= 85 && vix < 25 && optionType === "call") {
     // High score, low VIX, call = weekly for max leverage
     targetDays = 14;
     expiryType = "weekly";
@@ -1872,15 +1885,20 @@ function selectExpiry(score, vix, optionType, earningsDate) {
 
   let expiry;
   if (expiryType === "weekly") {
-    // Find next Friday at or after targetDate
     expiry = getNextExpiryFriday(targetDate);
-    // Make sure it's at least 7 days out (avoid gamma risk)
     const minDate = new Date(now + 7 * 86400000);
     if (expiry < minDate) expiry = getNextExpiryFriday(new Date(expiry.getTime() + 7 * 86400000));
+  } else if (expiryType === "leaps") {
+    // LEAPS use Jan expiry of next year (most liquid LEAPS expiration)
+    const targetYear = targetDate.getFullYear();
+    expiry = getThirdFriday(targetYear, 0); // January expiry
+    // If Jan is too close use next year's Jan
+    if (expiry < new Date(now + 180 * 86400000)) {
+      expiry = getThirdFriday(targetYear + 1, 0);
+    }
   } else {
-    // Find third Friday of target month
+    // Monthly — find third Friday of target month
     expiry = getThirdFriday(targetDate.getFullYear(), targetDate.getMonth());
-    // If that Friday has already passed or too close, go to next month
     const minDate = new Date(now + 21 * 86400000);
     if (expiry < minDate) {
       const nextMonth = targetDate.getMonth() === 11 ? 0 : targetDate.getMonth() + 1;
@@ -1907,7 +1925,7 @@ function selectExpiry(score, vix, optionType, earningsDate) {
 
 function buildCard(stock, price, contracts, iv, optionType = "call", score = 75, vix = 15) {
   // Smart expiry - real Friday dates, weekly vs monthly based on conditions
-  const { expDate, expDays, expiryType } = selectExpiry(score, vix, optionType, stock.earningsDate);
+  const { expDate, expDays, expiryType } = selectExpiry(score, vix, optionType, stock.earningsDate, stock.ticker);
 
   const otmPct    = stock.momentum === "strong" ? 0.035 : 0.045;
   // Calls: strike ABOVE price. Puts: strike BELOW price
@@ -1934,9 +1952,12 @@ async function executeTrade(stock, price, score, scoreReasons, vix, optionType =
 
   // Fallback to estimated contract if real data unavailable
   if (!contract) {
-    logEvent("warn", `${stock.ticker} - no real options contract found, using estimate`);
+    logEvent("warn", `⚠ ${stock.ticker} - NO REAL OPTIONS DATA - using Black-Scholes estimate. Check Alpaca Pro subscription.`);
+    if (!state.dataQuality) state.dataQuality = { realTrades: 0, estimatedTrades: 0, totalTrades: 0 };
+    state.dataQuality.estimatedTrades++;
+    state.dataQuality.totalTrades++;
     const iv       = 0.25 + stock.ivr * 0.003;
-    const { expDate, expDays, expiryType } = selectExpiry(score, vix, optionType, stock.earningsDate);
+    const { expDate, expDays, expiryType } = selectExpiry(score, vix, optionType, stock.earningsDate, stock.ticker);
     const otmPct   = stock.momentum === "strong" ? 0.035 : 0.045;
     const strike   = optionType === "put"
       ? Math.round(price * (1 - otmPct) / 5) * 5
@@ -1947,6 +1968,11 @@ async function executeTrade(stock, price, score, scoreReasons, vix, optionType =
     contract = { symbol: null, strike, expDate, expDays, expiryType,
       premium, bid: premium * 0.95, ask: premium * 1.05,
       greeks, iv, oi: 0, vol: 0, optionType };
+  } else {
+    // Real data — track stats
+    if (!state.dataQuality) state.dataQuality = { realTrades: 0, estimatedTrades: 0, totalTrades: 0 };
+    state.dataQuality.realTrades++;
+    state.dataQuality.totalTrades++;
   }
 
   // Position sizing based on real premium
@@ -2018,6 +2044,10 @@ async function executeTrade(stock, price, score, scoreReasons, vix, optionType =
   state.positions.push(position);
 
   // Trade journal entry
+  // Tag if this is an earnings play
+  const isEarningsPlay = scoreReasons.some(r => r.includes("Earnings play"));
+  if (isEarningsPlay) position.earningsPlay = true;
+
   state.tradeJournal.unshift({
     time:      new Date().toISOString(),
     ticker:    stock.ticker,
@@ -2293,6 +2323,10 @@ async function runScan() {
     marketContext.relativeValue = getRelativeValueScreening();
     marketContext.globalMarket  = await getGlobalMarketSignal();
     marketContext.streaks       = getStreakAnalysis();
+
+    // Check earnings plays
+    await checkEarningsPlays();
+    await manageEarningsPlayExits();
 
     logEvent("scan", `[5min] Regime:${regime.regime}(${regime.confidence}%) | Kelly:${marketContext.kelly.contracts}x | Global:${marketContext.globalMarket.signal} | Streak:${marketContext.streaks.currentStreak}x${marketContext.streaks.currentType}`);
   }
@@ -2951,6 +2985,7 @@ app.get("/api/state", async (req, res) => {
     lastUpdated:        new Date().toISOString(),
     uptime:             process.uptime(),
     betaWeightedDelta:  calcBetaWeightedDelta(),
+    dataQuality:        state.dataQuality || { realTrades: 0, estimatedTrades: 0, totalTrades: 0 },
     macroCalendar:      marketContext.macroCalendar,
     upcomingEvents:     getUpcomingMacroEvents(7),
     regime:             marketContext.regime,
@@ -3125,6 +3160,77 @@ app.get("/api/journal",      (req,res) => res.json(state.tradeJournal.slice(0,50
 app.get("/api/report",       (req,res) => res.json({report:buildMonthlyReport()}));
 
 // - New Feature Endpoints -
+
+// ── Earnings Play Engine ─────────────────────────────────────────────────
+// Buy ATM straddle (call + put) 14-21 days before earnings when IV is still cheap
+// Exit before earnings announcement to capture IV expansion (avoid IV crush)
+
+const EARNINGS_PLAY_MIN_DTE  = 14;  // enter at least 14 days before earnings
+const EARNINGS_PLAY_MAX_DTE  = 21;  // enter no more than 21 days before earnings
+const EARNINGS_PLAY_MAX_IVR  = 45;  // only when options are still cheap
+const EARNINGS_PLAY_EXIT_DTE = 2;   // exit 2 days before earnings
+
+async function checkEarningsPlays() {
+  if (!isEntryWindow()) return;
+  if (heatPct() >= MAX_HEAT * 0.8) return; // need room for straddle (2 positions)
+
+  for (const stock of WATCHLIST) {
+    if (!stock.earningsDate) continue;
+
+    const daysToEarnings = Math.round((new Date(stock.earningsDate) - new Date()) / 86400000);
+
+    // Only enter in the 14-21 day window
+    if (daysToEarnings < EARNINGS_PLAY_MIN_DTE || daysToEarnings > EARNINGS_PLAY_MAX_DTE) continue;
+
+    // Skip if IVR already elevated (options too expensive)
+    if (stock.ivr > EARNINGS_PLAY_MAX_IVR) {
+      logEvent("filter", `${stock.ticker} earnings play skip - IVR ${stock.ivr} too high (>${EARNINGS_PLAY_MAX_IVR})`);
+      continue;
+    }
+
+    // Skip if already have a position in this ticker
+    if (state.positions.find(p => p.ticker === stock.ticker)) continue;
+
+    // Skip if not enough cash for both legs
+    const price = await getStockQuote(stock.ticker);
+    if (!price) continue;
+
+    logEvent("scan", `${stock.ticker} EARNINGS PLAY detected - ${daysToEarnings} days to earnings | IVR:${stock.ivr}`);
+
+    // Enter call leg
+    const callContract = await getRealOptionsContract(stock.ticker, price, "call", 75, state.vix, null);
+    if (callContract) {
+      const callStock = { ...stock, earningsDate: null }; // clear earnings date so it doesn't extend expiry
+      await executeTrade(callStock, price, 75, [`Earnings play call - ${daysToEarnings}d to earnings`], state.vix, "call");
+    }
+
+    // Enter put leg
+    const putContract = await getRealOptionsContract(stock.ticker, price, "put", 75, state.vix, null);
+    if (putContract) {
+      const putStock = { ...stock, earningsDate: null };
+      await executeTrade(putStock, price, 75, [`Earnings play put - ${daysToEarnings}d to earnings`], state.vix, "put");
+    }
+
+    await new Promise(r => setTimeout(r, 500));
+  }
+}
+
+// Check if any open earnings play positions need to exit (2 days before earnings)
+async function manageEarningsPlayExits() {
+  for (const pos of [...state.positions]) {
+    if (!pos.earningsPlay) continue;
+
+    const stock = WATCHLIST.find(s => s.ticker === pos.ticker);
+    if (!stock || !stock.earningsDate) continue;
+
+    const daysToEarnings = Math.round((new Date(stock.earningsDate) - new Date()) / 86400000);
+
+    if (daysToEarnings <= EARNINGS_PLAY_EXIT_DTE) {
+      logEvent("scan", `${pos.ticker} earnings play exit - ${daysToEarnings} days to earnings - capturing IV expansion`);
+      await closePosition(pos.ticker, "earnings-play-exit");
+    }
+  }
+}
 
 // ── Safe Reporting Metrics ───────────────────────────────────────────────
 
