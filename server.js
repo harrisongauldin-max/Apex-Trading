@@ -2963,25 +2963,40 @@ app.get("/api/test-options/:ticker", async (req, res) => {
   const strikeLow  = (price * 0.95).toFixed(0);
   const strikeHigh = (price * 1.05).toFixed(0);
 
-  const contractsUrl = `/options/contracts?underlying_symbol=${ticker}&expiration_date_gte=${minExpiry}&expiration_date_lte=${maxExpiry}&strike_price_gte=${strikeLow}&strike_price_lte=${strikeHigh}&type=call&limit=5`;
-  const contracts    = await alpacaGet(contractsUrl, ALPACA_DATA);
+  const params = `?underlying_symbol=${ticker}&expiration_date_gte=${minExpiry}&expiration_date_lte=${maxExpiry}&strike_price_gte=${strikeLow}&strike_price_lte=${strikeHigh}&type=call&limit=5`;
 
-  if (!contracts || !contracts.option_contracts || !contracts.option_contracts.length) {
-    return res.json({ error: "No contracts returned", raw: contracts, url: contractsUrl });
+  // Try all possible endpoint paths
+  const paths = [
+    `/options/contracts${params}`,
+    `/v1beta1/options/contracts${params}`,
+    `/v2/options/contracts${params}`,
+  ];
+
+  const results = {};
+  for (const path of paths) {
+    const data = await alpacaGet(path, ALPACA_DATA);
+    results[path] = data;
+    if (data && data.option_contracts && data.option_contracts.length > 0) {
+      // Found working endpoint — test snapshot too
+      const sym      = data.option_contracts[0].symbol;
+      const snapPaths = [
+        `/options/snapshots?symbols=${sym}&feed=indicative`,
+        `/v1beta1/options/snapshots?symbols=${sym}&feed=indicative`,
+        `/options/snapshots?symbols=${sym}`,
+      ];
+      const snapResults = {};
+      for (const sp of snapPaths) {
+        snapResults[sp] = await alpacaGet(sp, ALPACA_DATA);
+      }
+      return res.json({
+        workingContractsPath: path,
+        contractsFound: data.option_contracts.length,
+        firstContract:  data.option_contracts[0],
+        snapshotTests:  snapResults,
+      });
+    }
   }
-
-  // Test snapshot on first contract
-  const sym      = contracts.option_contracts[0].symbol;
-  const snapData = await alpacaGet(`/options/snapshots?symbols=${sym}&feed=indicative`, ALPACA_DATA);
-
-  res.json({
-    ticker, price,
-    contractsFound: contracts.option_contracts.length,
-    firstContract:  contracts.option_contracts[0],
-    snapshot:       snapData,
-    hasGreeks:      !!(snapData?.snapshots?.[sym]?.greeks),
-    hasQuote:       !!(snapData?.snapshots?.[sym]?.latestQuote),
-  });
+  return res.json({ error: "No working endpoint found", results });
 });
 
 // Health check endpoint
