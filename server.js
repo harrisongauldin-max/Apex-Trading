@@ -1267,7 +1267,7 @@ async function checkScaleIns() {
 
     if (chg >= 0.05 && state.cash > CAPITAL_FLOOR + addCost) {
       // Submit scale-in order to Alpaca
-      if (pos.contractSymbol && pos.ask > 0) {
+      if (pos.contractSymbol && pos.ask > 0 && !dryRunMode) {
         try {
           const scaleBody = {
             symbol:        pos.contractSymbol,
@@ -2078,7 +2078,7 @@ async function executeTrade(stock, price, score, scoreReasons, vix, optionType =
   // Submit order to Alpaca paper trading
   // Only submit if we have a real contract symbol (not an estimate)
   let alpacaOrderId = null;
-  if (contract.symbol && contract.ask > 0) {
+  if (contract.symbol && contract.ask > 0 && !dryRunMode) {
     try {
       const limitPrice = parseFloat(contract.ask.toFixed(2)); // number not string
       const orderBody = {
@@ -2124,6 +2124,12 @@ async function executeTrade(stock, price, score, scoreReasons, vix, optionType =
       } catch(e) { logEvent("error", `Failed to cancel order ${alpacaOrderId}: ${e.message}`); }
     }
     return false;
+  }
+
+  // In dry run — log what would happen but don't mutate state
+  if (dryRunMode) {
+    logEvent("dryrun", `WOULD BUY ${stock.ticker} ${optionType.toUpperCase()} $${contract.strike} | ${contracts}x @ $${contract.premium} | cost ${fmt(finalCost)} | score ${score} | delta ${contract.greeks.delta}`);
+    return true;
   }
 
   state.cash = parseFloat((state.cash - finalCost).toFixed(2));
@@ -2252,7 +2258,7 @@ async function closePosition(ticker, reason, exitPremium = null) {
   // But minimum 1 contract — if only 1 contract, full close regardless
   const contractsToSell = pos.contracts === 1 ? 1 : Math.max(1, Math.floor(pos.contracts * mult));
   const closeQty = contractsToSell;
-  if (pos.contractSymbol && closeQty > 0) {
+  if (pos.contractSymbol && closeQty > 0 && !dryRunMode) {
     try {
       // Use real bid if available, else use ep (mid) as limit
       // Real bid from position tracking is more reliable than derived estimate
@@ -2349,7 +2355,7 @@ async function partialClose(ticker) {
   const half = Math.max(1, Math.floor(pos.contracts / 2));
 
   // Submit partial close order to Alpaca
-  if (pos.contractSymbol && half > 0) {
+  if (pos.contractSymbol && half > 0 && !dryRunMode) {
     try {
       const bidPrice = parseFloat((pos.bid > 0 ? pos.bid : ep * 0.98).toFixed(2));
       const partialBody = {
@@ -2442,6 +2448,7 @@ let scanRunning  = false;
 let lastMedScan  = 0;  // 5 minute tier
 let lastSlowScan = 0;  // 15 minute tier
 let lastHourScan = 0;  // 60 minute tier
+let dryRunMode   = false; // when true: skips market hours check, Alpaca orders, state mutations
 
 // Shared market context updated on tiers
 let marketContext = {
@@ -2471,7 +2478,8 @@ async function runScan() {
   scanRunning = true;
   try {
   if (!ALPACA_KEY) { logEvent("warn", "No ALPACA_API_KEY set - check Railway variables"); scanRunning = false; return; }
-  if (!isMarketHours()) { logEvent("scan", "Outside market hours - skipping trade logic"); scanRunning = false; return; }
+  if (!isMarketHours() && !dryRunMode) { logEvent("scan", "Outside market hours - skipping trade logic"); scanRunning = false; return; }
+  if (dryRunMode) logEvent("scan", "⚡ DRY RUN MODE — no orders submitted, no state changes");
 
   const now = Date.now();
 
@@ -3429,6 +3437,49 @@ app.post("/api/close/:tkr",  async (req,res) => {
   await closePosition(t,"manual");
   res.json({ok:true});
 });
+// Test email endpoint — sends a test email immediately
+app.post("/api/test-email", async (req, res) => {
+  if (!GMAIL_USER || !GMAIL_PASS) {
+    return res.json({ error: "Email not configured — check GMAIL_USER and GMAIL_APP_PASSWORD in Railway" });
+  }
+  try {
+    await mailer.sendMail({
+      from:    GMAIL_USER,
+      to:      GMAIL_USER,
+      subject: `APEX Email Test - ${new Date().toLocaleTimeString()}`,
+      html:    `<div style="font-family:monospace;background:#07101f;color:#00ff88;padding:20px;border-radius:8px">
+        <h2>✅ APEX Email Working</h2>
+        <p style="color:#cce8ff">If you received this, Gmail notifications are configured correctly.</p>
+        <p style="color:#336688">GMAIL_USER: ${GMAIL_USER}</p>
+        <p style="color:#336688">Sent at: ${new Date().toISOString()}</p>
+      </div>`
+    });
+    logEvent("email", `Test email sent to ${GMAIL_USER}`);
+    res.json({ ok: true, message: `Test email sent to ${GMAIL_USER}` });
+  } catch(e) {
+    logEvent("error", `Test email failed: ${e.message}`);
+    res.json({ error: e.message, hint: "Check Gmail App Password is correct and 2FA is enabled on your Google account" });
+  }
+});
+
+// Dry run scan — full scan logic, no orders, no state changes
+app.post("/api/dry-run-scan", async (req, res) => {
+  if (scanRunning) return res.json({ error: "Scan already running" });
+  dryRunMode = true;
+  logEvent("scan", "═══ DRY RUN SCAN STARTED ═══");
+  try {
+    await runScan();
+  } finally {
+    dryRunMode = false;
+    logEvent("scan", "═══ DRY RUN SCAN COMPLETE ═══");
+  }
+  // Return all dryrun log entries from this scan
+  const dryLogs = state.tradeLog
+    .filter(e => e.type === "dryrun" || (e.type === "filter" && new Date(e.time) > new Date(Date.now() - 120000)))
+    .slice(0, 50);
+  res.json({ ok: true, message: "Dry run complete — check server log for details", entries: dryLogs });
+});
+
 // Emergency close all positions
 app.post("/api/emergency-close", async (req, res) => {
   const count = state.positions.length;
