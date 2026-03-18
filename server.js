@@ -49,10 +49,10 @@ const MA50_BUFFER         = 0.01;
 const IVR_MAX             = 70;
 const EARNINGS_SKIP_DAYS  = 5;
 const MIN_OPTIONS_VOLUME  = 10000;
-const MIN_OPEN_INTEREST   = 500;
+const MIN_OPEN_INTEREST   = 100;  // lowered from 500 — some valid contracts have lower OI
 const MIN_STOCK_PRICE     = 20;
-const MAX_SPREAD_PCT      = 0.10;  // max bid/ask spread as % of ask
-const EARLY_SPREAD_PCT    = 0.08;  // tighter spread required for early 9:45AM put entries
+const MAX_SPREAD_PCT      = 0.15;  // max bid/ask spread as % of ask (widened for high VIX days)
+const EARLY_SPREAD_PCT    = 0.10;  // tighter spread required for early 9:45AM put entries
 const MAX_GAP_PCT         = 0.03;
 const TARGET_DELTA_MIN    = 0.28;
 const TARGET_DELTA_MAX    = 0.42;
@@ -1588,14 +1588,14 @@ async function getRealOptionsContract(ticker, price, optionType, score, vix, ear
       const vol    = parseInt(day.v || day.volume || 0);
 
       // Skip illiquid
-      if (mid <= 0) continue;
+      if (mid <= 0) { skipped++; continue; }
       // Tighter spread requirement during early put window (9:45-10AM)
       const etH = getETTime().getHours() + getETTime().getMinutes() / 60;
       const isEarlyPutWindow = optionType === "put" && etH >= 9.75 && etH < 10.0;
       const maxSpread = isEarlyPutWindow ? EARLY_SPREAD_PCT : MAX_SPREAD_PCT;
-      if (spread > maxSpread) continue;
-      if (oi < MIN_OPEN_INTEREST) continue;
-      if (delta < deltaMin || delta > deltaMax) continue;
+      if (spread > maxSpread) { skipped++; continue; }
+      if (oi < MIN_OPEN_INTEREST) { skipped++; continue; }
+      if (delta < deltaMin || delta > deltaMax) { skipped++; continue; }
 
       const deltaTarget   = (deltaMin + deltaMax) / 2; // midpoint of actual target range
       const deltaRange    = (deltaMax - deltaMin) / 2;
@@ -1629,7 +1629,20 @@ async function getRealOptionsContract(ticker, price, optionType, score, vix, ear
       const earlyTag = optionType === "put" && etH2 >= 9.75 && etH2 < 10.0 ? " [EARLY WINDOW]" : "";
       logEvent("scan", `${ticker} best contract: ${best.symbol} | $${best.premium} bid/ask $${best.bid}/$${best.ask} | delta:${best.greeks.delta} | spread:${(best.spread*100).toFixed(1)}% | OI:${best.oi} [REAL DATA]${earlyTag}`);
     } else {
-      logEvent("warn", `${ticker} no valid contract found (${data.option_contracts.length} contracts, ${skipped} missing snapshots)`);
+      // Debug: log best available delta to help diagnose rejections
+      let bestDelta = 0, bestSpread = 0, bestOI = 0, noBid = 0;
+      for (const c of data.option_contracts) {
+        const s = snapshots[c.symbol];
+        if (!s) continue;
+        const d = Math.abs(parseFloat(s.greeks?.delta || 0));
+        const q = s.latestQuote || {};
+        const b = parseFloat(q.bp || 0), a = parseFloat(q.ap || 0);
+        const sp = a > 0 ? (a - b) / a : 1;
+        const oi = parseInt(s.openInterest || 0);
+        if (b <= 0 || a <= 0) { noBid++; continue; }
+        if (d > bestDelta) { bestDelta = d; bestSpread = sp; bestOI = oi; }
+      }
+      logEvent("warn", `${ticker} no valid contract found | best delta:${bestDelta.toFixed(3)} (need ${deltaMin}-${deltaMax}) | spread:${(bestSpread*100).toFixed(1)}% | OI:${bestOI} | no-bid:${noBid}`);
     }
 
     return best;
