@@ -95,9 +95,11 @@ const SUPPORT_BUFFER           = 0.03;  // skip if within 3% of support breaking
 // Correlation groups - max 1 position per group
 const CORRELATION_GROUPS = [
   ["NVDA", "AMD", "SMCI", "ARM", "AVGO", "MU"],           // Semiconductors
-  ["AAPL", "MSFT", "GOOGL", "CRM", "NOW", "SNOW", "BABA"],// Mega-cap / cloud tech
+  ["AAPL", "MSFT", "GOOGL", "CRM", "NOW", "SNOW"],         // Mega-cap / cloud tech
   ["AMZN", "META", "TTD", "ROKU"],                          // Ad / cloud / e-commerce / streaming
-  ["JPM", "GS", "BAC", "MS", "XLF", "COIN", "HOOD", "MSTR", "SQ", "MARA"], // Financials / crypto
+  ["JPM", "BAC", "WFC", "C"],                                            // Money center banks
+  ["GS", "MS"],                                                          // Investment banks
+  ["COIN", "HOOD", "MSTR", "SQ", "MARA"],                              // Crypto / fintech
   ["TSLA", "UBER"],                                          // Consumer mobility / EV
   ["CRWD", "PANW", "NET"],                                   // Cybersecurity
   ["NFLX", "SHOP", "DKNG", "NKE"],                          // Consumer / retail
@@ -110,6 +112,7 @@ const SECTOR_ETF_MAP = {
   "Financial":  "XLF",
   "Consumer":   "XLY",
   "Index":      null,  // no confirmation needed for indexes
+  "Global":     null,  // no ETF confirmation for global stocks (BABA etc)
 };
 // Always check SMH for semiconductor stocks
 const SEMIS = ["NVDA", "AMD", "SMCI", "ARM", "AVGO", "MU"];
@@ -137,15 +140,12 @@ const WATCHLIST = [
   { ticker:"CRWD",  sector:"Technology",  momentum:"strong",     rsi:60, macd:"bullish",           trend:"trending up",        catalyst:"Cybersecurity spending surge",     expiryDays:28,  ivr:48, beta:1.6, earningsDate:null },
   { ticker:"PANW",  sector:"Technology",  momentum:"strong",     rsi:57, macd:"bullish",           trend:"above 50MA",         catalyst:"Platform consolidation wins",     expiryDays:35,  ivr:40, beta:1.4, earningsDate:null },
   { ticker:"NET",   sector:"Technology",  momentum:"steady",     rsi:52, macd:"mild bullish",      trend:"above 50MA",         catalyst:"Zero trust adoption",             expiryDays:35,  ivr:50, beta:1.5, earningsDate:null },
-  // -- Indexes --
-  { ticker:"SPY",   sector:"Index",       momentum:"steady",     rsi:53, macd:"neutral",           trend:"near all-time high", catalyst:"Fed policy direction",            expiryDays:14,  ivr:22, beta:1.0, earningsDate:null },
-  { ticker:"QQQ",   sector:"Index",       momentum:"steady",     rsi:55, macd:"mild bullish",      trend:"above 50MA",         catalyst:"Tech sector leadership",          expiryDays:14,  ivr:24, beta:1.1, earningsDate:null },
   // -- Financials --
   { ticker:"JPM",   sector:"Financial",   momentum:"strong",     rsi:57, macd:"bullish",           trend:"above all MAs",      catalyst:"Net interest income strength",    expiryDays:28,  ivr:28, beta:1.1, earningsDate:null },
   { ticker:"GS",    sector:"Financial",   momentum:"strong",     rsi:59, macd:"bullish",           trend:"above 50MA",         catalyst:"Investment banking recovery",     expiryDays:28,  ivr:30, beta:1.3, earningsDate:null },
   { ticker:"BAC",   sector:"Financial",   momentum:"recovering", rsi:48, macd:"neutral",           trend:"near 50MA",          catalyst:"Net interest income + rate play", expiryDays:28,  ivr:30, beta:1.3, earningsDate:null },
+  { ticker:"C",     sector:"Financial",   momentum:"recovering", rsi:47, macd:"neutral",           trend:"near 50MA",          catalyst:"Restructuring + rate sensitivity", expiryDays:28,  ivr:32, beta:1.5, earningsDate:null },
   { ticker:"MS",    sector:"Financial",   momentum:"steady",     rsi:52, macd:"mild bullish",      trend:"above 50MA",         catalyst:"Investment banking cycle",        expiryDays:28,  ivr:28, beta:1.4, earningsDate:null },
-  { ticker:"XLF",   sector:"Financial",   momentum:"steady",     rsi:51, macd:"neutral",           trend:"near 50MA",          catalyst:"Rate decision direct play",       expiryDays:21,  ivr:25, beta:1.1, earningsDate:null },
   { ticker:"COIN",  sector:"Financial",   momentum:"recovering", rsi:48, macd:"forming base",      trend:"near 50MA",          catalyst:"Crypto market recovery",          expiryDays:42,  ivr:65, beta:2.2, earningsDate:null },
   { ticker:"HOOD",  sector:"Financial",   momentum:"recovering", rsi:46, macd:"neutral",           trend:"near 50MA",          catalyst:"Retail trading volume recovery",  expiryDays:35,  ivr:68, beta:2.0, earningsDate:null },
   { ticker:"MSTR",  sector:"Financial",   momentum:"recovering", rsi:48, macd:"forming base",      trend:"near 50MA",          catalyst:"Bitcoin treasury strategy",       expiryDays:21,  ivr:80, beta:3.0, earningsDate:null },
@@ -160,8 +160,8 @@ const WATCHLIST = [
   { ticker:"ROKU",  sector:"Consumer",    momentum:"recovering", rsi:47, macd:"neutral",           trend:"near 50MA",          catalyst:"Streaming ad platform growth",    expiryDays:35,  ivr:58, beta:1.8, earningsDate:null },
   // -- High Momentum / Speculative --
   { ticker:"PLTR",  sector:"Technology",  momentum:"strong",     rsi:65, macd:"bullish crossover", trend:"trending up",        catalyst:"Government AI contracts",         expiryDays:21,  ivr:62, beta:2.0, earningsDate:null },
-  { ticker:"MARA",  sector:"Financial",   momentum:"recovering", rsi:46, macd:"neutral",           trend:"near 50MA",          catalyst:"Bitcoin price + mining revenue",  expiryDays:21,  ivr:120, beta:3.5, earningsDate:null },
-  { ticker:"BABA",  sector:"Technology",  momentum:"recovering", rsi:49, macd:"neutral",           trend:"near 50MA",          catalyst:"China stimulus + AI investment",  expiryDays:35,  ivr:45, beta:1.6, earningsDate:null },
+  { ticker:"WFC",   sector:"Financial",   momentum:"steady",     rsi:51, macd:"neutral",           trend:"near 50MA",          catalyst:"Net interest income + expense cuts", expiryDays:28, ivr:28, beta:1.2, earningsDate:null },
+  { ticker:"BABA",  sector:"Global",      momentum:"recovering", rsi:49, macd:"neutral",           trend:"near 50MA",          catalyst:"China stimulus + AI investment",  expiryDays:35,  ivr:45, beta:1.6, earningsDate:null },
   // -- Ad Tech --
   { ticker:"TTD",   sector:"Technology",  momentum:"steady",     rsi:53, macd:"mild bullish",      trend:"above 50MA",         catalyst:"Programmatic ad recovery",        expiryDays:35,  ivr:55, beta:1.7, earningsDate:null },
 ];
@@ -1535,7 +1535,7 @@ async function getRealOptionsContract(ticker, price, optionType, score, vix, ear
 
     // Format date for API: YYYY-MM-DD
     const today     = getETTime();
-    const minExpiry = new Date(today.getTime() + 7  * 86400000).toISOString().split("T")[0];
+    const minExpiry = new Date(today.getTime() + 14 * 86400000).toISOString().split("T")[0]; // min 14 DTE — avoid theta decay trap
     const maxExpiry = new Date(today.getTime() + 90 * 86400000).toISOString().split("T")[0];
 
     // Strike range — directional based on option type
@@ -1800,7 +1800,7 @@ async function checkAllFilters(stock, price) {
 
   // 9. Correlated positions (max 2 per sector) + no opposite bets
   const sectorPositions = state.positions.filter(p => p.sector === stock.sector);
-  if (sectorPositions.length >= 2) return { pass:false, reason:`Already have 2 positions in ${stock.sector}` };
+  if (sectorPositions.length >= 3) return { pass:false, reason:`Already have 3 positions in ${stock.sector}` };
   // Detect opposite sector bets — don't have both calls and puts in same sector
   // (passed in via optionType from scan loop context)
 
@@ -3087,11 +3087,10 @@ async function runScan() {
     // Apply macro calendar modifier
     const calMod = (marketContext.macroCalendar || {}).modifier || 0;
     if (calMod !== 0) {
-      // FOMC/macro calendar reduces calls but puts can still fire on event days
-      // Market weakness on FOMC day = valid put opportunity
+      // FOMC/macro calendar reduces calls only — puts are unaffected
+      // FOMC day weakness = valid put opportunity, don't suppress it
       callSetup.score = Math.min(100, Math.max(0, callSetup.score + calMod));
-      // Only apply half the penalty to puts on macro event days
-      putSetup.score  = Math.min(100, Math.max(0, putSetup.score  + Math.round(calMod / 2)));
+      // puts: no penalty on macro event days — market weakness is the signal
     }
 
     // Apply global market signal modifier
