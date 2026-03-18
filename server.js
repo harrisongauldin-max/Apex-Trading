@@ -1736,9 +1736,11 @@ async function checkSectorETF(stock) {
 async function checkAllFilters(stock, price) {
   const fails = [];
 
-  // 1. Entry window — optionType passed separately since it's determined after scoring
-  // During pre-scoring filter check, optionType may be null — default to checking both
-  if (!isEntryWindow(null) && !dryRunMode) return { pass:false, reason:"Outside entry window" };
+  // 1. Entry window — allow if EITHER call or put window is open
+  // Puts open at 9:45AM when VIX>=25, calls at 10:00AM
+  // Since optionType is not known yet at filter time, pass if either window is open
+  const eitherWindowOpen = isEntryWindow("call") || isEntryWindow("put");
+  if (!eitherWindowOpen && !dryRunMode) return { pass:false, reason:"Outside entry window" };
 
   // 2. Circuit breakers
   if (!state.circuitOpen)       return { pass:false, reason:"Daily circuit breaker tripped" };
