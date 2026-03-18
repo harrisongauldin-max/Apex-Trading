@@ -1738,7 +1738,7 @@ async function checkAllFilters(stock, price) {
 
   // 1. Entry window — optionType passed separately since it's determined after scoring
   // During pre-scoring filter check, optionType may be null — default to checking both
-  if (!isEntryWindow(null)) return { pass:false, reason:"Outside entry window" };
+  if (!isEntryWindow(null) && !dryRunMode) return { pass:false, reason:"Outside entry window" };
 
   // 2. Circuit breakers
   if (!state.circuitOpen)       return { pass:false, reason:"Daily circuit breaker tripped" };
@@ -2253,6 +2253,12 @@ async function closePosition(ticker, reason, exitPremium = null) {
   const nr   = state.totalRevenue + (pnl > 0 ? pnl : 0);
   const bonus= state.totalRevenue < REVENUE_THRESHOLD && nr >= REVENUE_THRESHOLD;
 
+  // In dry run — log what would happen but don't mutate state or submit orders
+  if (dryRunMode) {
+    logEvent("dryrun", `WOULD CLOSE ${ticker} | reason:${reason} | exit:$${ep} | P&L:${pnl>=0?"+":""}$${pnl.toFixed(2)} (${pct}%)`);
+    return;
+  }
+
   // Submit close order to Alpaca if we have a contract symbol
   // For partial closes (mult=0.5), sell half; for full closes (mult=1.0), sell all
   // But minimum 1 contract — if only 1 contract, full close regardless
@@ -2382,6 +2388,12 @@ async function partialClose(ticker) {
 
   const ev   = parseFloat((ep * 100 * half).toFixed(2));
   const pnl  = parseFloat(((ep - pos.premium) * 100 * half).toFixed(2));
+
+  if (dryRunMode) {
+    logEvent("dryrun", `WOULD PARTIAL CLOSE ${ticker} | ${half}x @ $${ep} | P&L:+$${pnl.toFixed(2)}`);
+    return;
+  }
+
   state.cash = parseFloat((state.cash + ev).toFixed(2));
   state.monthlyProfit = parseFloat((state.monthlyProfit + pnl).toFixed(2));
   state.closedTrades.push({ ticker, pnl, pct:((pnl/(pos.cost*0.5))*100).toFixed(1), date:new Date().toLocaleDateString(), reason:"partial" });
@@ -2799,8 +2811,8 @@ async function runScan() {
   }
 
   // 2. New entries — check if any entry type is valid
-  const callsAllowed = isEntryWindow("call");
-  const putsAllowed  = isEntryWindow("put");
+  const callsAllowed = isEntryWindow("call") || dryRunMode;
+  const putsAllowed  = isEntryWindow("put")  || dryRunMode;
   if (!callsAllowed && !putsAllowed) return;
   if (state.circuitOpen === false || state.weeklyCircuitOpen === false) return;
   if (state.consecutiveLosses >= CONSEC_LOSS_LIMIT) return;
