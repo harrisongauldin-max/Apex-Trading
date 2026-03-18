@@ -3464,7 +3464,13 @@ app.post("/api/test-email", async (req, res) => {
 
 // Dry run scan — full scan logic, no orders, no state changes
 app.post("/api/dry-run-scan", async (req, res) => {
-  if (scanRunning) return res.json({ error: "Scan already running" });
+  // Wait up to 35 seconds for any running scan to complete
+  let waited = 0;
+  while (scanRunning && waited < 35000) {
+    await new Promise(r => setTimeout(r, 500));
+    waited += 500;
+  }
+  if (scanRunning) return res.json({ error: "Scan still running after 35s — try again" });
   dryRunMode = true;
   logEvent("scan", "═══ DRY RUN SCAN STARTED ═══");
   try {
