@@ -1350,6 +1350,23 @@ async function closePos(ticker) {
   await fetchState();
 }
 
+async function resetCircuit() {
+  if (!confirm('Reset circuit breaker? APEX will resume scanning and entering new trades.')) return;
+  const resp = await fetch('/api/reset-circuit', {method:'POST'});
+  const data = await resp.json();
+  alert('Circuit breaker reset. APEX is scanning again.');
+  await fetchState();
+}
+
+async function fullReset() {
+  if (!confirm('⚠ FULL RESET: This will wipe ALL positions, cash, and trade history back to $10,000. Are you sure?')) return;
+  if (!confirm('This cannot be undone. Confirm full reset?')) return;
+  const resp = await fetch('/api/full-reset', {method:'POST'});
+  const data = await resp.json();
+  alert('Full reset complete. APEX restarted with $10,000.');
+  location.reload();
+}
+
 async function emergencyClose() {
   if (!confirm('EMERGENCY CLOSE ALL POSITIONS? This cannot be undone.')) return;
   await fetch('/api/emergency-close', {method:'POST'});
