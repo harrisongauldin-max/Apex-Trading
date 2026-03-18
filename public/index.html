@@ -337,7 +337,7 @@ input[type=text]:focus{border-color:var(--blue)}
 
   <div class="section-title">Open Positions</div>
   <div id="positions-wrap">
-    <div class="no-data">No open positions. APEX will enter trades during market hours (10AM–3:30PM ET).</div>
+    <div class="no-data">No open positions. APEX will enter trades during market hours (Puts 9:45AM / Calls 10AM–3:30PM ET).</div>
   </div>
 
   <div class="section-title">Portfolio Greeks</div>
@@ -353,6 +353,7 @@ input[type=text]:focus{border-color:var(--blue)}
   <div class="section-title">Quick Actions</div>
   <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:16px">
     <button class="btn btn-green" onclick="triggerScan()">▶ MANUAL SCAN</button>
+    <button class="btn" onclick="triggerDryRun()" style="background:#1a2a10;border-color:#4a7a20;color:#aadd44">⚡ DRY RUN</button>
     <button class="btn btn-red" onclick="resetMonth()">↺ RESET MONTH</button>
     <button class="btn" style="background:#b8640a" onclick="resetCircuit()">↺ RESET CIRCUIT</button>
     <button class="btn" style="background:#7b0000;border:1px solid #ff0000" onclick="emergencyClose()">⚠ EMERGENCY CLOSE ALL</button>
@@ -566,7 +567,7 @@ input[type=text]:focus{border-color:var(--blue)}
   <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px;flex-wrap:wrap;gap:8px">
     <div>
       <span>Schedule: <strong style="color:var(--green)">Every 30 seconds · 9AM–4PM ET · Mon–Fri</strong></span>
-      <span style="margin-left:16px">Entry window: <strong style="color:var(--blue)">10AM–3:30PM ET</strong></span>
+      <span style="margin-left:16px">Entry window: <strong style="color:var(--blue)">Puts 9:45AM / Calls 10AM–3:30PM ET</strong></span>
     </div>
     <button class="btn" onclick="clearLog()">CLEAR</button>
   </div>
@@ -979,7 +980,7 @@ function renderPositions() {
   const wrap = document.getElementById('positions-wrap');
   const positions = state.positions || [];
   if (!positions.length) {
-    wrap.innerHTML = '<div class="no-data">No open positions. APEX will enter trades during market hours (10AM–3:30PM ET).</div>';
+    wrap.innerHTML = '<div class="no-data">No open positions. APEX will enter trades during market hours (Puts 9:45AM / Calls 10AM–3:30PM ET).</div>';
     return;
   }
   wrap.innerHTML = positions.map(p => {
@@ -1326,6 +1327,21 @@ async function triggerScan() {
   btn.textContent = 'SCANNING...'; btn.disabled = true;
   await fetch('/api/scan', {method:'POST'});
   setTimeout(async () => { await fetchState(); btn.textContent='▶ MANUAL SCAN'; btn.disabled=false; }, 3000);
+}
+
+async function triggerDryRun() {
+  const btn = event.target;
+  btn.textContent = '⚡ RUNNING...'; btn.disabled = true;
+  try {
+    const resp = await fetch('/api/dry-run-scan', {method:'POST'});
+    const data = await resp.json();
+    await fetchState();
+    alert('Dry run complete! Check the Server Log tab — look for [DRYRUN] entries showing what APEX would trade.');
+  } catch(e) {
+    alert('Dry run error: ' + e.message);
+  } finally {
+    btn.textContent = '⚡ DRY RUN'; btn.disabled = false;
+  }
 }
 
 async function closePos(ticker) {
