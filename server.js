@@ -790,12 +790,18 @@ async function getStockBars(ticker, limit = 60) {
 // 1-minute gives maximum real-time accuracy — updated every scan cycle
 async function getIntradayBars(ticker, minutes = 390) {
   try {
-    // Get today's intraday bars — 1 min timeframe
-    const now     = new Date();
-    const start   = new Date(now);
-    start.setHours(9, 30, 0, 0); // market open ET
-    const startISO = start.toISOString();
-    const endISO   = now.toISOString();
+    // Calculate market open in ET (Railway runs UTC — must use ET explicitly)
+    const nowET       = getETTime();
+    const marketOpen  = new Date(nowET);
+    marketOpen.setHours(9, 30, 0, 0);
+
+    // Convert ET market open back to UTC ISO for Alpaca API
+    // getETTime returns a Date object representing ET — get its UTC equivalent
+    const etOffsetMs  = nowET.getTime() - new Date().getTime(); // ET offset from UTC
+    const openUTC     = new Date(marketOpen.getTime() - etOffsetMs);
+    const startISO    = openUTC.toISOString();
+    const endISO      = new Date().toISOString();
+
     const feeds = ["sip", "iex"];
     for (const feed of feeds) {
       const url  = `/stocks/${ticker}/bars?timeframe=1Min&start=${startISO}&end=${endISO}&limit=390&feed=${feed}`;
