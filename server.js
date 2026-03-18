@@ -2139,6 +2139,17 @@ async function executeTrade(stock, price, score, scoreReasons, vix, optionType =
     return true;
   }
 
+  // Final heat check — projected heat AFTER this position is added
+  // This catches the scan-level blindness where multiple positions queue before any are entered
+  const projectedHeat = (openRisk() + finalCost) / totalCap();
+  if (projectedHeat > MAX_HEAT) {
+    logEvent("filter", `${stock.ticker} - projected heat ${(projectedHeat*100).toFixed(0)}% would exceed ${MAX_HEAT*100}% max — skipping`);
+    if (alpacaOrderId) {
+      try { await alpacaDelete(`/orders/${alpacaOrderId}`); } catch(e) {}
+    }
+    return false;
+  }
+
   state.cash = parseFloat((state.cash - finalCost).toFixed(2));
   state.todayTrades++;
 
