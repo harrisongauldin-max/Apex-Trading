@@ -1535,7 +1535,7 @@ async function getRealOptionsContract(ticker, price, optionType, score, vix, ear
 
     // Format date for API: YYYY-MM-DD
     const today     = getETTime();
-    const minExpiry = new Date(today.getTime() + 14 * 86400000).toISOString().split("T")[0]; // min 14 DTE — avoid theta decay trap
+    const minExpiry = new Date(today.getTime() + 7  * 86400000).toISOString().split("T")[0]; // min 7 DTE — tiered exits handle short-dated positions
     const maxExpiry = new Date(today.getTime() + 90 * 86400000).toISOString().split("T")[0];
 
     // Strike range — directional based on option type
@@ -1607,13 +1607,16 @@ async function getRealOptionsContract(ticker, price, optionType, score, vix, ear
       const isEarlyPutWindow = optionType === "put" && etH >= 9.75 && etH < 10.0;
       const maxSpread = isEarlyPutWindow ? EARLY_SPREAD_PCT : MAX_SPREAD_PCT;
       if (spread > maxSpread) { skipped++; continue; }
-      if (oi < MIN_OPEN_INTEREST) { skipped++; continue; }
+      // OI=0 means data not yet updated for session, not truly zero — allow through
+      // Only block if OI is explicitly reported as very low (1-99)
+      if (oi > 0 && oi < MIN_OPEN_INTEREST) { skipped++; continue; }
       if (delta < deltaMin || delta > deltaMax) { skipped++; continue; }
 
       const deltaTarget   = (deltaMin + deltaMax) / 2; // midpoint of actual target range
       const deltaRange    = (deltaMax - deltaMin) / 2;
       const deltaScore    = Math.max(0, 1 - Math.abs(delta - deltaTarget) / deltaRange);
-      const liquidScore   = Math.min(oi / 5000, 1);
+      // If OI=0 (unknown), use delta score only — don't penalize for missing data
+      const liquidScore   = oi > 0 ? Math.min(oi / 5000, 1) : 0.5;
       const contractScore = deltaScore * 0.6 + liquidScore * 0.4;
 
       if (contractScore > bestScore) {
@@ -1879,6 +1882,45 @@ async function checkAllFilters(stock, price) {
   }
 
   return { pass:true, reason:null };
+}
+
+// - DTE-Tiered Exit Parameters -
+// Returns appropriate exit levels based on days to expiry
+// Short DTE = take profits fast, trail tight (theta kills you)
+// Monthly   = moderate targets, standard trail
+// LEAPS     = let winners run, wide trail
+function getDTEExitParams(dte) {
+  if (dte <= 14) {
+    // Weekly / short-dated — aggressive exits
+    return {
+      takeProfitPct:  0.35,  // 35% target
+      stopLossPct:    0.35,  // keep stop same — protect capital
+      fastStopPct:    0.15,  // -15% fast stop in first 48hrs
+      trailActivate:  0.20,  // trail kicks in at +20%
+      trailStop:      0.10,  // trails 10% below peak
+      label:          "SHORT-DTE",
+    };
+  } else if (dte <= 45) {
+    // Monthly — balanced
+    return {
+      takeProfitPct:  0.50,  // 50% target
+      stopLossPct:    0.35,
+      fastStopPct:    0.20,  // -20% fast stop
+      trailActivate:  0.30,  // trail at +30%
+      trailStop:      0.15,  // 15% trail
+      label:          "MONTHLY",
+    };
+  } else {
+    // LEAPS / long-dated — let winners run
+    return {
+      takeProfitPct:  0.80,  // 80% target
+      stopLossPct:    0.35,
+      fastStopPct:    0.20,
+      trailActivate:  0.40,  // trail at +40%
+      trailStop:      0.20,  // 20% trail — wider for long-dated
+      label:          "LEAPS",
+    };
+  }
 }
 
 // - Position Sizing -
@@ -2148,8 +2190,10 @@ async function executeTrade(stock, price, score, scoreReasons, vix, optionType =
 
   // Recalculate cost/target/stop using final premium (may have been updated by fill)
   const finalCost     = parseFloat((contract.premium * 100 * contracts).toFixed(2));
-  const finalTarget   = parseFloat((contract.premium * (1 + TAKE_PROFIT_PCT)).toFixed(2));
-  const finalStop     = parseFloat((contract.premium * (1 - STOP_LOSS_PCT)).toFixed(2));
+  // Use DTE-tiered exit params — short-dated options need faster exits
+  const exitParams    = getDTEExitParams(contract.expDays || 30);
+  const finalTarget   = parseFloat((contract.premium * (1 + exitParams.takeProfitPct)).toFixed(2));
+  const finalStop     = parseFloat((contract.premium * (1 - exitParams.stopLossPct)).toFixed(2));
   const finalBreakeven = optionType === "put"
     ? parseFloat((contract.strike - contract.premium).toFixed(2))
     : parseFloat((contract.strike + contract.premium).toFixed(2));
@@ -2199,6 +2243,11 @@ async function executeTrade(stock, price, score, scoreReasons, vix, optionType =
     stop:           finalStop,
     breakeven:      finalBreakeven,
     cost:           finalCost,
+    takeProfitPct:  exitParams.takeProfitPct,
+    trailActivate:  exitParams.trailActivate,
+    trailStop:      exitParams.trailStop,
+    fastStopPct:    exitParams.fastStopPct,
+    dteLabel:       exitParams.label,
     partialClosed:  false,
     openDate:       new Date().toISOString(),
     ivr:            stock.ivr,
@@ -2255,7 +2304,7 @@ async function executeTrade(stock, price, score, scoreReasons, vix, optionType =
   await saveStateNow(); // critical — persist trade immediately
   logEvent("trade",
     `BUY ${stock.ticker} $${contract.strike}${typeLabel} exp ${contract.expDate} | ${contracts}x @ $${contract.premium} | ` +
-    `cost ${fmt(finalCost)} | score ${score} | delta ${contract.greeks.delta} | [${dataLabel}] | cash ${fmt(state.cash)} | heat ${(heatPct()*100).toFixed(0)}%`
+    `cost ${fmt(finalCost)} | score ${score} | delta ${contract.greeks.delta} | ${exitParams.label} | [${dataLabel}] | cash ${fmt(state.cash)} | heat ${(heatPct()*100).toFixed(0)}%`
   );
   return true;
 }
@@ -2696,13 +2745,13 @@ async function runScan() {
     if (curP > pos.peakPremium) pos.peakPremium = curP;
 
     // Fast stop - -20% in first 48 hours
-    if (hoursOpen <= FAST_STOP_HOURS && chg <= -FAST_STOP_PCT) {
+    if (hoursOpen <= FAST_STOP_HOURS && chg <= -(pos.fastStopPct || FAST_STOP_PCT)) {
       logEvent("scan", `${pos.ticker} fast stop - down ${(chg*100).toFixed(0)}% in ${hoursOpen.toFixed(0)}hrs`);
       await closePosition(pos.ticker, "fast-stop"); continue;
     }
 
     // Profit target acceleration - if +40% in first 48hrs, take it now
-    if (hoursOpen <= FAST_PROFIT_HOURS && chg >= FAST_PROFIT_PCT && !pos.partialClosed) {
+    if (hoursOpen <= FAST_PROFIT_HOURS && chg >= (pos.takeProfitPct ? pos.takeProfitPct * 0.7 : FAST_PROFIT_PCT) && !pos.partialClosed) {
       logEvent("scan", `${pos.ticker} ACCELERATED PROFIT - +${(chg*100).toFixed(0)}% in ${hoursOpen.toFixed(0)}hrs - taking gains early`);
       await closePosition(pos.ticker, "fast-target"); continue;
     }
@@ -2712,15 +2761,15 @@ async function runScan() {
     if (curCash > (state.peakCash || MONTHLY_BUDGET)) state.peakCash = curCash;
 
     // Hard stop loss
-    if (chg <= -STOP_LOSS_PCT) {
+    if (chg <= -(pos.fastStopPct ? STOP_LOSS_PCT : STOP_LOSS_PCT)) {
       logEvent("scan", `${pos.ticker} stop loss - down ${(chg*100).toFixed(0)}%`);
       await closePosition(pos.ticker, "stop"); continue;
     }
 
     // Trailing stop with signal decay tightening
-    if (chg >= TRAIL_ACTIVATE_PCT) {
+    if (chg >= (pos.trailActivate || TRAIL_ACTIVATE_PCT)) {
       // Base trail percentage
-      let trailPct = TRAIL_STOP_PCT;
+      let trailPct = pos.trailStop || TRAIL_STOP_PCT;
 
       // Signal decay check — if entry conditions have deteriorated, tighten the trail
       // Re-score current conditions vs entry conditions
@@ -2760,7 +2809,7 @@ async function runScan() {
     }
 
     // Partial close at +50%
-    if (!pos.partialClosed && chg >= PARTIAL_CLOSE_PCT) {
+    if (!pos.partialClosed && chg >= (pos.takeProfitPct ? pos.takeProfitPct * 0.6 : PARTIAL_CLOSE_PCT)) {
       logEvent("scan", `${pos.ticker} partial close at +50%`);
       await partialClose(pos.ticker);
     }
@@ -2772,8 +2821,8 @@ async function runScan() {
     }
 
     // Full target (if no partial close)
-    if (!pos.partialClosed && chg >= TAKE_PROFIT_PCT) {
-      logEvent("scan", `${pos.ticker} take profit +${(chg*100).toFixed(0)}%`);
+    if (!pos.partialClosed && chg >= (pos.takeProfitPct || TAKE_PROFIT_PCT)) {
+      logEvent("scan", `${pos.ticker} take profit +${(chg*100).toFixed(0)}% [${pos.dteLabel||"MONTHLY"}]`);
       await closePosition(pos.ticker, "target"); continue;
     }
 
@@ -4067,7 +4116,7 @@ async function runSimTick(scenario, simPrices, tick) {
     let exitReason = null;
 
     // Update trailing stop — activates at +30%, trails 15% below peak
-    if (chg >= TRAIL_ACTIVATE_PCT) {
+    if (chg >= (pos.trailActivate || TRAIL_ACTIVATE_PCT)) {
       const simTrail = pos.peakPremium * (1 - TRAIL_STOP_PCT);
       pos.trailStop  = simTrail;
       if (curP <= simTrail) exitReason = "trail";
