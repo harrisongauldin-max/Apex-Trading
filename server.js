@@ -3540,6 +3540,39 @@ app.post("/api/dry-run-scan", async (req, res) => {
   res.json({ ok: true, message: "Dry run complete — check server log for details", entries: dryLogs });
 });
 
+// Reset circuit breaker only — keeps positions and cash
+app.post("/api/reset-circuit", async (req, res) => {
+  state.circuitOpen       = true;
+  state.weeklyCircuitOpen = true;
+  state.consecutiveLosses = 0;
+  state.dayStartCash      = state.cash; // reset daily baseline to current cash
+  await saveStateNow();
+  logEvent("circuit", "Circuit breaker manually reset — resuming normal operations");
+  res.json({ ok: true, cash: state.cash, positions: state.positions.length });
+});
+
+// Full reset — wipes everything back to fresh $10,000 state
+app.post("/api/full-reset", async (req, res) => {
+  // Cancel all open Alpaca positions first
+  for (const pos of [...state.positions]) {
+    if (pos.contractSymbol) {
+      try {
+        const qty = Math.max(1, pos.contracts);
+        const bidPrice = parseFloat((pos.bid > 0 ? pos.bid : pos.premium * 0.98).toFixed(2));
+        await alpacaPost("/orders", {
+          symbol: pos.contractSymbol, qty, side:"sell",
+          type:"limit", time_in_force:"day", limit_price: bidPrice
+        });
+      } catch(e) { /* best effort */ }
+    }
+  }
+  // Reset state completely
+  state = defaultState();
+  await saveStateNow();
+  logEvent("reset", "FULL RESET — state wiped, starting fresh with $10,000");
+  res.json({ ok: true, message: "Full reset complete" });
+});
+
 // Emergency close all positions
 app.post("/api/emergency-close", async (req, res) => {
   const count = state.positions.length;
