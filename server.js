@@ -59,7 +59,7 @@ const TARGET_DELTA_MAX    = 0.42;
 // MAX_TRADES_PER_DAY removed - portfolio heat (60%) controls position limits
 const CONSEC_LOSS_LIMIT   = 3;
 const WEEKLY_DD_LIMIT     = 0.25;
-const MAX_LOSS_PER_TRADE  = 400;
+const MAX_LOSS_PER_TRADE  = 900;
 const MIN_SCORE           = 70;
 const FULL_KELLY_SCORE    = 85;
 const ENTRY_START_HOUR    = 10;     // 10:00 AM ET
@@ -1890,6 +1890,11 @@ function calcPositionSize(premium, score, vix) {
   );
 
   const contracts = Math.max(1, Math.min(5, Math.floor(maxCost / (premium * 100))));
+
+  // If even 1 contract exceeds the risk-based cap, return 0 to signal skip
+  // Caller checks contracts < 1 and skips the trade
+  if (premium * 100 > MAX_LOSS_PER_TRADE / STOP_LOSS_PCT) return 0;
+
   return contracts;
 }
 
