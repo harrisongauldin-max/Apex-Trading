@@ -366,18 +366,66 @@ function calcIVRank(currentIV, bars) {
 }
 
 // Full dynamic signal analysis for a stock
-async function getDynamicSignals(ticker, bars) {
-  const rsi      = calcRSI(bars);
-  const macd     = calcMACD(bars);
-  const momentum = calcMomentum(bars);
-  const adx      = calcADX(bars);
-  // Approximate current IV from recent price action
+// Uses intraday 1-min bars for RSI/MACD/momentum (real-time, prefetched in parallel)
+// Falls back to daily bars for trend context and IV calculation
+async function getDynamicSignals(ticker, bars, intradayBars = null) {
+  // Use prefetched intraday bars if provided, otherwise fetch now
+  if (!intradayBars) intradayBars = await getIntradayBars(ticker);
+  const signalBars   = intradayBars.length >= 10 ? intradayBars : bars;
+
+  // RSI and MACD from intraday if available — captures today's move
+  const rsi      = calcRSI(signalBars);
+  const macd     = calcMACD(signalBars);
+
+  // Momentum from intraday — is it moving up or down TODAY?
+  let momentum;
+  if (intradayBars.length >= 10) {
+    const first = intradayBars[0].c;
+    const last  = intradayBars[intradayBars.length - 1].c;
+    const move  = (last - first) / first;
+    const recentMove = intradayBars.length >= 6
+      ? (last - intradayBars[intradayBars.length - 6].c) / intradayBars[intradayBars.length - 6].c
+      : move;
+    // Strong intraday move > 1.5% = strong, 0.5-1.5% = steady, negative = recovering (bearish)
+    if (move > 0.015 && recentMove > 0.005)        momentum = "strong";
+    else if (move < -0.005 || recentMove < -0.005) momentum = "recovering"; // bearish intraday
+    else                                            momentum = "steady";
+  } else {
+    momentum = calcMomentum(bars); // fall back to daily
+  }
+
+  const adx = calcADX(signalBars.length >= 14 ? signalBars : bars);
+
+  // IV rank still uses daily bars — needs historical range context
   const recentBars = bars.slice(-20);
   const returns    = recentBars.slice(1).map((b, i) => Math.log(b.c / recentBars[i].c));
   const stdDev     = Math.sqrt(returns.reduce((s, r) => s + r * r, 0) / returns.length);
   const currentIV  = stdDev * Math.sqrt(252);
   const ivr        = calcIVRank(currentIV, bars);
-  return { rsi, macd: macd.signal, momentum, adx, ivr };
+
+  // Intraday VWAP
+  const intradayVWAP = intradayBars.length >= 5 ? calcVWAP(intradayBars) : 0;
+
+  // Volume ratio — today's intraday volume vs expected (based on time of day)
+  const intradayVol  = intradayBars.reduce((s, b) => s + b.v, 0);
+  const avgDailyVol  = bars.length ? bars.slice(-20).reduce((s,b)=>s+b.v,0)/20 : 0;
+  // Adjust for time of day — if 2 hours into session, expect ~40% of daily vol
+  const etH = getETTime().getHours() + getETTime().getMinutes() / 60;
+  const sessionPct = Math.min(1, Math.max(0.1, (etH - 9.5) / 6.5)); // 0-100% through session
+  const expectedVol = avgDailyVol * sessionPct;
+  const volPaceRatio = expectedVol > 0 ? intradayVol / expectedVol : 1;
+
+  return {
+    rsi,
+    macd:          macd.signal,
+    momentum,
+    adx,
+    ivr,
+    intradayVWAP,
+    intradayVol,
+    volPaceRatio,  // >1.5 = running hot, <0.7 = quiet day
+    hasIntraday:   intradayBars.length >= 10,
+  };
 }
 
 // - Helpers -
@@ -623,7 +671,13 @@ function scorePutSetup(stock, relStrength, adx, volume, avgVolume) {
   else                      { reasons.push(`IVR ${stock.ivr} - expensive (+0)`); }
 
   // Bearish catalyst (15pts)
-  if (stock.bearishCatalyst) { score += 15; reasons.push(`Bearish catalyst: ${stock.bearishCatalyst} (+15)`); }
+  // Use intraday momentum as proxy — stock actually moving down today = confirmed bearish catalyst
+  if (stock.bearishCatalyst) {
+    score += 15; reasons.push(`Bearish catalyst: ${stock.bearishCatalyst} (+15)`);
+  } else if (stock.momentum === "recovering" && stock.hasIntraday) {
+    // Intraday confirmed bearish move — stock IS going down right now
+    score += 10; reasons.push("Intraday confirmed bearish move (+10)");
+  }
 
   // Volume confirmation (10pts)
   if (volume && avgVolume && volume > avgVolume * 1.2) { score += 10; reasons.push("Above-avg volume (+10)"); }
@@ -728,13 +782,40 @@ async function getStockBars(ticker, limit = 60) {
     const last = await alpacaGet(`/stocks/${ticker}/bars?timeframe=1Day&start=${start}&end=${end}&limit=${limit}`, ALPACA_DATA);
     return last && last.bars ? last.bars : [];
   } catch(e) { return []; }
+
 }
 
-// Get VIX
+// Get intraday bars — 1-minute candles for today's session
+// Used for real-time RSI, MACD, VWAP, momentum signals
+// 1-minute gives maximum real-time accuracy — updated every scan cycle
+async function getIntradayBars(ticker, minutes = 390) {
+  try {
+    // Get today's intraday bars — 1 min timeframe
+    const now     = new Date();
+    const start   = new Date(now);
+    start.setHours(9, 30, 0, 0); // market open ET
+    const startISO = start.toISOString();
+    const endISO   = now.toISOString();
+    const feeds = ["sip", "iex"];
+    for (const feed of feeds) {
+      const url  = `/stocks/${ticker}/bars?timeframe=1Min&start=${startISO}&end=${endISO}&limit=390&feed=${feed}`;
+      const data = await alpacaGet(url, ALPACA_DATA);
+      if (data && data.bars && data.bars.length >= 5) return data.bars;
+    }
+    return [];
+  } catch(e) { return []; }
+}
+
+// Get VIX — cached for 60 seconds to avoid redundant API calls
+let _vixCache = { value: 15, ts: 0 };
 async function getVIX() {
+  if (Date.now() - _vixCache.ts < 60000) return _vixCache.value; // use cache
   const data = await alpacaGet(`/stocks/VIXY/quotes/latest`, ALPACA_DATA);
-  if (data && data.quote) return parseFloat(data.quote.ap || 15);
-  return 15; // default to low VIX if unavailable
+  if (data && data.quote) {
+    _vixCache = { value: parseFloat(data.quote.ap || 15), ts: Date.now() };
+    return _vixCache.value;
+  }
+  return _vixCache.value; // return last known on error
 }
 
 // Get real options chain from Alpaca OPRA feed
@@ -2652,40 +2733,34 @@ async function runScan() {
     if (calMod.events.length > 0) {
       logEvent("macro", `Calendar: ${calMod.message || calMod.events.map(e => e.event + " in " + e.daysTo + "d").join(", ")}`);
     }
-    // Regime detection
-    const regime = await detectMarketRegime();
-    marketContext.regime = regime;
+    // Run async market context calls in parallel
+    const [regime, benchmark, globalMarket] = await Promise.all([
+      detectMarketRegime(),
+      getBenchmarkComparison(),
+      getGlobalMarketSignal(),
+    ]);
+    marketContext.regime      = regime;
+    marketContext.benchmark   = benchmark;
+    marketContext.globalMarket= globalMarket;
 
-    // Concentration risk check
-    marketContext.concentration = checkConcentrationRisk();
+    // Synchronous calculations (no API calls)
+    marketContext.concentration    = checkConcentrationRisk();
+    marketContext.drawdownProtocol = getDrawdownProtocol();
+    marketContext.stressTest       = runStressTest();
+    marketContext.monteCarlo       = runMonteCarlo(500);
+    marketContext.kelly            = calcKellySize(20);
+    marketContext.relativeValue    = getRelativeValueScreening();
+    marketContext.streaks          = getStreakAnalysis();
+
     if (marketContext.concentration.alerts.length > 0) {
       marketContext.concentration.alerts.forEach(a => logEvent("risk", a));
     }
-
-    // Drawdown protocol
-    marketContext.drawdownProtocol = getDrawdownProtocol();
     if (marketContext.drawdownProtocol.level !== "normal") {
       logEvent("risk", `Drawdown protocol: ${marketContext.drawdownProtocol.message}`);
     }
 
-    // Stress test
-    marketContext.stressTest = runStressTest();
-
-    // Benchmark comparison
-    marketContext.benchmark = await getBenchmarkComparison();
-
-    // Check tail risk hedge
-    await checkTailRiskHedge();
-
-    // Check scale-ins on half positions
-    await checkScaleIns();
-
-    // Monte Carlo + Kelly + Relative Value
-    marketContext.monteCarlo    = runMonteCarlo(500);
-    marketContext.kelly         = calcKellySize(20);
-    marketContext.relativeValue = getRelativeValueScreening();
-    marketContext.globalMarket  = await getGlobalMarketSignal();
-    marketContext.streaks       = getStreakAnalysis();
+    // These need to run after context is updated
+    await Promise.all([checkTailRiskHedge(), checkScaleIns()]);
 
     // Check earnings plays
     await checkEarningsPlays();
@@ -2739,22 +2814,32 @@ async function runScan() {
   await manageStockPositions();
 
   // 1. Manage existing options positions
-  for (const pos of [...state.positions]) {
-    const price = await getStockQuote(pos.ticker);
+  // Fetch all position data in parallel — stock quotes + options snapshots simultaneously
+  const posSymbols = state.positions
+    .filter(p => p.contractSymbol)
+    .map(p => p.contractSymbol)
+    .join(",");
+
+  const [posSnapData, ...posQuotes] = await Promise.all([
+    posSymbols ? alpacaGet(`/options/snapshots?symbols=${posSymbols}&feed=indicative`, ALPACA_OPT_SNAP) : Promise.resolve(null),
+    ...state.positions.map(p => getStockQuote(p.ticker)),
+  ]);
+  const posSnapshots = posSnapData?.snapshots || {};
+
+  for (let pi = 0; pi < state.positions.length; pi++) {
+    const pos   = state.positions[pi];
+    const price = posQuotes[pi];
     if (!price) continue;
 
     const dte      = Math.max(1, Math.round((new Date(pos.expDate)-new Date())/86400000));
     const t        = dte / 365;
-    // Use real options price if we have a contract symbol, else estimate
     let curP;
-    if (pos.contractSymbol) {
-      const snapData = await alpacaGet(`/options/snapshots?symbols=${pos.contractSymbol}&feed=indicative`, ALPACA_OPT_SNAP);
-      const snap     = snapData?.snapshots?.[pos.contractSymbol];
-      const quote    = snap?.latestQuote || {};
-      const bid      = parseFloat(quote.bp || 0);
-      const ask      = parseFloat(quote.ap || 0);
+    if (pos.contractSymbol && posSnapshots[pos.contractSymbol]) {
+      const snap  = posSnapshots[pos.contractSymbol];
+      const quote = snap?.latestQuote || {};
+      const bid   = parseFloat(quote.bp || 0);
+      const ask   = parseFloat(quote.ap || 0);
       const realPrice = bid > 0 && ask > 0 ? parseFloat(((bid + ask) / 2).toFixed(2)) : null;
-      // Update live bid/ask on position for close order accuracy
       if (bid > 0) pos.bid = bid;
       if (ask > 0) pos.ask = ask;
       curP = realPrice ? realPrice : parseFloat((price * pos.iv * Math.sqrt(t) * 0.4 + 0.1).toFixed(2));
@@ -2963,15 +3048,38 @@ async function runScan() {
   }
 
   // Score and rank candidates
-  const scored = [];
-  for (const stock of WATCHLIST) {
-    if (state.positions.find(p=>p.ticker===stock.ticker)) continue;
-    // On gap down days, only evaluate puts
-    // On gap up days, only evaluate calls
-    // This is applied after scoring so we still collect all signals
+  // ── PARALLEL PREFETCH — fetch all data for all stocks simultaneously ──────
+  // This is the key performance optimization: instead of sequential API calls
+  // per stock (~70s total), we fetch everything in parallel (~4s total)
+  logEvent("scan", `Prefetching data for ${WATCHLIST.length} stocks in parallel...`);
+  const prefetchStart = Date.now();
 
-    // Fetch price FIRST before running filters
-    const price = await getStockQuote(stock.ticker);
+  const stockData = await Promise.all(
+    WATCHLIST.map(async stock => {
+      try {
+        const [price, bars, intradayBars, sectorResult, preMarket, newsArticles, analystData, eqScore] = await Promise.all([
+          getStockQuote(stock.ticker),
+          getStockBars(stock.ticker, 60),
+          getIntradayBars(stock.ticker),
+          checkSectorETF(stock),
+          getPreMarketData(stock.ticker),
+          getNewsForTicker(stock.ticker),
+          getAnalystActivity(stock.ticker),
+          getEarningsQualityScore(stock.ticker, []),
+        ]);
+        return { stock, price, bars, intradayBars, sectorResult, preMarket, newsArticles, analystData, eqScore };
+      } catch(e) {
+        return { stock, price: null, bars: [], intradayBars: [], sectorResult: { pass:true, putBoost:0 }, preMarket:null, newsArticles:[], analystData:{ modifier:0, signal:"neutral", upgrades:[], downgrades:[] }, eqScore:{ signal:"neutral" } };
+      }
+    })
+  );
+
+  logEvent("scan", `Prefetch complete in ${((Date.now()-prefetchStart)/1000).toFixed(1)}s for ${WATCHLIST.length} stocks`);
+
+  const scored = [];
+  for (const { stock, price, bars, intradayBars, sectorResult, preMarket, newsArticles, analystData, eqScore } of stockData) {
+    if (state.positions.find(p=>p.ticker===stock.ticker)) continue;
+
     if (!price || price < MIN_STOCK_PRICE) {
       logEvent("filter", `${stock.ticker} price $${price||0} unavailable or below min - skip`);
       continue;
@@ -2984,28 +3092,22 @@ async function runScan() {
 
     // Get filter result — even on fail, collect weakness signals for put scoring
     const filterResult = await checkAllFilters(stock, price);
-    const sectorResult = await checkSectorETF(stock);
 
     // Collect weakness signals that boost put scores
     let weaknessBoost = 0;
     const weaknessReasons = [];
 
     if (!filterResult.pass) {
-      // On a hard fail that's not a put-relevant signal, skip entirely
       const putRelevantFails = ["sector ETF", "support", "VWAP", "breakdown"];
       const isPutRelevant = putRelevantFails.some(f => filterResult.reason?.includes(f));
-
       if (!isPutRelevant) {
         logEvent("filter", `${stock.ticker} filter fail: ${filterResult.reason}`);
         continue;
       }
-      // Put-relevant failure — collect the weakness signal
       weaknessBoost += sectorResult.putBoost || 0;
       if (filterResult.reason?.includes("sector ETF")) { weaknessBoost += 15; weaknessReasons.push(`Sector ETF down (+15)`); }
       if (filterResult.reason?.includes("support"))    { weaknessBoost += 12; weaknessReasons.push(`Near support breakdown (+12)`); }
     }
-
-    const bars     = await getStockBars(stock.ticker, 60);
     const avgVol   = bars.length ? bars.slice(0,-1).reduce((s,b)=>s+b.v,0)/Math.max(bars.length-1,1) : 0;
     const todayVol = bars.length ? bars[bars.length-1].v : 0;
 
@@ -3028,44 +3130,46 @@ async function runScan() {
       logEvent("filter", `${stock.ticker} insufficient bars (${bars.length}) - skip`);
       continue;
     }
-    const signals = await getDynamicSignals(stock.ticker, bars);
+    const signals = await getDynamicSignals(stock.ticker, bars, intradayBars);
 
     // Earnings quality score
-    const eqScore = await getEarningsQualityScore(stock.ticker, bars);
+    // eqScore already prefetched in parallel above
 
     // VWAP — price below VWAP boosts puts, blocks calls
-    const vwap = calcVWAP(bars.slice(-5));
+    const vwap = liveStock.intradayVWAP > 0 ? liveStock.intradayVWAP : calcVWAP(bars.slice(-5));
     if (vwap > 0 && price < vwap * 0.99) {
-      logEvent("filter", `${stock.ticker} price $${price} below VWAP $${vwap} - weak intraday - put boost +10`);
+      logEvent("filter", `${stock.ticker} price $${price} below ${liveStock.intradayVWAP > 0 ? 'intraday' : 'daily'} VWAP $${vwap} - weak - put boost +10`);
       weaknessBoost += 10;
       weaknessReasons.push(`Below VWAP (+10)`);
     }
 
-    // Pre-market gap check
-    const preMarket = await getPreMarketData(stock.ticker);
+    // Pre-market gap check — already prefetched
     if (preMarket && Math.abs(preMarket.gapPct) > 3) {
       logEvent("filter", `${stock.ticker} pre-market gap ${preMarket.gapPct > 0 ? "+" : ""}${preMarket.gapPct}%`);
     }
 
-    // Analyst activity
-    const analystData = await getAnalystActivity(stock.ticker);
-
-    // Short interest / squeeze signal
+    // Short interest — computed from prefetched bars
     const shortSignal = await getShortInterestSignal(stock.ticker, bars);
 
-    // News sentiment
-    const newsArticles  = await getNewsForTicker(stock.ticker);
+    // News sentiment — already prefetched
     const newsSentiment = analyzeNews(newsArticles);
 
-    // Merge live signals into stock object
+    // Merge live signals into stock object — intraday signals override static seed values
     const liveStock = {
       ...stock,
-      rsi:      signals.rsi,
-      macd:     signals.macd,
-      momentum: signals.momentum,
-      ivr:      signals.ivr,
+      rsi:           signals.rsi,
+      macd:          signals.macd,
+      momentum:      signals.momentum,  // now intraday momentum when available
+      ivr:           signals.ivr,
       newsSentiment: newsSentiment.signal,
+      intradayVWAP:  signals.intradayVWAP || 0,
+      volPaceRatio:  signals.volPaceRatio || 1,
+      hasIntraday:   signals.hasIntraday || false,
     };
+    // Log intraday data quality
+    if (signals.hasIntraday) {
+      logEvent("filter", `${stock.ticker} intraday RSI:${signals.rsi} MACD:${signals.macd} MOM:${signals.momentum} VWAP:$${signals.intradayVWAP?.toFixed(2)} VolPace:${signals.volPaceRatio?.toFixed(1)}x`);
+    }
 
     // Time of day adjustment — only penalize late entries when VIX elevated OR volume declining
     // A strong high-volume breakout at 2:30PM is still worth trading
@@ -3106,6 +3210,18 @@ async function runScan() {
     if (timeOfDayMult < 1.0) {
       callSetup.reasons.push(`Time of day adj x${timeOfDayMult}`);
       putSetup.reasons.push(`Time of day adj x${timeOfDayMult}`);
+    }
+
+    // Volume pace boost — if running 2x+ expected volume, strong signal either direction
+    if (signals.volPaceRatio > 2.0 && signals.hasIntraday) {
+      putSetup.score  = Math.min(100, putSetup.score + 8);
+      putSetup.reasons.push(`Volume running ${signals.volPaceRatio.toFixed(1)}x pace (+8)`);
+      callSetup.score = Math.min(100, callSetup.score + 8);
+      callSetup.reasons.push(`Volume running ${signals.volPaceRatio.toFixed(1)}x pace (+8)`);
+    } else if (signals.volPaceRatio < 0.4 && signals.hasIntraday) {
+      // Quiet tape — reduce conviction on both sides
+      putSetup.score  = Math.max(0, putSetup.score - 5);
+      callSetup.score = Math.max(0, callSetup.score - 5);
     }
 
     // Apply weakness boost to puts — filters that block calls become put signals
