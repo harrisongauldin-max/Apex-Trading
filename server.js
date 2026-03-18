@@ -1890,14 +1890,14 @@ async function checkAllFilters(stock, price) {
 // Monthly   = moderate targets, standard trail
 // LEAPS     = let winners run, wide trail
 function getDTEExitParams(dte) {
-  if (dte <= 14) {
-    // Weekly / short-dated — aggressive exits
+  if (dte <= 21) {
+    // Short-dated (7-21 DTE) — aggressive exits, theta eating you alive
     return {
-      takeProfitPct:  0.35,  // 35% target
-      stopLossPct:    0.35,  // keep stop same — protect capital
+      takeProfitPct:  0.35,  // 35% target — take it fast
+      stopLossPct:    0.35,
       fastStopPct:    0.15,  // -15% fast stop in first 48hrs
       trailActivate:  0.20,  // trail kicks in at +20%
-      trailStop:      0.10,  // trails 10% below peak
+      trailStop:      0.10,  // tight 10% trail
       label:          "SHORT-DTE",
     };
   } else if (dte <= 45) {
@@ -2011,24 +2011,41 @@ function selectExpiry(score, vix, optionType, earningsDate, ticker = null) {
   let targetDays;
   let expiryType;
 
-  // LEAPS tier — 180-270 days, high conviction + low VIX + LEAPS eligible stock
-  if (score >= 90 && vix < 20 && optionType === "call" && ticker && LEAPS_ELIGIBLE.includes(ticker)) {
-    targetDays = 210; // ~7 months out
+  // ── PUT tiers — directional selloff captures ──────────────────────────
+  if (optionType === "put") {
+    if (score >= 92 && vix >= 28 && vix <= 45) {
+      // Extreme conviction + active selloff window — capture fast before VIX reverts
+      targetDays = 14;
+      expiryType = "weekly";
+    } else if (score >= 85 && vix >= 25 && vix <= 40) {
+      // High conviction + elevated VIX — short window, confirmed breakdown
+      targetDays = 21;
+      expiryType = "weekly";
+    } else if (score >= 75 && vix >= 20 && vix <= 30) {
+      // Moderate conviction — give it room but don't overpay for time
+      targetDays = 30;
+      expiryType = "monthly";
+    } else {
+      // Default — high VIX extremes (>40) or low conviction = need more time
+      targetDays = 45;
+      expiryType = "monthly";
+    }
+
+  // ── CALL tiers ─────────────────────────────────────────────────────────
+  } else if (score >= 90 && vix < 20 && ticker && LEAPS_ELIGIBLE.includes(ticker)) {
+    // LEAPS — high conviction + calm market + liquid ticker
+    targetDays = 210;
     expiryType = "leaps";
-  } else if (score >= 85 && vix < 25 && optionType === "call") {
+  } else if (score >= 85 && vix < 25) {
     // High score, low VIX, call = weekly for max leverage
     targetDays = 14;
     expiryType = "weekly";
-  } else if (vix >= VIX_REDUCE50 || optionType === "put") {
-    // High VIX or put = monthly, need more time
-    targetDays = 45;
-    expiryType = "monthly";
   } else if (score >= 70 && vix < 30) {
-    // Normal setup = standard monthly
+    // Normal call setup
     targetDays = 30;
     expiryType = "monthly";
   } else {
-    // Default to monthly with extra buffer
+    // Default — elevated VIX calls need more time
     targetDays = 45;
     expiryType = "monthly";
   }
@@ -2100,6 +2117,14 @@ function buildCard(stock, price, contracts, iv, optionType = "call", score = 75,
 
 // - Execute Trade -
 async function executeTrade(stock, price, score, scoreReasons, vix, optionType = "call") {
+  // Quick cash pre-check before expensive API calls
+  // Use conservative estimate: assume at least $200 premium * 1 contract = $200 min cost
+  const estimatedMinCost = price * 0.03 * 100; // ~3% OTM premium estimate * 100
+  if (state.cash - estimatedMinCost < CAPITAL_FLOOR) {
+    logEvent("skip", `${stock.ticker} - insufficient cash pre-check (est. min cost ${fmt(estimatedMinCost)})`);
+    return false;
+  }
+
   // Try to get real options contract from Alpaca OPRA feed
   let contract = await getRealOptionsContract(stock.ticker, price, optionType, score, vix, stock.earningsDate);
 
