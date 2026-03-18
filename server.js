@@ -1547,11 +1547,19 @@ async function getRealOptionsContract(ticker, price, optionType, score, vix, ear
     const data = await alpacaGet(url, ALPACA_OPTIONS);
     if (!data || !data.option_contracts || !data.option_contracts.length) return null;
 
-    // Get snapshots for the contracts to get real greeks + IV + quotes
-    const symbols   = data.option_contracts.slice(0, 20).map(c => c.symbol).join(",");
-    // Use confirmed working snapshot endpoint
-    const snapData  = await alpacaGet(`/options/snapshots?symbols=${symbols}&feed=indicative`, ALPACA_OPT_SNAP);
-    const snapshots = snapData && snapData.snapshots ? snapData.snapshots : {};
+    // Get snapshots for ALL contracts to find the best delta match
+    // Splitting into two batches of 25 to avoid URL length limits
+    const allSymbols  = data.option_contracts.map(c => c.symbol);
+    const batch1      = allSymbols.slice(0, 25).join(",");
+    const batch2      = allSymbols.slice(25).join(",");
+    const [snap1, snap2] = await Promise.all([
+      alpacaGet(`/options/snapshots?symbols=${batch1}&feed=indicative`, ALPACA_OPT_SNAP),
+      batch2 ? alpacaGet(`/options/snapshots?symbols=${batch2}&feed=indicative`, ALPACA_OPT_SNAP) : Promise.resolve(null),
+    ]);
+    const snapshots = {
+      ...(snap1?.snapshots || {}),
+      ...(snap2?.snapshots || {}),
+    };
 
     logEvent("scan", `${ticker} options chain: ${data.option_contracts.length} contracts | ${Object.keys(snapshots).length} snapshots with greeks`);
 
