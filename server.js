@@ -3123,14 +3123,25 @@ async function runScan() {
     }
 
     logEvent("filter", `${stock.ticker} best setup: ${optionType.toUpperCase()} score ${bestScore} | RSI:${signals.rsi} MACD:${signals.macd} MOM:${signals.momentum}`);
-    scored.push({ stock: liveStock, price, score: bestScore, reasons: bestReasons, optionType });
+    // Only queue if heat has room — prevents opening burst from queuing too many at once
+    // Each position costs roughly (bestScore >= 85 ? 1.25 : 1.0) * 8% = ~8-10% of capital
+    // So estimate heat impact before queuing
+    const estCost       = contract?.ask > 0 ? contract.ask * 100 : 500; // rough estimate
+    const estHeatImpact = estCost / (totalCap() || MONTHLY_BUDGET);
+    if (heatPct() + estHeatImpact > MAX_HEAT) {
+      logEvent("filter", `${stock.ticker} skipped - projected heat ${((heatPct() + estHeatImpact)*100).toFixed(0)}% would exceed ${MAX_HEAT*100}%`);
+    } else {
+      scored.push({ stock: liveStock, price, score: bestScore, reasons: bestReasons, optionType });
+    }
     await new Promise(r=>setTimeout(r,200));
   }
 
   // Sort by score
   scored.sort((a,b) => b.score - a.score);
 
-  // Enter trades
+  // Enter trades — sorted by score, best first
+  // heatPct() is live and updates after every executeTrade call
+  // So heat check here is always accurate even mid-loop
   for (const { stock, price, score, reasons, optionType } of scored) {
     if (heatPct() >= MAX_HEAT) break;
     if (state.cash <= CAPITAL_FLOOR) break;
