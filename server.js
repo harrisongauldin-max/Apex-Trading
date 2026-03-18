@@ -94,14 +94,14 @@ const SUPPORT_BUFFER           = 0.03;  // skip if within 3% of support breaking
 
 // Correlation groups - max 1 position per group
 const CORRELATION_GROUPS = [
-  ["NVDA", "AMD", "SMCI", "ARM", "AVGO", "MU"],      // Semiconductors
-  ["AAPL", "MSFT", "GOOGL", "CRM", "NOW", "SNOW"],   // Mega-cap / cloud tech
-  ["AMZN", "META", "TTD"],                             // Ad / cloud / e-commerce
-  ["JPM", "GS", "COIN", "HOOD", "SOFI", "MSTR"],     // Financials / crypto
-  ["TSLA", "UBER", "RIVN"],                            // Consumer mobility / EV
-  ["CRWD", "PANW", "NET"],                             // Cybersecurity
-  ["NFLX", "SHOP", "DKNG"],                           // Consumer / retail
-  ["PLTR", "PYPL"],                                    // High momentum / fintech
+  ["NVDA", "AMD", "SMCI", "ARM", "AVGO", "MU"],           // Semiconductors
+  ["AAPL", "MSFT", "GOOGL", "CRM", "NOW", "SNOW", "BABA"],// Mega-cap / cloud tech
+  ["AMZN", "META", "TTD", "ROKU"],                          // Ad / cloud / e-commerce / streaming
+  ["JPM", "GS", "BAC", "MS", "XLF", "COIN", "HOOD", "MSTR", "SQ", "MARA"], // Financials / crypto
+  ["TSLA", "UBER"],                                          // Consumer mobility / EV
+  ["CRWD", "PANW", "NET"],                                   // Cybersecurity
+  ["NFLX", "SHOP", "DKNG", "NKE"],                          // Consumer / retail
+  ["PLTR"],                                                   // High momentum
 ];
 
 // Sector ETF confirmation map
@@ -140,25 +140,28 @@ const WATCHLIST = [
   // -- Indexes --
   { ticker:"SPY",   sector:"Index",       momentum:"steady",     rsi:53, macd:"neutral",           trend:"near all-time high", catalyst:"Fed policy direction",            expiryDays:14,  ivr:22, beta:1.0, earningsDate:null },
   { ticker:"QQQ",   sector:"Index",       momentum:"steady",     rsi:55, macd:"mild bullish",      trend:"above 50MA",         catalyst:"Tech sector leadership",          expiryDays:14,  ivr:24, beta:1.1, earningsDate:null },
-  { ticker:"IWM",   sector:"Index",       momentum:"steady",     rsi:50, macd:"neutral",           trend:"near 50MA",          catalyst:"Small cap rate sensitivity",      expiryDays:21,  ivr:28, beta:1.2, earningsDate:null },
   // -- Financials --
   { ticker:"JPM",   sector:"Financial",   momentum:"strong",     rsi:57, macd:"bullish",           trend:"above all MAs",      catalyst:"Net interest income strength",    expiryDays:28,  ivr:28, beta:1.1, earningsDate:null },
   { ticker:"GS",    sector:"Financial",   momentum:"strong",     rsi:59, macd:"bullish",           trend:"above 50MA",         catalyst:"Investment banking recovery",     expiryDays:28,  ivr:30, beta:1.3, earningsDate:null },
+  { ticker:"BAC",   sector:"Financial",   momentum:"recovering", rsi:48, macd:"neutral",           trend:"near 50MA",          catalyst:"Net interest income + rate play", expiryDays:28,  ivr:30, beta:1.3, earningsDate:null },
+  { ticker:"MS",    sector:"Financial",   momentum:"steady",     rsi:52, macd:"mild bullish",      trend:"above 50MA",         catalyst:"Investment banking cycle",        expiryDays:28,  ivr:28, beta:1.4, earningsDate:null },
+  { ticker:"XLF",   sector:"Financial",   momentum:"steady",     rsi:51, macd:"neutral",           trend:"near 50MA",          catalyst:"Rate decision direct play",       expiryDays:21,  ivr:25, beta:1.1, earningsDate:null },
   { ticker:"COIN",  sector:"Financial",   momentum:"recovering", rsi:48, macd:"forming base",      trend:"near 50MA",          catalyst:"Crypto market recovery",          expiryDays:42,  ivr:65, beta:2.2, earningsDate:null },
   { ticker:"HOOD",  sector:"Financial",   momentum:"recovering", rsi:46, macd:"neutral",           trend:"near 50MA",          catalyst:"Retail trading volume recovery",  expiryDays:35,  ivr:68, beta:2.0, earningsDate:null },
-  { ticker:"SOFI",  sector:"Financial",   momentum:"recovering", rsi:44, macd:"forming base",      trend:"testing 50MA",       catalyst:"Student loan refinancing growth", expiryDays:42,  ivr:62, beta:1.8, earningsDate:null },
+  { ticker:"MSTR",  sector:"Financial",   momentum:"recovering", rsi:48, macd:"forming base",      trend:"near 50MA",          catalyst:"Bitcoin treasury strategy",       expiryDays:21,  ivr:80, beta:3.0, earningsDate:null },
+  { ticker:"SQ",    sector:"Financial",   momentum:"recovering", rsi:45, macd:"neutral",           trend:"near 50MA",          catalyst:"Bitcoin + fintech recovery",      expiryDays:35,  ivr:60, beta:2.0, earningsDate:null },
   // -- Consumer & E-commerce --
   { ticker:"TSLA",  sector:"Consumer",    momentum:"recovering", rsi:44, macd:"neutral",           trend:"testing 200MA",      catalyst:"Q1 delivery data",                expiryDays:56,  ivr:61, beta:2.0, earningsDate:null },
   { ticker:"NFLX",  sector:"Consumer",    momentum:"strong",     rsi:60, macd:"bullish",           trend:"trending up",        catalyst:"Ad-supported tier growth",        expiryDays:28,  ivr:38, beta:1.4, earningsDate:null },
   { ticker:"UBER",  sector:"Consumer",    momentum:"strong",     rsi:58, macd:"bullish",           trend:"above all MAs",      catalyst:"Profitability milestone",         expiryDays:28,  ivr:35, beta:1.5, earningsDate:null },
   { ticker:"SHOP",  sector:"Consumer",    momentum:"steady",     rsi:52, macd:"mild bullish",      trend:"above 50MA",         catalyst:"E-commerce market share gains",   expiryDays:35,  ivr:52, beta:1.6, earningsDate:null },
   { ticker:"DKNG",  sector:"Consumer",    momentum:"steady",     rsi:50, macd:"neutral",           trend:"near 50MA",          catalyst:"Sports betting expansion",        expiryDays:35,  ivr:58, beta:1.7, earningsDate:null },
-  // -- Fintech --
-  { ticker:"PYPL",  sector:"Financial",   momentum:"recovering", rsi:47, macd:"neutral",           trend:"near 50MA",          catalyst:"Venmo monetization growth",       expiryDays:35,  ivr:45, beta:1.4, earningsDate:null },
+  { ticker:"NKE",   sector:"Consumer",    momentum:"recovering", rsi:46, macd:"neutral",           trend:"near 50MA",          catalyst:"China recovery + DTC growth",     expiryDays:35,  ivr:32, beta:1.2, earningsDate:null },
+  { ticker:"ROKU",  sector:"Consumer",    momentum:"recovering", rsi:47, macd:"neutral",           trend:"near 50MA",          catalyst:"Streaming ad platform growth",    expiryDays:35,  ivr:58, beta:1.8, earningsDate:null },
   // -- High Momentum / Speculative --
   { ticker:"PLTR",  sector:"Technology",  momentum:"strong",     rsi:65, macd:"bullish crossover", trend:"trending up",        catalyst:"Government AI contracts",         expiryDays:21,  ivr:62, beta:2.0, earningsDate:null },
-  { ticker:"MSTR",  sector:"Financial",   momentum:"recovering", rsi:48, macd:"forming base",      trend:"near 50MA",          catalyst:"Bitcoin treasury strategy",       expiryDays:21,  ivr:80, beta:3.0, earningsDate:null },
-  { ticker:"RIVN",  sector:"Consumer",    momentum:"recovering", rsi:40, macd:"bearish",           trend:"testing 200MA",      catalyst:"EV production ramp",              expiryDays:42,  ivr:72, beta:2.2, earningsDate:null },
+  { ticker:"MARA",  sector:"Financial",   momentum:"recovering", rsi:46, macd:"neutral",           trend:"near 50MA",          catalyst:"Bitcoin price + mining revenue",  expiryDays:21,  ivr:120, beta:3.5, earningsDate:null },
+  { ticker:"BABA",  sector:"Technology",  momentum:"recovering", rsi:49, macd:"neutral",           trend:"near 50MA",          catalyst:"China stimulus + AI investment",  expiryDays:35,  ivr:45, beta:1.6, earningsDate:null },
   // -- Ad Tech --
   { ticker:"TTD",   sector:"Technology",  momentum:"steady",     rsi:53, macd:"mild bullish",      trend:"above 50MA",         catalyst:"Programmatic ad recovery",        expiryDays:35,  ivr:55, beta:1.7, earningsDate:null },
 ];
@@ -1535,9 +1538,19 @@ async function getRealOptionsContract(ticker, price, optionType, score, vix, ear
     const minExpiry = new Date(today.getTime() + 7  * 86400000).toISOString().split("T")[0];
     const maxExpiry = new Date(today.getTime() + 90 * 86400000).toISOString().split("T")[0];
 
-    // Strike range - wider for LEAPS
-    const strikeLow  = (price * (1 - strikeRange)).toFixed(0);
-    const strikeHigh = (price * (1 + strikeRange)).toFixed(0);
+    // Strike range — directional based on option type
+    // Calls: ATM to slightly OTM above (delta 0.28-0.42 = strikes just above current price)
+    // Puts:  ATM to slightly OTM below (delta 0.28-0.42 = strikes just below current price)
+    let strikeLow, strikeHigh;
+    if (optionType === "put") {
+      // OTM puts: strikes from 20% below price up to ATM (100%)
+      strikeLow  = (price * (1 - strikeRange * 2)).toFixed(0);  // wider down range
+      strikeHigh = (price * 1.01).toFixed(0);                   // just above ATM
+    } else {
+      // OTM calls: strikes from ATM up to 20% above
+      strikeLow  = (price * 0.99).toFixed(0);                   // just below ATM
+      strikeHigh = (price * (1 + strikeRange * 2)).toFixed(0);  // wider up range
+    }
 
     const url = `/options/contracts?underlying_symbol=${ticker}` +
       `&expiration_date_gte=${minExpiry}&expiration_date_lte=${maxExpiry}` +
