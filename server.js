@@ -98,7 +98,7 @@ const CORRELATION_GROUPS = [
   ["AAPL", "MSFT", "GOOGL", "CRM", "NOW", "SNOW"],         // Mega-cap / cloud tech
   ["AMZN", "META", "TTD", "ROKU"],                          // Ad / cloud / e-commerce / streaming
   ["JPM", "BAC", "WFC", "C"],                                            // Money center banks
-  ["GS", "MS"],                                                          // Investment banks
+  ["MS"],                                                                 // Investment banks
   ["COIN", "HOOD", "MSTR", "SQ", "MARA"],                              // Crypto / fintech
   ["TSLA", "UBER"],                                          // Consumer mobility / EV
   ["CRWD", "PANW", "NET"],                                   // Cybersecurity
@@ -142,7 +142,6 @@ const WATCHLIST = [
   { ticker:"NET",   sector:"Technology",  momentum:"steady",     rsi:52, macd:"mild bullish",      trend:"above 50MA",         catalyst:"Zero trust adoption",             expiryDays:35,  ivr:50, beta:1.5, earningsDate:null },
   // -- Financials --
   { ticker:"JPM",   sector:"Financial",   momentum:"strong",     rsi:57, macd:"bullish",           trend:"above all MAs",      catalyst:"Net interest income strength",    expiryDays:28,  ivr:28, beta:1.1, earningsDate:null },
-  { ticker:"GS",    sector:"Financial",   momentum:"strong",     rsi:59, macd:"bullish",           trend:"above 50MA",         catalyst:"Investment banking recovery",     expiryDays:28,  ivr:30, beta:1.3, earningsDate:null },
   { ticker:"BAC",   sector:"Financial",   momentum:"recovering", rsi:48, macd:"neutral",           trend:"near 50MA",          catalyst:"Net interest income + rate play", expiryDays:28,  ivr:30, beta:1.3, earningsDate:null },
   { ticker:"C",     sector:"Financial",   momentum:"recovering", rsi:47, macd:"neutral",           trend:"near 50MA",          catalyst:"Restructuring + rate sensitivity", expiryDays:28,  ivr:32, beta:1.5, earningsDate:null },
   { ticker:"MS",    sector:"Financial",   momentum:"steady",     rsi:52, macd:"mild bullish",      trend:"above 50MA",         catalyst:"Investment banking cycle",        expiryDays:28,  ivr:28, beta:1.4, earningsDate:null },
@@ -1639,27 +1638,26 @@ async function getRealOptionsContract(ticker, price, optionType, score, vix, ear
       strikeHigh = (price * (1 + strikeRange * 2)).toFixed(0);  // wider up range
     }
 
+    // Use higher limit for expensive stocks to get more strike coverage
+    const contractLimit = isExpensive ? 100 : 50;
     const url = `/options/contracts?underlying_symbol=${ticker}` +
       `&expiration_date_gte=${minExpiry}&expiration_date_lte=${maxExpiry}` +
       `&strike_price_gte=${strikeLow}&strike_price_lte=${strikeHigh}` +
-      `&type=${optionType}&limit=50`;
+      `&type=${optionType}&limit=${contractLimit}`;
 
     const data = await alpacaGet(url, ALPACA_OPTIONS);
     if (!data || !data.option_contracts || !data.option_contracts.length) return null;
 
-    // Get snapshots for ALL contracts to find the best delta match
-    // Splitting into two batches of 25 to avoid URL length limits
-    const allSymbols  = data.option_contracts.map(c => c.symbol);
-    const batch1      = allSymbols.slice(0, 25).join(",");
-    const batch2      = allSymbols.slice(25).join(",");
-    const [snap1, snap2] = await Promise.all([
-      alpacaGet(`/options/snapshots?symbols=${batch1}&feed=indicative`, ALPACA_OPT_SNAP),
-      batch2 ? alpacaGet(`/options/snapshots?symbols=${batch2}&feed=indicative`, ALPACA_OPT_SNAP) : Promise.resolve(null),
-    ]);
-    const snapshots = {
-      ...(snap1?.snapshots || {}),
-      ...(snap2?.snapshots || {}),
-    };
+    // Get snapshots for ALL contracts — batch into groups of 25 to avoid URL length limits
+    const allSymbols = data.option_contracts.map(c => c.symbol);
+    const batches    = [];
+    for (let i = 0; i < allSymbols.length; i += 25) {
+      batches.push(allSymbols.slice(i, i + 25).join(","));
+    }
+    const snapResults = await Promise.all(
+      batches.map(b => alpacaGet(`/options/snapshots?symbols=${b}&feed=indicative`, ALPACA_OPT_SNAP))
+    );
+    const snapshots = snapResults.reduce((acc, r) => ({ ...acc, ...(r?.snapshots || {}) }), {});
 
     logEvent("scan", `${ticker} options chain: ${data.option_contracts.length} contracts | ${Object.keys(snapshots).length} snapshots with greeks`);
 
