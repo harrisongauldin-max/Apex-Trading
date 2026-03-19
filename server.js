@@ -2299,8 +2299,9 @@ async function executeTrade(stock, price, score, scoreReasons, vix, optionType =
     return false;
   }
 
-  // Try to get real options contract from Alpaca OPRA feed
-  let contract = await getRealOptionsContract(stock.ticker, price, optionType, score, vix, stock.earningsDate);
+  // Use cached contract from parallel prefetch if available, else fetch now
+  let contract = stock._cachedContract || await getRealOptionsContract(stock.ticker, price, optionType, score, vix, stock.earningsDate);
+  delete stock._cachedContract; // clean up cache after use
 
   // Fallback to estimated contract if real data unavailable
   if (!contract) {
@@ -3527,17 +3528,29 @@ async function runScan() {
   // Sort by score
   scored.sort((a,b) => b.score - a.score);
 
+  // ── PARALLEL OPTIONS PREFETCH ─────────────────────────────────────────────
+  // Fetch options chains for all scored stocks simultaneously before executing
+  // This eliminates sequential chain fetching when multiple trades fire at once
+  if (scored.length > 0) {
+    logEvent("scan", `Prefetching options chains for ${scored.length} candidates in parallel...`);
+    const optPrefetchStart = Date.now();
+    await Promise.all(scored.map(async ({ stock, price, optionType, score }) => {
+      try {
+        const contract = await getRealOptionsContract(stock.ticker, price, optionType, score, state.vix, stock.earningsDate);
+        if (contract) stock._cachedContract = contract;
+      } catch(e) {}
+    }));
+    logEvent("scan", `Options prefetch complete in ${((Date.now()-optPrefetchStart)/1000).toFixed(1)}s`);
+  }
+
   // Enter trades — sorted by score, best first
   // heatPct() is live and updates after every executeTrade call
-  // So heat check here is always accurate even mid-loop
   for (const { stock, price, score, reasons, optionType, isMeanReversion } of scored) {
     if (heatPct() >= MAX_HEAT) break;
     if (state.cash <= CAPITAL_FLOOR) break;
 
     const { pass, reason } = await checkAllFilters(stock, price);
     if (!pass) {
-      // For put trades, sector ETF weakness and support breakdown are valid entry signals
-      // Don't block puts just because calls are blocked
       const putBypassReasons = ["sector ETF", "support", "VWAP", "breakdown"];
       const canBypassForPut  = optionType === "put" && putBypassReasons.some(r => reason?.includes(r));
       if (!canBypassForPut) {
