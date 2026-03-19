@@ -641,6 +641,57 @@ function scoreSetup(stock, relStrength, adx, volume, avgVolume) {
   return { score: Math.min(score, 100), reasons };
 }
 
+// - Mean Reversion Call Scoring -
+// Fires when quality stocks are oversold in a high-VIX environment
+// These are discounted calls on beaten-down names — not trend-following
+function scoreMeanReversionCall(stock, relStrength, adx, bars, vix) {
+  let score = 0;
+  const reasons = [];
+
+  // Only applies when VIX is elevated (high fear = cheap relative calls)
+  if (vix < 25) return { score: 0, reasons: ["VIX too low for mean reversion (+0)"] };
+
+  // Stock must be a quality name — use beta as proxy for quality/liquidity
+  if ((stock.beta || 1) < 1.0) return { score: 0, reasons: ["Low beta — not a mean reversion candidate (+0)"] };
+
+  // RSI oversold — stock is beaten down (20pts)
+  if (stock.rsi <= 35)                        { score += 20; reasons.push(`RSI ${stock.rsi} - deeply oversold (+20)`); }
+  else if (stock.rsi <= 42)                   { score += 12; reasons.push(`RSI ${stock.rsi} - oversold (+12)`); }
+  else if (stock.rsi <= 48)                   { score += 5;  reasons.push(`RSI ${stock.rsi} - near oversold (+5)`); }
+  else return { score: 0, reasons: [`RSI ${stock.rsi} not oversold — skip mean reversion`] };
+
+  // Drawdown from recent high — how cheap is the stock? (25pts)
+  if (bars && bars.length >= 20) {
+    const recentHigh = Math.max(...bars.slice(-20).map(b => b.h));
+    const currentPrice = bars[bars.length - 1].c;
+    const drawdown = (recentHigh - currentPrice) / recentHigh;
+    if (drawdown >= 0.20)      { score += 25; reasons.push(`Down ${(drawdown*100).toFixed(0)}% from 20d high — deep discount (+25)`); }
+    else if (drawdown >= 0.12) { score += 15; reasons.push(`Down ${(drawdown*100).toFixed(0)}% from 20d high — discount (+15)`); }
+    else if (drawdown >= 0.07) { score += 8;  reasons.push(`Down ${(drawdown*100).toFixed(0)}% from 20d high (+8)`); }
+    else                       { score += 0;  reasons.push(`Only down ${(drawdown*100).toFixed(0)}% — not enough discount (+0)`); }
+  }
+
+  // MACD forming base or bullish crossover = possible reversal (15pts)
+  if (stock.macd.includes("bullish crossover")) { score += 15; reasons.push("MACD bullish crossover — reversal signal (+15)"); }
+  else if (stock.macd.includes("forming"))      { score += 10; reasons.push("MACD forming base — bottom building (+10)"); }
+  else if (stock.macd.includes("bullish"))      { score += 5;  reasons.push("MACD bullish (+5)"); }
+  else                                          { reasons.push("MACD bearish — wait for base (+0)"); }
+
+  // VIX level bonus — higher VIX = cheaper calls relative to intrinsic move potential (15pts)
+  if (vix >= 35)      { score += 15; reasons.push(`VIX ${vix} — extreme fear, calls historically cheap (+15)`); }
+  else if (vix >= 30) { score += 10; reasons.push(`VIX ${vix} — elevated fear (+10)`); }
+  else if (vix >= 25) { score += 5;  reasons.push(`VIX ${vix} — moderate fear (+5)`); }
+
+  // Quality / catalyst (15pts)
+  if (stock.catalyst)  { score += 10; reasons.push(`Recovery catalyst: ${stock.catalyst} (+10)`); }
+
+  // ADX — low ADX means trend is weakening (good for reversal) (10pts)
+  if (adx && adx < 20) { score += 10; reasons.push(`ADX ${adx} - weak trend, reversal likely (+10)`); }
+  else if (adx && adx < 30) { score += 5; reasons.push(`ADX ${adx} - trend weakening (+5)`); }
+
+  return { score: Math.min(score, 100), reasons, isMeanReversion: true };
+}
+
 // - Put Setup Scoring -
 // Mirror of scoreSetup but for bearish setups - looks for opposite signals
 function scorePutSetup(stock, relStrength, adx, volume, avgVolume) {
@@ -2129,6 +2180,11 @@ function selectExpiry(score, vix, optionType, earningsDate, ticker = null) {
     // Normal call setup
     targetDays = 30;
     expiryType = "monthly";
+  } else if (vix >= 25) {
+    // Mean reversion call — high VIX = buy discounted calls on beaten-down quality names
+    // 90 days gives time for VIX reversion + stock recovery
+    targetDays = 90;
+    expiryType = "monthly";
   } else {
     // Default — elevated VIX calls need more time
     targetDays = 45;
@@ -2201,7 +2257,7 @@ function buildCard(stock, price, contracts, iv, optionType = "call", score = 75,
 }
 
 // - Execute Trade -
-async function executeTrade(stock, price, score, scoreReasons, vix, optionType = "call") {
+async function executeTrade(stock, price, score, scoreReasons, vix, optionType = "call", isMeanReversion = false) {
   // Quick cash pre-check before expensive API calls
   // Use conservative estimate: assume at least $200 premium * 1 contract = $200 min cost
   const estimatedMinCost = price * 0.03 * 100; // ~3% OTM premium estimate * 100
@@ -2358,6 +2414,7 @@ async function executeTrade(stock, price, score, scoreReasons, vix, optionType =
     trailStop:      exitParams.trailStop,
     fastStopPct:    exitParams.fastStopPct,
     dteLabel:       exitParams.label,
+    isMeanReversion: isMeanReversion,
     partialClosed:  false,
     openDate:       new Date().toISOString(),
     ivr:            stock.ivr,
@@ -2414,7 +2471,7 @@ async function executeTrade(stock, price, score, scoreReasons, vix, optionType =
   await saveStateNow(); // critical — persist trade immediately
   logEvent("trade",
     `BUY ${stock.ticker} $${contract.strike}${typeLabel} exp ${contract.expDate} | ${contracts}x @ $${contract.premium} | ` +
-    `cost ${fmt(finalCost)} | score ${score} | delta ${contract.greeks.delta} | ${exitParams.label} | [${dataLabel}] | cash ${fmt(state.cash)} | heat ${(heatPct()*100).toFixed(0)}%`
+    `cost ${fmt(finalCost)} | score ${score} | delta ${contract.greeks.delta} | ${isMeanReversion ? "MEAN-REV" : exitParams.label} | [${dataLabel}] | cash ${fmt(state.cash)} | heat ${(heatPct()*100).toFixed(0)}%`
   );
   return true;
 }
@@ -3194,6 +3251,17 @@ async function runScan() {
     const callSetup = scoreSetup(liveStock, relStrength, signals.adx, todayVol, avgVol);
     const putSetup  = scorePutSetup(liveStock, relStrength, signals.adx, todayVol, avgVol);
 
+    // Mean reversion call scoring — runs when VIX >= 25
+    // Identifies beaten-down quality names for discounted 90-day calls
+    const mrSetup = scoreMeanReversionCall(liveStock, relStrength, signals.adx, bars, state.vix);
+    if (mrSetup.score > callSetup.score) {
+      // Mean reversion wins — boost call score and tag it
+      callSetup.score   = mrSetup.score;
+      callSetup.reasons = mrSetup.reasons;
+      callSetup.isMeanReversion = true;
+      logEvent("filter", `${stock.ticker} MEAN REVERSION setup: score ${mrSetup.score} | ${mrSetup.reasons[0]}`);
+    }
+
     // Volume context for puts — high volume confirms distribution, but capitulation
     // (extreme high volume) can signal reversal. Use nuanced scoring.
     const volRatio = avgVol > 0 ? todayVol / avgVol : 1;
@@ -3301,7 +3369,10 @@ async function runScan() {
     // Apply regime modifier
     const regimeMod   = getRegimeModifier(marketContext.regime?.regime || "neutral", "call");
     const regimePutMod= getRegimeModifier(marketContext.regime?.regime || "neutral", "put");
-    callSetup.score   = Math.min(100, Math.max(0, callSetup.score + regimeMod));
+    // Don't apply bear regime penalty to mean reversion calls — they're designed FOR bear markets
+    if (!callSetup.isMeanReversion) {
+      callSetup.score = Math.min(100, Math.max(0, callSetup.score + regimeMod));
+    }
     putSetup.score    = Math.min(100, Math.max(0, putSetup.score  + regimePutMod));
     if (regimeMod !== 0) {
       callSetup.reasons.push(`Regime ${marketContext.regime?.regime}: ${regimeMod > 0 ? "+" : ""}${regimeMod}`);
@@ -3366,7 +3437,8 @@ async function runScan() {
 
     logEvent("filter", `${stock.ticker} best setup: ${optionType.toUpperCase()} score ${bestScore} | RSI:${signals.rsi} MACD:${signals.macd} MOM:${signals.momentum}`);
     // Queue for execution — heat is rechecked live in the execution loop below
-    scored.push({ stock: liveStock, price, score: bestScore, reasons: bestReasons, optionType });
+    const isMR = optionType === "call" && callSetup.isMeanReversion;
+    scored.push({ stock: liveStock, price, score: bestScore, reasons: bestReasons, optionType, isMeanReversion: isMR });
     await new Promise(r=>setTimeout(r,200));
   }
 
@@ -3393,7 +3465,7 @@ async function runScan() {
       logEvent("filter", `${stock.ticker} - bypassing filter for PUT: ${reason}`);
     }
 
-    const entered = await executeTrade(stock, price, score, reasons, state.vix, optionType);
+    const entered = await executeTrade(stock, price, score, reasons, state.vix, optionType, isMeanReversion);
     if (entered) await new Promise(r=>setTimeout(r,500));
   }
 
