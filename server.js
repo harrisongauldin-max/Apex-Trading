@@ -961,15 +961,30 @@ function analyzeNews(articles) {
 }
 
 // - VIX Velocity -
-let lastVIXReading = 0; // 0 = uninitialized, will be set from state on first scan
+let lastVIXReading  = 0;   // 0 = uninitialized
+let vixFallingPause = false; // true when VIX is falling — suppresses new put entries
 function checkVIXVelocity(currentVIX) {
-  // Initialize from current VIX on first call to prevent false trigger on restart
   if (lastVIXReading === 0) { lastVIXReading = currentVIX; return false; }
-  const delta    = currentVIX - lastVIXReading;
+  const delta   = currentVIX - lastVIXReading;
+  const prevVIX = lastVIXReading; // save before updating
   lastVIXReading = currentVIX;
+  const fallPct = prevVIX > 0 ? (delta / prevVIX) : 0;
+
+  // Black swan: VIX spiked 8+ points — close all positions
   if (delta >= 8) {
     logEvent("circuit", `VIX VELOCITY ALERT - jumped ${delta.toFixed(1)} points to ${currentVIX} - closing all positions`);
     return true;
+  }
+
+  // VIX falling >3% = market recovering = pause new put entries
+  // Falling VIX means options premiums deflating — puts entered now lose value fast
+  if (delta <= -1.0 && fallPct <= -0.03) {
+    if (!vixFallingPause) logEvent("filter", `VIX falling (${delta.toFixed(1)} pts) — pausing new PUT entries until VIX stabilizes`);
+    vixFallingPause = true;
+  } else if (delta >= 0) {
+    // VIX stable or rising — resume put entries
+    if (vixFallingPause) logEvent("filter", `VIX stabilized — resuming PUT entries`);
+    vixFallingPause = false;
   }
   return false;
 }
@@ -2147,7 +2162,7 @@ function getDTEExitParams(dte) {
     return {
       takeProfitPct:  0.35,  // 35% target — take it fast
       stopLossPct:    0.35,
-      fastStopPct:    0.15,  // -15% fast stop in first 48hrs
+      fastStopPct:    0.20,  // -20% fast stop (raised from 15% — VIX 33 noise too wide)
       trailActivate:  0.20,  // trail kicks in at +20%
       trailStop:      0.10,  // tight 10% trail
       label:          "SHORT-DTE",
@@ -3256,16 +3271,35 @@ async function runScan() {
 
   // 2. New entries — check if any entry type is valid
   const callsAllowed = isEntryWindow("call") || dryRunMode;
-  const putsAllowed  = isEntryWindow("put")  || dryRunMode;
+  const putsAllowed  = (isEntryWindow("put") && !vixFallingPause) || dryRunMode;
+  if (vixFallingPause && !dryRunMode) logEvent("filter", "VIX falling — put entries paused this scan");
   if (!callsAllowed && !putsAllowed) return;
   if (state.circuitOpen === false || state.weeklyCircuitOpen === false) return;
   if (state.consecutiveLosses >= CONSEC_LOSS_LIMIT) return;
   if (state.cash <= CAPITAL_FLOOR) return;
 
-  // Get SPY price for relative strength
-  const spyPrice  = await getStockQuote("SPY") || 500;
-  const spyBars   = await getStockBars("SPY", 5);
-  const spyReturn = spyBars.length >= 5 ? (spyBars[spyBars.length-1].c - spyBars[0].o) / spyBars[0].o : 0;
+  // Burst entry cooldown — max 3 new positions per 10 minutes
+  // Prevents over-concentration at a single market moment (e.g. after reset)
+  const tenMinAgo = Date.now() - 10 * 60 * 1000;
+  const recentEntries = state.positions.filter(p => new Date(p.openDate).getTime() > tenMinAgo).length;
+  if (recentEntries >= 3) {
+    logEvent("filter", `Burst entry cooldown — ${recentEntries} positions opened in last 10min — waiting`);
+    return;
+  }
+
+  // Get SPY price for relative strength + intraday momentum
+  const spyPrice     = await getStockQuote("SPY") || 500;
+  const spyBars      = await getStockBars("SPY", 5);
+  const spyReturn    = spyBars.length >= 5 ? (spyBars[spyBars.length-1].c - spyBars[0].o) / spyBars[0].o : 0;
+  // SPY 15-min momentum — if SPY is recovering, puts are fighting the tape
+  const spyIntraday  = await getIntradayBars("SPY");
+  const spyRecovering = (() => {
+    if (spyIntraday.length < 15) return false;
+    const recent = spyIntraday.slice(-15);
+    const spyMove = (recent[recent.length-1].c - recent[0].c) / recent[0].c;
+    return spyMove > 0.003; // SPY up 0.3%+ in last 15 min = recovery
+  })();
+  if (spyRecovering) logEvent("filter", `SPY recovering (+0.3%+ last 15min) — puts fighting the tape`);
 
   // Gap detection - large gap down = put opportunity, gap up = call opportunity
   let marketGapDirection = null;
@@ -3469,6 +3503,12 @@ async function runScan() {
     // Applied after contract selection since volOIRatio comes from executeTrade context
     // Note: logged in executeTrade when volOIRatio > 3
 
+    // SPY recovery suppresses puts — market bouncing = puts fighting the tape
+    if (spyRecovering) {
+      putSetup.score = Math.max(0, putSetup.score - 20);
+      putSetup.reasons.push("SPY recovering — tape fighting puts (-20)");
+    }
+
     // Volume pace boost — if running 2x+ expected volume, strong signal either direction
     if (signals.volPaceRatio > 2.0 && signals.hasIntraday) {
       putSetup.score  = Math.min(100, putSetup.score + 8);
@@ -3600,9 +3640,12 @@ async function runScan() {
     }
     const bestReasons = optionType === "put" ? putSetup.reasons : callSetup.reasons;
 
-    const effectiveMinScore = ddProtocol.minScore || MIN_SCORE;
+    // After 1PM ET, afternoon session is noisier — require higher conviction
+    const etHourNow = getETTime().getHours() + getETTime().getMinutes() / 60;
+    const afternoonMinScore = etHourNow >= 13 ? 85 : 0; // 85+ required after 1PM ET
+    const effectiveMinScore = Math.max(ddProtocol.minScore || MIN_SCORE, afternoonMinScore);
     if (bestScore < effectiveMinScore) {
-      logEvent("filter", `${stock.ticker} call:${callSetup.score} put:${putSetup.score} - below ${effectiveMinScore} (${ddProtocol.level} protocol) - skip`);
+      logEvent("filter", `${stock.ticker} call:${callSetup.score} put:${putSetup.score} - below ${effectiveMinScore} (${etHourNow >= 13 ? "afternoon" : ddProtocol.level} protocol) - skip`);
       continue;
     }
 
