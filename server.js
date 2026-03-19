@@ -1611,39 +1611,32 @@ async function getRealOptionsContract(ticker, price, optionType, score, vix, ear
     const { expDate: targetExpDate, expDays: targetExpDays, expiryType } = selectExpiry(score, vix, optionType, earningsDate, ticker);
   // LEAPS use deeper ITM delta (0.70-0.80) for better intrinsic value retention
   const isLeaps      = expiryType === "leaps";
-  // For puts on high-priced stocks ($500+), widen delta range slightly
-  // ATM puts on expensive stocks have delta around 0.50, OTM around 0.25-0.45
   const isPut        = optionType === "put";
-  const isExpensive  = price > 400;
-  const deltaMin     = isLeaps ? 0.65 : (isPut && isExpensive ? 0.20 : TARGET_DELTA_MIN);
-  const deltaMax     = isLeaps ? 0.85 : (isPut && isExpensive ? 0.55 : TARGET_DELTA_MAX);
-  const strikeRange  = isLeaps ? 0.15 : (isExpensive ? 0.12 : 0.10);
+  const isExpensive  = price > 400;  // high-priced stocks need wider delta range
+  const isCheap      = price < 100;  // low-priced stocks have fewer strikes, need wider range
+
+  // Delta range by stock price tier:
+  // Cheap (<$100): 0.28-0.50 — fewer strikes, liquid ones are closer to ATM
+  // Normal: 0.28-0.42 — standard target
+  // Expensive (>$400): 0.20-0.55 — wide range needed to find liquid OTM puts
+  // LEAPS: 0.65-0.85 — deep ITM for intrinsic value retention
+  const deltaMin = isLeaps ? 0.65 : (isPut && isExpensive ? 0.20 : TARGET_DELTA_MIN);
+  const deltaMax = isLeaps ? 0.85 : (isPut && isCheap ? 0.50 : isPut && isExpensive ? 0.55 : TARGET_DELTA_MAX);
+  const strikeRange = 0; // unused — delta now selects contracts, not strike range
 
     // Format date for API: YYYY-MM-DD
-    const today     = getETTime();
-    const minExpiry = new Date(today.getTime() + 7  * 86400000).toISOString().split("T")[0]; // min 7 DTE — tiered exits handle short-dated positions
-    const maxExpiry = new Date(today.getTime() + 90 * 86400000).toISOString().split("T")[0];
+    const today      = getETTime();
+    const minExpiry  = new Date(today.getTime() + 7   * 86400000).toISOString().split("T")[0];
+    // LEAPS need up to 270 days — use 300 day window to cover all expiry types
+    const maxDays    = expiryType === "leaps" ? 300 : 90;
+    const maxExpiry  = new Date(today.getTime() + maxDays * 86400000).toISOString().split("T")[0];
 
-    // Strike range — directional based on option type
-    // Calls: ATM to slightly OTM above (delta 0.28-0.42 = strikes just above current price)
-    // Puts:  ATM to slightly OTM below (delta 0.28-0.42 = strikes just below current price)
-    let strikeLow, strikeHigh;
-    if (optionType === "put") {
-      // OTM puts: strikes from 20% below price up to ATM (100%)
-      strikeLow  = (price * (1 - strikeRange * 2)).toFixed(0);  // wider down range
-      strikeHigh = (price * 1.01).toFixed(0);                   // just above ATM
-    } else {
-      // OTM calls: strikes from ATM up to 20% above
-      strikeLow  = (price * 0.99).toFixed(0);                   // just below ATM
-      strikeHigh = (price * (1 + strikeRange * 2)).toFixed(0);  // wider up range
-    }
-
-    // Use higher limit for expensive stocks to get more strike coverage
-    const contractLimit = isExpensive ? 100 : 50;
+    // Fetch ALL contracts in expiry window — no strike range filter
+    // Let delta be the sole selector — eliminates whack-a-mole with strike ranges
+    // 200 contracts covers the full chain for any stock price tier
     const url = `/options/contracts?underlying_symbol=${ticker}` +
       `&expiration_date_gte=${minExpiry}&expiration_date_lte=${maxExpiry}` +
-      `&strike_price_gte=${strikeLow}&strike_price_lte=${strikeHigh}` +
-      `&type=${optionType}&limit=${contractLimit}`;
+      `&type=${optionType}&limit=200`;
 
     const data = await alpacaGet(url, ALPACA_OPTIONS);
     if (!data || !data.option_contracts || !data.option_contracts.length) return null;
@@ -1697,12 +1690,17 @@ async function getRealOptionsContract(ticker, price, optionType, score, vix, ear
       if (oi > 0 && oi < MIN_OPEN_INTEREST) { skipped++; continue; }
       if (delta < deltaMin || delta > deltaMax) { skipped++; continue; }
 
-      const deltaTarget   = (deltaMin + deltaMax) / 2; // midpoint of actual target range
+      const deltaTarget   = (deltaMin + deltaMax) / 2;
       const deltaRange    = (deltaMax - deltaMin) / 2;
       const deltaScore    = Math.max(0, 1 - Math.abs(delta - deltaTarget) / deltaRange);
       // If OI=0 (unknown), use delta score only — don't penalize for missing data
       const liquidScore   = oi > 0 ? Math.min(oi / 5000, 1) : 0.5;
-      const contractScore = deltaScore * 0.6 + liquidScore * 0.4;
+      // Expiry proximity score — prefer contracts closest to our target DTE
+      const contractDTE   = Math.round((new Date(contract.expiration_date) - today) / 86400000);
+      const dteDistance   = Math.abs(contractDTE - targetExpDays);
+      const expiryScore   = Math.max(0, 1 - dteDistance / 30); // penalize >30 days from target
+      // Weighted: delta most important, then expiry, then liquidity
+      const contractScore = deltaScore * 0.55 + expiryScore * 0.25 + liquidScore * 0.20;
 
       if (contractScore > bestScore) {
         bestScore = contractScore;
