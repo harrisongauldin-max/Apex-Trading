@@ -3448,7 +3448,7 @@ async function runScan() {
   // Enter trades — sorted by score, best first
   // heatPct() is live and updates after every executeTrade call
   // So heat check here is always accurate even mid-loop
-  for (const { stock, price, score, reasons, optionType } of scored) {
+  for (const { stock, price, score, reasons, optionType, isMeanReversion } of scored) {
     if (heatPct() >= MAX_HEAT) break;
     if (state.cash <= CAPITAL_FLOOR) break;
 
