@@ -51,6 +51,7 @@ const EARNINGS_SKIP_DAYS  = 5;
 const MIN_OPTIONS_VOLUME  = 10000;
 const MIN_OPEN_INTEREST   = 100;  // lowered from 500 — some valid contracts have lower OI
 const MIN_STOCK_PRICE     = 20;
+const MIN_OPTION_PREMIUM  = 0.50;  // minimum $50 per contract — filters out lottery tickets
 const MAX_SPREAD_PCT      = 0.15;  // max bid/ask spread as % of ask (widened for high VIX days)
 const EARLY_SPREAD_PCT    = 0.10;  // tighter spread required for early 9:45AM put entries
 const MAX_GAP_PCT         = 0.03;
@@ -1678,8 +1679,9 @@ async function getRealOptionsContract(ticker, price, optionType, score, vix, ear
       const oi     = parseInt(snap.openInterest || quote.as || 0); // use ask size as OI proxy if needed
       const vol    = parseInt(day.v || day.volume || 0);
 
-      // Skip illiquid
+      // Skip illiquid or too cheap (lottery tickets)
       if (mid <= 0) { skipped++; continue; }
+      if (mid < MIN_OPTION_PREMIUM) { skipped++; continue; } // below $0.50 = unreliable fills
       // Tighter spread requirement during early put window (9:45-10AM)
       const etH = getETTime().getHours() + getETTime().getMinutes() / 60;
       const isEarlyPutWindow = optionType === "put" && etH >= 9.75 && etH < 10.0;
