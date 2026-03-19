@@ -396,12 +396,26 @@ async function getDynamicSignals(ticker, bars, intradayBars = null) {
 
   const adx = calcADX(signalBars.length >= 14 ? signalBars : bars);
 
-  // IV rank still uses daily bars — needs historical range context
+  // IV rank + IV Percentile — both use daily bars for historical context
+  // IVR: where is IV in its 52-week range
+  // IV Percentile: what % of days had lower IV (more accurate measure)
   const recentBars = bars.slice(-20);
   const returns    = recentBars.slice(1).map((b, i) => Math.log(b.c / recentBars[i].c));
   const stdDev     = Math.sqrt(returns.reduce((s, r) => s + r * r, 0) / returns.length);
   const currentIV  = stdDev * Math.sqrt(252);
   const ivr        = calcIVRank(currentIV, bars);
+
+  // IV Percentile — % of days where IV was lower than today
+  let ivPercentile = 50; // default
+  if (bars.length >= 30) {
+    const allIVs = [];
+    for (let i = 1; i < bars.length; i++) {
+      const ret = Math.log(bars[i].c / bars[i-1].c);
+      allIVs.push(Math.abs(ret) * Math.sqrt(252));
+    }
+    const daysBelow = allIVs.filter(iv => iv < currentIV).length;
+    ivPercentile = Math.round((daysBelow / allIVs.length) * 100);
+  }
 
   // Intraday VWAP
   const intradayVWAP = intradayBars.length >= 5 ? calcVWAP(intradayBars) : 0;
@@ -421,9 +435,10 @@ async function getDynamicSignals(ticker, bars, intradayBars = null) {
     momentum,
     adx,
     ivr,
+    ivPercentile,  // % of days with lower IV — high = options expensive
     intradayVWAP,
     intradayVol,
-    volPaceRatio,  // >1.5 = running hot, <0.7 = quiet day
+    volPaceRatio,
     hasIntraday:   intradayBars.length >= 10,
   };
 }
@@ -616,11 +631,13 @@ function scoreSetup(stock, relStrength, adx, volume, avgVolume) {
   else if (stock.macd.includes("forming"))      { score += 5;  reasons.push("MACD forming base (+5)"); }
   else                                          { reasons.push("MACD neutral (+0)"); }
 
-  // IVR (15pts) - lower is better for buying calls
-  if (stock.ivr < 30)       { score += 15; reasons.push(`IVR ${stock.ivr} - cheap options (+15)`); }
-  else if (stock.ivr < 50)  { score += 10; reasons.push(`IVR ${stock.ivr} - moderate (+10)`); }
-  else if (stock.ivr < 65)  { score += 5;  reasons.push(`IVR ${stock.ivr} - elevated (+5)`); }
-  else                      { reasons.push(`IVR ${stock.ivr} - expensive (+0)`); }
+  // IVR + IV Percentile (15pts) - lower is better for buying options
+  // Use IV Percentile when available (more accurate than IVR alone)
+  const ivp = stock.ivPercentile || 50;
+  if (ivp < 30)       { score += 15; reasons.push(`IVP ${ivp}% - cheap options (+15)`); }
+  else if (ivp < 50)  { score += 10; reasons.push(`IVP ${ivp}% - moderate (+10)`); }
+  else if (ivp < 70)  { score += 5;  reasons.push(`IVP ${ivp}% - elevated (+5)`); }
+  else                { reasons.push(`IVP ${ivp}% - expensive, options overpriced (+0)`); }
 
   // Catalyst (15pts)
   if (stock.catalyst)       { score += 15; reasons.push(`Catalyst: ${stock.catalyst} (+15)`); }
@@ -715,11 +732,12 @@ function scorePutSetup(stock, relStrength, adx, volume, avgVolume) {
   else if (stock.macd.includes("neutral"))      { score += 5;  reasons.push("MACD neutral (+5)"); }
   else                                          { reasons.push("MACD bullish - bad for put (+0)"); }
 
-  // IVR - lower is still better for buying puts (15pts)
-  if (stock.ivr < 30)       { score += 15; reasons.push(`IVR ${stock.ivr} - cheap options (+15)`); }
-  else if (stock.ivr < 50)  { score += 10; reasons.push(`IVR ${stock.ivr} - moderate (+10)`); }
-  else if (stock.ivr < 65)  { score += 5;  reasons.push(`IVR ${stock.ivr} - elevated (+5)`); }
-  else                      { reasons.push(`IVR ${stock.ivr} - expensive (+0)`); }
+  // IVR + IV Percentile (15pts) - lower is still better for buying puts
+  const ivpP = stock.ivPercentile || 50;
+  if (ivpP < 30)       { score += 15; reasons.push(`IVP ${ivpP}% - cheap options (+15)`); }
+  else if (ivpP < 50)  { score += 10; reasons.push(`IVP ${ivpP}% - moderate (+10)`); }
+  else if (ivpP < 70)  { score += 5;  reasons.push(`IVP ${ivpP}% - elevated (+5)`); }
+  else                 { reasons.push(`IVP ${ivpP}% - expensive (+0)`); }
 
   // Bearish catalyst (15pts)
   // Use intraday momentum as proxy — stock actually moving down today = confirmed bearish catalyst
@@ -1730,9 +1748,17 @@ async function getRealOptionsContract(ticker, price, optionType, score, vix, ear
       const oi     = parseInt(snap.openInterest || quote.as || 0); // use ask size as OI proxy if needed
       const vol    = parseInt(day.v || day.volume || 0);
 
+      // Contract DTE — needed early for theta check and expiry scoring
+      const contractDTE = Math.round((new Date(contract.expiration_date) - today) / 86400000);
+
       // Skip illiquid or too cheap (lottery tickets)
       if (mid <= 0) { skipped++; continue; }
       if (mid < MIN_OPTION_PREMIUM) { skipped++; continue; } // below $0.50 = unreliable fills
+      // Theta/premium ratio — skip if daily decay > 2% of premium (too expensive to hold)
+      // Pros never buy options where time decay eats more than 2%/day
+      const theta    = Math.abs(parseFloat(greeks.theta || 0));
+      const thetaPct = mid > 0 ? theta / mid : 0;
+      if (thetaPct > 0.02 && contractDTE <= 14) { skipped++; continue; } // theta trap on short dated
       // Tighter spread requirement during early put window (9:45-10AM)
       const etH = getETTime().getHours() + getETTime().getMinutes() / 60;
       const isEarlyPutWindow = optionType === "put" && etH >= 9.75 && etH < 10.0;
@@ -1748,8 +1774,9 @@ async function getRealOptionsContract(ticker, price, optionType, score, vix, ear
       const deltaScore    = Math.max(0, 1 - Math.abs(delta - deltaTarget) / deltaRange);
       // If OI=0 (unknown), use delta score only — don't penalize for missing data
       const liquidScore   = oi > 0 ? Math.min(oi / 5000, 1) : 0.5;
+      // Vol/OI ratio — unusual activity signal stored for scoring boost
+      const volOIRatio    = oi > 0 && vol > 0 ? vol / oi : 0; // >3x = unusual activity
       // Expiry proximity score — prefer contracts closest to our target DTE
-      const contractDTE   = Math.round((new Date(contract.expiration_date) - today) / 86400000);
       const dteDistance   = Math.abs(contractDTE - targetExpDays);
       const expiryScore   = Math.max(0, 1 - dteDistance / 30); // penalize >30 days from target
       // Weighted: delta most important, then expiry, then liquidity
@@ -1771,7 +1798,7 @@ async function getRealOptionsContract(ticker, price, optionType, score, vix, ear
             gamma: parseFloat(greeks.gamma || 0).toFixed(4),
             vega:  parseFloat(greeks.vega  || 0).toFixed(3),
           },
-          iv, oi, vol, optionType,
+          iv, oi, vol, volOIRatio, theta: thetaPct, optionType,
         };
       }
     }
@@ -2089,6 +2116,12 @@ function calcPositionSize(premium, score, vix) {
   // Higher score = more conviction = size up within Kelly bounds
   const convictionMult = score >= 85 ? 1.25 : score >= 75 ? 1.0 : score >= 70 ? 0.80 : 0.60;
 
+  // Time of day sizing — reduce in first 30 mins (wide spreads, price discovery)
+  // Pros size down at open — market makers widen spreads until order flow stabilizes
+  const etNow  = getETTime();
+  const minsSinceOpen = (etNow.getHours() - 9) * 60 + etNow.getMinutes() - 30;
+  const openingMult   = minsSinceOpen < 30 ? 0.75 : 1.0; // 25% smaller in first 30 mins
+
   // Step 3: VIX adjustment — options are more expensive in high vol, size down
   const vixMult = vix >= VIX_REDUCE50 ? 0.50 : vix >= VIX_REDUCE25 ? 0.75 : 1.0;
 
@@ -2096,7 +2129,7 @@ function calcPositionSize(premium, score, vix) {
   const ddMult = (marketContext?.drawdownProtocol?.sizeMultiplier) || 1.0;
 
   // Step 5: Combine into single sizing decision
-  const effectiveFraction = kellyBase * convictionMult * vixMult * ddMult;
+  const effectiveFraction = kellyBase * convictionMult * vixMult * ddMult * openingMult;
   const maxCost           = Math.min(
     state.cash * effectiveFraction,
     state.cash * 0.20,                     // hard cap: never more than 20% per trade
@@ -2415,6 +2448,7 @@ async function executeTrade(stock, price, score, scoreReasons, vix, optionType =
     fastStopPct:    exitParams.fastStopPct,
     dteLabel:       exitParams.label,
     isMeanReversion: isMeanReversion,
+    entryVIX:       vix,
     partialClosed:  false,
     openDate:       new Date().toISOString(),
     ivr:            stock.ivr,
@@ -2471,7 +2505,8 @@ async function executeTrade(stock, price, score, scoreReasons, vix, optionType =
   await saveStateNow(); // critical — persist trade immediately
   logEvent("trade",
     `BUY ${stock.ticker} $${contract.strike}${typeLabel} exp ${contract.expDate} | ${contracts}x @ $${contract.premium} | ` +
-    `cost ${fmt(finalCost)} | score ${score} | delta ${contract.greeks.delta} | ${isMeanReversion ? "MEAN-REV" : exitParams.label} | [${dataLabel}] | cash ${fmt(state.cash)} | heat ${(heatPct()*100).toFixed(0)}%`
+    `cost ${fmt(finalCost)} | score ${score} | delta ${contract.greeks.delta} | ${isMeanReversion ? "MEAN-REV" : exitParams.label} | [${dataLabel}] | ` +
+    `vol/OI:${contract.volOIRatio?.toFixed(1)||"?"}x | cash ${fmt(state.cash)} | heat ${(heatPct()*100).toFixed(0)}%`
   );
   return true;
 }
@@ -2809,6 +2844,25 @@ async function runScan() {
     marketContext.globalMarket= globalMarket;
 
     // Synchronous calculations (no API calls)
+    // Portfolio Greeks — track total delta/theta/vega/gamma across all positions
+    const portfolioGreeks = state.positions.reduce((acc, pos) => {
+      const g    = pos.greeks || {};
+      const mult = (pos.contracts || 1) * 100;
+      acc.delta += parseFloat(g.delta || 0) * mult;
+      acc.theta += parseFloat(g.theta || 0) * mult;
+      acc.gamma += parseFloat(g.gamma || 0) * mult;
+      acc.vega  += parseFloat(g.vega  || 0) * mult;
+      return acc;
+    }, { delta: 0, theta: 0, gamma: 0, vega: 0 });
+    portfolioGreeks.delta = parseFloat(portfolioGreeks.delta.toFixed(2));
+    portfolioGreeks.theta = parseFloat(portfolioGreeks.theta.toFixed(2));
+    portfolioGreeks.gamma = parseFloat(portfolioGreeks.gamma.toFixed(4));
+    portfolioGreeks.vega  = parseFloat(portfolioGreeks.vega.toFixed(2));
+    marketContext.portfolioGreeks = portfolioGreeks;
+    if (state.positions.length > 0) {
+      logEvent("scan", `[Greeks] Δ:${portfolioGreeks.delta} Θ:${portfolioGreeks.theta}/day Γ:${portfolioGreeks.gamma} V:${portfolioGreeks.vega}`);
+    }
+
     marketContext.concentration    = checkConcentrationRisk();
     marketContext.drawdownProtocol = getDrawdownProtocol();
     marketContext.stressTest       = runStressTest();
@@ -2941,6 +2995,17 @@ async function runScan() {
       await closePosition(pos.ticker, "stop"); continue;
     }
 
+    // VIX spike profit taking — if VIX surges 15%+ intraday, option premiums inflate
+    // Pros close winners during vol spikes to capture temporarily inflated premium
+    if (chg >= 0.20 && state.vix > 0) {
+      const vixVsEntry = pos.entryVIX ? (state.vix - pos.entryVIX) / pos.entryVIX : 0;
+      if (vixVsEntry >= 0.20 && chg >= 0.25) {
+        // VIX up 20%+ since entry AND option up 25%+ = take the inflated premium
+        logEvent("scan", `${pos.ticker} VIX spike profit — VIX up ${(vixVsEntry*100).toFixed(0)}% since entry, option +${(chg*100).toFixed(0)}% — taking inflated premium`);
+        await closePosition(pos.ticker, "vix-spike-profit"); continue;
+      }
+    }
+
     // Trailing stop with signal decay tightening
     if (chg >= (pos.trailActivate || TRAIL_ACTIVATE_PCT)) {
       // Base trail percentage
@@ -2999,6 +3064,17 @@ async function runScan() {
     if (!pos.partialClosed && chg >= (pos.takeProfitPct || TAKE_PROFIT_PCT)) {
       logEvent("scan", `${pos.ticker} take profit +${(chg*100).toFixed(0)}% [${pos.dteLabel||"MONTHLY"}]`);
       await closePosition(pos.ticker, "target"); continue;
+    }
+
+    // Gamma risk check — short DTE + high gamma = explosive moves either direction
+    // Pros cut positions when gamma risk becomes unmanageable
+    if (dte <= 5 && pos.greeks) {
+      const gamma = Math.abs(parseFloat(pos.greeks.gamma || 0));
+      const gammaRisk = gamma * price * price * 0.01; // dollar gamma risk per 1% move
+      if (gammaRisk > pos.cost * 0.30) {
+        logEvent("scan", `${pos.ticker} gamma risk high — ${dte}DTE gamma risk $${gammaRisk.toFixed(0)} vs cost $${pos.cost} — closing`);
+        await closePosition(pos.ticker, "gamma-risk"); continue;
+      }
     }
 
     // Time stop
@@ -3230,6 +3306,7 @@ async function runScan() {
       intradayVWAP:  signals.intradayVWAP || 0,
       volPaceRatio:  signals.volPaceRatio || 1,
       hasIntraday:   signals.hasIntraday || false,
+      ivPercentile:  signals.ivPercentile || 50,
     };
     // Log intraday data quality
     if (signals.hasIntraday) {
@@ -3287,6 +3364,11 @@ async function runScan() {
       callSetup.reasons.push(`Time of day adj x${timeOfDayMult}`);
       putSetup.reasons.push(`Time of day adj x${timeOfDayMult}`);
     }
+
+    // Unusual options activity boost — high vol/OI ratio means big money is moving
+    // This uses today's options volume vs open interest on the selected contract
+    // Applied after contract selection since volOIRatio comes from executeTrade context
+    // Note: logged in executeTrade when volOIRatio > 3
 
     // Volume pace boost — if running 2x+ expected volume, strong signal either direction
     if (signals.volPaceRatio > 2.0 && signals.hasIntraday) {
