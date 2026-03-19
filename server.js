@@ -3141,10 +3141,10 @@ async function runScan() {
     // Earnings quality score
     // eqScore already prefetched in parallel above
 
-    // VWAP — price below VWAP boosts puts, blocks calls
-    const vwap = liveStock.intradayVWAP > 0 ? liveStock.intradayVWAP : calcVWAP(bars.slice(-5));
+    // VWAP — use intraday VWAP from signals (available before liveStock is built)
+    const vwap = signals.intradayVWAP > 0 ? signals.intradayVWAP : calcVWAP(bars.slice(-5));
     if (vwap > 0 && price < vwap * 0.99) {
-      logEvent("filter", `${stock.ticker} price $${price} below ${liveStock.intradayVWAP > 0 ? 'intraday' : 'daily'} VWAP $${vwap} - weak - put boost +10`);
+      logEvent("filter", `${stock.ticker} price $${price} below ${signals.intradayVWAP > 0 ? 'intraday' : 'daily'} VWAP $${vwap} - weak - put boost +10`);
       weaknessBoost += 10;
       weaknessReasons.push(`Below VWAP (+10)`);
     }
