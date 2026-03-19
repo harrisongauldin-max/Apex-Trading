@@ -2475,7 +2475,11 @@ async function closePosition(ticker, reason, exitPremium = null) {
   // But minimum 1 contract — if only 1 contract, full close regardless
   const contractsToSell = pos.contracts === 1 ? 1 : Math.max(1, Math.floor(pos.contracts * mult));
   const closeQty = contractsToSell;
-  if (pos.contractSymbol && closeQty > 0 && !dryRunMode) {
+  // Minimum 60 seconds hold before Alpaca close — prevents wash trade rejections
+  const heldSeconds = (Date.now() - new Date(pos.openDate).getTime()) / 1000;
+  const alpacaCloseAllowed = heldSeconds >= 60;
+  if (!alpacaCloseAllowed) logEvent("warn", `${ticker} held only ${heldSeconds.toFixed(0)}s — skipping Alpaca close order to avoid wash trade`);
+  if (pos.contractSymbol && closeQty > 0 && !dryRunMode && alpacaCloseAllowed) {
     try {
       // Use real bid if available, else use ep (mid) as limit
       // Real bid from position tracking is more reliable than derived estimate
@@ -2523,11 +2527,11 @@ async function closePosition(ticker, reason, exitPremium = null) {
   const dailyPnL  = portfolioValue - state.dayStartCash;
   const weeklyPnL = portfolioValue - state.weekStartCash;
 
-  // Daily max loss — 15% of deployed capital
-  const deployedCapital = Math.max(openRisk(), totalCap() * 0.10);
-  if (dailyPnL / deployedCapital <= -0.15 && state.circuitOpen) {
+  // Daily max loss — 25% of TOTAL capital (not just deployed)
+  // Using deployed capital caused false triggers when few positions were open
+  if (dailyPnL / totalCap() <= -0.25 && state.circuitOpen) {
     state.circuitOpen = false;
-    logEvent("circuit", `DAILY MAX LOSS circuit - lost ${fmt(Math.abs(dailyPnL))} (${(dailyPnL/deployedCapital*100).toFixed(1)}% of deployed capital)`);
+    logEvent("circuit", `DAILY MAX LOSS circuit - lost ${fmt(Math.abs(dailyPnL))} (${(dailyPnL/totalCap()*100).toFixed(1)}% of total capital)`);
   }
   // Weekly circuit — 25% of total capital using weeklyPnL
   if (weeklyPnL / totalCap() <= -WEEKLY_DD_LIMIT && state.weeklyCircuitOpen) {
