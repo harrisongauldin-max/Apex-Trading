@@ -1,5 +1,5 @@
 // -
-// APEX v3.5 - Professional Options Trading Agent
+// APEX v3.75 - Professional Options Trading Agent
 // Alpaca Paper Trading Edition
 // -
 const express    = require("express");
@@ -19,6 +19,19 @@ const ALPACA_BASE       = "https://paper-api.alpaca.markets/v2";
 const ALPACA_DATA       = "https://data.alpaca.markets/v2";
 const ALPACA_OPTIONS    = "https://paper-api.alpaca.markets/v2";    // confirmed: options contracts
 const ALPACA_OPT_SNAP   = "https://data.alpaca.markets/v1beta1";    // confirmed: options snapshots/greeks
+
+// ── Data Cache — declared early so all functions can use it ──────────────
+// Slow-changing data cached to reduce API calls and Railway connection pressure
+const _slowCache     = new Map(); // key: "type:ticker", value: { data, ts }
+const SLOW_CACHE_TTL = 5  * 60 * 1000; // 5 min — news, analyst, premarket
+const BARS_CACHE_TTL = 60 * 60 * 1000; // 60 min — daily bars don't change intraday
+
+function getCached(key, ttl = SLOW_CACHE_TTL) {
+  const entry = _slowCache.get(key);
+  if (entry && Date.now() - entry.ts < ttl) return entry.data;
+  return null;
+}
+function setCache(key, data) { _slowCache.set(key, { data, ts: Date.now() }); return data; }
 const GMAIL_USER        = process.env.GMAIL_USER        || "";
 const GMAIL_PASS        = process.env.GMAIL_APP_PASSWORD|| "";
 const STATE_FILE        = path.join(__dirname, "state.json");
@@ -836,6 +849,10 @@ async function getStockQuote(ticker) {
 
 // Get stock bars for volume and MA calculation
 async function getStockBars(ticker, limit = 60) {
+  // Daily bars only update once per day — cache for 60 minutes
+  const cacheKey = 'bars:' + ticker + ':' + limit;
+  const cached = getCached(cacheKey, BARS_CACHE_TTL);
+  if (cached) return cached;
   try {
     // Always use date range — more reliable than limit param across all Alpaca tiers
     const end   = new Date().toISOString().split("T")[0];
@@ -845,7 +862,10 @@ async function getStockBars(ticker, limit = 60) {
     for (const feed of feeds) {
       const url  = `/stocks/${ticker}/bars?timeframe=1Day&start=${start}&end=${end}&limit=${limit}&feed=${feed}`;
       const data = await alpacaGet(url, ALPACA_DATA);
-      if (data && data.bars && data.bars.length > 1) return data.bars;
+      if (data && data.bars && data.bars.length > 1) {
+        // Daily bars don't change intraday — cache for 60 minutes
+        return setCache('bars:' + ticker + ':' + limit, data.bars);
+      }
     }
     // Last resort — no feed param
     const last = await alpacaGet(`/stocks/${ticker}/bars?timeframe=1Day&start=${start}&end=${end}&limit=${limit}`, ALPACA_DATA);
@@ -909,10 +929,14 @@ async function getEarningsDate(ticker) {
 }
 
 // - News Feed -
+// [cache block moved to top of file]
+
 async function getNewsForTicker(ticker) {
+  const cached = getCached('news:' + ticker);
+  if (cached) return cached;
   try {
     const data = await alpacaGet(`/news?symbols=${ticker}&limit=5`, ALPACA_DATA);
-    return data && data.news ? data.news : [];
+    return setCache('news:' + ticker, data && data.news ? data.news : []);
   } catch(e) { return []; }
 }
 
@@ -952,6 +976,8 @@ function checkVIXVelocity(currentVIX) {
 
 // - Pre-Market Gap Scanner -
 async function getPreMarketData(ticker) {
+  const cached = getCached('premarket:' + ticker);
+  if (cached) return cached;
   try {
     // Get latest quote - pre-market activity shows in extended hours
     const snap = await alpacaGet(`/stocks/${ticker}/snapshot`, ALPACA_DATA);
@@ -961,7 +987,7 @@ async function getPreMarketData(ticker) {
     const dailyOpen   = snap.dailyBar      ? snap.dailyBar.o      : null;
     if (!prevClose || !preMarket) return null;
     const gapPct      = (preMarket - prevClose) / prevClose * 100;
-    return { prevClose, preMarket, gapPct: parseFloat(gapPct.toFixed(2)) };
+    return setCache('premarket:' + ticker, { prevClose, preMarket, gapPct: parseFloat(gapPct.toFixed(2)) });
   } catch(e) { return null; }
 }
 
@@ -984,6 +1010,8 @@ function calcBetaWeightedDelta() {
 
 // - Analyst Upgrades/Downgrades via Alpaca news -
 async function getAnalystActivity(ticker) {
+  const cached = getCached('analyst:' + ticker);
+  if (cached) return cached;
   try {
     const data = await alpacaGet(`/news?symbols=${ticker}&limit=10`, ALPACA_DATA);
     const articles = data && data.news ? data.news : [];
@@ -996,10 +1024,10 @@ async function getAnalystActivity(ticker) {
       if (upgradeKW.some(k => text.includes(k)))   upgrades.push(a.headline);
       if (downgradeKW.some(k => text.includes(k))) downgrades.push(a.headline);
     }
-    return { upgrades, downgrades,
+    return setCache('analyst:' + ticker, { upgrades, downgrades,
       signal: upgrades.length > downgrades.length ? "bullish" : downgrades.length > upgrades.length ? "bearish" : "neutral",
       modifier: (upgrades.length - downgrades.length) * 5
-    };
+    });
   } catch(e) { return { upgrades: [], downgrades: [], signal: "neutral", modifier: 0 }; }
 }
 
@@ -1696,7 +1724,7 @@ async function getRealOptionsContract(ticker, price, optionType, score, vix, ear
 
     // Format date for API: YYYY-MM-DD
     const today      = getETTime();
-    const minExpiry  = new Date(today.getTime() + 7   * 86400000).toISOString().split("T")[0];
+    const minExpiry  = new Date(today.getTime() + 3   * 86400000).toISOString().split("T")[0]; // 3 day floor — scoring handles DTE preference
     // LEAPS need up to 270 days — use 300 day window to cover all expiry types
     const maxDays    = expiryType === "leaps" ? 300 : 90;
     const maxExpiry  = new Date(today.getTime() + maxDays * 86400000).toISOString().split("T")[0];
@@ -1798,43 +1826,40 @@ async function getRealOptionsContract(ticker, price, optionType, score, vix, ear
       const oi     = parseInt(snap.openInterest || quote.as || 0); // use ask size as OI proxy if needed
       const vol    = parseInt(day.v || day.volume || 0);
 
-      // Contract DTE — needed early for theta check and expiry scoring
+      // Contract DTE — needed for expiry scoring
       const contractDTE = Math.round((new Date(contract.expiration_date) - today) / 86400000);
 
-      // Skip illiquid or too cheap (lottery tickets)
+      // Only hard filter: contract must have a tradeable price
       if (mid <= 0) { skipped++; continue; }
-      // Min premium scales with stock price — cheap stocks need $0.50, expensive stocks $0.20
-      const minPrem = isExpensive ? 0.20 : MIN_OPTION_PREMIUM;
-      if (mid < minPrem) { skipped++; continue; } // below min = unreliable fills
-      // Theta/premium ratio — skip if daily decay > 2% of premium (too expensive to hold)
-      // Pros never buy options where time decay eats more than 2%/day
-      const theta    = Math.abs(parseFloat(greeks.theta || 0));
-      const thetaPct = mid > 0 ? theta / mid : 0;
-      if (thetaPct > 0.02 && contractDTE <= 14) { skipped++; continue; } // theta trap on short dated
-      // Tighter spread requirement during early put window (9:45-10AM)
-      const etH = getETTime().getHours() + getETTime().getMinutes() / 60;
-      const isEarlyPutWindow = optionType === "put" && etH >= 9.75 && etH < 10.0;
-      // On high-VIX days (>30), market makers widen spreads — relax filter
-      const vixSpreadMult = (typeof state !== 'undefined' && state.vix > 30) ? 1.5 : 1.0;
-      const maxSpread = (isEarlyPutWindow ? EARLY_SPREAD_PCT : MAX_SPREAD_PCT) * vixSpreadMult;
-      if (spread > maxSpread) { skipped++; continue; }
-      // OI=0 means data not yet updated for session, not truly zero — allow through
-      // Only block if OI is explicitly reported as very low (1-99)
-      if (oi > 0 && oi < MIN_OPEN_INTEREST) { skipped++; continue; }
+      // Only hard filter on delta — everything else is a scoring factor not a gate
       if (delta < deltaMin || delta > deltaMax) { skipped++; continue; }
 
-      const deltaTarget   = (deltaMin + deltaMax) / 2;
-      const deltaRange    = (deltaMax - deltaMin) / 2;
-      const deltaScore    = Math.max(0, 1 - Math.abs(delta - deltaTarget) / deltaRange);
-      // If OI=0 (unknown), use delta score only — don't penalize for missing data
-      const liquidScore   = oi > 0 ? Math.min(oi / 5000, 1) : 0.5;
-      // Vol/OI ratio — unusual activity signal stored for scoring boost
-      const volOIRatio    = oi > 0 && vol > 0 ? vol / oi : 0; // >3x = unusual activity
-      // Expiry proximity score — prefer contracts closest to our target DTE
-      const dteDistance   = Math.abs(contractDTE - targetExpDays);
-      const expiryScore   = Math.max(0, 1 - dteDistance / 30); // penalize >30 days from target
-      // Weighted: delta most important, then expiry, then liquidity
-      const contractScore = deltaScore * 0.55 + expiryScore * 0.25 + liquidScore * 0.20;
+      // ── CONTRACT SCORING — higher = better ──────────────────────────────
+      // Delta match (50%) — how close to target delta midpoint
+      const deltaTarget  = (deltaMin + deltaMax) / 2;
+      const deltaRange   = (deltaMax - deltaMin) / 2;
+      const deltaScore   = Math.max(0, 1 - Math.abs(delta - deltaTarget) / deltaRange);
+
+      // Expiry proximity (20%) — prefer contracts closest to target DTE
+      const dteDistance  = Math.abs(contractDTE - targetExpDays);
+      const expiryScore  = Math.max(0, 1 - dteDistance / 30);
+
+      // Liquidity (15%) — OI as proxy, unknown OI gets neutral score
+      const liquidScore  = oi > 0 ? Math.min(oi / 5000, 1) : 0.5;
+
+      // Spread quality (15%) — tighter spread = better fill = higher score
+      // Wide spread on high-VIX days is expected — penalize but don't exclude
+      const spreadScore  = Math.max(0, 1 - spread / 0.30); // 0% spread = 1.0, 30%+ = 0
+
+      // Vol/OI ratio — unusual activity signal
+      const volOIRatio   = oi > 0 && vol > 0 ? vol / oi : 0;
+
+      // Theta — stored for position tracking, not used as filter
+      const theta        = Math.abs(parseFloat(greeks.theta || 0));
+      const thetaPct     = mid > 0 ? theta / mid : 0;
+
+      // Combined score
+      const contractScore = deltaScore * 0.50 + expiryScore * 0.20 + liquidScore * 0.15 + spreadScore * 0.15;
 
       if (contractScore > bestScore) {
         bestScore = contractScore;
@@ -1862,35 +1887,30 @@ async function getRealOptionsContract(ticker, price, optionType, score, vix, ear
       const earlyTag = optionType === "put" && etH2 >= 9.75 && etH2 < 10.0 ? " [EARLY WINDOW]" : "";
       logEvent("scan", `${ticker} best contract: ${best.symbol} | $${best.premium} bid/ask $${best.bid}/$${best.ask} | delta:${best.greeks.delta} | spread:${(best.spread*100).toFixed(1)}% | OI:${best.oi} [REAL DATA]${earlyTag}`);
     } else {
-      // Debug: log WHY contracts were rejected — breakdown by rejection reason
-      let closestDelta = -1, closestDeltaSpread = 0, closestDeltaOI = 0;
-      let noBid = 0, thetaTrap = 0, spreadTooWide = 0, deltaOutOfRange = 0, lowOI = 0, noSnap = 0;
+      // Debug: only two hard filters now — mid>0 and delta range
+      // Everything else is scoring. Show what delta range we found.
+      let noPrice = 0, deltaOutOfRange = 0, closestDelta = -1;
       for (const c of sortedContracts) {
         const s = snapshots[c.symbol];
-        if (!s) { noSnap++; continue; }
+        if (!s) continue;
         const greeks2 = s.greeks || {};
         const quote2  = s.latestQuote || {};
         const d  = Math.abs(parseFloat(greeks2.delta || 0));
         const b  = parseFloat(quote2.bp || 0);
         const a  = parseFloat(quote2.ap || 0);
         const m2 = b > 0 && a > 0 ? (b + a) / 2 : 0;
-        const sp = a > 0 ? (a - b) / a : 1;
-        const oi = parseInt(s.openInterest || 0);
-        const th = Math.abs(parseFloat(greeks2.theta || 0));
-        const cDTE = Math.round((new Date(c.expiration_date) - today) / 86400000);
-        if (b <= 0 || a <= 0) { noBid++; continue; }
-        if (m2 < MIN_OPTION_PREMIUM) continue;
-        if (sp > MAX_SPREAD_PCT) { spreadTooWide++; continue; }
-        if (oi > 0 && oi < MIN_OPEN_INTEREST) { lowOI++; continue; }
-        if (m2 > 0 && th / m2 > 0.02 && cDTE <= 14) { thetaTrap++; continue; }
-        // Track closest delta to our range
-        const distToRange = d < deltaMin ? deltaMin - d : d > deltaMax ? d - deltaMax : 0;
-        if (closestDelta < 0 || distToRange < Math.abs(closestDelta - (deltaMin+deltaMax)/2)) {
-          closestDelta = d; closestDeltaSpread = sp; closestDeltaOI = oi;
+        if (m2 <= 0) { noPrice++; continue; }
+        // Track closest delta to our range among priced contracts
+        if (closestDelta < 0 || Math.abs(d - (deltaMin+deltaMax)/2) < Math.abs(closestDelta - (deltaMin+deltaMax)/2)) {
+          closestDelta = d;
         }
         if (d < deltaMin || d > deltaMax) deltaOutOfRange++;
       }
-      logEvent("warn", `${ticker} no valid contract | closest delta:${closestDelta.toFixed(3)} (need ${deltaMin}-${deltaMax}) | no-bid:${noBid} | spread-wide:${spreadTooWide} | delta-range:${deltaOutOfRange} | theta-trap:${thetaTrap} | low-OI:${lowOI} | no-snap:${noSnap}`);
+      const cdStr = closestDelta >= 0 ? closestDelta.toFixed(3) : "none";
+      logEvent("warn", `${ticker} no valid contract | closest delta:${cdStr} (need ${deltaMin}-${deltaMax}) | no-price:${noPrice} | delta-out:${deltaOutOfRange} | total:${sortedContracts.length}`);
+      if      (closestDelta > deltaMax)  logEvent("warn", `${ticker} all priced contracts are ITM — stock crashed below put liquidity zone`);
+      else if (closestDelta >= 0 && closestDelta < deltaMin) logEvent("warn", `${ticker} all priced contracts are far OTM — stock already moved too far`);
+      else if (closestDelta < 0)         logEvent("warn", `${ticker} no priced contracts found — complete liquidity failure on this chain`);
     }
 
     return best;
@@ -2373,6 +2393,8 @@ async function executeTrade(stock, price, score, scoreReasons, vix, optionType =
   delete stock._cachedContract; // clean up cache after use
 
   // Fallback to estimated contract if real data unavailable
+  // NOTE: If the chain exists but no liquid contracts found, estimation is unreliable
+  // Only estimate if we got no chain data at all (API failure)
   if (!contract) {
     logEvent("warn", `⚠ ${stock.ticker} - NO REAL OPTIONS DATA - using Black-Scholes estimate. Check Alpaca Pro subscription.`);
     if (!state.dataQuality) state.dataQuality = { realTrades: 0, estimatedTrades: 0, totalTrades: 0 };
@@ -3265,25 +3287,32 @@ async function runScan() {
   logEvent("scan", `Prefetching data for ${WATCHLIST.length} stocks in parallel...`);
   const prefetchStart = Date.now();
 
-  const stockData = await Promise.all(
-    WATCHLIST.map(async stock => {
-      try {
-        const [price, bars, intradayBars, sectorResult, preMarket, newsArticles, analystData, eqScore] = await Promise.all([
-          getStockQuote(stock.ticker),
-          getStockBars(stock.ticker, 60),
-          getIntradayBars(stock.ticker),
-          checkSectorETF(stock),
-          getPreMarketData(stock.ticker),
-          getNewsForTicker(stock.ticker),
-          getAnalystActivity(stock.ticker),
-          getEarningsQualityScore(stock.ticker, []),
-        ]);
-        return { stock, price, bars, intradayBars, sectorResult, preMarket, newsArticles, analystData, eqScore };
-      } catch(e) {
-        return { stock, price: null, bars: [], intradayBars: [], sectorResult: { pass:true, putBoost:0 }, preMarket:null, newsArticles:[], analystData:{ modifier:0, signal:"neutral", upgrades:[], downgrades:[] }, eqScore:{ signal:"neutral" } };
-      }
-    })
-  );
+  // Batch stock prefetch in groups of 10 — prevents 288 simultaneous connections
+  const STOCK_BATCH = 10;
+  const stockData = [];
+  for (let i = 0; i < WATCHLIST.length; i += STOCK_BATCH) {
+    const batch = WATCHLIST.slice(i, i + STOCK_BATCH);
+    const results = await Promise.all(
+      batch.map(async stock => {
+        try {
+          const [price, bars, intradayBars, sectorResult, preMarket, newsArticles, analystData, eqScore] = await Promise.all([
+            getStockQuote(stock.ticker),
+            getStockBars(stock.ticker, 60),
+            getIntradayBars(stock.ticker),
+            checkSectorETF(stock),
+            getPreMarketData(stock.ticker),
+            getNewsForTicker(stock.ticker),
+            getAnalystActivity(stock.ticker),
+            getEarningsQualityScore(stock.ticker, []),
+          ]);
+          return { stock, price, bars, intradayBars, sectorResult, preMarket, newsArticles, analystData, eqScore };
+        } catch(e) {
+          return { stock, price: null, bars: [], intradayBars: [], sectorResult: { pass:true, putBoost:0 }, preMarket:null, newsArticles:[], analystData:{ modifier:0, signal:"neutral", upgrades:[], downgrades:[] }, eqScore:{ signal:"neutral" } };
+        }
+      })
+    );
+    stockData.push(...results);
+  }
 
   logEvent("scan", `Prefetch complete in ${((Date.now()-prefetchStart)/1000).toFixed(1)}s for ${WATCHLIST.length} stocks`);
 
@@ -3603,12 +3632,18 @@ async function runScan() {
   if (scored.length > 0) {
     logEvent("scan", `Prefetching options chains for ${scored.length} candidates in parallel...`);
     const optPrefetchStart = Date.now();
-    await Promise.all(scored.map(async ({ stock, price, optionType, score }) => {
-      try {
-        const contract = await getRealOptionsContract(stock.ticker, price, optionType, score, state.vix, stock.earningsDate);
-        if (contract) stock._cachedContract = contract;
-      } catch(e) {}
-    }));
+    // Process in batches of 5 to avoid exhausting Railway connection pool
+    // 5 concurrent options fetches × up to 40 snapshot batches each = 200 max connections
+    const BATCH_SIZE = 5;
+    for (let i = 0; i < scored.length; i += BATCH_SIZE) {
+      const batch = scored.slice(i, i + BATCH_SIZE);
+      await Promise.all(batch.map(async ({ stock, price, optionType, score }) => {
+        try {
+          const contract = await getRealOptionsContract(stock.ticker, price, optionType, score, state.vix, stock.earningsDate);
+          if (contract) stock._cachedContract = contract;
+        } catch(e) {}
+      }));
+    }
     logEvent("scan", `Options prefetch complete in ${((Date.now()-optPrefetchStart)/1000).toFixed(1)}s`);
   }
 
@@ -4999,7 +5034,7 @@ app.get("/health",           (req,res) => res.json({status:"ok",uptime:process.u
 // Boot sequence - load state from Redis then start server
 initState().then(() => {
   app.listen(PORT, () => {
-    console.log(`APEX v3.5 running on port ${PORT}`);
+    console.log(`APEX v3.75 running on port ${PORT}`);
     console.log(`Alpaca key:  ${ALPACA_KEY?"SET":"NOT SET"}`);
     console.log(`Gmail:       ${GMAIL_USER||"NOT SET"}`);
     console.log(`Redis:       ${REDIS_URL?"SET":"NOT SET - using file fallback"}`);
