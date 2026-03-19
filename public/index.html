@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8"/>
 <meta name="viewport" content="width=device-width,initial-scale=1"/>
-<title>APEX v3.5 — Professional Options Agent</title>
+<title>APEX v3.75 — Professional Options Agent</title>
 <style>
 :root{
   --bg:#07101f;--panel:#0a1628;--border:#0d3050;--text:#cce8ff;--muted:#336688;
@@ -113,7 +113,7 @@ input[type=text]:focus{border-color:var(--blue)}
     <div class="logo-icon">▲</div>
     <div class="logo-text">
       <h1>APEX</h1>
-      <p>PROFESSIONAL OPTIONS AGENT v3.5 · ALPACA PAPER</p>
+      <p>PROFESSIONAL OPTIONS AGENT v3.75 · ALPACA PAPER</p>
     </div>
   </div>
   <div class="header-right">
@@ -739,7 +739,11 @@ function renderMetrics() {
   document.getElementById('etf-shares').textContent = (state.cashETFShares || 0) + ' shares · $1,500 floor target · ~5% APY';
   document.getElementById('heat').style.color = heat > 50 ? 'var(--red)' : heat > 35 ? 'var(--orange)' : 'var(--green)';
   const fill = document.getElementById('heat-fill');
-  fill.style.width = Math.min(heat, 100) + '%';
+  // Scale bar width against MAX_HEAT (60%) so 60% fills the bar completely
+  // 54.5% heat = 54.5/60 = 90.8% of bar — was the bug
+  // Now: 54.5% heat = 54.5/60 * 100 = 90.8% width — correct visual
+  const MAX_HEAT_PCT = 60;
+  fill.style.width = Math.min((heat / MAX_HEAT_PCT) * 100, 100) + '%';
   fill.style.background = heat > 50 ? 'var(--red)' : heat > 35 ? 'var(--orange)' : 'var(--green)';
 
   const rev = state.totalRevenue || 0;
