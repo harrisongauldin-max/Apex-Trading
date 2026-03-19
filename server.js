@@ -1701,18 +1701,30 @@ async function getRealOptionsContract(ticker, price, optionType, score, vix, ear
     const maxDays    = expiryType === "leaps" ? 300 : 90;
     const maxExpiry  = new Date(today.getTime() + maxDays * 86400000).toISOString().split("T")[0];
 
-    // Sort OTM contracts first — no filtering, just ordering
-    // Puts sorted ASC = lowest strikes first = OTM puts (we want delta 0.28-0.42)
-    // Calls sorted DESC = highest strikes first = OTM calls
-    // This means the 200 limit fills with OTM contracts instead of ITM garbage
-    const sortOrder = optionType === "put" ? "asc" : "desc";
-
-    const url = `/options/contracts?underlying_symbol=${ticker}` +
+    // Fetch ALL contracts with no filters — paginate until we have everything
+    // No strike filters, no sort tricks — get the full chain and let delta scoring decide
+    // This is the only approach that never breaks regardless of market conditions
+    const baseUrl = `/options/contracts?underlying_symbol=${ticker}` +
       `&expiration_date_gte=${minExpiry}&expiration_date_lte=${maxExpiry}` +
-      `&type=${optionType}&sort=strike_price&direction=${sortOrder}&limit=200`;
+      `&type=${optionType}&limit=200`;
 
-    const data = await alpacaGet(url, ALPACA_OPTIONS);
-    if (!data || !data.option_contracts || !data.option_contracts.length) return null;
+    // Paginate through all contracts using next_page_token
+    let allContracts = [];
+    let pageToken = null;
+    let pageCount = 0;
+    const MAX_PAGES = 5; // cap at 1000 contracts total — enough for any chain
+
+    do {
+      const pageUrl = pageToken ? `${baseUrl}&page_token=${pageToken}` : baseUrl;
+      const pageData = await alpacaGet(pageUrl, ALPACA_OPTIONS);
+      if (!pageData || !pageData.option_contracts) break;
+      allContracts = allContracts.concat(pageData.option_contracts);
+      pageToken = pageData.next_page_token || null;
+      pageCount++;
+    } while (pageToken && pageCount < MAX_PAGES);
+
+    if (!allContracts.length) return null;
+    logEvent("scan", `${ticker} options chain: ${allContracts.length} contracts across ${pageCount} page(s)`);
 
     // For expensive stocks, weekly options have near-zero OI — prioritize monthly expiries
     // Sort contracts: monthly expiries (3rd Friday) first, then weeklies
@@ -1732,7 +1744,7 @@ async function getRealOptionsContract(ticker, price, optionType, score, vix, ear
       return months;
     };
     const monthlyDates = getMonthlyExpiries();
-    const sortedContracts = [...data.option_contracts].sort((a, b) => {
+    const sortedContracts = [...allContracts].sort((a, b) => {
       const aMonthly = monthlyDates.has(a.expiration_date) ? 0 : 1;
       const bMonthly = monthlyDates.has(b.expiration_date) ? 0 : 1;
       return aMonthly - bMonthly; // monthly expiries first
@@ -1760,7 +1772,7 @@ async function getRealOptionsContract(ticker, price, optionType, score, vix, ear
     );
     const snapshots = snapResults.reduce((acc, r) => ({ ...acc, ...(r?.snapshots || {}) }), {});
 
-    logEvent("scan", `${ticker} options chain: ${data.option_contracts.length} contracts | ${Object.keys(snapshots).length} snapshots with greeks`);
+    logEvent("scan", `${ticker} options chain: ${allContracts.length} contracts | ${Object.keys(snapshots).length} snapshots with greeks`);
 
     // Score each contract — find best delta match in 0.28-0.42 range
     let best       = null;
