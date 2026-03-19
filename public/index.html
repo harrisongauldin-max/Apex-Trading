@@ -1088,7 +1088,7 @@ function renderJournal() {
         <div style="display:flex;align-items:center;gap:10px">
           <span class="journal-ticker">${e.ticker}</span>
           <span style="font-size:10px;padding:2px 8px;border-radius:10px;background:${isOpen?'rgba(0,255,136,.1)':'rgba(0,196,255,.1)'};color:${color}">${e.action}</span>
-          ${isOpen ? `<span style="font-size:10px;color:var(--muted)">$${e.strike}C · ${e.expDate}</span>` : ''}
+          ${isOpen ? `<span style="font-size:10px;color:var(--muted)">$${e.strike}${e.optionType==='put'?'P':'C'} · ${e.expDate}</span>` : ''}
         </div>
         <div style="display:flex;align-items:center;gap:8px">
           ${score ? `<span class="journal-score" style="background:rgba(0,196,255,.1);color:${scoreColor}">${score}/100</span>` : ''}
