@@ -1701,24 +1701,62 @@ async function getRealOptionsContract(ticker, price, optionType, score, vix, ear
     const maxDays    = expiryType === "leaps" ? 300 : 90;
     const maxExpiry  = new Date(today.getTime() + maxDays * 86400000).toISOString().split("T")[0];
 
-    // Fetch ALL contracts in expiry window — no strike range filter
-    // Let delta be the sole selector — eliminates whack-a-mole with strike ranges
-    // 200 contracts covers the full chain for any stock price tier
+    // Sort OTM contracts first — no filtering, just ordering
+    // Puts sorted ASC = lowest strikes first = OTM puts (we want delta 0.28-0.42)
+    // Calls sorted DESC = highest strikes first = OTM calls
+    // This means the 200 limit fills with OTM contracts instead of ITM garbage
+    const sortOrder = optionType === "put" ? "asc" : "desc";
+
     const url = `/options/contracts?underlying_symbol=${ticker}` +
       `&expiration_date_gte=${minExpiry}&expiration_date_lte=${maxExpiry}` +
-      `&type=${optionType}&limit=200`;
+      `&type=${optionType}&sort=strike_price&direction=${sortOrder}&limit=200`;
 
     const data = await alpacaGet(url, ALPACA_OPTIONS);
     if (!data || !data.option_contracts || !data.option_contracts.length) return null;
 
+    // For expensive stocks, weekly options have near-zero OI — prioritize monthly expiries
+    // Sort contracts: monthly expiries (3rd Friday) first, then weeklies
+    // This ensures the 200-snapshot limit hits the liquid contracts first
+    const getMonthlyExpiries = () => {
+      const months = new Set();
+      const todayMs = today.getTime();
+      for (let m = 0; m <= 4; m++) {
+        const d = new Date(todayMs);
+        d.setMonth(d.getMonth() + m);
+        // Find 3rd Friday of this month
+        const first = new Date(d.getFullYear(), d.getMonth(), 1);
+        const firstFri = (5 - first.getDay() + 7) % 7;
+        const thirdFri = new Date(d.getFullYear(), d.getMonth(), firstFri + 15);
+        months.add(thirdFri.toISOString().split('T')[0]);
+      }
+      return months;
+    };
+    const monthlyDates = getMonthlyExpiries();
+    const sortedContracts = [...data.option_contracts].sort((a, b) => {
+      const aMonthly = monthlyDates.has(a.expiration_date) ? 0 : 1;
+      const bMonthly = monthlyDates.has(b.expiration_date) ? 0 : 1;
+      return aMonthly - bMonthly; // monthly expiries first
+    });
+
     // Get snapshots for ALL contracts — batch into groups of 25 to avoid URL length limits
-    const allSymbols = data.option_contracts.map(c => c.symbol);
+    const allSymbols = sortedContracts.map(c => c.symbol);
     const batches    = [];
     for (let i = 0; i < allSymbols.length; i += 25) {
       batches.push(allSymbols.slice(i, i + 25).join(","));
     }
+    // Try indicative feed first (faster), fall back to opra if greeks are missing
     const snapResults = await Promise.all(
-      batches.map(b => alpacaGet(`/options/snapshots?symbols=${b}&feed=indicative`, ALPACA_OPT_SNAP))
+      batches.map(async b => {
+        const res = await alpacaGet(`/options/snapshots?symbols=${b}&feed=indicative`, ALPACA_OPT_SNAP);
+        // Check if greeks are populated — if not, try opra feed
+        const snaps = res?.snapshots || {};
+        const hasGreeks = Object.values(snaps).some(s => s?.greeks?.delta);
+        if (!hasGreeks && Object.keys(snaps).length > 0) {
+          const opra = await alpacaGet(`/options/snapshots?symbols=${b}&feed=opra`, ALPACA_OPT_SNAP);
+          return opra || res;
+        }
+        return res;
+      })
     );
     const snapshots = snapResults.reduce((acc, r) => ({ ...acc, ...(r?.snapshots || {}) }), {});
 
@@ -1729,7 +1767,7 @@ async function getRealOptionsContract(ticker, price, optionType, score, vix, ear
     let bestScore  = -1;
     let skipped    = 0;
 
-    for (const contract of data.option_contracts) {
+    for (const contract of sortedContracts) {
       const snap = snapshots[contract.symbol];
       if (!snap) { skipped++; continue; }
 
@@ -1753,7 +1791,9 @@ async function getRealOptionsContract(ticker, price, optionType, score, vix, ear
 
       // Skip illiquid or too cheap (lottery tickets)
       if (mid <= 0) { skipped++; continue; }
-      if (mid < MIN_OPTION_PREMIUM) { skipped++; continue; } // below $0.50 = unreliable fills
+      // Min premium scales with stock price — cheap stocks need $0.50, expensive stocks $0.20
+      const minPrem = isExpensive ? 0.20 : MIN_OPTION_PREMIUM;
+      if (mid < minPrem) { skipped++; continue; } // below min = unreliable fills
       // Theta/premium ratio — skip if daily decay > 2% of premium (too expensive to hold)
       // Pros never buy options where time decay eats more than 2%/day
       const theta    = Math.abs(parseFloat(greeks.theta || 0));
@@ -1762,7 +1802,9 @@ async function getRealOptionsContract(ticker, price, optionType, score, vix, ear
       // Tighter spread requirement during early put window (9:45-10AM)
       const etH = getETTime().getHours() + getETTime().getMinutes() / 60;
       const isEarlyPutWindow = optionType === "put" && etH >= 9.75 && etH < 10.0;
-      const maxSpread = isEarlyPutWindow ? EARLY_SPREAD_PCT : MAX_SPREAD_PCT;
+      // On high-VIX days (>30), market makers widen spreads — relax filter
+      const vixSpreadMult = (typeof state !== 'undefined' && state.vix > 30) ? 1.5 : 1.0;
+      const maxSpread = (isEarlyPutWindow ? EARLY_SPREAD_PCT : MAX_SPREAD_PCT) * vixSpreadMult;
       if (spread > maxSpread) { skipped++; continue; }
       // OI=0 means data not yet updated for session, not truly zero — allow through
       // Only block if OI is explicitly reported as very low (1-99)
@@ -1808,20 +1850,35 @@ async function getRealOptionsContract(ticker, price, optionType, score, vix, ear
       const earlyTag = optionType === "put" && etH2 >= 9.75 && etH2 < 10.0 ? " [EARLY WINDOW]" : "";
       logEvent("scan", `${ticker} best contract: ${best.symbol} | $${best.premium} bid/ask $${best.bid}/$${best.ask} | delta:${best.greeks.delta} | spread:${(best.spread*100).toFixed(1)}% | OI:${best.oi} [REAL DATA]${earlyTag}`);
     } else {
-      // Debug: log best available delta to help diagnose rejections
-      let bestDelta = 0, bestSpread = 0, bestOI = 0, noBid = 0;
-      for (const c of data.option_contracts) {
+      // Debug: log WHY contracts were rejected — breakdown by rejection reason
+      let closestDelta = -1, closestDeltaSpread = 0, closestDeltaOI = 0;
+      let noBid = 0, thetaTrap = 0, spreadTooWide = 0, deltaOutOfRange = 0, lowOI = 0, noSnap = 0;
+      for (const c of sortedContracts) {
         const s = snapshots[c.symbol];
-        if (!s) continue;
-        const d = Math.abs(parseFloat(s.greeks?.delta || 0));
-        const q = s.latestQuote || {};
-        const b = parseFloat(q.bp || 0), a = parseFloat(q.ap || 0);
+        if (!s) { noSnap++; continue; }
+        const greeks2 = s.greeks || {};
+        const quote2  = s.latestQuote || {};
+        const d  = Math.abs(parseFloat(greeks2.delta || 0));
+        const b  = parseFloat(quote2.bp || 0);
+        const a  = parseFloat(quote2.ap || 0);
+        const m2 = b > 0 && a > 0 ? (b + a) / 2 : 0;
         const sp = a > 0 ? (a - b) / a : 1;
         const oi = parseInt(s.openInterest || 0);
+        const th = Math.abs(parseFloat(greeks2.theta || 0));
+        const cDTE = Math.round((new Date(c.expiration_date) - today) / 86400000);
         if (b <= 0 || a <= 0) { noBid++; continue; }
-        if (d > bestDelta) { bestDelta = d; bestSpread = sp; bestOI = oi; }
+        if (m2 < MIN_OPTION_PREMIUM) continue;
+        if (sp > MAX_SPREAD_PCT) { spreadTooWide++; continue; }
+        if (oi > 0 && oi < MIN_OPEN_INTEREST) { lowOI++; continue; }
+        if (m2 > 0 && th / m2 > 0.02 && cDTE <= 14) { thetaTrap++; continue; }
+        // Track closest delta to our range
+        const distToRange = d < deltaMin ? deltaMin - d : d > deltaMax ? d - deltaMax : 0;
+        if (closestDelta < 0 || distToRange < Math.abs(closestDelta - (deltaMin+deltaMax)/2)) {
+          closestDelta = d; closestDeltaSpread = sp; closestDeltaOI = oi;
+        }
+        if (d < deltaMin || d > deltaMax) deltaOutOfRange++;
       }
-      logEvent("warn", `${ticker} no valid contract found | best delta:${bestDelta.toFixed(3)} (need ${deltaMin}-${deltaMax}) | spread:${(bestSpread*100).toFixed(1)}% | OI:${bestOI} | no-bid:${noBid}`);
+      logEvent("warn", `${ticker} no valid contract | closest delta:${closestDelta.toFixed(3)} (need ${deltaMin}-${deltaMax}) | no-bid:${noBid} | spread-wide:${spreadTooWide} | delta-range:${deltaOutOfRange} | theta-trap:${thetaTrap} | low-OI:${lowOI} | no-snap:${noSnap}`);
     }
 
     return best;
