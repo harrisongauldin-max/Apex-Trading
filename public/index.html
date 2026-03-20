@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8"/>
 <meta name="viewport" content="width=device-width,initial-scale=1"/>
-<title>APEX v3.75 — Professional Options Agent</title>
+<title>APEX v3.80 — Professional Options Agent</title>
 <style>
 :root{
   --bg:#07101f;--panel:#0a1628;--border:#0d3050;--text:#cce8ff;--muted:#336688;
@@ -113,7 +113,7 @@ input[type=text]:focus{border-color:var(--blue)}
     <div class="logo-icon">▲</div>
     <div class="logo-text">
       <h1>APEX</h1>
-      <p>PROFESSIONAL OPTIONS AGENT v3.75 · ALPACA PAPER</p>
+      <p>PROFESSIONAL OPTIONS AGENT v3.80 · ALPACA PAPER</p>
     </div>
   </div>
   <div class="header-right">
@@ -358,6 +358,7 @@ input[type=text]:focus{border-color:var(--blue)}
     <button class="btn" style="background:#1a1a40;border:1px solid #4444ff;color:#8888ff" onclick="resetCircuit()">⟳ RESET CIRCUIT</button>
     <button class="btn" style="background:#401010;border:1px solid #ff4444;color:#ff8888" onclick="fullReset()">🗑 FULL RESET</button>
     <button class="btn" style="background:#7b0000;border:1px solid #ff0000" onclick="emergencyClose()">⚠ EMERGENCY CLOSE ALL</button>
+    <button class="btn" style="background:#0a1f3a;border:1px solid #00c4ff;color:#00c4ff" onclick="downloadDayReport()">📊 DAY REPORT</button>
     <div style="display:flex;align-items:center;gap:6px">
       <span style="font-size:11px;color:var(--muted)">BUDGET:</span>
       <input type="number" id="budget-input" placeholder="5000" min="100" max="1000000" style="background:var(--panel);border:1px solid var(--border);color:var(--text);padding:6px 10px;border-radius:6px;font-family:var(--font);font-size:11px;width:100px;outline:none"/>
@@ -1376,6 +1377,120 @@ async function emergencyClose() {
   if (!confirm('EMERGENCY CLOSE ALL POSITIONS? This cannot be undone.')) return;
   await fetch('/api/emergency-close', {method:'POST'});
   location.reload();
+}
+
+async function downloadDayReport() {
+  try {
+    const res   = await fetch('/api/state');
+    const state = await res.json();
+    const today = new Date().toLocaleDateString('en-US', {month:'2-digit',day:'2-digit',year:'numeric'}).replace(/\//g,'-');
+
+    // ── Filter today's trades ─────────────────────────────────────────────
+    const todayStr = new Date().toLocaleDateString();
+    const trades   = (state.closedTrades || []).filter(t => t.date === todayStr);
+    const journal  = (state.tradeJournal || []).filter(t => {
+      const d = new Date(t.time).toLocaleDateString();
+      return d === todayStr;
+    });
+
+    // ── Summary stats ─────────────────────────────────────────────────────
+    const wins     = trades.filter(t => t.pnl > 0);
+    const losses   = trades.filter(t => t.pnl <= 0);
+    const totalPnL = trades.reduce((s, t) => s + (t.pnl || 0), 0);
+    const winRate  = trades.length ? ((wins.length / trades.length) * 100).toFixed(1) : 0;
+    const avgWin   = wins.length   ? (wins.reduce((s,t)=>s+t.pnl,0) / wins.length).toFixed(2) : 0;
+    const avgLoss  = losses.length ? (losses.reduce((s,t)=>s+t.pnl,0) / losses.length).toFixed(2) : 0;
+    const bigWin   = wins.length   ? Math.max(...wins.map(t=>t.pnl)).toFixed(2) : 0;
+    const bigLoss  = losses.length ? Math.min(...losses.map(t=>t.pnl)).toFixed(2) : 0;
+
+    // ── Reason breakdown ──────────────────────────────────────────────────
+    const byReason = {};
+    trades.forEach(t => {
+      if (!byReason[t.reason]) byReason[t.reason] = { count:0, pnl:0 };
+      byReason[t.reason].count++;
+      byReason[t.reason].pnl += t.pnl || 0;
+    });
+
+    // ── Open positions ────────────────────────────────────────────────────
+    const openPos = (state.positions || []).map(p => ({
+      ticker:    p.ticker,
+      type:      p.optionType,
+      strike:    p.strike,
+      expiry:    p.expDate,
+      dte:       Math.max(0, Math.round((new Date(p.expDate) - new Date()) / 86400000)),
+      entry:     p.premium,
+      cost:      p.cost,
+      contracts: p.contracts,
+      dteLabel:  p.dteLabel || 'MONTHLY',
+    }));
+
+    // ── Build report ──────────────────────────────────────────────────────
+    const report = {
+      date:       today,
+      generated:  new Date().toLocaleTimeString(),
+      account: {
+        cash:          state.cash,
+        budget:        state.customBudget || 10000,
+        monthlyProfit: state.monthlyProfit || 0,
+        vix:           state.vix,
+        heat:          ((state.positions||[]).reduce((s,p)=>s+p.cost,0) / (state.customBudget||10000) * 100).toFixed(1) + '%',
+      },
+      summary: {
+        totalTrades:  trades.length,
+        wins:         wins.length,
+        losses:       losses.length,
+        winRate:      winRate + '%',
+        totalPnL:     '$' + totalPnL.toFixed(2),
+        avgWin:       '$' + avgWin,
+        avgLoss:      '$' + avgLoss,
+        biggestWin:   '$' + bigWin,
+        biggestLoss:  '$' + bigLoss,
+        profitFactor: losses.length && avgLoss != 0 ? (Math.abs(avgWin * wins.length) / Math.abs(avgLoss * losses.length)).toFixed(2) : 'N/A',
+      },
+      exitReasons: byReason,
+      closedTrades: trades.map(t => ({
+        ticker:  t.ticker,
+        pnl:     '$' + (t.pnl||0).toFixed(2),
+        pct:     t.pct + '%',
+        reason:  t.reason,
+        score:   t.score || 'N/A',
+      })),
+      openPositions: openPos,
+      tradeJournal:  journal.map(e => ({
+        time:   new Date(e.time).toLocaleTimeString(),
+        action: e.action,
+        ticker: e.ticker,
+        detail: e.strike ? `$${e.strike}${e.optionType==='put'?'P':'C'} ${e.expDate}` : '',
+        score:  e.score || '',
+        pnl:    e.pnl !== undefined ? '$' + e.pnl.toFixed(2) : '',
+        reason: e.reason || '',
+      })),
+    };
+
+    // ── Download as JSON ──────────────────────────────────────────────────
+    const blob = new Blob([JSON.stringify(report, null, 2)], {type:'application/json'});
+    const url  = URL.createObjectURL(blob);
+    const a    = document.createElement('a');
+    a.href     = url;
+    a.download = `APEX_DayReport_${today}.json`;
+    a.click();
+    URL.revokeObjectURL(url);
+
+    // ── Also show quick summary in alert ─────────────────────────────────
+    alert(
+      `APEX Day Report — ${today}\n\n` +
+      `Trades: ${trades.length} | Win Rate: ${winRate}%\n` +
+      `Total P&L: $${totalPnL.toFixed(2)}\n` +
+      `Best: $${bigWin} | Worst: $${bigLoss}\n` +
+      `Avg Win: $${avgWin} | Avg Loss: $${avgLoss}\n\n` +
+      `Exit Reasons:\n` +
+      Object.entries(byReason).map(([r,v]) => `  ${r}: ${v.count}x ($${v.pnl.toFixed(2)})`).join('\n') +
+      `\n\nOpen Positions: ${openPos.length}\n` +
+      `Report saved as APEX_DayReport_${today}.json`
+    );
+  } catch(e) {
+    alert('Error generating report: ' + e.message);
+  }
 }
 let simPollInterval = null;
 
