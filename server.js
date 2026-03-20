@@ -61,8 +61,7 @@ const IV_COLLAPSE_PCT     = 0.30;
 const MA50_BUFFER         = 0.01;
 const IVR_MAX             = 70;
 const EARNINGS_SKIP_DAYS  = 5;
-const MIN_OPTIONS_VOLUME  = 10000;
-const MIN_OPEN_INTEREST   = 100;  // lowered from 500 — some valid contracts have lower OI
+const MIN_OPEN_INTEREST   = 100;  // used in contract scoring as OI proxy threshold
 const MIN_STOCK_PRICE     = 20;
 const MIN_OPTION_PREMIUM  = 0.50;  // minimum $50 per contract — filters out lottery tickets
 const MAX_SPREAD_PCT      = 0.15;  // max bid/ask spread as % of ask (widened for high VIX days)
@@ -75,10 +74,7 @@ const CONSEC_LOSS_LIMIT   = 3;
 const WEEKLY_DD_LIMIT     = 0.25;
 const MAX_LOSS_PER_TRADE  = 900;
 const MIN_SCORE           = 70;
-const FULL_KELLY_SCORE    = 85;
-const ENTRY_START_HOUR    = 10;     // 10:00 AM ET
-const ENTRY_END_HOUR      = 15;     // 3:30 PM ET
-const ENTRY_END_MIN       = 30;
+// Entry windows handled by isEntryWindow() — see function below
 const STOCK_PROFIT_THRESH = 1000;   // monthly profit threshold for stock buys
 const STOCK_ALLOC_PCT     = 0.20;   // 20% of profits above threshold
 const MAX_STOCK_PCT       = 0.30;   // max 30% of account in stocks
@@ -86,12 +82,10 @@ const STOCK_STOP_PCT      = 0.15;   // -15% stop on stock positions
 
 // Cash ETF parking - floor is split 50/50 between liquid and BIL
 const CASH_ETF             = "BIL";     // 1-3 Month T-Bill ETF
-const CASH_ETF_FLOOR_PCT   = 0.50;      // 50% of capital floor parked in BIL
 const CASH_ETF_TARGET      = CAPITAL_FLOOR * 0.50;  // $1,500 in BIL at all times
 const CASH_ETF_MIN         = 100;       // minimum rebalance threshold
 
 // VIX tiers
-const VIX_NORMAL    = 20;
 const VIX_REDUCE25  = 25;
 const VIX_REDUCE50  = 30;
 const VIX_PAUSE     = 35;
@@ -105,6 +99,9 @@ const PREMARKET_STRONG_MOVE    = 0.015; // 1.5% pre-market move = strong signal
 const PREMARKET_NEGATIVE       = -0.01; // -1% pre-market = skip entry
 const RESISTANCE_BUFFER        = 0.02;  // skip if within 2% of resistance
 const SUPPORT_BUFFER           = 0.03;  // skip if within 3% of support breaking
+
+// Time constants
+const MS_PER_DAY = MS_PER_DAY; // milliseconds per day
 
 // Correlation groups - max 1 position per group
 const CORRELATION_GROUPS = [
@@ -120,14 +117,6 @@ const CORRELATION_GROUPS = [
   ["PLTR"],                                                   // High momentum
 ];
 
-// Sector ETF confirmation map
-const SECTOR_ETF_MAP = {
-  "Technology": "XLK",
-  "Financial":  "XLF",
-  "Consumer":   "XLY",
-  "Index":      null,  // no confirmation needed for indexes
-  "Global":     null,  // no ETF confirmation for global stocks (BABA etc)
-};
 // Always check SMH for semiconductor stocks
 const SEMIS = ["NVDA", "AMD", "SMCI", "ARM", "AVGO", "MU"];
 
@@ -257,28 +246,33 @@ function markDirty() {
 
 async function saveState() {
   stateDirty = true;
-  // Only write to Redis if enough time has passed
   const now = Date.now();
   if (now - lastRedisSave >= REDIS_SAVE_INTERVAL) {
-    await redisSave(state);
-    lastRedisSave = now;
-    stateDirty    = false;
+    try {
+      await redisSave(state);
+      lastRedisSave = now;
+      stateDirty    = false;
+    } catch(e) { console.error("saveState error:", e.message); }
   }
 }
 
 // Force save — used for critical state changes (trade open/close, circuit breaker)
 async function saveStateNow() {
-  await redisSave(state);
-  lastRedisSave = Date.now();
-  stateDirty    = false;
+  try {
+    await redisSave(state);
+    lastRedisSave = Date.now();
+    stateDirty    = false;
+  } catch(e) { console.error("saveStateNow error:", e.message); }
 }
 
 // Periodic flush — saves if dirty but not recently saved
 async function flushStateIfDirty() {
   if (stateDirty && Date.now() - lastRedisSave >= REDIS_SAVE_INTERVAL) {
-    await redisSave(state);
-    lastRedisSave = Date.now();
-    stateDirty    = false;
+    try {
+      await redisSave(state);
+      lastRedisSave = Date.now();
+      stateDirty    = false;
+    } catch(e) { console.error("flushStateIfDirty error:", e.message); }
   }
 }
 
@@ -880,7 +874,7 @@ async function getStockBars(ticker, limit = 60) {
   try {
     // Always use date range — more reliable than limit param across all Alpaca tiers
     const end   = new Date().toISOString().split("T")[0];
-    const start = new Date(Date.now() - Math.ceil(limit * 1.6) * 86400000).toISOString().split("T")[0];
+    const start = new Date(Date.now() - Math.ceil(limit * 1.6) * MS_PER_DAY).toISOString().split("T")[0];
     // Try SIP feed first (Pro tier), fall back to IEX (free tier)
     const feeds = ["sip", "iex"];
     for (const feed of feeds) {
@@ -943,7 +937,7 @@ async function getVIX() {
 async function getEarningsDate(ticker) {
   try {
     const today = getETTime().toISOString().split("T")[0];
-    const end   = new Date(Date.now() + 60 * 86400000).toISOString().split("T")[0];
+    const end   = new Date(Date.now() + 60 * MS_PER_DAY).toISOString().split("T")[0];
     const data  = await alpacaGet(`/corporate_actions/announcements?ca_types=Earnings&symbols=${ticker}&since=${today}&until=${end}`, ALPACA_DATA);
     if (data && data.announcements && data.announcements.length > 0) {
       return data.announcements[0].ex_date || null;
@@ -1115,7 +1109,7 @@ function getUpcomingMacroEvents(daysAhead = 7) {
   const events = [];
   for (const ev of MACRO_EVENTS_2025) {
     const evDate = new Date(ev.date);
-    const daysTo = Math.round((evDate - todayDate) / 86400000);
+    const daysTo = Math.round((evDate - todayDate) / MS_PER_DAY);
     if (daysTo >= 0 && daysTo <= daysAhead) {
       events.push({ ...ev, daysTo });
     }
@@ -1645,14 +1639,15 @@ async function getFearAndGreed() {
 async function getMarketBreadth() {
   try {
     const sectors = ["XLK","XLF","XLE","XLV","XLI","XLY","XLP","XLU","XLB","XLRE"];
+    // Fetch all breadth ETFs in parallel
+    const allBars = await Promise.all(sectors.map(etf => getStockBars(etf, 2)));
     let advancing = 0, declining = 0;
-    for (const etf of sectors) {
-      const bars = await getStockBars(etf, 2);
+    allBars.forEach(bars => {
       if (bars.length >= 2) {
         if (bars[bars.length-1].c > bars[bars.length-2].c) advancing++;
         else declining++;
       }
-    }
+    });
     const total      = advancing + declining;
     const breadthPct = total > 0 ? (advancing / total) * 100 : 50;
     return { advancing, declining, breadthPct: parseFloat(breadthPct.toFixed(0)) };
@@ -1729,10 +1724,13 @@ async function getSectorRotation() {
   try {
     const sectorETFs = { Technology:"XLK", Financial:"XLF", Consumer:"XLY", Energy:"XLE", Health:"XLV" };
     const perf = {};
-    for (const [sector, etf] of Object.entries(sectorETFs)) {
-      const bars = await getStockBars(etf, 5);
+    // Fetch all sector ETF bars in parallel instead of sequentially
+    const entries = Object.entries(sectorETFs);
+    const allBars = await Promise.all(entries.map(([, etf]) => getStockBars(etf, 5)));
+    entries.forEach(([sector], i) => {
+      const bars = allBars[i];
       if (bars.length >= 2) perf[sector] = (bars[bars.length-1].c - bars[0].c) / bars[0].c * 100;
-    }
+    });
     const sorted  = Object.entries(perf).sort((a, b) => b[1] - a[1]);
     return {
       leading:     sorted[0]?.[0] || "Technology",
@@ -1763,10 +1761,10 @@ async function getRealOptionsContract(ticker, price, optionType, score, vix, ear
 
     // Format date for API: YYYY-MM-DD
     const today      = getETTime();
-    const minExpiry  = new Date(today.getTime() + 3   * 86400000).toISOString().split("T")[0]; // 3 day floor — scoring handles DTE preference
+    const minExpiry  = new Date(today.getTime() + 3   * MS_PER_DAY).toISOString().split("T")[0]; // 3 day floor — scoring handles DTE preference
     // LEAPS need up to 270 days — use 300 day window to cover all expiry types
     const maxDays    = expiryType === "leaps" ? 300 : 90;
-    const maxExpiry  = new Date(today.getTime() + maxDays * 86400000).toISOString().split("T")[0];
+    const maxExpiry  = new Date(today.getTime() + maxDays * MS_PER_DAY).toISOString().split("T")[0];
 
     // Fetch ALL contracts with no filters — paginate until we have everything
     // No strike filters, no sort tricks — get the full chain and let delta scoring decide
@@ -1866,7 +1864,7 @@ async function getRealOptionsContract(ticker, price, optionType, score, vix, ear
       const vol    = parseInt(day.v || day.volume || 0);
 
       // Contract DTE — needed for expiry scoring
-      const contractDTE = Math.round((new Date(contract.expiration_date) - today) / 86400000);
+      const contractDTE = Math.round((new Date(contract.expiration_date) - today) / MS_PER_DAY);
 
       // Only hard filter: contract must have a tradeable price
       if (mid <= 0) { skipped++; continue; }
@@ -1906,7 +1904,7 @@ async function getRealOptionsContract(ticker, price, optionType, score, vix, ear
           symbol:  contract.symbol,
           strike:  parseFloat(contract.strike_price),
           expDate: new Date(contract.expiration_date).toLocaleDateString("en-US", {month:"short",day:"2-digit",year:"numeric"}),
-          expDays: Math.round((new Date(contract.expiration_date) - today) / 86400000),
+          expDays: Math.round((new Date(contract.expiration_date) - today) / MS_PER_DAY),
           expiryType,
           premium: parseFloat(mid.toFixed(2)),
           bid, ask, spread,
@@ -2046,12 +2044,14 @@ async function checkSectorETF(stock) {
   if (SEMIS.includes(stock.ticker)) etfs.push("SMH");
   if (!etfs.length) return { pass: true, reason: null, putBoost: 0 };
 
-  for (const etf of etfs) {
-    const bars = await getStockBars(etf, 5);
+  // Fetch all sector ETFs in parallel
+  const allEtfBars = await Promise.all(etfs.map(etf => getStockBars(etf, 5)));
+  for (let i = 0; i < etfs.length; i++) {
+    const etf  = etfs[i];
+    const bars = allEtfBars[i];
     if (bars.length < 2) continue;
     const etfReturn = (bars[bars.length-1].c - bars[0].o) / bars[0].o;
     if (etfReturn < -0.015) {
-      // Strong sector weakness — block calls but signal put opportunity
       return { pass: false, reason: `${etf} sector ETF down ${(etfReturn*100).toFixed(1)}% - sector headwind`, putBoost: 20, etfReturn };
     } else if (etfReturn < -0.01) {
       return { pass: false, reason: `${etf} sector ETF down ${(etfReturn*100).toFixed(1)}% - sector headwind`, putBoost: 12, etfReturn };
@@ -2123,7 +2123,7 @@ async function checkAllFilters(stock, price) {
 
   // 11. Earnings
   if (stock.earningsDate) {
-    const dte = Math.round((new Date(stock.earningsDate) - new Date()) / 86400000);
+    const dte = Math.round((new Date(stock.earningsDate) - new Date()) / MS_PER_DAY);
     if (dte >= 0 && dte <= EARNINGS_SKIP_DAYS) return { pass:false, reason:`Earnings in ${dte} days` };
   }
 
@@ -2353,25 +2353,25 @@ function selectExpiry(score, vix, optionType, earningsDate, ticker = null) {
   }
 
   // Calculate target date
-  const targetDate = new Date(now + targetDays * 86400000);
+  const targetDate = new Date(now + targetDays * MS_PER_DAY);
 
   let expiry;
   if (expiryType === "weekly") {
     expiry = getNextExpiryFriday(targetDate);
-    const minDate = new Date(now + 7 * 86400000);
-    if (expiry < minDate) expiry = getNextExpiryFriday(new Date(expiry.getTime() + 7 * 86400000));
+    const minDate = new Date(now + 7 * MS_PER_DAY);
+    if (expiry < minDate) expiry = getNextExpiryFriday(new Date(expiry.getTime() + 7 * MS_PER_DAY));
   } else if (expiryType === "leaps") {
     // LEAPS use Jan expiry of next year (most liquid LEAPS expiration)
     const targetYear = targetDate.getFullYear();
     expiry = getThirdFriday(targetYear, 0); // January expiry
     // If Jan is too close use next year's Jan
-    if (expiry < new Date(now + 180 * 86400000)) {
+    if (expiry < new Date(now + 180 * MS_PER_DAY)) {
       expiry = getThirdFriday(targetYear + 1, 0);
     }
   } else {
     // Monthly — find third Friday of target month
     expiry = getThirdFriday(targetDate.getFullYear(), targetDate.getMonth());
-    const minDate = new Date(now + 21 * 86400000);
+    const minDate = new Date(now + 21 * MS_PER_DAY);
     if (expiry < minDate) {
       const nextMonth = targetDate.getMonth() === 11 ? 0 : targetDate.getMonth() + 1;
       const nextYear  = targetDate.getMonth() === 11 ? targetDate.getFullYear() + 1 : targetDate.getFullYear();
@@ -2381,15 +2381,15 @@ function selectExpiry(score, vix, optionType, earningsDate, ticker = null) {
 
   // If earnings date is within our expiry window, extend past earnings
   if (earningsDate) {
-    const eDays = Math.round((new Date(earningsDate) - new Date(now)) / 86400000);
-    if (eDays > 0 && eDays < Math.round((expiry - new Date(now)) / 86400000)) {
+    const eDays = Math.round((new Date(earningsDate) - new Date(now)) / MS_PER_DAY);
+    if (eDays > 0 && eDays < Math.round((expiry - new Date(now)) / MS_PER_DAY)) {
       // Earnings before expiry - extend to next monthly after earnings
-      const postEarnings = new Date(new Date(earningsDate).getTime() + 7 * 86400000);
+      const postEarnings = new Date(new Date(earningsDate).getTime() + 7 * MS_PER_DAY);
       expiry = getThirdFriday(postEarnings.getFullYear(), postEarnings.getMonth());
     }
   }
 
-  const expDays = Math.round((expiry - new Date(now)) / 86400000);
+  const expDays = Math.round((expiry - new Date(now)) / MS_PER_DAY);
   const expDate = expiry.toLocaleDateString("en-US", { month: "short", day: "2-digit", year: "numeric" });
 
   return { expDate, expDays: Math.max(expDays, 7), expiryType };
@@ -3081,7 +3081,7 @@ async function runScan() {
     const price = posQuotes[pi];
     if (!price) continue;
 
-    const dte      = Math.max(1, Math.round((new Date(pos.expDate)-new Date())/86400000));
+    const dte      = Math.max(1, Math.round((new Date(pos.expDate)-new Date())/MS_PER_DAY));
     const t        = dte / 365;
     let curP;
     if (pos.contractSymbol && posSnapshots[pos.contractSymbol]) {
@@ -3235,7 +3235,7 @@ async function runScan() {
 
     // Mid-trade earnings check
     if (pos.earningsDate) {
-      const daysToE = Math.round((new Date(pos.earningsDate)-new Date())/86400000);
+      const daysToE = Math.round((new Date(pos.earningsDate)-new Date())/MS_PER_DAY);
       if (daysToE >= 0 && daysToE <= EARNINGS_SKIP_DAYS) {
         logEvent("scan", `${pos.ticker} earnings in ${daysToE} days - closing to avoid IV crush`);
         await closePosition(pos.ticker, "earnings-close"); continue;
@@ -4032,16 +4032,6 @@ app.get("/api/state", async (req, res) => {
     drawdownDuration:   calcDrawdownDuration(),
     autocorrelation:    calcAutocorrelation(),
     riskOfRuin:         calcRiskOfRuin(),
-    monteCarlo:         marketContext.monteCarlo,
-    kelly:              marketContext.kelly,
-    relativeValue:      marketContext.relativeValue,
-    globalMarket:       marketContext.globalMarket,
-    streaks:            marketContext.streaks,
-    calmar:             calcCalmarRatio(),
-    informationRatio:   calcInformationRatio(),
-    drawdownDuration:   calcDrawdownDuration(),
-    autocorrelation:    calcAutocorrelation(),
-    riskOfRuin:         calcRiskOfRuin(),
   });
 });
 
@@ -4153,8 +4143,8 @@ app.get("/api/test-options/:ticker", async (req, res) => {
 
   // Test raw options contracts endpoint
   const today      = getETTime();
-  const minExpiry  = new Date(today.getTime() + 7  * 86400000).toISOString().split("T")[0];
-  const maxExpiry  = new Date(today.getTime() + 60 * 86400000).toISOString().split("T")[0];
+  const minExpiry  = new Date(today.getTime() + 7  * MS_PER_DAY).toISOString().split("T")[0];
+  const maxExpiry  = new Date(today.getTime() + 60 * MS_PER_DAY).toISOString().split("T")[0];
   const strikeLow  = (price * 0.95).toFixed(0);
   const strikeHigh = (price * 1.05).toFixed(0);
 
@@ -4248,17 +4238,7 @@ app.get("/api/health", (req, res) => {
   });
 });
 
-// Reset circuit breakers without wiping everything else
-app.post("/api/reset-circuit", async (req, res) => {
-  state.circuitOpen       = true;
-  state.weeklyCircuitOpen = true;
-  state.consecutiveLosses = 0;
-  state.dayStartCash      = state.cash + openRisk();
-  state.weekStartCash     = state.cash + openRisk();
-  await saveStateNow();
-  logEvent("reset", "Circuit breakers manually reset");
-  res.json({ ok: true });
-});
+// [duplicate /api/reset-circuit removed]
 
 app.post("/api/reset-month", async (req, res) => {
   state.cash=MONTHLY_BUDGET+state.extraBudget; state.todayTrades=0;
@@ -4289,7 +4269,7 @@ async function checkEarningsPlays() {
   for (const stock of WATCHLIST) {
     if (!stock.earningsDate) continue;
 
-    const daysToEarnings = Math.round((new Date(stock.earningsDate) - new Date()) / 86400000);
+    const daysToEarnings = Math.round((new Date(stock.earningsDate) - new Date()) / MS_PER_DAY);
 
     // Only enter in the 14-21 day window
     if (daysToEarnings < EARNINGS_PLAY_MIN_DTE || daysToEarnings > EARNINGS_PLAY_MAX_DTE) continue;
@@ -4331,7 +4311,7 @@ async function manageEarningsPlayExits() {
     const stock = WATCHLIST.find(s => s.ticker === pos.ticker);
     if (!stock || !stock.earningsDate) continue;
 
-    const daysToEarnings = Math.round((new Date(stock.earningsDate) - new Date()) / 86400000);
+    const daysToEarnings = Math.round((new Date(stock.earningsDate) - new Date()) / MS_PER_DAY);
 
     if (daysToEarnings <= EARNINGS_PLAY_EXIT_DTE) {
       logEvent("scan", `${pos.ticker} earnings play exit - ${daysToEarnings} days to earnings - capturing IV expansion`);
@@ -4348,7 +4328,7 @@ function calcCalmarRatio() {
   if (trades.length < 5) return 0;
   const totalPnL  = trades.reduce((s, t) => s + t.pnl, 0);
   const startDate = new Date(trades[trades.length-1]?.date || Date.now());
-  const years     = Math.max(0.1, (Date.now() - startDate.getTime()) / (365 * 86400000));
+  const years     = Math.max(0.1, (Date.now() - startDate.getTime()) / (365 * MS_PER_DAY));
   const annReturn = (totalPnL / MONTHLY_BUDGET) / years * 100;
   const peak      = state.peakCash || MONTHLY_BUDGET;
   const maxDD     = Math.abs(Math.min(0, (state.cash - peak) / peak * 100));
@@ -4381,7 +4361,7 @@ function calcDrawdownDuration() {
     runningPnL += trade.pnl || 0;
     if (runningPnL > peak) {
       if (inDrawdown && ddStart) {
-        durations.push(Math.round((new Date(trade.date) - new Date(ddStart)) / 86400000));
+        durations.push(Math.round((new Date(trade.date) - new Date(ddStart)) / MS_PER_DAY));
       }
       peak      = runningPnL;
       inDrawdown = false;
@@ -4393,7 +4373,7 @@ function calcDrawdownDuration() {
   }
 
   const currentDuration = inDrawdown && ddStart
-    ? Math.round((Date.now() - new Date(ddStart).getTime()) / 86400000) : 0;
+    ? Math.round((Date.now() - new Date(ddStart).getTime()) / MS_PER_DAY) : 0;
 
   return {
     avgDuration:     durations.length ? Math.round(durations.reduce((s, d) => s + d, 0) / durations.length) : 0,
@@ -4462,7 +4442,7 @@ function calcGreeksLadder(pos) {
   const levels = [-0.15, -0.10, -0.05, 0, 0.05, 0.10, 0.15];
   return levels.map(pct => {
     const simPrice = pos.price * (1 + pct);
-    const dte      = Math.max(1, Math.round((new Date(pos.expDate) - new Date()) / 86400000));
+    const dte      = Math.max(1, Math.round((new Date(pos.expDate) - new Date()) / MS_PER_DAY));
     const greeks   = calcGreeks(simPrice, pos.strike, dte, pos.iv || 0.3);
     const simPrem  = parseFloat((simPrice * (pos.iv||0.3) * Math.sqrt(dte/365) * 0.4 + 0.1).toFixed(2));
     return {
@@ -4692,7 +4672,7 @@ async function runSimTick(scenario, simPrices, tick) {
         ticker: stock.ticker, sector: stock.sector, optionType: optType,
         premium, contracts: contr, cost, iv, expiryDays: 30,
         strike,
-        expDate: new Date(Date.now() + 30 * 86400000).toLocaleDateString(),
+        expDate: new Date(Date.now() + 30 * MS_PER_DAY).toLocaleDateString(),
         peakPremium: premium, partialClosed: false,
         openDate: new Date().toISOString(), score: best,
         greeks: calcGreeks(price, strike, 30, iv),
@@ -4800,7 +4780,7 @@ async function runBacktest(months = 6) {
     const limit   = months * 22;
     // Always use date range for backtest — confirmed working with Pro tier
     const end   = new Date().toISOString().split("T")[0];
-    const start = new Date(Date.now() - Math.ceil(limit * 1.6) * 86400000).toISOString().split("T")[0];
+    const start = new Date(Date.now() - Math.ceil(limit * 1.6) * MS_PER_DAY).toISOString().split("T")[0];
 
     logEvent("scan", `Backtest fetching ${months} months (${limit} bars) from ${start} to ${end}`);
 
@@ -5022,7 +5002,7 @@ app.get("/api/test-bars/:ticker", async (req, res) => {
   const months = parseInt(req.query.months || "3");
   const limit  = months * 22;
   const end    = new Date().toISOString().split("T")[0];
-  const start  = new Date(Date.now() - limit * 1.6 * 86400000).toISOString().split("T")[0];
+  const start  = new Date(Date.now() - limit * 1.6 * MS_PER_DAY).toISOString().split("T")[0];
 
   const results = {};
   const tests = [
@@ -5055,7 +5035,7 @@ app.get("/api/taxlog",       (req,res) => res.json(getTaxLog()));
 
 app.get("/api/theta",        (req,res) => {
   const positions = state.positions.map(pos => {
-    const dte      = Math.max(1, Math.round((new Date(pos.expDate)-new Date())/86400000));
+    const dte      = Math.max(1, Math.round((new Date(pos.expDate)-new Date())/MS_PER_DAY));
     const theta    = pos.greeks ? pos.greeks.theta : -(pos.premium / (dte * 2));
     const dailyBurn= Math.abs(theta) * 100 * (pos.contracts || 1) * (pos.partialClosed ? 0.5 : 1);
     return { ticker: pos.ticker, theta: parseFloat(theta.toFixed(4)), dailyBurn: parseFloat(dailyBurn.toFixed(2)), dte };
