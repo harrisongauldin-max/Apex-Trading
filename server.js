@@ -1,5 +1,5 @@
 // -
-// APEX v3.75 - Professional Options Trading Agent
+// APEX v3.80 - Professional Options Trading Agent
 // Alpaca Paper Trading Edition
 // -
 const express    = require("express");
@@ -633,40 +633,52 @@ function scoreSetup(stock, relStrength, adx, volume, avgVolume) {
   else if (stock.momentum === "steady")     { score += 12; reasons.push("Steady momentum (+12)"); }
   else                                      { score += 5;  reasons.push("Recovering momentum (+5)"); }
 
-  // RSI sweet spot 50-65 (15pts)
-  if (stock.rsi >= 50 && stock.rsi <= 65)   { score += 15; reasons.push(`RSI ${stock.rsi} in sweet spot (+15)`); }
-  else if (stock.rsi >= 45 && stock.rsi < 50){ score += 8; reasons.push(`RSI ${stock.rsi} near zone (+8)`); }
+  // RSI sweet spot 50-65 — RAISED to 20pts (more reliable than MACD on 1-min bars)
+  if (stock.rsi >= 50 && stock.rsi <= 65)   { score += 20; reasons.push(`RSI ${stock.rsi} in sweet spot (+20)`); }
+  else if (stock.rsi >= 45 && stock.rsi < 50){ score += 10; reasons.push(`RSI ${stock.rsi} near zone (+10)`); }
   else                                       { reasons.push(`RSI ${stock.rsi} outside zone (+0)`); }
 
-  // MACD (15pts)
-  if (stock.macd.includes("bullish crossover")) { score += 15; reasons.push("MACD bullish crossover (+15)"); }
-  else if (stock.macd.includes("bullish"))      { score += 10; reasons.push("MACD bullish (+10)"); }
-  else if (stock.macd.includes("forming"))      { score += 5;  reasons.push("MACD forming base (+5)"); }
+  // MACD — REDUCED to 10pts max (noisy on 1-min bars, confirms not leads)
+  if (stock.macd.includes("bullish crossover")) { score += 10; reasons.push("MACD bullish crossover (+10)"); }
+  else if (stock.macd.includes("bullish"))      { score += 7;  reasons.push("MACD bullish (+7)"); }
+  else if (stock.macd.includes("forming"))      { score += 3;  reasons.push("MACD forming base (+3)"); }
   else                                          { reasons.push("MACD neutral (+0)"); }
 
-  // IVR + IV Percentile (15pts) - lower is better for buying options
-  // Use IV Percentile when available (more accurate than IVR alone)
+  // IV Percentile (15pts) — lower = cheaper options = better for buying calls
   const ivp = stock.ivPercentile || 50;
   if (ivp < 30)       { score += 15; reasons.push(`IVP ${ivp}% - cheap options (+15)`); }
   else if (ivp < 50)  { score += 10; reasons.push(`IVP ${ivp}% - moderate (+10)`); }
   else if (ivp < 70)  { score += 5;  reasons.push(`IVP ${ivp}% - elevated (+5)`); }
-  else                { reasons.push(`IVP ${ivp}% - expensive, options overpriced (+0)`); }
+  else                { reasons.push(`IVP ${ivp}% - expensive (+0)`); }
 
-  // Catalyst (15pts)
-  if (stock.catalyst)       { score += 15; reasons.push(`Catalyst: ${stock.catalyst} (+15)`); }
+  // News sentiment (15pts) — replaces static catalyst which was always +15
+  // Live news is more meaningful than a hardcoded string
+  const newsMod = stock.newsSentiment === "bullish" ? 15
+                : stock.newsSentiment === "mild bullish" ? 8
+                : stock.newsSentiment === "mild bearish" ? 0
+                : stock.newsSentiment === "bearish" ? 0 : 5; // neutral = small boost
+  if (newsMod > 0) reasons.push(`News ${stock.newsSentiment} (+${newsMod})`);
+  score += newsMod;
 
-  // Volume confirmation (10pts)
-  if (volume && avgVolume && volume > avgVolume * 1.2) { score += 10; reasons.push("Above-avg volume (+10)"); }
-  else if (volume && avgVolume && volume > avgVolume)  { score += 5;  reasons.push("Average volume (+5)"); }
-  else                                                 { reasons.push("Low volume (+0)"); }
+  // Volume confirmation — DIRECTIONAL: above VWAP + high vol = stronger call signal (10pts)
+  const aboveVWAP = stock.intradayVWAP > 0 && (stock.price || 0) > stock.intradayVWAP;
+  if (volume && avgVolume && volume > avgVolume * 1.2) {
+    const volPts = aboveVWAP ? 12 : 8; // directional bonus
+    score += volPts; reasons.push(`Above-avg volume ${aboveVWAP ? "+ above VWAP" : ""} (+${volPts})`);
+  } else if (volume && avgVolume && volume > avgVolume) {
+    score += 5; reasons.push("Average volume (+5)");
+  } else { reasons.push("Low volume (+0)"); }
 
-  // Relative strength vs SPY (10pts)
-  if (relStrength > 1.05)      { score += 10; reasons.push(`RS vs SPY: +${((relStrength-1)*100).toFixed(1)}% (+10)`); }
-  else if (relStrength > 1.0)  { score += 5;  reasons.push(`RS vs SPY: +${((relStrength-1)*100).toFixed(1)}% (+5)`); }
+  // Relative strength vs SPY — RAISED to 15pts max
+  if (relStrength > 1.05)      { score += 15; reasons.push(`RS vs SPY: +${((relStrength-1)*100).toFixed(1)}% (+15)`); }
+  else if (relStrength > 1.02) { score += 8;  reasons.push(`RS vs SPY: +${((relStrength-1)*100).toFixed(1)}% (+8)`); }
+  else if (relStrength > 1.0)  { score += 3;  reasons.push(`RS vs SPY: +${((relStrength-1)*100).toFixed(1)}% (+3)`); }
   else                         { reasons.push(`RS vs SPY: ${((relStrength-1)*100).toFixed(1)}% (+0)`); }
 
-  // ADX bonus (not in original 100 but adds quality signal)
-  if (adx && adx > 25)  { score += 5; reasons.push(`ADX ${adx} - strong trend (+5)`); }
+  // ADX — RAISED to 15pts max (strong confirmed trend is a top-tier signal)
+  if (adx && adx > 35)      { score += 15; reasons.push(`ADX ${adx} - very strong trend (+15)`); }
+  else if (adx && adx > 25) { score += 10; reasons.push(`ADX ${adx} - strong trend (+10)`); }
+  else if (adx && adx > 18) { score += 5;  reasons.push(`ADX ${adx} - emerging trend (+5)`); }
 
   return { score: Math.min(score, 100), reasons };
 }
@@ -723,8 +735,7 @@ function scoreMeanReversionCall(stock, relStrength, adx, bars, vix) {
 }
 
 // - Put Setup Scoring -
-// Mirror of scoreSetup but for bearish setups - looks for opposite signals
-function scorePutSetup(stock, relStrength, adx, volume, avgVolume) {
+function scorePutSetup(stock, relStrength, adx, volume, avgVolume, vix = 20) {
   let score = 0;
   const reasons = [];
 
@@ -733,46 +744,59 @@ function scorePutSetup(stock, relStrength, adx, volume, avgVolume) {
   else if (stock.momentum === "steady")      { score += 10; reasons.push("Neutral momentum (+10)"); }
   else                                       { score += 0;  reasons.push("Strong momentum - bad for put (+0)"); }
 
-  // RSI overbought 70+ or falling from high (15pts)
-  if (stock.rsi >= 72)                       { score += 15; reasons.push(`RSI ${stock.rsi} - overbought (+15)`); }
-  else if (stock.rsi >= 65 && stock.rsi < 72){ score += 8;  reasons.push(`RSI ${stock.rsi} - elevated (+8)`); }
+  // RSI — RAISED to 20pts (more reliable signal, especially in trending markets)
+  if (stock.rsi >= 72)                       { score += 20; reasons.push(`RSI ${stock.rsi} - overbought (+20)`); }
+  else if (stock.rsi >= 65 && stock.rsi < 72){ score += 12; reasons.push(`RSI ${stock.rsi} - elevated (+12)`); }
   else if (stock.rsi <= 45)                  { score += 5;  reasons.push(`RSI ${stock.rsi} - oversold caution (+5)`); }
   else                                       { reasons.push(`RSI ${stock.rsi} neutral for put (+0)`); }
 
-  // MACD bearish (15pts)
-  if (stock.macd.includes("bearish crossover")) { score += 15; reasons.push("MACD bearish crossover (+15)"); }
-  else if (stock.macd.includes("bearish"))      { score += 10; reasons.push("MACD bearish (+10)"); }
-  else if (stock.macd.includes("neutral"))      { score += 5;  reasons.push("MACD neutral (+5)"); }
+  // MACD — REDUCED to 10pts max (confirms direction, doesn't lead it)
+  if (stock.macd.includes("bearish crossover")) { score += 10; reasons.push("MACD bearish crossover (+10)"); }
+  else if (stock.macd.includes("bearish"))      { score += 7;  reasons.push("MACD bearish (+7)"); }
+  else if (stock.macd.includes("neutral"))      { score += 3;  reasons.push("MACD neutral (+3)"); }
   else                                          { reasons.push("MACD bullish - bad for put (+0)"); }
 
-  // IVR + IV Percentile (15pts) - lower is still better for buying puts
+  // IV Percentile — ADJUSTED for VIX environment
+  // High VIX: high IVP is expected and acceptable — options are expensive but moves are big
+  // Low VIX: penalize high IVP more — no reason to buy expensive puts in calm market
   const ivpP = stock.ivPercentile || 50;
+  const highVIX = vix > 30;
   if (ivpP < 30)       { score += 15; reasons.push(`IVP ${ivpP}% - cheap options (+15)`); }
   else if (ivpP < 50)  { score += 10; reasons.push(`IVP ${ivpP}% - moderate (+10)`); }
-  else if (ivpP < 70)  { score += 5;  reasons.push(`IVP ${ivpP}% - elevated (+5)`); }
-  else                 { reasons.push(`IVP ${ivpP}% - expensive (+0)`); }
+  else if (ivpP < 70)  { score += highVIX ? 8 : 5; reasons.push(`IVP ${ivpP}% - elevated (${highVIX ? "+8 high VIX" : "+5"})`); }
+  else                 { score += highVIX ? 5 : 0; reasons.push(`IVP ${ivpP}% - expensive (${highVIX ? "+5 high VIX justified" : "+0"})`); }
 
-  // Bearish catalyst (15pts)
-  // Use intraday momentum as proxy — stock actually moving down today = confirmed bearish catalyst
-  if (stock.bearishCatalyst) {
-    score += 15; reasons.push(`Bearish catalyst: ${stock.bearishCatalyst} (+15)`);
-  } else if (stock.momentum === "recovering" && stock.hasIntraday) {
-    // Intraday confirmed bearish move — stock IS going down right now
-    score += 10; reasons.push("Intraday confirmed bearish move (+10)");
+  // News sentiment (15pts) — replaces static bearishCatalyst
+  // Live bearish news is much more meaningful than a hardcoded string
+  const newsMod = stock.newsSentiment === "bearish" ? 15
+                : stock.newsSentiment === "mild bearish" ? 8
+                : stock.newsSentiment === "neutral" ? 3
+                : 0; // bullish news = bad for puts
+  if (newsMod > 0) reasons.push(`News ${stock.newsSentiment} (+${newsMod})`);
+  else if (stock.momentum === "recovering" && stock.hasIntraday) {
+    score += 8; reasons.push("Intraday confirmed bearish move (+8)");
   }
+  score += newsMod;
 
-  // Volume confirmation (10pts)
-  if (volume && avgVolume && volume > avgVolume * 1.2) { score += 10; reasons.push("Above-avg volume (+10)"); }
-  else if (volume && avgVolume && volume > avgVolume)  { score += 5;  reasons.push("Average volume (+5)"); }
-  else                                                 { reasons.push("Low volume (+0)"); }
+  // Volume confirmation — DIRECTIONAL: below VWAP + high vol = stronger put signal
+  const belowVWAP = stock.intradayVWAP > 0 && (stock.price || 0) < stock.intradayVWAP;
+  if (volume && avgVolume && volume > avgVolume * 1.2) {
+    const volPts = belowVWAP ? 12 : 8; // directional bonus when below VWAP
+    score += volPts; reasons.push(`Above-avg volume ${belowVWAP ? "+ below VWAP" : ""} (+${volPts})`);
+  } else if (volume && avgVolume && volume > avgVolume) {
+    score += 5; reasons.push("Average volume (+5)");
+  } else { reasons.push("Low volume (+0)"); }
 
-  // Relative weakness vs SPY - negative is good for puts (10pts)
-  if (relStrength < 0.95)      { score += 10; reasons.push(`Weak vs SPY: ${((relStrength-1)*100).toFixed(1)}% (+10)`); }
-  else if (relStrength < 1.0)  { score += 5;  reasons.push(`Slightly weak vs SPY (+5)`); }
+  // Relative weakness vs SPY — RAISED to 15pts max
+  if (relStrength < 0.93)      { score += 15; reasons.push(`Weak vs SPY: ${((relStrength-1)*100).toFixed(1)}% (+15)`); }
+  else if (relStrength < 0.97) { score += 8;  reasons.push(`Weak vs SPY: ${((relStrength-1)*100).toFixed(1)}% (+8)`); }
+  else if (relStrength < 1.0)  { score += 3;  reasons.push(`Slightly weak vs SPY (+3)`); }
   else                         { reasons.push(`Outperforming SPY - bad for put (+0)`); }
 
-  // ADX bonus - strong downtrend
-  if (adx && adx > 25) { score += 5; reasons.push(`ADX ${adx} - strong trend (+5)`); }
+  // ADX — RAISED to 15pts max (strong downtrend is a top-tier confirmation)
+  if (adx && adx > 35)      { score += 15; reasons.push(`ADX ${adx} - very strong downtrend (+15)`); }
+  else if (adx && adx > 25) { score += 10; reasons.push(`ADX ${adx} - strong trend (+10)`); }
+  else if (adx && adx > 18) { score += 5;  reasons.push(`ADX ${adx} - emerging trend (+5)`); }
 
   return { score: Math.min(score, 100), reasons };
 }
@@ -2711,7 +2735,7 @@ async function closePosition(ticker, reason, exitPremium = null) {
   state.totalRevenue  = nr;
   state.monthlyProfit = parseFloat((state.monthlyProfit + pnl).toFixed(2));
   state.positions.splice(idx, 1);
-  state.closedTrades.push({ ticker, pnl, pct, date:new Date().toLocaleDateString(), reason, score:pos.score||0 });
+  state.closedTrades.push({ ticker, pnl, pct, date:new Date().toLocaleDateString(), reason, score:pos.score||0, closeTime: Date.now() });
   await saveStateNow(); // force immediate save on trade close
 
   // Update consecutive losses
@@ -3354,6 +3378,18 @@ async function runScan() {
   for (const { stock, price, bars, intradayBars, sectorResult, preMarket, newsArticles, analystData, eqScore } of stockData) {
     if (state.positions.find(p=>p.ticker===stock.ticker)) continue;
 
+    // Ticker cooldown — 30 minutes after closing same ticker before re-entry
+    // Prevents rapid re-entry after expiry-roll or stop (e.g. ROKU entering 3x in 45 min)
+    const TICKER_COOLDOWN_MS = 30 * 60 * 1000;
+    const recentClose = (state.closedTrades || []).find(t =>
+      t.ticker === stock.ticker && t.closeTime && (Date.now() - t.closeTime) < TICKER_COOLDOWN_MS
+    );
+    if (recentClose) {
+      const minsAgo = ((Date.now() - recentClose.closeTime) / 60000).toFixed(0);
+      logEvent("filter", `${stock.ticker} cooldown — closed ${minsAgo}min ago (${recentClose.reason}) — wait ${Math.ceil((TICKER_COOLDOWN_MS - (Date.now() - recentClose.closeTime)) / 60000)}min`);
+      continue;
+    }
+
     if (!price || price < MIN_STOCK_PRICE) {
       logEvent("filter", `${stock.ticker} price $${price||0} unavailable or below min - skip`);
       continue;
@@ -3431,6 +3467,7 @@ async function runScan() {
     // Merge live signals into stock object — intraday signals override static seed values
     const liveStock = {
       ...stock,
+      price:         price,
       rsi:           signals.rsi,
       macd:          signals.macd,
       momentum:      signals.momentum,  // now intraday momentum when available
@@ -3459,7 +3496,7 @@ async function runScan() {
 
     // Score both call and put setups using live signals
     const callSetup = scoreSetup(liveStock, relStrength, signals.adx, todayVol, avgVol);
-    const putSetup  = scorePutSetup(liveStock, relStrength, signals.adx, todayVol, avgVol);
+    const putSetup  = scorePutSetup(liveStock, relStrength, signals.adx, todayVol, avgVol, state.vix);
 
     // Mean reversion call scoring — runs when VIX >= 25
     // Identifies beaten-down quality names for discounted 90-day calls
@@ -5077,7 +5114,7 @@ app.get("/health",           (req,res) => res.json({status:"ok",uptime:process.u
 // Boot sequence - load state from Redis then start server
 initState().then(() => {
   app.listen(PORT, () => {
-    console.log(`APEX v3.75 running on port ${PORT}`);
+    console.log(`APEX v3.80 running on port ${PORT}`);
     console.log(`Alpaca key:  ${ALPACA_KEY?"SET":"NOT SET"}`);
     console.log(`Gmail:       ${GMAIL_USER||"NOT SET"}`);
     console.log(`Redis:       ${REDIS_URL?"SET":"NOT SET - using file fallback"}`);
