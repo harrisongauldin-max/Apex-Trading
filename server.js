@@ -101,7 +101,7 @@ const RESISTANCE_BUFFER        = 0.02;  // skip if within 2% of resistance
 const SUPPORT_BUFFER           = 0.03;  // skip if within 3% of support breaking
 
 // Time constants
-const MS_PER_DAY = MS_PER_DAY; // milliseconds per day
+const MS_PER_DAY = 86400000; // milliseconds per day
 
 // Correlation groups - max 1 position per group
 const CORRELATION_GROUPS = [
