@@ -123,49 +123,49 @@ const SEMIS = ["NVDA", "AMD", "SMCI", "ARM", "AVGO", "MU"];
 // - Watchlist (36 high-liquidity stocks) -
 const WATCHLIST = [
   // -- Mega Cap Tech --
-  { ticker:"NVDA",  sector:"Technology",  momentum:"strong",     rsi:58, macd:"bullish crossover", trend:"above 50MA",         catalyst:"AI infrastructure demand",       expiryDays:14,  ivr:52, beta:1.8, earningsDate:null },
-  { ticker:"AAPL",  sector:"Technology",  momentum:"steady",     rsi:52, macd:"mild bullish",      trend:"above all MAs",      catalyst:"Services revenue growth",         expiryDays:42,  ivr:28, beta:1.1, earningsDate:null },
-  { ticker:"MSFT",  sector:"Technology",  momentum:"strong",     rsi:56, macd:"bullish",           trend:"above all MAs",      catalyst:"Copilot enterprise adoption",     expiryDays:35,  ivr:30, beta:1.2, earningsDate:null },
-  { ticker:"AMZN",  sector:"Technology",  momentum:"strong",     rsi:61, macd:"bullish",           trend:"above 50MA",         catalyst:"AWS acceleration",                expiryDays:28,  ivr:35, beta:1.3, earningsDate:null },
-  { ticker:"META",  sector:"Technology",  momentum:"strong",     rsi:63, macd:"bullish",           trend:"trending up",        catalyst:"AI ad revenue momentum",          expiryDays:28,  ivr:40, beta:1.4, earningsDate:null },
-  { ticker:"GOOGL", sector:"Technology",  momentum:"steady",     rsi:54, macd:"mild bullish",      trend:"above 50MA",         catalyst:"Search + cloud strength",         expiryDays:35,  ivr:32, beta:1.2, earningsDate:null },
+  { ticker:"NVDA",  sector:"Technology",  momentum:"strong",     rsi:58, macd:"bullish crossover",         catalyst:"AI infrastructure demand",  ivr:52, beta:1.8, earningsDate:null },
+  { ticker:"AAPL",  sector:"Technology",  momentum:"steady",     rsi:52, macd:"mild bullish",      catalyst:"Services revenue growth",  ivr:28, beta:1.1, earningsDate:null },
+  { ticker:"MSFT",  sector:"Technology",  momentum:"strong",     rsi:56, macd:"bullish",      catalyst:"Copilot enterprise adoption",  ivr:30, beta:1.2, earningsDate:null },
+  { ticker:"AMZN",  sector:"Technology",  momentum:"strong",     rsi:61, macd:"bullish",         catalyst:"AWS acceleration",  ivr:35, beta:1.3, earningsDate:null },
+  { ticker:"META",  sector:"Technology",  momentum:"strong",     rsi:63, macd:"bullish",        catalyst:"AI ad revenue momentum",  ivr:40, beta:1.4, earningsDate:null },
+  { ticker:"GOOGL", sector:"Technology",  momentum:"steady",     rsi:54, macd:"mild bullish",         catalyst:"Search + cloud strength",  ivr:32, beta:1.2, earningsDate:null },
   // -- Semiconductors --
-  { ticker:"AMD",   sector:"Technology",  momentum:"recovering", rsi:47, macd:"forming base",      trend:"near 50MA",          catalyst:"MI300X server demand",            expiryDays:56,  ivr:55, beta:1.7, earningsDate:null },
-  { ticker:"ARM",   sector:"Technology",  momentum:"strong",     rsi:62, macd:"bullish crossover", trend:"trending up",        catalyst:"AI chip architecture demand",     expiryDays:21,  ivr:58, beta:1.9, earningsDate:null },
-  { ticker:"AVGO",  sector:"Technology",  momentum:"strong",     rsi:57, macd:"bullish",           trend:"above 50MA",         catalyst:"AI networking chips",             expiryDays:28,  ivr:38, beta:1.4, earningsDate:null },
-  { ticker:"MU",    sector:"Technology",  momentum:"recovering", rsi:48, macd:"neutral",           trend:"near 50MA",          catalyst:"HBM memory for AI",               expiryDays:35,  ivr:52, beta:1.6, earningsDate:null },
-  { ticker:"SMCI",  sector:"Technology",  momentum:"recovering", rsi:45, macd:"neutral",           trend:"testing 50MA",       catalyst:"AI server infrastructure",        expiryDays:42,  ivr:60, beta:2.1, earningsDate:null },
+  { ticker:"AMD",   sector:"Technology",  momentum:"recovering", rsi:47, macd:"forming base",          catalyst:"MI300X server demand",  ivr:55, beta:1.7, earningsDate:null },
+  { ticker:"ARM",   sector:"Technology",  momentum:"strong",     rsi:62, macd:"bullish crossover",        catalyst:"AI chip architecture demand",  ivr:58, beta:1.9, earningsDate:null },
+  { ticker:"AVGO",  sector:"Technology",  momentum:"strong",     rsi:57, macd:"bullish",         catalyst:"AI networking chips",  ivr:38, beta:1.4, earningsDate:null },
+  { ticker:"MU",    sector:"Technology",  momentum:"recovering", rsi:48, macd:"neutral",          catalyst:"HBM memory for AI",  ivr:52, beta:1.6, earningsDate:null },
+  { ticker:"SMCI",  sector:"Technology",  momentum:"recovering", rsi:45, macd:"neutral",       catalyst:"AI server infrastructure",  ivr:60, beta:2.1, earningsDate:null },
   // -- Cloud & Enterprise Software --
-  { ticker:"CRM",   sector:"Technology",  momentum:"steady",     rsi:51, macd:"mild bullish",      trend:"above 50MA",         catalyst:"AI CRM integration",              expiryDays:42,  ivr:33, beta:1.3, earningsDate:null },
-  { ticker:"NOW",   sector:"Technology",  momentum:"strong",     rsi:58, macd:"bullish",           trend:"above all MAs",      catalyst:"AI workflow automation",          expiryDays:28,  ivr:35, beta:1.3, earningsDate:null },
-  { ticker:"SNOW",  sector:"Technology",  momentum:"steady",     rsi:50, macd:"neutral",           trend:"near 50MA",          catalyst:"Data cloud growth",               expiryDays:42,  ivr:55, beta:1.5, earningsDate:null },
+  { ticker:"CRM",   sector:"Technology",  momentum:"steady",     rsi:51, macd:"mild bullish",         catalyst:"AI CRM integration",  ivr:33, beta:1.3, earningsDate:null },
+  { ticker:"NOW",   sector:"Technology",  momentum:"strong",     rsi:58, macd:"bullish",      catalyst:"AI workflow automation",  ivr:35, beta:1.3, earningsDate:null },
+  { ticker:"SNOW",  sector:"Technology",  momentum:"steady",     rsi:50, macd:"neutral",          catalyst:"Data cloud growth",  ivr:55, beta:1.5, earningsDate:null },
   // -- Cybersecurity --
-  { ticker:"CRWD",  sector:"Technology",  momentum:"strong",     rsi:60, macd:"bullish",           trend:"trending up",        catalyst:"Cybersecurity spending surge",     expiryDays:28,  ivr:48, beta:1.6, earningsDate:null },
-  { ticker:"PANW",  sector:"Technology",  momentum:"strong",     rsi:57, macd:"bullish",           trend:"above 50MA",         catalyst:"Platform consolidation wins",     expiryDays:35,  ivr:40, beta:1.4, earningsDate:null },
-  { ticker:"NET",   sector:"Technology",  momentum:"steady",     rsi:52, macd:"mild bullish",      trend:"above 50MA",         catalyst:"Zero trust adoption",             expiryDays:35,  ivr:50, beta:1.5, earningsDate:null },
+  { ticker:"CRWD",  sector:"Technology",  momentum:"strong",     rsi:60, macd:"bullish",        catalyst:"Cybersecurity spending surge",  ivr:48, beta:1.6, earningsDate:null },
+  { ticker:"PANW",  sector:"Technology",  momentum:"strong",     rsi:57, macd:"bullish",         catalyst:"Platform consolidation wins",  ivr:40, beta:1.4, earningsDate:null },
+  { ticker:"NET",   sector:"Technology",  momentum:"steady",     rsi:52, macd:"mild bullish",         catalyst:"Zero trust adoption",  ivr:50, beta:1.5, earningsDate:null },
   // -- Financials --
-  { ticker:"JPM",   sector:"Financial",   momentum:"strong",     rsi:57, macd:"bullish",           trend:"above all MAs",      catalyst:"Net interest income strength",    expiryDays:28,  ivr:28, beta:1.1, earningsDate:null },
-  { ticker:"BAC",   sector:"Financial",   momentum:"recovering", rsi:48, macd:"neutral",           trend:"near 50MA",          catalyst:"Net interest income + rate play", expiryDays:28,  ivr:30, beta:1.3, earningsDate:null },
-  { ticker:"C",     sector:"Financial",   momentum:"recovering", rsi:47, macd:"neutral",           trend:"near 50MA",          catalyst:"Restructuring + rate sensitivity", expiryDays:28,  ivr:32, beta:1.5, earningsDate:null },
-  { ticker:"MS",    sector:"Financial",   momentum:"steady",     rsi:52, macd:"mild bullish",      trend:"above 50MA",         catalyst:"Investment banking cycle",        expiryDays:28,  ivr:28, beta:1.4, earningsDate:null },
-  { ticker:"COIN",  sector:"Financial",   momentum:"recovering", rsi:48, macd:"forming base",      trend:"near 50MA",          catalyst:"Crypto market recovery",          expiryDays:42,  ivr:65, beta:2.2, earningsDate:null },
-  { ticker:"HOOD",  sector:"Financial",   momentum:"recovering", rsi:46, macd:"neutral",           trend:"near 50MA",          catalyst:"Retail trading volume recovery",  expiryDays:35,  ivr:68, beta:2.0, earningsDate:null },
-  { ticker:"MSTR",  sector:"Financial",   momentum:"recovering", rsi:48, macd:"forming base",      trend:"near 50MA",          catalyst:"Bitcoin treasury strategy",       expiryDays:21,  ivr:80, beta:3.0, earningsDate:null },
-  { ticker:"SQ",    sector:"Financial",   momentum:"recovering", rsi:45, macd:"neutral",           trend:"near 50MA",          catalyst:"Bitcoin + fintech recovery",      expiryDays:35,  ivr:60, beta:2.0, earningsDate:null },
+  { ticker:"JPM",   sector:"Financial",   momentum:"strong",     rsi:57, macd:"bullish",      catalyst:"Net interest income strength",  ivr:28, beta:1.1, earningsDate:null },
+  { ticker:"BAC",   sector:"Financial",   momentum:"recovering", rsi:48, macd:"neutral",          catalyst:"Net interest income + rate play",  ivr:30, beta:1.3, earningsDate:null },
+  { ticker:"C",     sector:"Financial",   momentum:"recovering", rsi:47, macd:"neutral",          catalyst:"Restructuring + rate sensitivity",  ivr:32, beta:1.5, earningsDate:null },
+  { ticker:"MS",    sector:"Financial",   momentum:"steady",     rsi:52, macd:"mild bullish",         catalyst:"Investment banking cycle",  ivr:28, beta:1.4, earningsDate:null },
+  { ticker:"COIN",  sector:"Financial",   momentum:"recovering", rsi:48, macd:"forming base",          catalyst:"Crypto market recovery",  ivr:65, beta:2.2, earningsDate:null },
+  { ticker:"HOOD",  sector:"Financial",   momentum:"recovering", rsi:46, macd:"neutral",          catalyst:"Retail trading volume recovery",  ivr:68, beta:2.0, earningsDate:null },
+  { ticker:"MSTR",  sector:"Financial",   momentum:"recovering", rsi:48, macd:"forming base",          catalyst:"Bitcoin treasury strategy",  ivr:80, beta:3.0, earningsDate:null },
+  { ticker:"SQ",    sector:"Financial",   momentum:"recovering", rsi:45, macd:"neutral",          catalyst:"Bitcoin + fintech recovery",  ivr:60, beta:2.0, earningsDate:null },
   // -- Consumer & E-commerce --
-  { ticker:"TSLA",  sector:"Consumer",    momentum:"recovering", rsi:44, macd:"neutral",           trend:"testing 200MA",      catalyst:"Q1 delivery data",                expiryDays:56,  ivr:61, beta:2.0, earningsDate:null },
-  { ticker:"NFLX",  sector:"Consumer",    momentum:"strong",     rsi:60, macd:"bullish",           trend:"trending up",        catalyst:"Ad-supported tier growth",        expiryDays:28,  ivr:38, beta:1.4, earningsDate:null },
-  { ticker:"UBER",  sector:"Consumer",    momentum:"strong",     rsi:58, macd:"bullish",           trend:"above all MAs",      catalyst:"Profitability milestone",         expiryDays:28,  ivr:35, beta:1.5, earningsDate:null },
-  { ticker:"SHOP",  sector:"Consumer",    momentum:"steady",     rsi:52, macd:"mild bullish",      trend:"above 50MA",         catalyst:"E-commerce market share gains",   expiryDays:35,  ivr:52, beta:1.6, earningsDate:null },
-  { ticker:"DKNG",  sector:"Consumer",    momentum:"steady",     rsi:50, macd:"neutral",           trend:"near 50MA",          catalyst:"Sports betting expansion",        expiryDays:35,  ivr:58, beta:1.7, earningsDate:null },
-  { ticker:"NKE",   sector:"Consumer",    momentum:"recovering", rsi:46, macd:"neutral",           trend:"near 50MA",          catalyst:"China recovery + DTC growth",     expiryDays:35,  ivr:32, beta:1.2, earningsDate:null },
-  { ticker:"ROKU",  sector:"Consumer",    momentum:"recovering", rsi:47, macd:"neutral",           trend:"near 50MA",          catalyst:"Streaming ad platform growth",    expiryDays:35,  ivr:58, beta:1.8, earningsDate:null },
+  { ticker:"TSLA",  sector:"Consumer",    momentum:"recovering", rsi:44, macd:"neutral",      catalyst:"Q1 delivery data",  ivr:61, beta:2.0, earningsDate:null },
+  { ticker:"NFLX",  sector:"Consumer",    momentum:"strong",     rsi:60, macd:"bullish",        catalyst:"Ad-supported tier growth",  ivr:38, beta:1.4, earningsDate:null },
+  { ticker:"UBER",  sector:"Consumer",    momentum:"strong",     rsi:58, macd:"bullish",      catalyst:"Profitability milestone",  ivr:35, beta:1.5, earningsDate:null },
+  { ticker:"SHOP",  sector:"Consumer",    momentum:"steady",     rsi:52, macd:"mild bullish",         catalyst:"E-commerce market share gains",  ivr:52, beta:1.6, earningsDate:null },
+  { ticker:"DKNG",  sector:"Consumer",    momentum:"steady",     rsi:50, macd:"neutral",          catalyst:"Sports betting expansion",  ivr:58, beta:1.7, earningsDate:null },
+  { ticker:"NKE",   sector:"Consumer",    momentum:"recovering", rsi:46, macd:"neutral",          catalyst:"China recovery + DTC growth",  ivr:32, beta:1.2, earningsDate:null },
+  { ticker:"ROKU",  sector:"Consumer",    momentum:"recovering", rsi:47, macd:"neutral",          catalyst:"Streaming ad platform growth",  ivr:58, beta:1.8, earningsDate:null },
   // -- High Momentum / Speculative --
-  { ticker:"PLTR",  sector:"Technology",  momentum:"strong",     rsi:65, macd:"bullish crossover", trend:"trending up",        catalyst:"Government AI contracts",         expiryDays:21,  ivr:62, beta:2.0, earningsDate:null },
-  { ticker:"WFC",   sector:"Financial",   momentum:"steady",     rsi:51, macd:"neutral",           trend:"near 50MA",          catalyst:"Net interest income + expense cuts", expiryDays:28, ivr:28, beta:1.2, earningsDate:null },
-  { ticker:"BABA",  sector:"Global",      momentum:"recovering", rsi:49, macd:"neutral",           trend:"near 50MA",          catalyst:"China stimulus + AI investment",  expiryDays:35,  ivr:45, beta:1.6, earningsDate:null },
+  { ticker:"PLTR",  sector:"Technology",  momentum:"strong",     rsi:65, macd:"bullish crossover",        catalyst:"Government AI contracts",  ivr:62, beta:2.0, earningsDate:null },
+  { ticker:"WFC",   sector:"Financial",   momentum:"steady",     rsi:51, macd:"neutral",          catalyst:"Net interest income + expense cuts", ivr:28, beta:1.2, earningsDate:null },
+  { ticker:"BABA",  sector:"Global",      momentum:"recovering", rsi:49, macd:"neutral",          catalyst:"China stimulus + AI investment",  ivr:45, beta:1.6, earningsDate:null },
   // -- Ad Tech --
-  { ticker:"TTD",   sector:"Technology",  momentum:"steady",     rsi:53, macd:"mild bullish",      trend:"above 50MA",         catalyst:"Programmatic ad recovery",        expiryDays:35,  ivr:55, beta:1.7, earningsDate:null },
+  { ticker:"TTD",   sector:"Technology",  momentum:"steady",     rsi:53, macd:"mild bullish",         catalyst:"Programmatic ad recovery",  ivr:55, beta:1.7, earningsDate:null },
 ];
 
 // - Default State -
@@ -375,7 +375,7 @@ function calcIVRank(currentIV, bars) {
 // Full dynamic signal analysis for a stock
 // Uses intraday 1-min bars for RSI/MACD/momentum (real-time, prefetched in parallel)
 // Falls back to daily bars for trend context and IV calculation
-async function getDynamicSignals(ticker, bars, intradayBars = null) {
+async function getDynamicSignals(ticker, bars, intradayBars = null, realOptionsIV = null) {
   // Use prefetched intraday bars if provided, otherwise fetch now
   if (!intradayBars) intradayBars = await getIntradayBars(ticker);
   const signalBars   = intradayBars.length >= 10 ? intradayBars : bars;
@@ -413,6 +413,8 @@ async function getDynamicSignals(ticker, bars, intradayBars = null) {
   const ivr        = calcIVRank(currentIV, bars);
 
   // IV Percentile — % of days where IV was lower than today
+  // Uses realized vol from price bars as proxy for IV history
+  // When real options IV is available (passed in), it replaces the approximation
   let ivPercentile = 50; // default
   if (bars.length >= 30) {
     const allIVs = [];
@@ -420,7 +422,9 @@ async function getDynamicSignals(ticker, bars, intradayBars = null) {
       const ret = Math.log(bars[i].c / bars[i-1].c);
       allIVs.push(Math.abs(ret) * Math.sqrt(252));
     }
-    const daysBelow = allIVs.filter(iv => iv < currentIV).length;
+    // Use real options IV if available, else use approximation
+    const ivForPercentile = (typeof realOptionsIV === 'number' && realOptionsIV > 0) ? realOptionsIV : currentIV;
+    const daysBelow = allIVs.filter(iv => iv < ivForPercentile).length;
     ivPercentile = Math.round((daysBelow / allIVs.length) * 100);
   }
 
@@ -1459,7 +1463,7 @@ async function checkTailRiskHedge() {
     logEvent("risk", `Tail risk hedge triggered - VIX:${vix} call exposure:${fmt(callValue)} - adding SPY put hedge`);
     const spyPrice = await getStockQuote("SPY");
     if (spyPrice) {
-      const spyStock = { ticker:"SPY", sector:"Index", momentum:"steady", rsi:50, macd:"neutral", ivr:22, beta:1.0, earningsDate:null, expiryDays:30 };
+      const spyStock = { ticker:"SPY", sector:"Index", momentum:"steady", rsi:50, macd:"neutral", ivr:22, beta:1.0, earningsDate:null };
       await executeTrade(spyStock, spyPrice, 70, ["Tail risk hedge"], vix, "put");
     }
   }
@@ -1920,7 +1924,7 @@ async function getRealOptionsContract(ticker, price, optionType, score, vix, ear
     }
 
     if (best) {
-      const etH2 = getETTime().getHours() + getETTime().getMinutes() / 60;
+      const etH2 = today.getHours() + today.getMinutes() / 60;
       const earlyTag = optionType === "put" && etH2 >= 9.75 && etH2 < 10.0 ? " [EARLY WINDOW]" : "";
       logEvent("scan", `${ticker} best contract: ${best.symbol} | $${best.premium} bid/ask $${best.bid}/$${best.ask} | delta:${best.greeks.delta} | spread:${(best.spread*100).toFixed(1)}% | OI:${best.oi} [REAL DATA]${earlyTag}`);
     } else {
@@ -2234,10 +2238,16 @@ function calcPositionSize(premium, score, vix) {
     const kelly   = winRate - (1 - winRate) / payoff;
     kellyBase     = Math.max(0.05, Math.min(0.25, kelly * 0.5)); // half-Kelly, capped 5-25% of capital
   } else {
-    // Bootstrap: use conservative fixed fraction until we have real data
-    // Blend toward real Kelly as trades accumulate (70% bootstrap, 30% real when <10 trades)
-    const bootstrapKelly = 0.08; // conservative 8% of capital
-    kellyBase = bootstrapKelly;
+    // Bootstrap: hard cap at 1 contract until 30 live trades give real edge data
+    // Paper trade Kelly is inflated — don't let it size up until live fills calibrate it
+    kellyBase = 0.05; // conservative 5% of capital = typically 1 contract
+  }
+
+  // Live trading protection — never exceed 1 contract until 30 real trades recorded
+  const liveTrades = (state.dataQuality || {}).realTrades || 0;
+  if (liveTrades < 30) {
+    // Force single contract sizing until system is calibrated on live fills
+    return 1;
   }
 
   // Step 2: Score conviction multiplier
@@ -2674,7 +2684,7 @@ async function closePosition(ticker, reason, exitPremium = null) {
               : reason === "target"      ? TAKE_PROFIT_PCT
               : reason === "trail"       ? TRAIL_ACTIVATE_PCT
               : reason === "expiry-roll" ? 0.15
-              : reason === "fast-target" ? FAST_PROFIT_PCT
+              : reason === "fast-profit" ? FAST_PROFIT_PCT
               : 0; // all other exits — use entry premium (breakeven)
       ep = parseFloat((pos.premium * (1 + g)).toFixed(2));
       logEvent("warn", `${pos.ticker} using estimated exit price (no real data available) | reason:${reason} | ep:$${ep}`);
@@ -2736,6 +2746,9 @@ async function closePosition(ticker, reason, exitPremium = null) {
   state.monthlyProfit = parseFloat((state.monthlyProfit + pnl).toFixed(2));
   state.positions.splice(idx, 1);
   state.closedTrades.push({ ticker, pnl, pct, date:new Date().toLocaleDateString(), reason, score:pos.score||0, closeTime: Date.now() });
+  // Cap closedTrades at 500 — older trades archived in tradeJournal
+  // Prevents Redis payload from growing unbounded over many trading days
+  if (state.closedTrades.length > 500) state.closedTrades = state.closedTrades.slice(0, 500);
   await saveStateNow(); // force immediate save on trade close
 
   // Update consecutive losses
@@ -2931,7 +2944,8 @@ async function runScan() {
   if (!isMarketHours() && !dryRunMode) { logEvent("scan", "Outside market hours - skipping trade logic"); scanRunning = false; return; }
   if (dryRunMode) logEvent("scan", "⚡ DRY RUN MODE — no orders submitted, no state changes");
 
-  const now = Date.now();
+  const now    = Date.now();
+  const scanET = getETTime(); // single ET time reference for entire scan — avoids 6+ repeated calls
 
   // Update VIX and check velocity
   const newVIX  = await getVIX() || state.vix;
@@ -2949,7 +2963,7 @@ async function runScan() {
   logEvent("scan", `Scan | VIX:${state.vix} | cash:${fmt(state.cash)} | positions:${state.positions.length} | breadth:${marketContext.breadth.breadthPct}% | F&G:${marketContext.fearGreed.score}`);
 
   // -- MEDIUM TIER (every 5 minutes) --
-  if (now - lastMedScan > 5 * 60 * 1000) {
+  if (now - lastMedScan > 5 * 60 * 1000) { // 5-minute tier
     lastMedScan = now;
     const [breadth, rotation] = await Promise.all([getMarketBreadth(), getSectorRotation()]);
     marketContext.breadth        = breadth;
@@ -3064,6 +3078,13 @@ async function runScan() {
   await manageStockPositions();
 
   // 1. Manage existing options positions
+  // Prefetch news for all open positions in parallel — avoids per-position fetches inside loop
+  const posNewsCache = {};
+  if (state.positions.length > 0) {
+    const posNewsFetches = await Promise.all(state.positions.map(p => getNewsForTicker(p.ticker)));
+    state.positions.forEach((p, i) => { posNewsCache[p.ticker] = posNewsFetches[i] || []; });
+  }
+
   // Fetch all position data in parallel — stock quotes + options snapshots simultaneously
   const posSymbols = state.positions
     .filter(p => p.contractSymbol)
@@ -3104,184 +3125,124 @@ async function runScan() {
     // Update peak premium for trailing stop
     if (curP > pos.peakPremium) pos.peakPremium = curP;
 
-    // Fast stop - -20% in first 48 hours
-    if (hoursOpen <= FAST_STOP_HOURS && chg <= -(pos.fastStopPct || FAST_STOP_PCT)) {
-      logEvent("scan", `${pos.ticker} fast stop - down ${(chg*100).toFixed(0)}% in ${hoursOpen.toFixed(0)}hrs`);
-      await closePosition(pos.ticker, "fast-stop"); continue;
-    }
-
-    // Profit target acceleration - if +40% in first 48hrs, take it now
-    if (hoursOpen <= FAST_PROFIT_HOURS && chg >= (pos.takeProfitPct ? pos.takeProfitPct * 0.7 : FAST_PROFIT_PCT) && !pos.partialClosed) {
-      logEvent("scan", `${pos.ticker} ACCELERATED PROFIT - +${(chg*100).toFixed(0)}% in ${hoursOpen.toFixed(0)}hrs - taking gains early`);
-      await closePosition(pos.ticker, "fast-target"); continue;
-    }
-
     // Update peak cash for drawdown tracking
     const curCash = state.cash + openRisk() + realizedPnL();
     if (curCash > (state.peakCash || MONTHLY_BUDGET)) state.peakCash = curCash;
 
-    // Hard stop loss
-    if (chg <= -(pos.fastStopPct ? STOP_LOSS_PCT : STOP_LOSS_PCT)) {
-      logEvent("scan", `${pos.ticker} stop loss - down ${(chg*100).toFixed(0)}%`);
+    // ── EXIT HIERARCHY ────────────────────────────────────────────────────
+    // Order matters — earlier checks take priority over later ones
+
+    // 1. FAST STOP — -20% in first 48 hours (noise filter, not full stop)
+    if (hoursOpen <= FAST_STOP_HOURS && chg <= -(pos.fastStopPct || FAST_STOP_PCT)) {
+      logEvent("scan", `${pos.ticker} fast-stop ${(chg*100).toFixed(0)}% in ${hoursOpen.toFixed(0)}hrs`);
+      await closePosition(pos.ticker, "fast-stop"); continue;
+    }
+
+    // 2. HARD STOP — -35% at any time
+    if (chg <= -STOP_LOSS_PCT) {
+      logEvent("scan", `${pos.ticker} stop-loss ${(chg*100).toFixed(0)}%`);
       await closePosition(pos.ticker, "stop"); continue;
     }
 
-    // VIX spike profit taking — if VIX surges 15%+ intraday, option premiums inflate
-    // Pros close winners during vol spikes to capture temporarily inflated premium
-    if (chg >= 0.20 && state.vix > 0) {
-      const vixVsEntry = pos.entryVIX ? (state.vix - pos.entryVIX) / pos.entryVIX : 0;
-      if (vixVsEntry >= 0.20 && chg >= 0.25) {
-        // VIX up 20%+ since entry AND option up 25%+ = take the inflated premium
-        logEvent("scan", `${pos.ticker} VIX spike profit — VIX up ${(vixVsEntry*100).toFixed(0)}% since entry, option +${(chg*100).toFixed(0)}% — taking inflated premium`);
-        await closePosition(pos.ticker, "vix-spike-profit"); continue;
-      }
-    }
-
-    // Trailing stop with signal decay tightening
+    // 3. TRAILING STOP — activates at tier threshold, tightens on signal decay
     if (chg >= (pos.trailActivate || TRAIL_ACTIVATE_PCT)) {
-      // Base trail percentage
       let trailPct = pos.trailStop || TRAIL_STOP_PCT;
-
-      // Signal decay check — if entry conditions have deteriorated, tighten the trail
-      // Re-score current conditions vs entry conditions
-      const currentRSI      = pos.entryRSI || 55;
-      const entryMomentum   = pos.entryMomentum || "steady";
-      // Fetch current RSI for signal decay detection
-      let liveRSI = currentRSI;
+      // Signal decay: tighten trail if entry thesis has reversed
+      let liveRSI = pos.entryRSI || 55;
       try {
         const posBars = await getStockBars(pos.ticker, 20);
         if (posBars.length >= 15) liveRSI = calcRSI(posBars);
       } catch(e) {}
-
-      // If RSI has crossed from bullish zone to bearish zone since entry, tighten trail
-      if (pos.optionType === "call" && liveRSI < 45 && currentRSI >= 50) {
-        trailPct = TRAIL_STOP_PCT * 0.6; // tighten to 9% trail instead of 15%
-        logEvent("scan", `${pos.ticker} signal decay detected — RSI dropped to ${liveRSI} — tightening trail to ${(trailPct*100).toFixed(0)}%`);
-      }
-      // If put and RSI has recovered, tighten trail on the put
-      if (pos.optionType === "put" && liveRSI > 55 && currentRSI <= 50) {
+      if (pos.optionType === "call" && liveRSI < 45 && (pos.entryRSI || 55) >= 50) {
         trailPct = TRAIL_STOP_PCT * 0.6;
-        logEvent("scan", `${pos.ticker} signal decay (put) — RSI recovered to ${liveRSI} — tightening trail`);
+        logEvent("scan", `${pos.ticker} signal decay — RSI ${liveRSI} — tightening trail`);
       }
-
-      const trailStop = pos.peakPremium * (1 - trailPct);
-      pos.trailStop   = trailStop;
-      if (curP <= trailStop) {
-        logEvent("scan", `${pos.ticker} trailing stop hit - peak $${pos.peakPremium.toFixed(2)} trail $${trailStop.toFixed(2)}`);
+      if (pos.optionType === "put" && liveRSI > 55 && (pos.entryRSI || 55) <= 50) {
+        trailPct = TRAIL_STOP_PCT * 0.6;
+        logEvent("scan", `${pos.ticker} signal decay (put) — RSI ${liveRSI} — tightening trail`);
+      }
+      const trailFloor = pos.peakPremium * (1 - trailPct);
+      pos.trailStop = trailFloor;
+      if (curP <= trailFloor) {
+        logEvent("scan", `${pos.ticker} trail hit — peak $${pos.peakPremium.toFixed(2)} floor $${trailFloor.toFixed(2)}`);
         await closePosition(pos.ticker, "trail"); continue;
       }
     }
 
-    // Breakeven lock at +40%
-    if (chg >= BREAKEVEN_LOCK_PCT && !pos.breakevenLocked) {
-      pos.breakevenLocked = true;
-      pos.stop = pos.premium; // move stop to breakeven
-      logEvent("scan", `${pos.ticker} breakeven locked - stop moved to $${pos.premium}`);
-    }
-
-    // Partial close at +50%
+    // 4. PARTIAL CLOSE — at 60% of take profit target
     if (!pos.partialClosed && chg >= (pos.takeProfitPct ? pos.takeProfitPct * 0.6 : PARTIAL_CLOSE_PCT)) {
-      logEvent("scan", `${pos.ticker} partial close at +50%`);
+      logEvent("scan", `${pos.ticker} partial close at +${(chg*100).toFixed(0)}%`);
       await partialClose(pos.ticker);
     }
 
-    // Let remainder ride to +100% after partial
+    // 5. FULL TARGET — take profit (remainder after partial rides to 100%)
     if (pos.partialClosed && chg >= RIDE_TARGET_PCT) {
-      logEvent("scan", `${pos.ticker} remainder hit +100% target`);
+      logEvent("scan", `${pos.ticker} remainder +100% target`);
       await closePosition(pos.ticker, "target"); continue;
     }
-
-    // Full target (if no partial close)
     if (!pos.partialClosed && chg >= (pos.takeProfitPct || TAKE_PROFIT_PCT)) {
       logEvent("scan", `${pos.ticker} take profit +${(chg*100).toFixed(0)}% [${pos.dteLabel||"MONTHLY"}]`);
       await closePosition(pos.ticker, "target"); continue;
     }
 
-    // Gamma risk check — short DTE + high gamma = explosive moves either direction
-    // Pros cut positions when gamma risk becomes unmanageable
-    if (dte <= 5 && pos.greeks) {
-      const gamma = Math.abs(parseFloat(pos.greeks.gamma || 0));
-      const gammaRisk = gamma * price * price * 0.01; // dollar gamma risk per 1% move
-      if (gammaRisk > pos.cost * 0.30) {
-        logEvent("scan", `${pos.ticker} gamma risk high — ${dte}DTE gamma risk $${gammaRisk.toFixed(0)} vs cost $${pos.cost} — closing`);
-        await closePosition(pos.ticker, "gamma-risk"); continue;
-      }
-    }
-
-    // Time stop
+    // 6. TIME STOP — 7 days with no meaningful move
     if (daysOpen >= TIME_STOP_DAYS && Math.abs(chg) < TIME_STOP_MOVE) {
-      logEvent("scan", `${pos.ticker} time stop - ${daysOpen.toFixed(0)} days, only ${(chg*100).toFixed(1)}% move`);
+      logEvent("scan", `${pos.ticker} time-stop — ${daysOpen.toFixed(0)}d, only ${(chg*100).toFixed(1)}% move`);
       await closePosition(pos.ticker, "time-stop"); continue;
     }
 
-    // 50MA break
-    if (price < pos.strike / 1.035 * (1-MA50_BUFFER)) {
-      logEvent("scan", `${pos.ticker} broke 50MA - price $${price}`);
-      await closePosition(pos.ticker, "50ma-break"); continue;
+    // 7. EXPIRY ROLL — DTE <= 7, close winners (losers hit stop first)
+    if (dte <= 7 && chg > 0) {
+      logEvent("scan", `${pos.ticker} expiry-roll — ${dte}DTE with profit`);
+      await closePosition(pos.ticker, "expiry-roll"); continue;
     }
 
-    // IV collapse
-    if (curP < pos.premium*(1-IV_COLLAPSE_PCT) && price >= pos.strike*0.97) {
-      logEvent("scan", `${pos.ticker} IV collapse - option down ${(((pos.premium-curP)/pos.premium)*100).toFixed(0)}%`);
-      await closePosition(pos.ticker, "iv-collapse"); continue;
-    }
+    // 8. 50MA BREAK — thesis invalidated (real 50-day MA)
+    try {
+      const maBars = await getStockBars(pos.ticker, 55);
+      if (maBars.length >= 50) {
+        const ma50 = maBars.slice(-50).reduce((s, b) => s + b.c, 0) / 50;
+        const ma50Break = pos.optionType === "put"
+          ? price > ma50 * (1 + MA50_BUFFER)  // stock recovered above 50MA — put thesis broken
+          : price < ma50 * (1 - MA50_BUFFER); // stock broke below 50MA — call thesis broken
+        if (ma50Break) {
+          logEvent("scan", `${pos.ticker} 50ma-break | price $${price.toFixed(2)} | 50MA $${ma50.toFixed(2)}`);
+          await closePosition(pos.ticker, "50ma-break"); continue;
+        }
+      }
+    } catch(e) {}
 
-    // Delta drift — if delta > 0.85 option is deep ITM acting like a stock, take profits
-    const currentDelta = Math.abs(parseFloat(pos.greeks?.delta || 0));
-    if (currentDelta > 0.85 && chg >= 0.30) {
-      logEvent("scan", `${pos.ticker} delta drift ${currentDelta.toFixed(2)} > 0.85 - deep ITM, taking profits`);
-      await closePosition(pos.ticker, "delta-drift"); continue;
-    }
-
-    // Mid-trade earnings check
+    // 9. EARNINGS CLOSE — approaching earnings = IV crush risk
     if (pos.earningsDate) {
-      const daysToE = Math.round((new Date(pos.earningsDate)-new Date())/MS_PER_DAY);
+      const daysToE = Math.round((new Date(pos.earningsDate) - new Date()) / MS_PER_DAY);
       if (daysToE >= 0 && daysToE <= EARNINGS_SKIP_DAYS) {
-        logEvent("scan", `${pos.ticker} earnings in ${daysToE} days - closing to avoid IV crush`);
+        logEvent("scan", `${pos.ticker} earnings in ${daysToE}d — closing`);
         await closePosition(pos.ticker, "earnings-close"); continue;
       }
     }
 
-    // News exit — requires BOTH sustained sentiment AND price confirmation
-    // A single headline is not enough — need multiple signals agreeing
-    const newsArts = await getNewsForTicker(pos.ticker);
+    // 10. NEWS EXIT — strongly opposite news + position losing (thesis broken)
+    // newsCache prefetched before loop — no per-position API calls
+    const newsArts = posNewsCache[pos.ticker] || [];
     const newsSent = analyzeNews(newsArts);
-
     if (pos.optionType === "put" && newsSent.signal === "strongly bullish" && chg <= -0.15) {
-      // Put losing AND strongly bullish news with multiple articles — thesis broken
-      logEvent("scan", `${pos.ticker} PUT closing - strongly bullish news confirmed by price action`);
+      logEvent("scan", `${pos.ticker} news-exit — strongly bullish news vs losing put`);
       await closePosition(pos.ticker, "news-exit"); continue;
     }
     if (pos.optionType === "call" && newsSent.signal === "strongly bearish" && chg <= -0.15) {
-      // Call losing AND strongly bearish news — thesis broken
-      logEvent("scan", `${pos.ticker} CALL closing - strongly bearish news confirmed by price action`);
+      logEvent("scan", `${pos.ticker} news-exit — strongly bearish news vs losing call`);
       await closePosition(pos.ticker, "news-exit"); continue;
     }
 
-    // Expiry roll
-    if (dte <= 7 && chg > 0) {
-      logEvent("scan", `${pos.ticker} near expiry (${dte}d) - closing to avoid gamma risk`);
-      await closePosition(pos.ticker, "expiry-roll"); continue;
-    }
-
-    // Overnight risk — professional position-by-position assessment
-    const etNow2      = getETTime();
-    const etHourNow   = etNow2.getHours() + etNow2.getMinutes() / 60;
+    // 11. OVERNIGHT RISK — high VIX, losing position into close
+    const etHourNow = scanET.getHours() + scanET.getMinutes() / 60;
     if (etHourNow >= 15.75 && state.vix >= 30) {
-      // Close losers — theta + overnight risk compounds on losing positions
       if (chg <= -0.10) {
-        logEvent("scan", `${pos.ticker} overnight risk - closing losing position (${(chg*100).toFixed(0)}%) into close`);
+        logEvent("scan", `${pos.ticker} overnight-risk — losing ${(chg*100).toFixed(0)}% into close VIX ${state.vix}`);
         await closePosition(pos.ticker, "overnight-risk"); continue;
       }
-      // Protect winners — move stop to breakeven for positions up 20%+
-      if (chg >= 0.20 && !pos.breakevenLocked) {
-        pos.breakevenLocked = true;
-        pos.stop = pos.premium;
-        logEvent("scan", `${pos.ticker} overnight protection - stop moved to breakeven (up ${(chg*100).toFixed(0)}%)`);
-      }
-      // Close DTE <= 7 regardless — gamma risk overnight is too dangerous
       if (dte <= 7) {
-        logEvent("scan", `${pos.ticker} overnight risk - DTE ${dte} too short for overnight hold`);
+        logEvent("scan", `${pos.ticker} overnight-risk — ${dte}DTE too short for overnight hold`);
         await closePosition(pos.ticker, "overnight-risk"); continue;
       }
     }
@@ -3425,6 +3386,17 @@ async function runScan() {
     const stockReturn  = bars.length >= 5 ? (bars[bars.length-1].c - bars[0].o) / bars[0].o : 0;
     const relStrength  = spyReturn !== 0 ? (1 + stockReturn) / (1 + spyReturn) : 1;
 
+    // Relative weakness vs sector peers — only meaningful edge if stock is lagging ITS sector
+    // If everything scores 100 because the whole market is down, that's not signal
+    // Calculate average return of same-sector stocks and compare this stock against it
+    const sectorPeers  = stockData.filter(d => d.stock.sector === stock.sector && d.stock.ticker !== stock.ticker && d.bars && d.bars.length >= 5);
+    const sectorAvgRet = sectorPeers.length
+      ? sectorPeers.reduce((s, d) => s + (d.bars[d.bars.length-1].c - d.bars[0].o) / d.bars[0].o, 0) / sectorPeers.length
+      : stockReturn;
+    const relToSector  = sectorAvgRet !== 0 ? (1 + stockReturn) / (1 + sectorAvgRet) : 1;
+    // Store on liveStock for use in scoring
+    // relToSector < 1.0 = underperforming peers = genuine relative weakness
+
     // Gap check on individual stock
     if (bars.length >= 2) {
       const gap = Math.abs(bars[bars.length-1].o - bars[bars.length-2].c) / bars[bars.length-2].c;
@@ -3440,7 +3412,7 @@ async function runScan() {
       logEvent("filter", `${stock.ticker} insufficient bars (${bars.length}) - skip`);
       continue;
     }
-    const signals = await getDynamicSignals(stock.ticker, bars, intradayBars);
+    const signals = await getDynamicSignals(stock.ticker, bars, intradayBars, stock._realIV || null);
 
     // Earnings quality score
     // eqScore already prefetched in parallel above
@@ -3485,7 +3457,7 @@ async function runScan() {
 
     // Time of day adjustment — only penalize late entries when VIX elevated OR volume declining
     // A strong high-volume breakout at 2:30PM is still worth trading
-    const etHour      = getETTime().getHours() + getETTime().getMinutes() / 60;
+    const etHour      = scanET.getHours() + scanET.getMinutes() / 60;
     const isLastHour  = etHour >= 15.0;
     const isLateDay   = etHour >= 14.5;
     const volDecline  = todayVol < avgVol * 0.7;
@@ -3502,11 +3474,20 @@ async function runScan() {
     // Identifies beaten-down quality names for discounted 90-day calls
     const mrSetup = scoreMeanReversionCall(liveStock, relStrength, signals.adx, bars, state.vix);
     if (mrSetup.score > callSetup.score) {
-      // Mean reversion wins — boost call score and tag it
-      callSetup.score   = mrSetup.score;
-      callSetup.reasons = mrSetup.reasons;
-      callSetup.isMeanReversion = true;
-      logEvent("filter", `${stock.ticker} MEAN REVERSION setup: score ${mrSetup.score} | ${mrSetup.reasons[0]}`);
+      // Mean reversion wins — but requires liquid options or fills will be terrible in live trading
+      // RSI sub-30 situations = market makers widen spreads, OI dries up — must gate this
+      const mrContract = stock._cachedContract;
+      const mrOI       = mrContract ? (mrContract.oi || 0) : 0;
+      const mrSpread   = mrContract ? (mrContract.spread || 1) : 1;
+      const mrLiquid   = (mrOI === 0 || mrOI >= 300) && mrSpread <= 0.20; // OI=0 = unknown, allow through
+      if (mrLiquid) {
+        callSetup.score   = mrSetup.score;
+        callSetup.reasons = mrSetup.reasons;
+        callSetup.isMeanReversion = true;
+        logEvent("filter", `${stock.ticker} MEAN REVERSION setup: score ${mrSetup.score} | OI:${mrOI} spread:${(mrSpread*100).toFixed(0)}% | ${mrSetup.reasons[0]}`);
+      } else {
+        logEvent("filter", `${stock.ticker} MEAN REVERSION blocked — illiquid (OI:${mrOI} spread:${(mrSpread*100).toFixed(0)}%) — bad live fills`);
+      }
     }
 
     // Volume context for puts — high volume confirms distribution, but capitulation
@@ -3544,6 +3525,20 @@ async function runScan() {
     if (spyRecovering) {
       putSetup.score = Math.max(0, putSetup.score - 20);
       putSetup.reasons.push("SPY recovering — tape fighting puts (-20)");
+    }
+
+    // Relative sector weakness — real edge vs just broad market selloff
+    // If stock is performing in line with or better than its sector, the put signal is weaker
+    if (relToSector < 0.97) {
+      // Stock lagging sector by 3%+ = genuine relative weakness = boost put score
+      const relBoost = relToSector < 0.93 ? 15 : 8;
+      putSetup.score = Math.min(100, putSetup.score + relBoost);
+      putSetup.reasons.push(`Weak vs sector peers: ${((relToSector-1)*100).toFixed(1)}% (+${relBoost})`);
+    } else if (relToSector > 1.03) {
+      // Stock outperforming sector — this is a sector-wide move not stock-specific
+      // Reduce put score — less edge when whole sector is moving together
+      putSetup.score = Math.max(0, putSetup.score - 10);
+      putSetup.reasons.push(`Outperforming sector peers (+${((relToSector-1)*100).toFixed(1)}%) — sector-wide move (-10)`);
     }
 
     // Volume pace boost — if running 2x+ expected volume, strong signal either direction
@@ -3678,7 +3673,7 @@ async function runScan() {
     const bestReasons = optionType === "put" ? putSetup.reasons : callSetup.reasons;
 
     // After 1PM ET, afternoon session is noisier — require higher conviction
-    const etHourNow = getETTime().getHours() + getETTime().getMinutes() / 60;
+    const etHourNow = scanET.getHours() + scanET.getMinutes() / 60;
     const afternoonMinScore = etHourNow >= 13 ? 85 : 0; // 85+ required after 1PM ET
     const effectiveMinScore = Math.max(ddProtocol.minScore || MIN_SCORE, afternoonMinScore);
     if (bestScore < effectiveMinScore) {
@@ -3700,7 +3695,6 @@ async function runScan() {
     // Queue for execution — heat is rechecked live in the execution loop below
     const isMR = optionType === "call" && callSetup.isMeanReversion;
     scored.push({ stock: liveStock, price, score: bestScore, reasons: bestReasons, optionType, isMeanReversion: isMR });
-    await new Promise(r=>setTimeout(r,200));
   }
 
   // Sort by score
@@ -3720,7 +3714,12 @@ async function runScan() {
       await Promise.all(batch.map(async ({ stock, price, optionType, score }) => {
         try {
           const contract = await getRealOptionsContract(stock.ticker, price, optionType, score, state.vix, stock.earningsDate);
-          if (contract) stock._cachedContract = contract;
+          if (contract) {
+            stock._cachedContract = contract;
+            // Store real IV from options market for use in scoring
+            // This replaces the approximated IV from price bars
+            if (contract.iv && contract.iv > 0) stock._realIV = contract.iv;
+          }
         } catch(e) {}
       }));
     }
@@ -3752,7 +3751,7 @@ async function runScan() {
   await checkStockBuys();
 
   state.lastScan = new Date().toISOString();
-  await flushStateIfDirty();
+  markDirty(); // flush handled by dedicated interval below
   } catch(e) {
     logEvent("error", `runScan crashed: ${e.message} | stack: ${e.stack?.split("\n")[1]?.trim() || "unknown"}`);
   } finally {
@@ -3936,6 +3935,12 @@ STOCK PORTFOLIO
 setInterval(() => {
   const day = getETTime().getDay();
   if (day >= 1 && day <= 5) runScan();
+}, 30000);
+
+// Dedicated state flush every 30 seconds — decoupled from scan timing
+// Ensures dirty state is persisted even if scan is slow or skipped
+setInterval(() => {
+  flushStateIfDirty().catch(e => console.error("Flush interval error:", e.message));
 }, 30000);
 
 // Morning reset + email 13:00 UTC = 9:00 AM EDT (UTC-4, DST in effect Mar-Nov)
