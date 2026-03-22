@@ -1,5 +1,5 @@
 // -
-// APEX v3.82 - Professional Options Trading Agent
+// APEX v3.83 - Professional Options Trading Agent
 // Alpaca Paper Trading Edition
 // -
 const express    = require("express");
@@ -240,17 +240,23 @@ async function redisSave(data) {
     if (sizeKB > 8000) {
       console.error(`[REDIS] WARNING: Payload ${sizeKB}KB approaching 10MB limit`);
     }
-    const res = await fetch(`${REDIS_URL}/set/${REDIS_KEY}`, {
+    // Use Upstash pipeline endpoint — most reliable format, no double-encoding ambiguity
+    // Pipeline body: array of commands, each command is [cmd, key, value]
+    const res = await fetch(`${REDIS_URL}/pipeline`, {
       method: "POST",
       headers: {
         Authorization: `Bearer ${REDIS_TOKEN}`,
         "Content-Type": "application/json"
       },
-      body: JSON.stringify(serialized)
+      body: JSON.stringify([["set", REDIS_KEY, serialized]])
     });
     const result = await res.json();
-    if (result.error) console.error("[REDIS] Save error:", result.error);
-    else if (sizeKB > 1000) console.log(`[REDIS] Saved ${sizeKB}KB`);
+    // Pipeline returns array of results: [{result:"OK"}]
+    if (result[0] && result[0].error) {
+      console.error("[REDIS] Save error:", result[0].error);
+    } else {
+      console.log(`[REDIS] Saved OK (${sizeKB}KB)`);
+    }
   } catch(e) { console.error("[REDIS] Save error:", e.message); }
 }
 
@@ -268,22 +274,35 @@ async function redisLoad() {
   const RETRY_DELAY  = 2000; // 2 seconds between retries
   for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
     try {
-      const res  = await fetch(`${REDIS_URL}/get/${REDIS_KEY}`, {
-        headers: { Authorization: `Bearer ${REDIS_TOKEN}` }
+      // Use pipeline GET — consistent with how we save
+      const res  = await fetch(`${REDIS_URL}/pipeline`, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${REDIS_TOKEN}`,
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify([["get", REDIS_KEY]])
       });
       const data = await res.json();
-      if (data && data.result) {
+      // Pipeline returns [{result: "value_string"}]
+      const raw = data && data[0] && data[0].result;
+      if (raw) {
         if (attempt > 1) console.log(`[REDIS] Loaded on attempt ${attempt}`);
-        // Parse the result — handle both old wrapped format and new raw format
-        let parsed = JSON.parse(data.result);
-        // Old format bug: state was saved as {value: "..."} — unwrap if detected
+        // raw is the JSON string we saved — parse it directly
+        let parsed = JSON.parse(raw);
+        // Safety: handle any legacy double-encoded formats
+        if (typeof parsed === 'string') {
+          console.log("[REDIS] Detected double-encoded string — parsing again");
+          parsed = JSON.parse(parsed);
+        }
+        // Handle old {value:"..."} wrapped format from very early versions
         if (parsed && typeof parsed === 'object' && typeof parsed.value === 'string' && !parsed.cash) {
           console.log("[REDIS] Detected old wrapped format — unwrapping");
           parsed = JSON.parse(parsed.value);
         }
         return parsed;
       }
-      // Key exists but null result = no saved state yet (fresh account)
+      // Null result = key doesn't exist yet (fresh account)
       return null;
     } catch(e) {
       console.error(`[REDIS] Load attempt ${attempt}/${MAX_RETRIES} failed: ${e.message}`);
@@ -2171,6 +2190,8 @@ function getDeployableCash() {
 }
 
 async function rebalanceCashETF() {
+  // Never execute during dry run or outside market hours — BIL is a real order
+  if (dryRunMode || !isMarketHours()) return;
   // Goal: always keep CASH_ETF_TARGET ($1,500) parked in BIL as the ETF half of the floor
   // The other $1,500 stays liquid as the cash half of the floor
   const currentETF    = state.cashETFValue || 0;
@@ -2213,6 +2234,7 @@ async function rebalanceCashETF() {
 
 // Liquidate BIL if needed to fund a trade - only touches ETF above the floor target
 async function ensureLiquidCash(needed) {
+  if (dryRunMode || !isMarketHours()) return; // never liquidate BIL in dry run or outside hours
   if (state.cash >= needed) return;
   const shortfall    = needed - state.cash;
   const bilPrice     = state.cashETFPrice || 91;
@@ -5515,7 +5537,7 @@ process.on("unhandledRejection", (reason, promise) => {
 // Boot sequence - load state from Redis then start server
 initState().then(() => {
   app.listen(PORT, () => {
-    console.log(`APEX v3.82 running on port ${PORT}`);
+    console.log(`APEX v3.83 running on port ${PORT}`);
     console.log(`Alpaca key:  ${ALPACA_KEY?"SET":"NOT SET"}`);
     console.log(`Gmail:       ${GMAIL_USER||"NOT SET"}`);
     console.log(`Redis:       ${REDIS_URL?"SET":"NOT SET - using file fallback"}`);
