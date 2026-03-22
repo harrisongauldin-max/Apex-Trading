@@ -202,27 +202,56 @@ function defaultState() {
 
 // - Redis Helpers -
 async function redisSave(data) {
-  // Always write to local file as backup regardless of Redis
+  // Strip large recalculable fields before saving — reduces payload from ~10MB to <500KB
+  // marketContext is rebuilt every 5 minutes — no need to persist to Redis
+  // scoreReasons in tradeJournal are display-only — trim to save space
+  const slim = {
+    ...data,
+    // Trim tradeJournal entries — keep essentials, drop verbose scoreReasons
+    tradeJournal: (data.tradeJournal || []).slice(0, 100).map(function(t) {
+      return {
+        time: t.time, ticker: t.ticker, action: t.action, strike: t.strike,
+        expDate: t.expDate, premium: t.premium, contracts: t.contracts,
+        cost: t.cost, score: t.score, delta: t.delta, iv: t.iv, vix: t.vix,
+        optionType: t.optionType, pnl: t.pnl, pct: t.pct, reason: t.reason,
+        washSaleFlag: t.washSaleFlag || false,
+        // Trim scoreReasons to 3 max
+        scoreReasons: (t.scoreReasons || []).slice(0, 3),
+      };
+    }),
+    // tradeLog is display-only — keep last 100
+    tradeLog: (data.tradeLog || []).slice(0, 100),
+    // closedTrades — keep last 200 (was 500)
+    closedTrades: (data.closedTrades || []).slice(0, 200),
+    // stockTrades — keep last 50
+    stockTrades: (data.stockTrades || []).slice(0, 50),
+  };
+  // Never persist marketContext — it's recalculated every 5 min
+  delete slim._marketContextCache;
+
+  // Always write full state to local file as backup
   try { fs.writeFileSync(STATE_FILE, JSON.stringify(data, null, 2)); } catch(e) {}
 
   if (!REDIS_URL || !REDIS_TOKEN) return;
 
   try {
-    // Upstash REST API: POST /set/KEY
-    // Body must be the raw JSON string — NOT wrapped in {value:...}
-    // Wrapped format caused isValid to fail on load → reset to defaults every deploy
-    const serialized = JSON.stringify(data);
+    const serialized = JSON.stringify(slim);
+    const sizeKB = Math.round(serialized.length / 1024);
+    if (sizeKB > 8000) {
+      console.error(`[REDIS] WARNING: Payload ${sizeKB}KB approaching 10MB limit`);
+    }
     const res = await fetch(`${REDIS_URL}/set/${REDIS_KEY}`, {
       method: "POST",
       headers: {
         Authorization: `Bearer ${REDIS_TOKEN}`,
         "Content-Type": "application/json"
       },
-      body: JSON.stringify(serialized) // Upstash expects the value as a JSON-encoded string
+      body: JSON.stringify(serialized)
     });
     const result = await res.json();
-    if (result.error) console.error("Redis save error:", result.error);
-  } catch(e) { console.error("Redis save error:", e.message); }
+    if (result.error) console.error("[REDIS] Save error:", result.error);
+    else if (sizeKB > 1000) console.log(`[REDIS] Saved ${sizeKB}KB`);
+  } catch(e) { console.error("[REDIS] Save error:", e.message); }
 }
 
 async function redisLoad() {
@@ -433,7 +462,7 @@ async function initState() {
 function logEvent(type, message) {
   const entry = { time: new Date().toISOString(), type, message };
   state.tradeLog.unshift(entry);
-  if (state.tradeLog.length > 500) state.tradeLog = state.tradeLog.slice(0, 500);
+  if (state.tradeLog.length > 200) state.tradeLog = state.tradeLog.slice(0, 200);
   console.log(`[${type.toUpperCase()}] ${message}`);
 }
 
@@ -2826,22 +2855,21 @@ async function executeTrade(stock, price, score, scoreReasons, vix, optionType =
     time:          new Date().toISOString(),
     ticker:        stock.ticker,
     action:        "OPEN",
+    optionType,
     strike:        contract.strike,
     expDate:       contract.expDate,
     premium:       contract.premium,
     contracts,
     cost:          finalCost,
-    alpacaOrderId,
     score,
-    scoreReasons,
+    scoreReasons:  scoreReasons.slice(0, 5), // cap at 5 reasons — full list not needed in Redis
     delta:         contract.greeks.delta,
     iv:            parseFloat(((contract.iv||0.3)*100).toFixed(1)),
     vix,
-    catalyst:      stock.catalyst,
     washSaleFlag:  stock._washSaleWarning || false,
-    reasoning:     `Score ${score}/100. ${scoreReasons.slice(0,3).join(". ")}. Delta ${contract.greeks.delta} within target range.${stock._washSaleWarning ? " ⚠ WASH SALE WARNING." : ""}`,
+    reasoning:     `Score ${score}/100. ${scoreReasons.slice(0,3).join(". ")}.${stock._washSaleWarning ? " ⚠ WASH SALE WARNING." : ""}`,
   });
-  if (state.tradeJournal.length > 200) state.tradeJournal = state.tradeJournal.slice(0,200);
+  if (state.tradeJournal.length > 100) state.tradeJournal = state.tradeJournal.slice(0,100);
 
   const typeLabel = optionType === "put" ? "P" : "C";
   const dataLabel = contract.symbol ? "REAL" : "EST";
@@ -2963,7 +2991,7 @@ async function closePosition(ticker, reason, exitPremium = null) {
   state.closedTrades.push({ ticker, pnl, pct, date:new Date().toLocaleDateString(), reason, score:pos.score||0, closeTime: Date.now() });
   // Cap closedTrades at 500 — older trades archived in tradeJournal
   // Prevents Redis payload from growing unbounded over many trading days
-  if (state.closedTrades.length > 500) state.closedTrades = state.closedTrades.slice(0, 500);
+  if (state.closedTrades.length > 200) state.closedTrades = state.closedTrades.slice(0, 200);
   await saveStateNow(); // force immediate save on trade close
 
   // Update consecutive losses
@@ -3672,10 +3700,21 @@ async function runScan() {
     // Store on liveStock for use in scoring
     // relToSector < 1.0 = underperforming peers = genuine relative weakness
 
-    // Gap check on individual stock
+    // Gap check — catches both overnight gaps and intraday crashes
     if (bars.length >= 2) {
-      const gap = Math.abs(bars[bars.length-1].o - bars[bars.length-2].c) / bars[bars.length-2].c;
-      if (gap > MAX_GAP_PCT) { logEvent("filter", `${stock.ticker} gap ${(gap*100).toFixed(1)}% - skip`); continue; }
+      // Overnight gap: today open vs yesterday close
+      const overnightGap = Math.abs(bars[bars.length-1].o - bars[bars.length-2].c) / bars[bars.length-2].c;
+      if (overnightGap > MAX_GAP_PCT) {
+        logEvent("filter", `${stock.ticker} gap ${(overnightGap*100).toFixed(1)}% overnight - skip`);
+        continue;
+      }
+      // Intraday crash: current price vs today's open — catches SMCI-style -30% intraday events
+      // These stocks have broken options markets, extreme spreads, unreliable data
+      const intradayCrash = (bars[bars.length-1].o - price) / bars[bars.length-1].o;
+      if (intradayCrash > 0.15) {
+        logEvent("filter", `${stock.ticker} intraday crash ${(intradayCrash*100).toFixed(1)}% below open — skip (broken options market)`);
+        continue;
+      }
     }
 
     // Anomaly detection — skip if unusual price movement detected
@@ -3895,17 +3934,21 @@ async function runScan() {
     // MR fires here so isMeanReversion flag is set before regime penalty check below
     const mrSetup = scoreMeanReversionCall(liveStock, relStrength, signals.adx, bars, state.vix);
     if (mrSetup.score > callSetup.score) {
-      const mrContract = stock._cachedContract;
-      const mrOI       = mrContract ? (mrContract.oi || 0) : 0;
-      const mrSpread   = mrContract ? (mrContract.spread || 1) : 1;
-      const mrLiquid   = (mrOI === 0 || mrOI >= 300) && mrSpread <= 0.20;
+      // MR liquidity check — contract not yet fetched at this stage
+      // Use stock-level proxy: beta > 1.2 and sector with active options = liquid enough
+      // Real OI/spread check happens at execution time via _cachedContract after prefetch
+      const mrBeta    = stock.beta || 1.0;
+      const mrSector  = stock.sector || "";
+      // Financial stocks typically have lower options liquidity for MR plays
+      // Low beta stocks don't move enough for MR to be profitable after spread
+      const mrLiquid  = mrBeta >= 1.2 && mrSector !== "Financial";
       if (mrLiquid) {
         callSetup.score   = mrSetup.score;
         callSetup.reasons = mrSetup.reasons;
         callSetup.isMeanReversion = true;
-        logEvent("filter", `${stock.ticker} MEAN REVERSION setup: score ${mrSetup.score} | OI:${mrOI} spread:${(mrSpread*100).toFixed(0)}% | ${mrSetup.reasons[0]}`);
+        logEvent("filter", `${stock.ticker} MEAN REVERSION: score ${mrSetup.score} | beta:${mrBeta} | liquidity check deferred to execution`);
       } else {
-        logEvent("filter", `${stock.ticker} MEAN REVERSION blocked — illiquid (OI:${mrOI} spread:${(mrSpread*100).toFixed(0)}%) — bad live fills`);
+        logEvent("filter", `${stock.ticker} MEAN REVERSION skipped — beta:${mrBeta} sector:${mrSector} (low liquidity proxy)`);
       }
     }
 
@@ -4026,6 +4069,15 @@ async function runScan() {
       logEvent("filter", `${stock.ticker} - bypassing filter for PUT: ${reason}`);
     }
 
+    // Final MR liquidity gate — now we have real contract data from prefetch
+    if (isMeanReversion && stock._cachedContract) {
+      const execOI     = stock._cachedContract.oi || 0;
+      const execSpread = stock._cachedContract.spread || 1;
+      if (execOI > 0 && execOI < 50 && execSpread > 0.25) {
+        logEvent("filter", `${stock.ticker} MEAN REVERSION blocked at execution — OI:${execOI} spread:${(execSpread*100).toFixed(0)}% too illiquid`);
+        continue;
+      }
+    }
     const entered = await executeTrade(stock, price, score, reasons, state.vix, optionType, isMeanReversion);
     if (entered) await new Promise(r=>setTimeout(r,500));
   }
