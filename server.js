@@ -1,5 +1,5 @@
 // -
-// APEX v3.81 - Professional Options Trading Agent
+// APEX v3.82 - Professional Options Trading Agent
 // Alpaca Paper Trading Edition
 // -
 const express    = require("express");
@@ -224,13 +224,40 @@ async function redisLoad() {
     } catch(e) {}
     return null;
   }
+  // Retry up to 3 times — Redis may not be reachable on cold container start
+  // Silent failure here causes state to reset to $10k default — catastrophic in live trading
+  const MAX_RETRIES  = 3;
+  const RETRY_DELAY  = 2000; // 2 seconds between retries
+  for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+    try {
+      const res  = await fetch(`${REDIS_URL}/get/${REDIS_KEY}`, {
+        headers: { Authorization: `Bearer ${REDIS_TOKEN}` }
+      });
+      const data = await res.json();
+      if (data && data.result) {
+        if (attempt > 1) console.log(`[REDIS] Loaded on attempt ${attempt}`);
+        return JSON.parse(data.result);
+      }
+      // Key exists but empty result = no saved state yet (fresh account)
+      return null;
+    } catch(e) {
+      console.error(`[REDIS] Load attempt ${attempt}/${MAX_RETRIES} failed: ${e.message}`);
+      if (attempt < MAX_RETRIES) {
+        console.log(`[REDIS] Retrying in ${RETRY_DELAY/1000}s...`);
+        await new Promise(r => setTimeout(r, RETRY_DELAY));
+      }
+    }
+  }
+  // All retries failed — this is dangerous in live trading
+  console.error("[REDIS] CRITICAL: All load attempts failed — starting with saved file or defaults");
+  console.error("[REDIS] If live trading, check Upstash connection immediately");
+  // Try file fallback as last resort
   try {
-    const res  = await fetch(`${REDIS_URL}/get/${REDIS_KEY}`, {
-      headers: { Authorization: `Bearer ${REDIS_TOKEN}` }
-    });
-    const data = await res.json();
-    if (data && data.result) return JSON.parse(data.result);
-  } catch(e) { console.error("Redis load error:", e.message); }
+    if (fs.existsSync(STATE_FILE)) {
+      console.log("[REDIS] Using local file fallback");
+      return JSON.parse(fs.readFileSync(STATE_FILE, "utf8"));
+    }
+  } catch(e) {}
   return null;
 }
 
@@ -281,14 +308,48 @@ let state = defaultState();
 async function initState() {
   const saved = await redisLoad();
   if (saved) {
-    state = { ...defaultState(), ...saved };
-    console.log("State loaded from Redis | cash:", state.cash, "| positions:", state.positions.length);
+    // ── STATE VALIDATION ─────────────────────────────────────────────────
+    // Validate loaded state before using it — corrupt or empty state
+    // is more dangerous than starting fresh, especially in live trading
+    const isValid = (
+      typeof saved.cash === 'number' && saved.cash >= 0 &&
+      Array.isArray(saved.positions) &&
+      Array.isArray(saved.closedTrades)
+    );
+
+    if (!isValid) {
+      console.error("[STATE] CRITICAL: Loaded state failed validation — fields missing or corrupt");
+      console.error("[STATE] Raw loaded cash:", saved.cash, "| positions type:", typeof saved.positions);
+      console.error("[STATE] Starting fresh — check Redis data integrity");
+      // Don't use corrupt state — fall through to defaultState
+    } else {
+      // Suspicious state check — $10k cash with no trades is normal on first run
+      // but $10k cash after weeks of trading means something reset unexpectedly
+      const hasTradeHistory = saved.closedTrades && saved.closedTrades.length > 0;
+      const cashMatchesDefault = Math.abs(saved.cash - MONTHLY_BUDGET) < 1;
+      const noPositions = !saved.positions || saved.positions.length === 0;
+      if (hasTradeHistory && cashMatchesDefault && noPositions) {
+        console.warn("[STATE] WARNING: State has trade history but cash reset to default — possible accidental reset");
+        console.warn("[STATE] Cash: $" + saved.cash + " | Trades: " + saved.closedTrades.length + " | Positions: 0");
+        console.warn("[STATE] Loading anyway — verify dashboard looks correct");
+      }
+
+      state = { ...defaultState(), ...saved };
+      console.log("[STATE] Loaded | cash: $" + state.cash + " | positions: " + state.positions.length + " | trades: " + (state.closedTrades||[]).length);
+    }
   } else {
-    console.log("No saved state found - starting fresh");
+    console.log("[STATE] No saved state found — starting fresh with $" + MONTHLY_BUDGET);
   }
-  // Apply custom budget if set
+
+  // Apply custom budget if set — customBudget overrides cash on every restart
+  // This ensures budget changes survive deploys
   if (state.customBudget && state.customBudget > 0) {
-    state.cash = state.customBudget;
+    // Only restore custom budget if it looks intentional
+    // Don't restore if it matches default (was never changed)
+    if (state.customBudget !== MONTHLY_BUDGET) {
+      state.cash = state.customBudget;
+      console.log("[STATE] Custom budget restored: $" + state.customBudget);
+    }
   }
 
   // ── POSITION RECONCILIATION ─────────────────────────────────────────────
@@ -5282,15 +5343,70 @@ app.post("/api/set-budget", async (req, res) => {
 });
 app.get("/health",           (req,res) => res.json({status:"ok",uptime:process.uptime(),vix:state.vix,positions:state.positions.length}));
 
+// ── GRACEFUL SHUTDOWN — save state before Railway kills the container ──────
+// Railway sends SIGTERM before terminating — we have ~10 seconds to clean up
+// This ensures state is persisted even mid-deploy, preventing data loss
+let isShuttingDown = false;
+
+async function gracefulShutdown(signal) {
+  if (isShuttingDown) return;
+  isShuttingDown = true;
+  console.log(`[SHUTDOWN] ${signal} received — saving state before exit`);
+
+  // Stop accepting new scans
+  scanRunning = true; // prevents new scan from starting
+
+  // Save state with retries — most critical operation on shutdown
+  let saved = false;
+  for (let i = 1; i <= 3; i++) {
+    try {
+      await redisSave(state);
+      saved = true;
+      console.log(`[SHUTDOWN] State saved to Redis (attempt ${i}) | cash: $${state.cash} | positions: ${state.positions.length}`);
+      break;
+    } catch(e) {
+      console.error(`[SHUTDOWN] Redis save attempt ${i} failed: ${e.message}`);
+      if (i < 3) await new Promise(r => setTimeout(r, 1000));
+    }
+  }
+
+  // Also save to local file as backup
+  try {
+    fs.writeFileSync(STATE_FILE, JSON.stringify(state, null, 2));
+    console.log("[SHUTDOWN] State saved to local file backup");
+  } catch(e) {
+    console.error("[SHUTDOWN] Local file save failed:", e.message);
+  }
+
+  if (!saved) {
+    console.error("[SHUTDOWN] CRITICAL: Could not save state to Redis — positions may be lost on restart");
+  }
+
+  console.log("[SHUTDOWN] Complete — exiting");
+  process.exit(0);
+}
+
+// Register shutdown handlers
+process.on("SIGTERM", () => gracefulShutdown("SIGTERM")); // Railway deploy
+process.on("SIGINT",  () => gracefulShutdown("SIGINT"));  // Ctrl+C / manual stop
+process.on("SIGHUP",  () => gracefulShutdown("SIGHUP"));  // Terminal hangup
+
+// Unhandled rejection safety net — log but don't crash
+process.on("unhandledRejection", (reason, promise) => {
+  console.error("[ERROR] Unhandled rejection:", reason?.message || reason);
+  // Don't exit — log and continue
+});
+
 // Boot sequence - load state from Redis then start server
 initState().then(() => {
   app.listen(PORT, () => {
-    console.log(`APEX v3.81 running on port ${PORT}`);
+    console.log(`APEX v3.82 running on port ${PORT}`);
     console.log(`Alpaca key:  ${ALPACA_KEY?"SET":"NOT SET"}`);
     console.log(`Gmail:       ${GMAIL_USER||"NOT SET"}`);
     console.log(`Redis:       ${REDIS_URL?"SET":"NOT SET - using file fallback"}`);
     console.log(`Budget:      $${state.cash} | Floor: $${CAPITAL_FLOOR}`);
     console.log(`Positions:   ${state.positions.length} open`);
+    console.log(`Trades:      ${(state.closedTrades||[]).length} closed trades in history`);
     console.log(`Scan:        every 30 seconds, 9AM-4PM ET Mon-Fri`);
     console.log(`Entry window: 10AM-3:30PM ET`);
   });
