@@ -1,5 +1,5 @@
 // -
-// APEX v3.80 - Professional Options Trading Agent
+// APEX v3.81 - Professional Options Trading Agent
 // Alpaca Paper Trading Edition
 // -
 const express    = require("express");
@@ -289,6 +289,62 @@ async function initState() {
   // Apply custom budget if set
   if (state.customBudget && state.customBudget > 0) {
     state.cash = state.customBudget;
+  }
+
+  // ── POSITION RECONCILIATION ─────────────────────────────────────────────
+  // Cross-reference APEX state with actual Alpaca positions on every startup
+  // Prevents ghost positions (APEX thinks open, Alpaca closed) and missed positions
+  if (ALPACA_KEY) {
+    try {
+      const alpacaPositions = await alpacaGet("/positions");
+      if (alpacaPositions && Array.isArray(alpacaPositions)) {
+        const alpacaSymbols = new Set(alpacaPositions.map(p => p.symbol));
+        let ghosts = 0, orphans = 0;
+
+        // Check for ghost positions — APEX has them, Alpaca doesn't
+        for (const pos of [...state.positions]) {
+          if (pos.contractSymbol && !alpacaSymbols.has(pos.contractSymbol)) {
+            // Position exists in APEX but not in Alpaca — was closed externally
+            console.log(`[RECONCILE] Ghost position detected: ${pos.ticker} ${pos.contractSymbol} — removing from state`);
+            const idx = state.positions.indexOf(pos);
+            state.positions.splice(idx, 1);
+            // Record as closed at unknown price (external close)
+            state.closedTrades.push({
+              ticker: pos.ticker, pnl: 0, pct: "0", reason: "reconcile-removed",
+              date: new Date().toLocaleDateString(), score: pos.score || 0, closeTime: Date.now()
+            });
+            ghosts++;
+          }
+        }
+
+        // Check for orphan positions — Alpaca has them, APEX doesn't know about them
+        for (const alpPos of alpacaPositions) {
+          // Only check options (contract symbols have format like AAPL260117C00150000)
+          if (!/^[A-Z]+\d{6}[CP]\d{8}$/.test(alpPos.symbol)) continue;
+          const known = state.positions.find(p => p.contractSymbol === alpPos.symbol);
+          if (!known) {
+            console.log(`[RECONCILE] Orphan position detected: ${alpPos.symbol} — exists in Alpaca but not in APEX state`);
+            orphans++;
+            // Log but don't auto-add — would need full position metadata
+            // Dashboard will show this as a warning
+          }
+        }
+
+        if (ghosts > 0 || orphans > 0) {
+          console.log(`[RECONCILE] Complete: ${ghosts} ghost(s) removed, ${orphans} orphan(s) detected`);
+          if (orphans > 0) console.log("[RECONCILE] WARNING: Orphan positions exist in Alpaca — check dashboard");
+          await redisSave(state); // save reconciled state immediately
+        } else {
+          console.log("[RECONCILE] OK — APEX state matches Alpaca positions");
+        }
+
+        state.lastReconcile = new Date().toISOString();
+        state.reconcileStatus = ghosts === 0 && orphans === 0 ? "ok" : "warning";
+        state.orphanCount = orphans;
+      }
+    } catch(e) {
+      console.log("[RECONCILE] Failed:", e.message, "— proceeding with saved state");
+    }
   }
 }
 
@@ -862,7 +918,17 @@ async function alpacaDelete(endpoint) {
 // Get latest stock quote
 async function getStockQuote(ticker) {
   const data = await alpacaGet(`/stocks/${ticker}/quotes/latest`, ALPACA_DATA);
-  if (data && data.quote) return parseFloat(data.quote.ap || data.quote.bp || 0);
+  if (data && data.quote) {
+    // Stale data check — reject quotes older than 5 minutes during market hours
+    const quoteTime = data.quote.t ? new Date(data.quote.t).getTime() : Date.now();
+    const ageMs     = Date.now() - quoteTime;
+    const STALE_MS  = 5 * 60 * 1000; // 5 minutes
+    if (ageMs > STALE_MS && isMarketHours()) {
+      logEvent("warn", `${ticker} quote is ${(ageMs/60000).toFixed(1)}min old — stale data, skipping`);
+      return null; // return null so calling code skips this stock
+    }
+    return parseFloat(data.quote.ap || data.quote.bp || 0);
+  }
   // Fallback to snapshot
   const snap = await alpacaGet(`/stocks/${ticker}/snapshot`, ALPACA_DATA);
   if (snap && snap.latestTrade) return parseFloat(snap.latestTrade.p || 0);
@@ -2498,7 +2564,7 @@ async function executeTrade(stock, price, score, scoreReasons, vix, optionType =
     return false;
   }
 
-  // Submit order to Alpaca paper trading
+  // Submit order to Alpaca — fill confirmation happens inside
   // Only submit if we have a real contract symbol (not an estimate)
   let alpacaOrderId = null;
   if (contract.symbol && contract.ask > 0 && !dryRunMode) {
@@ -2516,9 +2582,46 @@ async function executeTrade(stock, price, score, scoreReasons, vix, optionType =
       if (orderResp && orderResp.id) {
         alpacaOrderId = orderResp.id;
         logEvent("trade", `Alpaca order submitted: ${orderResp.id} | ${contract.symbol} | ${contracts}x @ $${limitPrice}`);
-        // Use actual fill price if immediately filled — recalculate cost/target/stop
-        if (orderResp.filled_avg_price && parseFloat(orderResp.filled_avg_price) > 0) {
-          contract.premium = parseFloat(parseFloat(orderResp.filled_avg_price).toFixed(2));
+
+        // ── FILL CONFIRMATION — poll for up to 10 seconds ──────────────
+        // Limit orders are not guaranteed to fill immediately
+        // If unfilled after 10s, cancel and skip — don't update state on unfilled orders
+        let fillConfirmed  = false;
+        let fillPrice      = null;
+        const pollStart    = Date.now();
+        const FILL_TIMEOUT = 10000; // 10 seconds
+        const POLL_INTERVAL= 1000;  // check every 1 second
+
+        // Check if immediately filled
+        if (orderResp.status === "filled" && orderResp.filled_avg_price) {
+          fillConfirmed = true;
+          fillPrice = parseFloat(parseFloat(orderResp.filled_avg_price).toFixed(2));
+          logEvent("trade", `Order ${alpacaOrderId} filled immediately @ $${fillPrice}`);
+        } else {
+          // Poll for fill
+          while (!fillConfirmed && Date.now() - pollStart < FILL_TIMEOUT) {
+            await new Promise(r => setTimeout(r, POLL_INTERVAL));
+            try {
+              const pollResp = await alpacaGet(`/orders/${alpacaOrderId}`);
+              if (pollResp && pollResp.status === "filled" && pollResp.filled_avg_price) {
+                fillConfirmed = true;
+                fillPrice = parseFloat(parseFloat(pollResp.filled_avg_price).toFixed(2));
+                logEvent("trade", `Order ${alpacaOrderId} fill confirmed @ $${fillPrice} (${((Date.now()-pollStart)/1000).toFixed(1)}s)`);
+              } else if (pollResp && ["canceled","expired","rejected"].includes(pollResp.status)) {
+                logEvent("warn", `Order ${alpacaOrderId} ${pollResp.status} — not filled`);
+                break;
+              }
+            } catch(e) { logEvent("warn", `Fill poll error: ${e.message}`); break; }
+          }
+        }
+
+        if (!fillConfirmed) {
+          // Cancel unfilled order and abort trade
+          try { await alpacaDelete(`/orders/${alpacaOrderId}`); } catch(e) {}
+          logEvent("warn", `Order ${alpacaOrderId} not filled in ${FILL_TIMEOUT/1000}s — cancelled, skipping trade`);
+          alpacaOrderId = null; // signal to caller to abort
+        } else if (fillPrice) {
+          contract.premium = fillPrice; // use actual fill price not limit price
         }
       } else {
         logEvent("warn", `Alpaca order failed for ${contract.symbol}: ${JSON.stringify(orderResp)?.slice(0, 150)}`);
@@ -2526,6 +2629,12 @@ async function executeTrade(stock, price, score, scoreReasons, vix, optionType =
     } catch(e) {
       logEvent("error", `Alpaca order submission error: ${e.message}`);
     }
+  }
+
+  // Abort if order was not confirmed filled — don't update state on unfilled orders
+  if (contract.symbol && !dryRunMode && alpacaOrderId === null && contract.symbol) {
+    logEvent("skip", `${stock.ticker} — trade aborted, order not filled`);
+    return false;
   }
 
   // Recalculate cost/target/stop using final premium (may have been updated by fill)
@@ -2622,22 +2731,23 @@ async function executeTrade(stock, price, score, scoreReasons, vix, optionType =
   if (isEarningsPlay) position.earningsPlay = true;
 
   state.tradeJournal.unshift({
-    time:      new Date().toISOString(),
-    ticker:    stock.ticker,
-    action:    "OPEN",
-    strike:    contract.strike,
-    expDate:   contract.expDate,
-    premium:   contract.premium,
+    time:          new Date().toISOString(),
+    ticker:        stock.ticker,
+    action:        "OPEN",
+    strike:        contract.strike,
+    expDate:       contract.expDate,
+    premium:       contract.premium,
     contracts,
-    cost:      finalCost,
+    cost:          finalCost,
     alpacaOrderId,
     score,
     scoreReasons,
-    delta:     contract.greeks.delta,
-    iv:        parseFloat(((contract.iv||0.3)*100).toFixed(1)),
+    delta:         contract.greeks.delta,
+    iv:            parseFloat(((contract.iv||0.3)*100).toFixed(1)),
     vix,
-    catalyst:  stock.catalyst,
-    reasoning: `Score ${score}/100. ${scoreReasons.slice(0,3).join(". ")}. Catalyst: ${stock.catalyst}. Delta ${contract.greeks.delta} within target range.`,
+    catalyst:      stock.catalyst,
+    washSaleFlag:  stock._washSaleWarning || false,
+    reasoning:     `Score ${score}/100. ${scoreReasons.slice(0,3).join(". ")}. Delta ${contract.greeks.delta} within target range.${stock._washSaleWarning ? " ⚠ WASH SALE WARNING." : ""}`,
   });
   if (state.tradeJournal.length > 200) state.tradeJournal = state.tradeJournal.slice(0,200);
 
@@ -3106,15 +3216,27 @@ async function runScan() {
     const t        = dte / 365;
     let curP;
     if (pos.contractSymbol && posSnapshots[pos.contractSymbol]) {
-      const snap  = posSnapshots[pos.contractSymbol];
-      const quote = snap?.latestQuote || {};
-      const bid   = parseFloat(quote.bp || 0);
-      const ask   = parseFloat(quote.ap || 0);
+      const snap   = posSnapshots[pos.contractSymbol];
+      const quote  = snap?.latestQuote || {};
+      const greeks = snap?.greeks || {};
+      const bid    = parseFloat(quote.bp || 0);
+      const ask    = parseFloat(quote.ap || 0);
       const realPrice = bid > 0 && ask > 0 ? parseFloat(((bid + ask) / 2).toFixed(2)) : null;
       if (bid > 0) pos.bid = bid;
       if (ask > 0) pos.ask = ask;
       curP = realPrice ? realPrice : parseFloat((price * pos.iv * Math.sqrt(t) * 0.4 + 0.1).toFixed(2));
       if (realPrice) pos.realData = true;
+      // ── LIVE GREEKS REFRESH ─────────────────────────────────────────
+      // Update Greeks from live snapshot — entry Greeks become stale quickly
+      if (greeks.delta) {
+        pos.greeks = {
+          delta: parseFloat(greeks.delta || 0).toFixed(3),
+          theta: parseFloat(greeks.theta || 0).toFixed(3),
+          gamma: parseFloat(greeks.gamma || 0).toFixed(4),
+          vega:  parseFloat(greeks.vega  || 0).toFixed(3),
+        };
+        if (snap.impliedVolatility) pos.iv = parseFloat(snap.impliedVolatility);
+      }
     } else {
       curP = parseFloat((price * pos.iv * Math.sqrt(t) * 0.4 + 0.1).toFixed(2));
     }
@@ -3146,7 +3268,9 @@ async function runScan() {
 
     // 3. TRAILING STOP — activates at tier threshold, tightens on signal decay
     if (chg >= (pos.trailActivate || TRAIL_ACTIVATE_PCT)) {
-      let trailPct = pos.trailStop || TRAIL_STOP_PCT;
+      // pos.trailPct stores the % width (0.15 = 15%), pos.trailStop stores the $ floor
+      // These are separate fields — reading pos.trailStop as % was the bug
+      let trailPct = pos.trailPct || TRAIL_STOP_PCT; // always a percentage
       // Signal decay: tighten trail if entry thesis has reversed
       let liveRSI = pos.entryRSI || 55;
       try {
@@ -3155,16 +3279,18 @@ async function runScan() {
       } catch(e) {}
       if (pos.optionType === "call" && liveRSI < 45 && (pos.entryRSI || 55) >= 50) {
         trailPct = TRAIL_STOP_PCT * 0.6;
-        logEvent("scan", `${pos.ticker} signal decay — RSI ${liveRSI} — tightening trail`);
+        pos.trailPct = trailPct; // persist tightened % for next scan
+        logEvent("scan", `${pos.ticker} signal decay — RSI ${liveRSI} — tightening trail to ${(trailPct*100).toFixed(0)}%`);
       }
       if (pos.optionType === "put" && liveRSI > 55 && (pos.entryRSI || 55) <= 50) {
         trailPct = TRAIL_STOP_PCT * 0.6;
-        logEvent("scan", `${pos.ticker} signal decay (put) — RSI ${liveRSI} — tightening trail`);
+        pos.trailPct = trailPct;
+        logEvent("scan", `${pos.ticker} signal decay (put) — RSI ${liveRSI} — tightening trail to ${(trailPct*100).toFixed(0)}%`);
       }
-      const trailFloor = pos.peakPremium * (1 - trailPct);
-      pos.trailStop = trailFloor;
+      const trailFloor = pos.peakPremium * (1 - trailPct); // $ floor value
+      pos.trailStop    = trailFloor;                        // store $ floor separately
       if (curP <= trailFloor) {
-        logEvent("scan", `${pos.ticker} trail hit — peak $${pos.peakPremium.toFixed(2)} floor $${trailFloor.toFixed(2)}`);
+        logEvent("scan", `${pos.ticker} trail hit — peak $${pos.peakPremium.toFixed(2)} floor $${trailFloor.toFixed(2)} (${(trailPct*100).toFixed(0)}% trail)`);
         await closePosition(pos.ticker, "trail"); continue;
       }
     }
@@ -3263,6 +3389,21 @@ async function runScan() {
   if (state.consecutiveLosses >= CONSEC_LOSS_LIMIT) return;
   if (state.cash <= CAPITAL_FLOOR) return;
 
+  // ── PORTFOLIO GREEKS LIMITS ────────────────────────────────────────────
+  // Prevent extreme one-sided exposure
+  const pgr = marketContext.portfolioGreeks || { delta: 0, vega: 0 };
+  const MAX_PORTFOLIO_DELTA = -500; // max short delta (puts) = -$500 per 1% SPY move
+  const MAX_PORTFOLIO_VEGA  = 2000; // max vega = $2000 per 1% IV move
+  if (pgr.delta < MAX_PORTFOLIO_DELTA) {
+    logEvent("filter", `Portfolio delta ${pgr.delta} too short — blocking new put entries`);
+    // Only block puts, calls can still balance the book
+    if (!callsAllowed) return;
+  }
+  if (Math.abs(pgr.vega) > MAX_PORTFOLIO_VEGA) {
+    logEvent("filter", `Portfolio vega ${pgr.vega} at limit — blocking new entries`);
+    return;
+  }
+
   // Burst entry cooldown — max 3 new positions per 10 minutes
   // Prevents over-concentration at a single market moment (e.g. after reset)
   const tenMinAgo = Date.now() - 10 * 60 * 1000;
@@ -3349,6 +3490,24 @@ async function runScan() {
       const minsAgo = ((Date.now() - recentClose.closeTime) / 60000).toFixed(0);
       logEvent("filter", `${stock.ticker} cooldown — closed ${minsAgo}min ago (${recentClose.reason}) — wait ${Math.ceil((TICKER_COOLDOWN_MS - (Date.now() - recentClose.closeTime)) / 60000)}min`);
       continue;
+    }
+
+    // Wash sale detection — IRS disallows loss if same security re-entered within 30 days
+    // Options on same underlying = "substantially identical" security under wash sale rules
+    const WASH_SALE_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
+    const washSaleClose = (state.closedTrades || []).find(t =>
+      t.ticker === stock.ticker &&
+      t.pnl < 0 &&               // was a loss
+      t.closeTime &&
+      (Date.now() - t.closeTime) < WASH_SALE_MS
+    );
+    if (washSaleClose) {
+      const daysAgo = ((Date.now() - washSaleClose.closeTime) / MS_PER_DAY).toFixed(0);
+      const daysRemaining = Math.ceil((WASH_SALE_MS - (Date.now() - washSaleClose.closeTime)) / MS_PER_DAY);
+      logEvent("filter", `${stock.ticker} wash sale warning — loss of $${Math.abs(washSaleClose.pnl).toFixed(0)} closed ${daysAgo}d ago — ${daysRemaining}d remaining — entering anyway but flagging`);
+      // Flag on the trade journal but don't block — trader may want to re-enter
+      // The wash sale only matters for tax purposes, not trading logic
+      stock._washSaleWarning = true;
     }
 
     if (!price || price < MIN_STOCK_PRICE) {
@@ -3469,26 +3628,6 @@ async function runScan() {
     // Score both call and put setups using live signals
     const callSetup = scoreSetup(liveStock, relStrength, signals.adx, todayVol, avgVol);
     const putSetup  = scorePutSetup(liveStock, relStrength, signals.adx, todayVol, avgVol, state.vix);
-
-    // Mean reversion call scoring — runs when VIX >= 25
-    // Identifies beaten-down quality names for discounted 90-day calls
-    const mrSetup = scoreMeanReversionCall(liveStock, relStrength, signals.adx, bars, state.vix);
-    if (mrSetup.score > callSetup.score) {
-      // Mean reversion wins — but requires liquid options or fills will be terrible in live trading
-      // RSI sub-30 situations = market makers widen spreads, OI dries up — must gate this
-      const mrContract = stock._cachedContract;
-      const mrOI       = mrContract ? (mrContract.oi || 0) : 0;
-      const mrSpread   = mrContract ? (mrContract.spread || 1) : 1;
-      const mrLiquid   = (mrOI === 0 || mrOI >= 300) && mrSpread <= 0.20; // OI=0 = unknown, allow through
-      if (mrLiquid) {
-        callSetup.score   = mrSetup.score;
-        callSetup.reasons = mrSetup.reasons;
-        callSetup.isMeanReversion = true;
-        logEvent("filter", `${stock.ticker} MEAN REVERSION setup: score ${mrSetup.score} | OI:${mrOI} spread:${(mrSpread*100).toFixed(0)}% | ${mrSetup.reasons[0]}`);
-      } else {
-        logEvent("filter", `${stock.ticker} MEAN REVERSION blocked — illiquid (OI:${mrOI} spread:${(mrSpread*100).toFixed(0)}%) — bad live fills`);
-      }
-    }
 
     // Volume context for puts — high volume confirms distribution, but capitulation
     // (extreme high volume) can signal reversal. Use nuanced scoring.
@@ -3622,13 +3761,33 @@ async function runScan() {
     // Apply regime modifier
     const regimeMod   = getRegimeModifier(marketContext.regime?.regime || "neutral", "call");
     const regimePutMod= getRegimeModifier(marketContext.regime?.regime || "neutral", "put");
-    // Don't apply bear regime penalty to mean reversion calls — they're designed FOR bear markets
-    if (!callSetup.isMeanReversion) {
-      callSetup.score = Math.min(100, Math.max(0, callSetup.score + regimeMod));
-    }
+    // Apply regime to regular calls first — MR calls bypass this (applied after MR check below)
     putSetup.score    = Math.min(100, Math.max(0, putSetup.score  + regimePutMod));
     if (regimeMod !== 0) {
       callSetup.reasons.push(`Regime ${marketContext.regime?.regime}: ${regimeMod > 0 ? "+" : ""}${regimeMod}`);
+    }
+
+    // Mean reversion call scoring — runs AFTER regime so bypass works correctly
+    // MR fires here so isMeanReversion flag is set before regime penalty check below
+    const mrSetup = scoreMeanReversionCall(liveStock, relStrength, signals.adx, bars, state.vix);
+    if (mrSetup.score > callSetup.score) {
+      const mrContract = stock._cachedContract;
+      const mrOI       = mrContract ? (mrContract.oi || 0) : 0;
+      const mrSpread   = mrContract ? (mrContract.spread || 1) : 1;
+      const mrLiquid   = (mrOI === 0 || mrOI >= 300) && mrSpread <= 0.20;
+      if (mrLiquid) {
+        callSetup.score   = mrSetup.score;
+        callSetup.reasons = mrSetup.reasons;
+        callSetup.isMeanReversion = true;
+        logEvent("filter", `${stock.ticker} MEAN REVERSION setup: score ${mrSetup.score} | OI:${mrOI} spread:${(mrSpread*100).toFixed(0)}% | ${mrSetup.reasons[0]}`);
+      } else {
+        logEvent("filter", `${stock.ticker} MEAN REVERSION blocked — illiquid (OI:${mrOI} spread:${(mrSpread*100).toFixed(0)}%) — bad live fills`);
+      }
+    }
+
+    // Now apply regime to calls — MR calls bypass this penalty (they're designed for bear markets)
+    if (!callSetup.isMeanReversion) {
+      callSetup.score = Math.min(100, Math.max(0, callSetup.score + regimeMod));
     }
 
     // Apply drawdown protocol min score
@@ -3750,11 +3909,34 @@ async function runScan() {
   // Check stock buys
   await checkStockBuys();
 
-  state.lastScan = new Date().toISOString();
+  state.lastScan    = new Date().toISOString();
+  state._scanFailures = 0; // reset consecutive failure counter on success
   markDirty(); // flush handled by dedicated interval below
   } catch(e) {
     logEvent("error", `runScan crashed: ${e.message} | stack: ${e.stack?.split("\n")[1]?.trim() || "unknown"}`);
+    // Track consecutive scan failures — alert after 3 in a row
+    state._scanFailures = (state._scanFailures || 0) + 1;
+    if (state._scanFailures >= 3 && GMAIL_USER && GMAIL_PASS && isMarketHours()) {
+      try {
+        await mailer.sendMail({
+          from: GMAIL_USER, to: GMAIL_USER,
+          subject: `APEX ALERT — Scanner failing (${state._scanFailures} errors)`,
+          html: `<div style="font-family:monospace;background:#07101f;color:#ff5555;padding:20px">
+            <h2>⚠ APEX Scanner Error</h2>
+            <p>Consecutive scan failures: <strong>${state._scanFailures}</strong></p>
+            <p>Last error: ${e.message}</p>
+            <p>Time: ${new Date().toISOString()}</p>
+            <p>Open positions: ${state.positions.length}</p>
+            <p>Cash: $${state.cash}</p>
+            <p><strong>Check Railway logs immediately.</strong></p>
+          </div>`
+        });
+        logEvent("warn", `Scan failure alert sent — ${state._scanFailures} consecutive errors`);
+      } catch(mailErr) { console.error("Failure alert email error:", mailErr.message); }
+    }
   } finally {
+    // Reset failure counter on successful scan completion
+    if (!state._scanFailures) state._scanFailures = 0;
     scanRunning = false;
   }
 }
@@ -4019,6 +4201,10 @@ app.get("/api/state", async (req, res) => {
     uptime:             process.uptime(),
     betaWeightedDelta:  calcBetaWeightedDelta(),
     dataQuality:        state.dataQuality || { realTrades: 0, estimatedTrades: 0, totalTrades: 0 },
+    reconcileStatus:    state.reconcileStatus || "unknown",
+    orphanCount:        state.orphanCount || 0,
+    lastReconcile:      state.lastReconcile || null,
+    scanFailures:       state._scanFailures || 0,
     macroCalendar:      marketContext.macroCalendar,
     upcomingEvents:     getUpcomingMacroEvents(7),
     regime:             marketContext.regime,
@@ -4603,7 +4789,7 @@ async function runSimTick(scenario, simPrices, tick) {
     // Update trailing stop — activates at +30%, trails 15% below peak
     if (chg >= (pos.trailActivate || TRAIL_ACTIVATE_PCT)) {
       const simTrail = pos.peakPremium * (1 - TRAIL_STOP_PCT);
-      pos.trailStop  = simTrail;
+      pos.trailStop  = simTrail; // $ floor value — sim uses separate calculation
       if (curP <= simTrail) exitReason = "trail";
     }
 
@@ -5099,7 +5285,7 @@ app.get("/health",           (req,res) => res.json({status:"ok",uptime:process.u
 // Boot sequence - load state from Redis then start server
 initState().then(() => {
   app.listen(PORT, () => {
-    console.log(`APEX v3.80 running on port ${PORT}`);
+    console.log(`APEX v3.81 running on port ${PORT}`);
     console.log(`Alpaca key:  ${ALPACA_KEY?"SET":"NOT SET"}`);
     console.log(`Gmail:       ${GMAIL_USER||"NOT SET"}`);
     console.log(`Redis:       ${REDIS_URL?"SET":"NOT SET - using file fallback"}`);
