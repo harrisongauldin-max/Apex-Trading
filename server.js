@@ -64,7 +64,8 @@ const EARNINGS_SKIP_DAYS  = 5;
 const MIN_OPEN_INTEREST   = 100;  // used in contract scoring as OI proxy threshold
 const MIN_STOCK_PRICE     = 20;
 const MIN_OPTION_PREMIUM  = 0.50;  // minimum $50 per contract — filters out lottery tickets
-const MAX_SPREAD_PCT      = 0.15;  // max bid/ask spread as % of ask (widened for high VIX days)
+const MIN_OI              = 5;     // hard block — OI < 5 means essentially no market
+const MAX_SPREAD_PCT      = 0.30;  // hard block — spread > 30% makes fills unprofitable (was 0.15)
 const EARLY_SPREAD_PCT    = 0.10;  // tighter spread required for early 9:45AM put entries
 const MAX_GAP_PCT         = 0.03;
 const TARGET_DELTA_MIN    = 0.28;
@@ -2896,16 +2897,27 @@ async function executeTrade(stock, price, score, scoreReasons, vix, optionType =
   const typeLabel = optionType === "put" ? "P" : "C";
   const dataLabel = contract.symbol ? "REAL" : "EST";
 
-  // Low OI warning — hard to fill in live trading, log prominently
-  if (contract.oi > 0 && contract.oi < 10) {
-    logEvent("warn", `⚠ ${stock.ticker} LOW OI: ${contract.oi} contracts — fill may be difficult in live trading`);
-  } else if (contract.oi === 0) {
-    logEvent("warn", `⚠ ${stock.ticker} OI UNKNOWN — no open interest data, treat as illiquid`);
+  // ── LIQUIDITY HARD GATES ──────────────────────────────────────────────
+  // OI < MIN_OI (5) = essentially no market — unfillable in live trading
+  if (!dryRunMode && contract.oi > 0 && contract.oi < MIN_OI) {
+    logEvent("filter", `${stock.ticker} BLOCKED — OI:${contract.oi} below minimum ${MIN_OI} — unfillable in live trading`);
+    return false;
   }
-  // Wide spread warning — live fill will be worse than mid price
+  // Spread > MAX_SPREAD_PCT (30%) = slippage destroys the trade
+  if (!dryRunMode && contract.spread > MAX_SPREAD_PCT) {
+    const slippageEst = parseFloat((contract.premium * contract.spread * 0.5 * 100 * contracts).toFixed(2));
+    logEvent("filter", `${stock.ticker} BLOCKED — spread ${(contract.spread*100).toFixed(0)}% exceeds ${(MAX_SPREAD_PCT*100).toFixed(0)}% max — est. slippage $${slippageEst}`);
+    return false;
+  }
+  // Warn on borderline OI (5-50) and spread (15-30%) — don't block but flag
+  if (contract.oi > 0 && contract.oi < 50) {
+    logEvent("warn", `⚠ ${stock.ticker} LOW OI: ${contract.oi} — fill may be slow`);
+  } else if (contract.oi === 0) {
+    logEvent("warn", `⚠ ${stock.ticker} OI UNKNOWN — treat as potentially illiquid`);
+  }
   if (contract.spread > 0.15) {
     const slippageEst = parseFloat((contract.premium * contract.spread * 0.5 * 100 * contracts).toFixed(2));
-    logEvent("warn", `⚠ ${stock.ticker} WIDE SPREAD: ${(contract.spread*100).toFixed(0)}% — est. slippage $${slippageEst} per round trip`);
+    logEvent("warn", `⚠ ${stock.ticker} WIDE SPREAD: ${(contract.spread*100).toFixed(0)}% — est. slippage $${slippageEst}`);
   }
 
   await saveStateNow(); // critical — persist trade immediately
@@ -4091,12 +4103,24 @@ async function runScan() {
       logEvent("filter", `${stock.ticker} - bypassing filter for PUT: ${reason}`);
     }
 
-    // Final MR liquidity gate — now we have real contract data from prefetch
-    if (isMeanReversion && stock._cachedContract) {
+    // Liquidity pre-check — block before executeTrade if contract is clearly unfillable
+    // executeTrade also checks, but this avoids unnecessary order submission attempts
+    if (stock._cachedContract) {
       const execOI     = stock._cachedContract.oi || 0;
       const execSpread = stock._cachedContract.spread || 1;
-      if (execOI > 0 && execOI < 50 && execSpread > 0.25) {
-        logEvent("filter", `${stock.ticker} MEAN REVERSION blocked at execution — OI:${execOI} spread:${(execSpread*100).toFixed(0)}% too illiquid`);
+      // Hard block: OI known and below floor
+      if (execOI > 0 && execOI < MIN_OI) {
+        logEvent("filter", `${stock.ticker} pre-blocked — OI:${execOI} below minimum ${MIN_OI}`);
+        continue;
+      }
+      // Hard block: spread too wide
+      if (execSpread > MAX_SPREAD_PCT) {
+        logEvent("filter", `${stock.ticker} pre-blocked — spread ${(execSpread*100).toFixed(0)}% exceeds ${(MAX_SPREAD_PCT*100).toFixed(0)}% max`);
+        continue;
+      }
+      // MR-specific tighter gate: MR trades need better liquidity
+      if (isMeanReversion && execOI > 0 && execOI < 50 && execSpread > 0.20) {
+        logEvent("filter", `${stock.ticker} MEAN REVERSION blocked — OI:${execOI} spread:${(execSpread*100).toFixed(0)}% too illiquid for MR`);
         continue;
       }
     }
