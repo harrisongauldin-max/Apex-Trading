@@ -202,17 +202,26 @@ function defaultState() {
 
 // - Redis Helpers -
 async function redisSave(data) {
-  if (!REDIS_URL || !REDIS_TOKEN) {
-    // Fallback to file if Redis not configured
-    try { fs.writeFileSync(STATE_FILE, JSON.stringify(data, null, 2)); } catch(e) {}
-    return;
-  }
+  // Always write to local file as backup regardless of Redis
+  try { fs.writeFileSync(STATE_FILE, JSON.stringify(data, null, 2)); } catch(e) {}
+
+  if (!REDIS_URL || !REDIS_TOKEN) return;
+
   try {
-    await fetch(`${REDIS_URL}/set/${REDIS_KEY}`, {
+    // Upstash REST API: POST /set/KEY
+    // Body must be the raw JSON string — NOT wrapped in {value:...}
+    // Wrapped format caused isValid to fail on load → reset to defaults every deploy
+    const serialized = JSON.stringify(data);
+    const res = await fetch(`${REDIS_URL}/set/${REDIS_KEY}`, {
       method: "POST",
-      headers: { Authorization: `Bearer ${REDIS_TOKEN}`, "Content-Type": "application/json" },
-      body: JSON.stringify({ value: JSON.stringify(data) })
+      headers: {
+        Authorization: `Bearer ${REDIS_TOKEN}`,
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify(serialized) // Upstash expects the value as a JSON-encoded string
     });
+    const result = await res.json();
+    if (result.error) console.error("Redis save error:", result.error);
   } catch(e) { console.error("Redis save error:", e.message); }
 }
 
@@ -236,9 +245,16 @@ async function redisLoad() {
       const data = await res.json();
       if (data && data.result) {
         if (attempt > 1) console.log(`[REDIS] Loaded on attempt ${attempt}`);
-        return JSON.parse(data.result);
+        // Parse the result — handle both old wrapped format and new raw format
+        let parsed = JSON.parse(data.result);
+        // Old format bug: state was saved as {value: "..."} — unwrap if detected
+        if (parsed && typeof parsed === 'object' && typeof parsed.value === 'string' && !parsed.cash) {
+          console.log("[REDIS] Detected old wrapped format — unwrapping");
+          parsed = JSON.parse(parsed.value);
+        }
+        return parsed;
       }
-      // Key exists but empty result = no saved state yet (fresh account)
+      // Key exists but null result = no saved state yet (fresh account)
       return null;
     } catch(e) {
       console.error(`[REDIS] Load attempt ${attempt}/${MAX_RETRIES} failed: ${e.message}`);
@@ -265,7 +281,7 @@ async function redisLoad() {
 // Prevents burning through Upstash free tier (10k commands/day)
 let stateDirty    = false;
 let lastRedisSave = 0;
-const REDIS_SAVE_INTERVAL = 120000; // minimum 2 minutes between Redis writes (~240/day, well under 10k limit)
+const REDIS_SAVE_INTERVAL = 30000; // minimum 30 seconds between Redis writes (~960/day, under 10k limit)
 
 function markDirty() {
   stateDirty = true;
@@ -341,14 +357,19 @@ async function initState() {
     console.log("[STATE] No saved state found — starting fresh with $" + MONTHLY_BUDGET);
   }
 
-  // Apply custom budget if set — customBudget overrides cash on every restart
-  // This ensures budget changes survive deploys
-  if (state.customBudget && state.customBudget > 0) {
-    // Only restore custom budget if it looks intentional
-    // Don't restore if it matches default (was never changed)
-    if (state.customBudget !== MONTHLY_BUDGET) {
+  // customBudget = the budget ceiling set by user (starting amount)
+  // state.cash   = actual current cash (changes with every trade — DO NOT override)
+  // Only restore customBudget on a genuinely fresh state (no trade history)
+  // If we have trade history, cash is already correct from Redis — don't touch it
+  if (state.customBudget && state.customBudget > 0 && state.customBudget !== MONTHLY_BUDGET) {
+    const isFreshState = (state.closedTrades || []).length === 0 && (state.positions || []).length === 0;
+    if (isFreshState) {
+      // Fresh account — set cash to customBudget as the starting balance
       state.cash = state.customBudget;
-      console.log("[STATE] Custom budget restored: $" + state.customBudget);
+      console.log("[STATE] Fresh account — setting cash to custom budget: $" + state.customBudget);
+    } else {
+      // Has trade history — cash is already accurate from Redis, don't override
+      console.log("[STATE] Custom budget: $" + state.customBudget + " | Current cash: $" + state.cash + " (preserved from Redis)");
     }
   }
 
