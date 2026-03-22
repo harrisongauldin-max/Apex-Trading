@@ -2672,9 +2672,10 @@ async function executeTrade(stock, price, score, scoreReasons, vix, optionType =
       premium, bid: premium * 0.95, ask: premium * 1.05,
       greeks, iv, oi: 0, vol: 0, optionType };
   } else {
-    // Real data — track stats
+    // Real data — track totalTrades for stats only
+    // realTrades is incremented AFTER a confirmed live fill (see below)
+    // Never increment in dry run — would bypass the 1-contract cap
     if (!state.dataQuality) state.dataQuality = { realTrades: 0, estimatedTrades: 0, totalTrades: 0 };
-    state.dataQuality.realTrades++;
     state.dataQuality.totalTrades++;
   }
 
@@ -2766,6 +2767,10 @@ async function executeTrade(stock, price, score, scoreReasons, vix, optionType =
           alpacaOrderId = null; // signal to caller to abort
         } else if (fillPrice) {
           contract.premium = fillPrice; // use actual fill price not limit price
+          // Confirmed live fill — now count as a real trade for Kelly calibration
+          if (!state.dataQuality) state.dataQuality = { realTrades: 0, estimatedTrades: 0, totalTrades: 0 };
+          state.dataQuality.realTrades++;
+          logEvent("trade", `Live fill confirmed — real trade count: ${state.dataQuality.realTrades}/30 before Kelly activates`);
         }
       } else {
         logEvent("warn", `Alpaca order failed for ${contract.symbol}: ${JSON.stringify(orderResp)?.slice(0, 150)}`);
