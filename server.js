@@ -5480,6 +5480,65 @@ app.post("/api/set-budget", async (req, res) => {
 });
 app.get("/health",           (req,res) => res.json({status:"ok",uptime:process.uptime(),vix:state.vix,positions:state.positions.length}));
 
+// Redis round-trip test — write a known value, read it back, confirm they match
+// Hit this endpoint after deploy to verify persistence is working before live trading
+app.get("/api/test-redis", async (req, res) => {
+  if (!REDIS_URL || !REDIS_TOKEN) {
+    return res.json({ ok: false, error: "Redis not configured — check UPSTASH_REDIS_REST_URL and UPSTASH_REDIS_REST_TOKEN env vars" });
+  }
+  const testKey   = "apex:redis-test";
+  const testValue = { ts: Date.now(), msg: "apex-redis-ok" };
+  try {
+    // Write test value
+    const writeRes = await fetch(`${REDIS_URL}/pipeline`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${REDIS_TOKEN}`, "Content-Type": "application/json" },
+      body: JSON.stringify([["set", testKey, JSON.stringify(testValue)]])
+    });
+    const writeData = await writeRes.json();
+    if (!writeData[0] || writeData[0].error) {
+      return res.json({ ok: false, stage: "write", error: writeData[0]?.error || "unknown write error" });
+    }
+
+    // Read it back
+    const readRes = await fetch(`${REDIS_URL}/pipeline`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${REDIS_TOKEN}`, "Content-Type": "application/json" },
+      body: JSON.stringify([["get", testKey]])
+    });
+    const readData = await readRes.json();
+    if (!readData[0] || readData[0].error) {
+      return res.json({ ok: false, stage: "read", error: readData[0]?.error || "unknown read error" });
+    }
+
+    // Confirm match
+    const readBack = JSON.parse(readData[0].result);
+    const match    = readBack && readBack.ts === testValue.ts && readBack.msg === testValue.msg;
+
+    // Also check actual state key exists
+    const stateRes  = await fetch(`${REDIS_URL}/pipeline`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${REDIS_TOKEN}`, "Content-Type": "application/json" },
+      body: JSON.stringify([["exists", REDIS_KEY]])
+    });
+    const stateData = await stateRes.json();
+    const stateExists = stateData[0]?.result === 1;
+
+    res.json({
+      ok:          match,
+      write:       writeData[0]?.result === "OK" ? "OK" : "FAIL",
+      read:        match ? "OK" : "MISMATCH",
+      stateKey:    stateExists ? "EXISTS" : "MISSING — state not yet saved",
+      stateCash:   state.cash,
+      statePos:    state.positions.length,
+      lastSave:    lastRedisSave ? new Date(lastRedisSave).toISOString() : "never",
+      message:     match && stateExists ? "Redis is working correctly" : match ? "Redis works but state key missing — trigger a save first" : "Redis round-trip FAILED",
+    });
+  } catch(e) {
+    res.json({ ok: false, error: e.message });
+  }
+});
+
 // ── GRACEFUL SHUTDOWN — save state before Railway kills the container ──────
 // Railway sends SIGTERM before terminating — we have ~10 seconds to clean up
 // This ensures state is persisted even mid-deploy, preventing data loss
