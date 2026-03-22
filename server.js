@@ -2013,7 +2013,12 @@ async function getRealOptionsContract(ticker, price, optionType, score, vix, ear
       const expiryScore  = Math.max(0, 1 - dteDistance / 30);
 
       // Liquidity (15%) — OI as proxy, unknown OI gets neutral score
-      const liquidScore  = oi > 0 ? Math.min(oi / 5000, 1) : 0.5;
+      // OI < 50 gets heavy penalty — essentially no market in live trading
+      const liquidScore  = oi === 0 ? 0.5                    // unknown = neutral
+                         : oi < 10  ? 0.02                   // essentially no market
+                         : oi < 50  ? 0.10                   // very thin
+                         : oi < 200 ? Math.min(oi / 1000, 0.4)  // thin but tradeable
+                         : Math.min(oi / 5000, 1.0);         // normal
 
       // Spread quality (15%) — tighter spread = better fill = higher score
       // Wide spread on high-VIX days is expected — penalize but don't exclude
@@ -2053,7 +2058,12 @@ async function getRealOptionsContract(ticker, price, optionType, score, vix, ear
     if (best) {
       const etH2 = today.getHours() + today.getMinutes() / 60;
       const earlyTag = optionType === "put" && etH2 >= 9.75 && etH2 < 10.0 ? " [EARLY WINDOW]" : "";
-      logEvent("scan", `${ticker} best contract: ${best.symbol} | $${best.premium} bid/ask $${best.bid}/$${best.ask} | delta:${best.greeks.delta} | spread:${(best.spread*100).toFixed(1)}% | OI:${best.oi} [REAL DATA]${earlyTag}`);
+      // Low OI warning — OI < 50 means very thin market, fills will be difficult in live trading
+      const oiTag = best.oi > 0 && best.oi < 50 ? ` ⚠LOW-OI:${best.oi}` : '';
+      if (best.oi > 0 && best.oi < 50) {
+        logEvent("warn", `${ticker} LOW OI WARNING: best contract OI=${best.oi} — fills may be difficult in live trading`);
+      }
+      logEvent("scan", `${ticker} best contract: ${best.symbol} | $${best.premium} bid/ask $${best.bid}/$${best.ask} | delta:${best.greeks.delta} | spread:${(best.spread*100).toFixed(1)}% | OI:${best.oi}${oiTag} [REAL DATA]${earlyTag}`);
     } else {
       // Debug: only two hard filters now — mid>0 and delta range
       // Everything else is scoring. Show what delta range we found.
@@ -2814,11 +2824,24 @@ async function executeTrade(stock, price, score, scoreReasons, vix, optionType =
 
   const typeLabel = optionType === "put" ? "P" : "C";
   const dataLabel = contract.symbol ? "REAL" : "EST";
+
+  // Low OI warning — hard to fill in live trading, log prominently
+  if (contract.oi > 0 && contract.oi < 10) {
+    logEvent("warn", `⚠ ${stock.ticker} LOW OI: ${contract.oi} contracts — fill may be difficult in live trading`);
+  } else if (contract.oi === 0) {
+    logEvent("warn", `⚠ ${stock.ticker} OI UNKNOWN — no open interest data, treat as illiquid`);
+  }
+  // Wide spread warning — live fill will be worse than mid price
+  if (contract.spread > 0.15) {
+    const slippageEst = parseFloat((contract.premium * contract.spread * 0.5 * 100 * contracts).toFixed(2));
+    logEvent("warn", `⚠ ${stock.ticker} WIDE SPREAD: ${(contract.spread*100).toFixed(0)}% — est. slippage $${slippageEst} per round trip`);
+  }
+
   await saveStateNow(); // critical — persist trade immediately
   logEvent("trade",
     `BUY ${stock.ticker} $${contract.strike}${typeLabel} exp ${contract.expDate} | ${contracts}x @ $${contract.premium} | ` +
     `cost ${fmt(finalCost)} | score ${score} | delta ${contract.greeks.delta} | ${isMeanReversion ? "MEAN-REV" : exitParams.label} | [${dataLabel}] | ` +
-    `vol/OI:${contract.volOIRatio?.toFixed(1)||"?"}x | cash ${fmt(state.cash)} | heat ${(heatPct()*100).toFixed(0)}%`
+    `OI:${contract.oi} spread:${(contract.spread*100).toFixed(1)}% | cash ${fmt(state.cash)} | heat ${(heatPct()*100).toFixed(0)}%`
   );
   return true;
 }
@@ -3585,8 +3608,18 @@ async function runScan() {
     const filterResult = await checkAllFilters(stock, price);
 
     // Collect weakness signals that boost put scores
+    // CAP: max +20 total weakness boost — prevents whole-sector selloffs
+    // from pushing every stock to 100 with no differentiation
     let weaknessBoost = 0;
     const weaknessReasons = [];
+    const MAX_WEAKNESS_BOOST = 20;
+
+    const avgVol      = bars.length ? bars.slice(0,-1).reduce((s,b)=>s+b.v,0)/Math.max(bars.length-1,1) : 0;
+    const todayVol    = bars.length ? bars[bars.length-1].v : 0;
+
+    // Relative strength vs SPY — declared early so weakness boost can use it
+    const stockReturn = bars.length >= 5 ? (bars[bars.length-1].c - bars[0].o) / bars[0].o : 0;
+    const relStrength = spyReturn !== 0 ? (1 + stockReturn) / (1 + spyReturn) : 1;
 
     if (!filterResult.pass) {
       const putRelevantFails = ["sector ETF", "support", "VWAP", "breakdown"];
@@ -3595,16 +3628,17 @@ async function runScan() {
         logEvent("filter", `${stock.ticker} filter fail: ${filterResult.reason}`);
         continue;
       }
-      weaknessBoost += sectorResult.putBoost || 0;
-      if (filterResult.reason?.includes("sector ETF")) { weaknessBoost += 15; weaknessReasons.push(`Sector ETF down (+15)`); }
-      if (filterResult.reason?.includes("support"))    { weaknessBoost += 12; weaknessReasons.push(`Near support breakdown (+12)`); }
+      // Sector ETF boost — scaled by how much this stock lags its ETF
+      // If stock and ETF both down equally = market risk, not stock-specific weakness
+      const etfReturn  = sectorResult.etfReturn || 0;
+      const stockVsEtf = etfReturn !== 0 ? (1 + stockReturn) / (1 + etfReturn) - 1 : 0;
+      const etfBoost   = stockVsEtf < -0.02 ? 15  // stock down 2%+ more than ETF = real weakness
+                       : stockVsEtf < 0      ? 8   // stock lagging ETF slightly
+                       : 5;                         // keeping pace = sector-wide move only
+      weaknessBoost += etfBoost;
+      weaknessReasons.push(`Sector ETF down, stock ${stockVsEtf < 0 ? "lagging" : "in line"} (+${etfBoost})`);
+      if (filterResult.reason?.includes("support")) { weaknessBoost += 10; weaknessReasons.push(`Near support breakdown (+10)`); }
     }
-    const avgVol   = bars.length ? bars.slice(0,-1).reduce((s,b)=>s+b.v,0)/Math.max(bars.length-1,1) : 0;
-    const todayVol = bars.length ? bars[bars.length-1].v : 0;
-
-    // Relative strength vs SPY
-    const stockReturn  = bars.length >= 5 ? (bars[bars.length-1].c - bars[0].o) / bars[0].o : 0;
-    const relStrength  = spyReturn !== 0 ? (1 + stockReturn) / (1 + spyReturn) : 1;
 
     // Relative weakness vs sector peers — only meaningful edge if stock is lagging ITS sector
     // If everything scores 100 because the whole market is down, that's not signal
@@ -3640,9 +3674,12 @@ async function runScan() {
     // VWAP — use intraday VWAP from signals (available before liveStock is built)
     const vwap = signals.intradayVWAP > 0 ? signals.intradayVWAP : calcVWAP(bars.slice(-5));
     if (vwap > 0 && price < vwap * 0.99) {
-      logEvent("filter", `${stock.ticker} price $${price} below ${signals.intradayVWAP > 0 ? 'intraday' : 'daily'} VWAP $${vwap} - weak - put boost +10`);
-      weaknessBoost += 10;
-      weaknessReasons.push(`Below VWAP (+10)`);
+      // Scale VWAP boost by how far below — more below = stronger signal
+      const vwapGap   = (vwap - price) / vwap;
+      const vwapPts   = vwapGap > 0.03 ? 10 : vwapGap > 0.01 ? 6 : 3;
+      logEvent("filter", `${stock.ticker} price $${price} below ${signals.intradayVWAP > 0 ? 'intraday' : 'daily'} VWAP $${vwap} (${(vwapGap*100).toFixed(1)}% gap) - put boost +${vwapPts}`);
+      weaknessBoost += vwapPts;
+      weaknessReasons.push(`Below VWAP ${(vwapGap*100).toFixed(1)}% (+${vwapPts})`);
     }
 
     // Pre-market gap check — already prefetched
@@ -3755,18 +3792,23 @@ async function runScan() {
 
     // Apply weakness boost to puts — filters that block calls become put signals
     if (weaknessBoost > 0) {
-      putSetup.score = Math.min(100, putSetup.score + weaknessBoost);
+      // Hard cap at MAX_WEAKNESS_BOOST (20pts) — prevents market-wide selloffs
+      // from pushing every stock to 100 with no differentiation
+      // Raw boost can be 5-35 (sector ETF + VWAP + support) — always capped to 20
+      const cappedBoost = Math.min(weaknessBoost, MAX_WEAKNESS_BOOST);
+      putSetup.score  = Math.min(100, putSetup.score + cappedBoost);
       putSetup.reasons.push(...weaknessReasons);
-      // Block calls when market weakness is detected
-      callSetup.score = Math.max(0, callSetup.score - weaknessBoost);
-      logEvent("filter", `${stock.ticker} weakness signals → put boost +${weaknessBoost}`);
+      callSetup.score = Math.max(0, callSetup.score - cappedBoost);
+      logEvent("filter", `${stock.ticker} weakness signals → put boost +${cappedBoost}${cappedBoost < weaknessBoost ? " (capped from +" + weaknessBoost + ")" : ""}`);
     }
 
-    // VIX boost for puts
+    // VIX boost for puts — scaled, not flat
+    // Flat +10 for all stocks when VIX>30 is undifferentiated — every stock gets same boost
+    // Use a smaller base boost (max +5) so individual stock signals still matter
     if (state.vix >= 25) {
-      const vixPutBoost = state.vix >= 30 ? 10 : 5;
+      const vixPutBoost = state.vix >= 35 ? 5 : state.vix >= 30 ? 3 : 2;
       putSetup.score = Math.min(100, putSetup.score + vixPutBoost);
-      putSetup.reasons.push(`VIX ${state.vix} put boost (+${vixPutBoost})`);
+      putSetup.reasons.push(`VIX ${state.vix.toFixed(1)} environment (+${vixPutBoost})`);
     }
 
     // Apply stock-level news modifier
