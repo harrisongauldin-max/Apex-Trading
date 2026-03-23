@@ -4738,6 +4738,17 @@ const mailer = nodemailer.createTransport({
   service: "gmail",
   auth: { user: GMAIL_USER, pass: GMAIL_PASS },
 });
+// Verify SMTP connection on startup — logs any auth issues immediately
+if (GMAIL_USER && GMAIL_PASS) {
+  mailer.verify(function(error) {
+    if (error) {
+      console.log("[EMAIL] SMTP verification FAILED:", error.message);
+      console.log("[EMAIL] Check GMAIL_USER and GMAIL_APP_PASSWORD in Railway env vars");
+    } else {
+      console.log("[EMAIL] SMTP verified — Gmail ready ✅");
+    }
+  });
+}
 
 function buildEmailHTML(type) {
   const pnl    = realizedPnL();
@@ -4902,22 +4913,90 @@ async function updateAfterHoursContext() {
   if (day === 0 || day === 6) return; // skip weekends
   if (isMarketHours()) return; // market scan handles this during hours
   try {
-    // Update macro news — catches overnight geopolitical/Fed news
+    // ── Macro / sentiment context ─────────────────────────────────────────
     const macro = await getMacroNews();
     marketContext.macro = macro;
     if (macro.mode !== "normal") {
       logEvent("macro", `[AH] Overnight macro: ${macro.signal} — ${macro.triggers.slice(0,3).join(", ")}`);
     }
-    // Update Fear & Greed
     const fg = await getFearAndGreed();
     marketContext.fearGreed = fg;
-    // Update VIX proxy via VIXY quote
     const newVIX = await getVIX();
     if (newVIX) state.vix = newVIX;
-    // Flag positions at risk for morning open
     if (state.positions.length > 0 && macro.mode === "aggressive") {
       logEvent("warn", `[AH] Bullish macro overnight — ${state.positions.filter(p=>p.optionType==="put").length} puts may be at risk at open`);
     }
+
+    // ── Overnight position pricing ────────────────────────────────────────
+    // Options don't trade after hours — fetch underlying stock price instead
+    // Use Black-Scholes to estimate what the option is worth at the new stock price
+    // Stored separately as estimatedAH — never overwrites real currentPrice
+    if (state.positions.length > 0) {
+      const etHour = et.getHours() + et.getMinutes() / 60;
+      // Use extended hours quotes if available (4am-9:30am ET pre-market, 4pm-8pm post-market)
+      const isPreMarket  = etHour >= 4   && etHour < 9.5;
+      const isPostMarket = etHour >= 16  && etHour < 20;
+      const hasExtended  = isPreMarket || isPostMarket;
+
+      // Fetch all underlying prices in parallel
+      const underlyingPrices = await Promise.all(
+        state.positions.map(async pos => {
+          try {
+            // Try extended hours snapshot first (pre/post market)
+            if (hasExtended) {
+              const snap = await alpacaGet(`/stocks/${pos.ticker}/snapshot`, ALPACA_DATA);
+              if (snap) {
+                // Pre-market: use minuteBar (most recent extended hours)
+                // Post-market: use minuteBar (after-hours activity)
+                const extPrice = snap.minuteBar?.c || snap.latestTrade?.p || null;
+                if (extPrice && extPrice > 0) return { ticker: pos.ticker, price: extPrice, source: isPreMarket ? "pre-market" : "post-market" };
+              }
+            }
+            // Fallback: last daily close
+            const bars = await getStockBars(pos.ticker, 2);
+            if (bars.length > 0) return { ticker: pos.ticker, price: bars[bars.length-1].c, source: "last-close" };
+            return null;
+          } catch(e) { return null; }
+        })
+      );
+
+      // Estimate option value at new underlying price using Black-Scholes
+      let updatedCount = 0;
+      for (const pos of state.positions) {
+        const underlying = underlyingPrices.find(u => u && u.ticker === pos.ticker);
+        if (!underlying) continue;
+        try {
+          const newStockPrice = underlying.price;
+          const dte           = Math.max(1, Math.round((new Date(pos.expDate) - new Date()) / MS_PER_DAY));
+          const iv            = pos.iv ? pos.iv / 100 : 0.30;
+          const greeks        = calcGreeks(newStockPrice, pos.strike, dte, iv, pos.optionType);
+          // Delta-based estimate — most reliable approach without live options data
+          // How much the stock moved × option delta = estimated option price change
+          const priceDelta   = newStockPrice - (pos.price || newStockPrice);
+          const optionDelta  = parseFloat(pos.greeks?.delta || greeks.delta);
+          const estPrice     = parseFloat(Math.max(0.01, (pos.currentPrice || pos.premium) + (priceDelta * optionDelta)).toFixed(2));
+          const estPnl       = parseFloat(((estPrice - pos.premium) * 100 * (pos.contracts || 1)).toFixed(2));
+          const estPct       = parseFloat((((estPrice - pos.premium) / pos.premium) * 100).toFixed(1));
+
+          // Store as estimatedAH — separate from real currentPrice
+          pos.estimatedAH = {
+            price:       estPrice,
+            pnl:         estPnl,
+            pct:         estPct,
+            stockPrice:  newStockPrice,
+            source:      underlying.source,
+            updatedAt:   new Date().toISOString(),
+          };
+          pos.price = newStockPrice; // update underlying price for display
+          updatedCount++;
+        } catch(e) {}
+      }
+      if (updatedCount > 0) {
+        logEvent("scan", `[AH] Updated ${updatedCount}/${state.positions.length} position estimates | ${isPreMarket ? "pre-market" : isPostMarket ? "post-market" : "last-close"} prices`);
+        markDirty();
+      }
+    }
+
     logEvent("scan", `[AH] Context updated | VIX:${state.vix} | F&G:${fg.score} | Macro:${macro.signal}`);
     markDirty();
   } catch(e) { console.error("[AH] Context update error:", e.message); }
@@ -5171,8 +5250,8 @@ app.post("/api/test-email", async (req, res) => {
     logEvent("email", `Test email sent to ${GMAIL_USER}`);
     res.json({ ok: true, message: `Test email sent to ${GMAIL_USER}` });
   } catch(e) {
-    logEvent("error", `Test email failed: ${e.message}`);
-    res.json({ error: e.message, hint: "Check Gmail App Password is correct and 2FA is enabled on your Google account" });
+    logEvent("error", `Test email failed: ${e.message} | code: ${e.code} | smtp: ${e.response || "none"}`);
+    res.json({ ok: false, error: e.message, code: e.code || null, smtp: e.response || null, hint: "Check Railway logs for SMTP verification status on startup" });
   }
 });
 
