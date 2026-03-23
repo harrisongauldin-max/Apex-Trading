@@ -1,5 +1,5 @@
 // -
-// APEX v3.83 - Professional Options Trading Agent
+// APEX v3.90 - Professional Options Trading Agent
 // Alpaca Paper Trading Edition
 // -
 const express    = require("express");
@@ -476,6 +476,41 @@ async function initState() {
     } catch(e) {
       console.log("[RECONCILE] Failed:", e.message, "— proceeding with saved state");
     }
+
+    // ── CASH SYNC from Alpaca account ─────────────────────────────────────
+    // state.cash is APEX's internal ledger — can drift from real Alpaca balance
+    // due to fills at different prices, fees, or manual activity outside APEX
+    //
+    // IMPORTANT: If customBudget is set, the user is intentionally trading a
+    // subset of their Alpaca balance (e.g. $10k out of $100k paper account).
+    // In that case, DON'T sync from Alpaca — it would override their budget.
+    // Only sync when no customBudget is set (user wants to trade full balance).
+    try {
+      const acct = await alpacaGet("/account");
+      if (acct && acct.cash) {
+        const alpacaCash = parseFloat(acct.cash);
+        state.alpacaCash = alpacaCash; // always store for dashboard display
+
+        const hasCustomBudget = state.customBudget && state.customBudget > 0 && state.customBudget !== MONTHLY_BUDGET;
+        if (hasCustomBudget) {
+          // User set a custom budget — respect it, don't sync from Alpaca
+          console.log(`[CASH SYNC] Custom budget active ($${state.customBudget}) — skipping Alpaca sync (Alpaca has $${alpacaCash.toFixed(2)})`);
+        } else {
+          // No custom budget — sync APEX cash to actual Alpaca balance
+          const apexCash = state.cash;
+          const drift    = Math.abs(alpacaCash - apexCash);
+          if (drift > 1.00) {
+            console.log(`[CASH SYNC] Alpaca: $${alpacaCash.toFixed(2)} | APEX: $${apexCash.toFixed(2)} | drift: $${drift.toFixed(2)} — syncing`);
+            state.cash = alpacaCash;
+            await redisSave(state);
+          } else {
+            console.log(`[CASH SYNC] OK — $${alpacaCash.toFixed(2)}`);
+          }
+        }
+      }
+    } catch(e) {
+      console.log("[CASH SYNC] Failed:", e.message, "— using saved cash balance");
+    }
   }
 }
 
@@ -562,6 +597,20 @@ function calcIVRank(currentIV, bars) {
 // Full dynamic signal analysis for a stock
 // Uses intraday 1-min bars for RSI/MACD/momentum (real-time, prefetched in parallel)
 // Falls back to daily bars for trend context and IV calculation
+async function getLiveBeta(ticker) {
+  // Fetch beta from Alpaca snapshot fundamentals
+  // Falls back to watchlist value if unavailable
+  try {
+    const snap = await alpacaGet(`/stocks/${ticker}/snapshot`, ALPACA_DATA);
+    if (snap && snap.fundamentals && snap.fundamentals.beta) {
+      return parseFloat(snap.fundamentals.beta);
+    }
+    // Some snapshots return beta in a different field
+    if (snap && snap.beta) return parseFloat(snap.beta);
+  } catch(e) {}
+  return null; // null = use watchlist fallback
+}
+
 async function getDynamicSignals(ticker, bars, intradayBars = null, realOptionsIV = null) {
   // Use prefetched intraday bars if provided, otherwise fetch now
   if (!intradayBars) intradayBars = await getIntradayBars(ticker);
@@ -1228,7 +1277,8 @@ async function getPreMarketData(ticker) {
 // - Beta-Weighted Portfolio Delta -
 function calcBetaWeightedDelta() {
   if (!state.positions || !state.positions.length) return 0;
-  const spyPrice = (state.positions.find(p => p.ticker === "SPY")?.price) || 560; // use live SPY if held, else current approx
+  // Use cached SPY price from scan context, or fetch fresh — never use hardcoded value
+  const spyPrice = (state.positions.find(p => p.ticker === "SPY")?.price) || state._liveSPY || 560;
   let totalBWD   = 0;
   for (const pos of state.positions) {
     const delta    = parseFloat(pos.greeks?.delta || 0);
@@ -3325,7 +3375,21 @@ async function runScan() {
     marketContext.dxy         = dxy;
     marketContext.yieldCurve  = yc;
     marketContext.macro       = macro;
-    marketContext.putCallRatio = state.vix > 30 ? { ratio: 1.3, signal: "fear" } : state.vix > 20 ? { ratio: 1.0, signal: "neutral" } : { ratio: 0.7, signal: "greed" };
+    // Real put/call ratio from CBOE via Alpaca — fetch PCCE (equity P/C) and PCCR (total P/C)
+    // PCCE tracks equity-only put/call ratio — most relevant for individual stock options
+    try {
+      const pcceData = await alpacaGet(`/stocks/PCCE/bars?timeframe=1Day&limit=5`, ALPACA_DATA);
+      if (pcceData && pcceData.bars && pcceData.bars.length > 0) {
+        const pcRatio  = parseFloat(pcceData.bars[pcceData.bars.length-1].c);
+        const signal   = pcRatio > 0.9 ? "fear" : pcRatio > 0.7 ? "elevated" : pcRatio < 0.5 ? "greed" : "neutral";
+        marketContext.putCallRatio = { ratio: parseFloat(pcRatio.toFixed(2)), signal, source: "CBOE-PCCE" };
+      } else {
+        // Fallback if PCCE unavailable
+        marketContext.putCallRatio = state.vix > 30 ? { ratio: 1.3, signal: "fear" } : state.vix > 20 ? { ratio: 1.0, signal: "neutral" } : { ratio: 0.7, signal: "greed" };
+      }
+    } catch(e) {
+      marketContext.putCallRatio = state.vix > 30 ? { ratio: 1.3, signal: "fear" } : state.vix > 20 ? { ratio: 1.0, signal: "neutral" } : { ratio: 0.7, signal: "greed" };
+    }
     logEvent("scan", `[15min] Macro:${macro.signal}(${macro.scoreModifier > 0 ? "+" : ""}${macro.scoreModifier}) | F&G:${fg.score} | DXY:${dxy.trend} | Yield:${yc.signal}`);
 
     // If macro is strongly bearish - close all calls immediately
@@ -3587,6 +3651,7 @@ async function runScan() {
 
   // Get SPY price for relative strength + intraday momentum
   const spyPrice     = await getStockQuote("SPY") || 500;
+  if (spyPrice) state._liveSPY = spyPrice; // cache for beta-weighted delta calc
   const spyBars      = await getStockBars("SPY", 5);
   const spyReturn    = spyBars.length >= 5 ? (spyBars[spyBars.length-1].c - spyBars[0].o) / spyBars[0].o : 0;
   // SPY 15-min momentum — if SPY is recovering, puts are fighting the tape
@@ -3627,7 +3692,7 @@ async function runScan() {
     const results = await Promise.all(
       batch.map(async stock => {
         try {
-          const [price, bars, intradayBars, sectorResult, preMarket, newsArticles, analystData, eqScore] = await Promise.all([
+          const [price, bars, intradayBars, sectorResult, preMarket, newsArticles, analystData, eqScore, liveBeta] = await Promise.all([
             getStockQuote(stock.ticker),
             getStockBars(stock.ticker, 60),
             getIntradayBars(stock.ticker),
@@ -3636,7 +3701,18 @@ async function runScan() {
             getNewsForTicker(stock.ticker),
             getAnalystActivity(stock.ticker),
             getEarningsQualityScore(stock.ticker, []),
+            (function() {
+              // Beta: cached 60 min — changes slowly, no need to fetch every scan
+              const cached = getCached('beta:' + stock.ticker);
+              if (cached) return Promise.resolve(cached);
+              return getLiveBeta(stock.ticker);
+            })(),
           ]);
+          // Store live beta on stock object for liveStock construction
+          if (liveBeta && liveBeta > 0) {
+            stock._liveBeta = liveBeta;
+            setCache('beta:' + stock.ticker, liveBeta);
+          }
           return { stock, price, bars, intradayBars, sectorResult, preMarket, newsArticles, analystData, eqScore };
         } catch(e) {
           return { stock, price: null, bars: [], intradayBars: [], sectorResult: { pass:true, putBoost:0 }, preMarket:null, newsArticles:[], analystData:{ modifier:0, signal:"neutral", upgrades:[], downgrades:[] }, eqScore:{ signal:"neutral" } };
@@ -3793,6 +3869,9 @@ async function runScan() {
     const newsSentiment = analyzeNews(newsArticles);
 
     // Merge live signals into stock object — intraday signals override static seed values
+    // Attempt live beta fetch — use watchlist beta as fallback
+    const liveBeta  = stock._liveBeta || stock.beta || 1.0;
+
     const liveStock = {
       ...stock,
       price:         price,
@@ -3800,6 +3879,7 @@ async function runScan() {
       macd:          signals.macd,
       momentum:      signals.momentum,  // now intraday momentum when available
       ivr:           signals.ivr,
+      beta:          liveBeta,          // live beta overrides static watchlist value
       newsSentiment: newsSentiment.signal,
       intradayVWAP:  signals.intradayVWAP || 0,
       volPaceRatio:  signals.volPaceRatio || 1,
@@ -4428,6 +4508,7 @@ app.get("/api/state", async (req, res) => {
     uptime:             process.uptime(),
     betaWeightedDelta:  calcBetaWeightedDelta(),
     dataQuality:        state.dataQuality || { realTrades: 0, estimatedTrades: 0, totalTrades: 0 },
+    alpacaCash:         state.alpacaCash || null,
     reconcileStatus:    state.reconcileStatus || "unknown",
     orphanCount:        state.orphanCount || 0,
     lastReconcile:      state.lastReconcile || null,
@@ -5625,7 +5706,7 @@ process.on("unhandledRejection", (reason, promise) => {
 // Boot sequence - load state from Redis then start server
 initState().then(() => {
   app.listen(PORT, () => {
-    console.log(`APEX v3.83 running on port ${PORT}`);
+    console.log(`APEX v3.90 running on port ${PORT}`);
     console.log(`Alpaca key:  ${ALPACA_KEY?"SET":"NOT SET"}`);
     console.log(`Gmail:       ${GMAIL_USER||"NOT SET"}`);
     console.log(`Redis:       ${REDIS_URL?"SET":"NOT SET - using file fallback"}`);
