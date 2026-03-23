@@ -1798,11 +1798,20 @@ const MACRO_BEARISH_KEYWORDS = [
 ];
 
 const MACRO_BULLISH_KEYWORDS = [
+  // Fed / monetary
   "fed rate cut", "rate cut", "dovish", "easing", "quantitative easing", "stimulus",
-  "soft landing", "inflation cooling", "cpi miss", "inflation slows",
-  "strong jobs", "unemployment falls", "gdp beat", "gdp growth",
-  "trade deal", "ceasefire", "peace talks", "sanctions lifted",
-  "oil falls", "energy prices drop", "supply chain recovery"
+  "soft landing", "inflation cooling", "cpi miss", "inflation slows", "pause rate",
+  // Economic strength
+  "strong jobs", "unemployment falls", "gdp beat", "gdp growth", "beat expectations",
+  // Geopolitical resolution — this morning's scenario
+  "ceasefire", "peace deal", "peace talks", "end to conflict", "truce", "accord",
+  "sanctions lifted", "sanctions relief", "tariff pause", "tariff suspended",
+  "tariff removed", "tariff cut", "trade deal", "trade agreement", "trade truce",
+  "iran deal", "us-iran", "deescalation", "de-escalation", "diplomatic",
+  "trump deal", "trade resolution", "agreement reached",
+  // Market relief
+  "oil falls", "energy prices drop", "supply chain recovery", "risk on",
+  "market rally", "stocks surge", "rally on"
 ];
 
 // Sector-specific impact from macro events
@@ -3427,6 +3436,12 @@ async function runScan() {
     await checkEarningsPlays();
     await manageEarningsPlayExits();
 
+    // Macro news on 5-min tier — catches breaking news within 5 minutes not 15
+    const macro = await getMacroNews();
+    marketContext.macro = macro;
+    if (macro.mode !== "normal") {
+      logEvent("macro", `[5min] Macro: ${macro.signal} | ${macro.triggers.slice(0,3).join(", ")}`);
+    }
     logEvent("scan", `[5min] Regime:${regime.regime}(${regime.confidence}%) | Kelly:${marketContext.kelly.contracts}x | Global:${marketContext.globalMarket.signal} | Streak:${marketContext.streaks.currentStreak}x${marketContext.streaks.currentType}`);
   }
 
@@ -3435,11 +3450,10 @@ async function runScan() {
   // -- SLOW TIER (every 15 minutes) --
   if (now - lastSlowScan > 15 * 60 * 1000) {
     lastSlowScan = now;
-    const [fg, dxy, yc, macro] = await Promise.all([getFearAndGreed(), getDXY(), getYieldCurve(), getMacroNews()]);
+    const [fg, dxy, yc] = await Promise.all([getFearAndGreed(), getDXY(), getYieldCurve()]);
     marketContext.fearGreed   = fg;
     marketContext.dxy         = dxy;
     marketContext.yieldCurve  = yc;
-    marketContext.macro       = macro;
     // Real put/call ratio from CBOE via Alpaca — fetch PCCE (equity P/C) and PCCR (total P/C)
     // PCCE tracks equity-only put/call ratio — most relevant for individual stock options
     try {
@@ -3462,6 +3476,19 @@ async function runScan() {
       logEvent("macro", `DEFENSIVE MODE - macro strongly bearish: ${macro.triggers.join(", ")} - closing call positions`);
       for (const pos of [...state.positions]) {
         if (pos.optionType === "call") await closePosition(pos.ticker, "macro-defensive");
+      }
+    }
+
+    // Bullish macro: close losing puts — thesis broken by macro tailwind
+    if (macro.mode === "aggressive" && !dryRunMode) {
+      logEvent("macro", `BULLISH MACRO — ${macro.signal}: ${macro.triggers.slice(0,3).join(", ")} — closing losing puts`);
+      for (const pos of [...state.positions]) {
+        if (pos.optionType !== "put") continue;
+        const curP = pos.currentPrice || pos.premium;
+        const chg  = (curP - pos.premium) / pos.premium;
+        if (chg < -0.05) { // losing 5%+ — macro has turned against the position
+          await closePosition(pos.ticker, "macro-bullish");
+        }
       }
     }
   }
@@ -3625,19 +3652,23 @@ async function runScan() {
     }
 
     // 8. 50MA BREAK — thesis invalidated (real 50-day MA)
-    try {
-      const maBars = await getStockBars(pos.ticker, 55);
-      if (maBars.length >= 50) {
-        const ma50 = maBars.slice(-50).reduce((s, b) => s + b.c, 0) / 50;
-        const ma50Break = pos.optionType === "put"
-          ? price > ma50 * (1 + MA50_BUFFER)  // stock recovered above 50MA — put thesis broken
-          : price < ma50 * (1 - MA50_BUFFER); // stock broke below 50MA — call thesis broken
-        if (ma50Break) {
-          logEvent("scan", `${pos.ticker} 50ma-break | price $${price.toFixed(2)} | 50MA $${ma50.toFixed(2)}`);
-          await closePosition(pos.ticker, "50ma-break"); continue;
+    // Minimum 2 hour hold — open volatility can briefly cross 50MA and recover
+    // Firing instantly on a bounce after open loses money on noise, not signal
+    if (hoursOpen >= 2) {
+      try {
+        const maBars = await getStockBars(pos.ticker, 55);
+        if (maBars.length >= 50) {
+          const ma50 = maBars.slice(-50).reduce((s, b) => s + b.c, 0) / 50;
+          const ma50Break = pos.optionType === "put"
+            ? price > ma50 * (1 + MA50_BUFFER)  // put: stock recovered above 50MA
+            : price < ma50 * (1 - MA50_BUFFER); // call: stock broke below 50MA
+          if (ma50Break) {
+            logEvent("scan", `${pos.ticker} 50ma-break | price $${price.toFixed(2)} | 50MA $${ma50.toFixed(2)} | held ${hoursOpen.toFixed(1)}h`);
+            await closePosition(pos.ticker, "50ma-break"); continue;
+          }
         }
-      }
-    } catch(e) {}
+      } catch(e) {}
+    }
 
     // 9. EARNINGS CLOSE — approaching earnings = IV crush risk
     if (pos.earningsDate) {
@@ -3682,10 +3713,48 @@ async function runScan() {
   }
 
   // 2. New entries — check if any entry type is valid
-  const callsAllowed = isEntryWindow("call") || dryRunMode;
-  const putsAllowed  = (isEntryWindow("put") && !vixFallingPause) || dryRunMode;
+  const macroBullish = (marketContext.macro?.mode === "aggressive");
+  const callsAllowed = (isEntryWindow("call") && !openingBlock) || dryRunMode;
+  const putsAllowed  = (isEntryWindow("put") && !vixFallingPause && !spyRecovering && !openingBlock && !macroBullish) || dryRunMode;
+  if (macroBullish && !dryRunMode) logEvent("filter", `Macro bullish (${marketContext.macro?.signal}) — puts blocked`);
   if (vixFallingPause && !dryRunMode) logEvent("filter", "VIX falling — put entries paused this scan");
+
+  // ── SPY STRONG RECOVERY — exit losing puts ────────────────────────────
+  // If SPY is up 1%+ from prior close, the macro environment has reversed
+  // This catches gap-up opens driven by news (ceasefire, Fed pivot, etc)
+  // Close puts that are underwater — thesis is broken by the macro move
+  if (!dryRunMode && spyBars.length >= 2) {
+    const prevClose  = spyBars[spyBars.length-2].c;
+    const curSPY     = spyBars[spyBars.length-1].c;
+    const spyDayMove = (curSPY - prevClose) / prevClose;
+    if (spyDayMove > 0.01) { // SPY up 1%+ = strong macro reversal
+      for (const pos of [...state.positions]) {
+        if (pos.optionType !== "put") continue;
+        const snap = posSnapshots[pos.contractSymbol];
+        if (!snap) continue;
+        const quote  = snap.latestQuote || {};
+        const bid    = parseFloat(quote.bp || 0);
+        const ask    = parseFloat(quote.ap || 0);
+        const curP   = bid > 0 && ask > 0 ? (bid + ask) / 2 : pos.premium;
+        const chg    = (curP - pos.premium) / pos.premium;
+        if (chg < -0.05) { // only close puts that are already losing (5%+)
+          logEvent("scan", `${pos.ticker} SPY macro reversal +${(spyDayMove*100).toFixed(1)}% — closing losing put (${(chg*100).toFixed(0)}%)`);
+          await closePosition(pos.ticker, "macro-reversal");
+        }
+      }
+    }
+  }
   if (!callsAllowed && !putsAllowed) return;
+
+  // ── OPENING VOLATILITY BLOCK — no new entries in first 15 min ──────────
+  // First 15 minutes = price discovery, wide spreads, macro news reactions
+  // Position management (exits, stops, trails) still runs — only new entries blocked
+  const etMinSinceOpen = (scanET.getHours() - 9) * 60 + scanET.getMinutes() - 30;
+  const openingBlock   = etMinSinceOpen >= 0 && etMinSinceOpen < 15 && !dryRunMode;
+  if (openingBlock) {
+    logEvent("filter", `Opening volatility block (${etMinSinceOpen}min since open) — entries paused until 9:45am`);
+    // Don't return — fall through to new entry section which checks openingBlock flag
+  }
   if (state.circuitOpen === false || state.weeklyCircuitOpen === false) return;
   if (state.consecutiveLosses >= CONSEC_LOSS_LIMIT) return;
   if (state.cash <= CAPITAL_FLOOR) return;
@@ -3722,12 +3791,30 @@ async function runScan() {
   // SPY 15-min momentum — if SPY is recovering, puts are fighting the tape
   const spyIntraday  = await getIntradayBars("SPY");
   const spyRecovering = (() => {
-    if (spyIntraday.length < 15) return false;
-    const recent = spyIntraday.slice(-15);
-    const spyMove = (recent[recent.length-1].c - recent[0].c) / recent[0].c;
-    return spyMove > 0.003; // SPY up 0.3%+ in last 15 min = recovery
+    // Check 1: 15-minute intraday momentum (original check)
+    if (spyIntraday.length >= 15) {
+      const recent   = spyIntraday.slice(-15);
+      const spyMove  = (recent[recent.length-1].c - recent[0].c) / recent[0].c;
+      if (spyMove > 0.003) return true; // up 0.3%+ in last 15 min
+    }
+    // Check 2: Gap-up detection — SPY up 0.5%+ from prior close
+    // Catches Trump-style announcements that cause a gap at open
+    // spyReturn is already calculated from daily bars (today open vs 5 days ago open)
+    // Use a direct prev-close comparison instead
+    if (spyBars.length >= 2) {
+      const prevClose  = spyBars[spyBars.length-2].c;
+      const curPrice   = spyBars[spyBars.length-1].c;
+      const dayReturn  = (curPrice - prevClose) / prevClose;
+      if (dayReturn > 0.005) return true; // up 0.5%+ from yesterday = strong recovery
+    }
+    // Check 3: Intraday from open — even with few bars
+    if (spyIntraday.length >= 3) {
+      const fromOpen = (spyIntraday[spyIntraday.length-1].c - spyIntraday[0].o) / spyIntraday[0].o;
+      if (fromOpen > 0.005) return true; // up 0.5%+ from today's open
+    }
+    return false;
   })();
-  if (spyRecovering) logEvent("filter", `SPY recovering (+0.3%+ last 15min) — puts fighting the tape`);
+  if (spyRecovering) logEvent("filter", `SPY recovery detected — puts blocked (day move or gap-up)`);
 
   // Gap detection - large gap down = put opportunity, gap up = call opportunity
   let marketGapDirection = null;
