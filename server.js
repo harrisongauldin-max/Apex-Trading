@@ -49,9 +49,9 @@ const MAX_SECTOR_PCT      = 0.50;
 const STOP_LOSS_PCT       = 0.35;
 const FAST_STOP_PCT       = 0.20;   // -20% in first 48hrs
 const FAST_STOP_HOURS     = 48;
-const TAKE_PROFIT_PCT     = 0.65;
-const PARTIAL_CLOSE_PCT   = 0.50;
-const TRAIL_ACTIVATE_PCT  = 0.30;   // start trailing at +30%
+const TAKE_PROFIT_PCT     = 0.30;  // tightened — faster exits, less overnight risk
+const PARTIAL_CLOSE_PCT   = 0.18;  // partial at 18% — lock in gains early
+const TRAIL_ACTIVATE_PCT  = 0.15;   // start trailing at +15% — tightened with new targets
 const TRAIL_STOP_PCT      = 0.15;   // trail 15% below peak
 const BREAKEVEN_LOCK_PCT  = 0.40;   // lock to breakeven at +40%
 const RIDE_TARGET_PCT     = 1.00;   // let remainder ride to +100%
@@ -184,6 +184,8 @@ function defaultState() {
     tradeJournal:     [],
     todayTrades:      0,
     consecutiveLosses:0,
+    dayTrades:        [],   // rolling log of day trades [{date, ticker, openTime, closeTime}]
+    pdtWarned:        false,
     monthStart:       new Date().toLocaleDateString(),
     weekStartCash:    MONTHLY_BUDGET,
     dayStartCash:     MONTHLY_BUDGET,
@@ -2520,35 +2522,93 @@ async function checkAllFilters(stock, price) {
 // LEAPS     = let winners run, wide trail
 function getDTEExitParams(dte) {
   if (dte <= 21) {
-    // Short-dated (7-21 DTE) — aggressive exits, theta eating you alive
+    // Short-dated (7-21 DTE) — fastest exits, theta kills you and PDT risk is high
     return {
-      takeProfitPct:  0.35,  // 35% target — take it fast
+      takeProfitPct:  0.20,  // 20% target — in and out fast
       stopLossPct:    0.35,
-      fastStopPct:    0.20,  // -20% fast stop (raised from 15% — VIX 33 noise too wide)
-      trailActivate:  0.20,  // trail kicks in at +20%
-      trailStop:      0.10,  // tight 10% trail
+      fastStopPct:    0.15,  // -15% fast stop — tight on short-dated
+      trailActivate:  0.12,  // trail kicks in at +12%
+      trailStop:      0.07,  // 7% trail — very tight
       label:          "SHORT-DTE",
     };
   } else if (dte <= 45) {
-    // Monthly — balanced
+    // Monthly — tighter than before, preserves day trades
     return {
-      takeProfitPct:  0.50,  // 50% target
+      takeProfitPct:  0.30,  // 30% target (was 50%)
       stopLossPct:    0.35,
-      fastStopPct:    0.20,  // -20% fast stop
-      trailActivate:  0.30,  // trail at +30%
-      trailStop:      0.15,  // 15% trail
+      fastStopPct:    0.20,
+      trailActivate:  0.18,  // trail at +18% (was +30%)
+      trailStop:      0.10,  // 10% trail (was 15%)
       label:          "MONTHLY",
     };
   } else {
-    // LEAPS / long-dated — let winners run
+    // LEAPS / long-dated — still let run but tighter than before
     return {
-      takeProfitPct:  0.80,  // 80% target
+      takeProfitPct:  0.50,  // 50% target (was 80%)
       stopLossPct:    0.35,
       fastStopPct:    0.20,
-      trailActivate:  0.40,  // trail at +40%
-      trailStop:      0.20,  // 20% trail — wider for long-dated
+      trailActivate:  0.25,  // trail at +25% (was +40%)
+      trailStop:      0.12,  // 12% trail (was 20%)
       label:          "LEAPS",
     };
+  }
+}
+
+// - PDT (Pattern Day Trader) Tracking -
+// SEC rule: 4+ day trades in 5 rolling business days = PDT flag on margin accounts <$25k
+// A day trade = opening AND closing the same security on the same calendar day
+// APEX tracks this and blocks new entries when at 3/3 to preserve the last day trade
+
+const PDT_LIMIT     = 3;   // max day trades before block (limit is 3, 4th triggers PDT flag)
+const PDT_DAYS      = 5;   // rolling business day window
+
+function getBusinessDaysAgo(n) {
+  // Returns the date n business days ago (skips weekends)
+  let date = new Date();
+  let count = 0;
+  while (count < n) {
+    date.setDate(date.getDate() - 1);
+    const day = date.getDay();
+    if (day !== 0 && day !== 6) count++; // skip Sat/Sun
+  }
+  return date;
+}
+
+function countRecentDayTrades() {
+  // Count day trades in the rolling 5 business day window
+  const cutoff    = getBusinessDaysAgo(PDT_DAYS);
+  const cutoffStr = cutoff.toLocaleDateString();
+  const recent    = (state.dayTrades || []).filter(dt => {
+    // Compare date strings to avoid timezone issues
+    return new Date(dt.closeTime) >= cutoff;
+  });
+  return recent.length;
+}
+
+function isDayTrade(pos) {
+  // A position is a day trade if it was opened today (same calendar date)
+  if (!pos || !pos.openDate) return false;
+  const openDay  = new Date(pos.openDate).toLocaleDateString();
+  const today    = new Date().toLocaleDateString();
+  return openDay === today;
+}
+
+function recordDayTrade(pos, reason) {
+  if (!state.dayTrades) state.dayTrades = [];
+  state.dayTrades.push({
+    ticker:    pos.ticker,
+    openTime:  pos.openDate,
+    closeTime: new Date().toISOString(),
+    reason,
+    pnl:       0, // will be updated by closePosition
+  });
+  // Keep only last 20 day trade records
+  if (state.dayTrades.length > 20) state.dayTrades = state.dayTrades.slice(-20);
+  const count = countRecentDayTrades();
+  logEvent("warn", `PDT: Day trade recorded for ${pos.ticker} — ${count}/${PDT_LIMIT} in rolling 5-day window`);
+  if (count >= PDT_LIMIT) {
+    logEvent("warn", `PDT LIMIT REACHED (${count}/${PDT_LIMIT}) — no new entries until window resets`);
+    state.pdtWarned = true;
   }
 }
 
@@ -3060,9 +3120,10 @@ async function executeTrade(stock, price, score, scoreReasons, vix, optionType =
 
 // - Close Position -
 async function closePosition(ticker, reason, exitPremium = null) {
-  const idx = state.positions.findIndex(p => p.ticker === ticker);
-  if (idx === -1) return;
-  const pos  = state.positions[idx];
+  try {
+    const idx = state.positions.findIndex(p => p.ticker === ticker);
+    if (idx === -1) return;
+    const pos  = state.positions[idx];
   const mult = pos.partialClosed ? 0.5 : 1.0;
 
   // Use real exit price in order of priority:
@@ -3151,6 +3212,10 @@ async function closePosition(ticker, reason, exitPremium = null) {
   state.totalRevenue  = nr;
   state.monthlyProfit = parseFloat((state.monthlyProfit + pnl).toFixed(2));
   state.positions.splice(idx, 1);
+  // PDT tracking — record if this is a day trade (opened and closed same day)
+  if (isDayTrade(pos)) {
+    recordDayTrade(pos, reason);
+  }
   state.closedTrades.push({ ticker, pnl, pct, date:new Date().toLocaleDateString(), reason, score:pos.score||0, closeTime: Date.now() });
   // Cap closedTrades at 500 — older trades archived in tradeJournal
   // Prevents Redis payload from growing unbounded over many trading days
@@ -3201,6 +3266,18 @@ async function closePosition(ticker, reason, exitPremium = null) {
     `cash ${fmt(state.cash)} | consec losses: ${state.consecutiveLosses}`
   );
   await saveStateNow();
+  return true;
+  } catch(e) {
+    logEvent("error", `closePosition crashed for ${ticker} (${reason}): ${e.message}`);
+    // Force remove from positions on error — don't leave stuck positions
+    const stuckIdx = state.positions.findIndex(p => p.ticker === ticker);
+    if (stuckIdx !== -1) {
+      state.positions.splice(stuckIdx, 1);
+      logEvent("warn", `${ticker} force-removed from positions after error`);
+      try { await saveStateNow(); } catch(se) {}
+    }
+    return false;
+  }
 }
 
 // - Partial Close -
@@ -3539,6 +3616,7 @@ async function runScan() {
     const pos   = state.positions[pi];
     const price = posQuotes[pi];
     if (!price) continue;
+    try { // wrap each position in try/catch — one bad position can't crash the whole scan
 
     const dte      = Math.max(1, Math.round((new Date(pos.expDate)-new Date())/MS_PER_DAY));
     const t        = dte / 365;
@@ -3578,6 +3656,28 @@ async function runScan() {
     // Update peak cash for drawdown tracking
     const curCash = state.cash + openRisk() + realizedPnL();
     if (curCash > (state.peakCash || MONTHLY_BUDGET)) state.peakCash = curCash;
+
+    // ── PDT-AWARE HOLD LOGIC ──────────────────────────────────────────────
+    // If position opened today — be reluctant to close it same-day (day trade)
+    // Only force-close if hitting hard stop or deeply losing
+    // Let minor moves ride overnight to avoid consuming a day trade
+    const openedToday    = isDayTrade(pos); // opened same calendar day
+    const etHourForPDT   = scanET.getHours() + scanET.getMinutes() / 60;
+    const inFinalHour    = etHourForPDT >= 15.0; // after 3pm ET
+    const pdtHoldMode    = openedToday && inFinalHour && !dryRunMode;
+    // In PDT hold mode: only hard stop (-35%) or deeply losing (-25%+) closes same-day
+    // Everything else holds overnight — trail, target, time-stop, 50MA all deferred
+    if (pdtHoldMode && chg > -0.25) {
+      // Minor loser or winner — hold overnight, don't day trade
+      if (chg >= 0) {
+        logEvent("scan", `${pos.ticker} +${(chg*100).toFixed(0)}% — holding overnight (PDT mode, avoid day trade)`);
+      } else {
+        logEvent("scan", `${pos.ticker} ${(chg*100).toFixed(0)}% — holding overnight (PDT mode, -25% threshold not reached)`);
+      }
+      pos.price = price; pos.currentPrice = curP;
+      markDirty();
+      continue; // skip all exits below for today's positions after 3pm
+    }
 
     // ── EXIT HIERARCHY ────────────────────────────────────────────────────
     // Order matters — earlier checks take priority over later ones
@@ -3710,12 +3810,19 @@ async function runScan() {
     pos.currentPrice = curP;
     logEvent("scan", `${pos.ticker} | chg:${(chg*100).toFixed(1)}% | cur:$${curP} | peak:$${pos.peakPremium.toFixed(2)} | DTE:${dte} | HOLD`);
     markDirty(); // will be flushed at end of scan, not every tick
+    } catch(posErr) {
+      logEvent("error", `Position scan error for ${pos?.ticker || "unknown"}: ${posErr.message}`);
+    } // end per-position try/catch
   }
 
   // 2. New entries — check if any entry type is valid
-  const macroBullish = (marketContext.macro?.mode === "aggressive");
-  const callsAllowed = (isEntryWindow("call") && !openingBlock) || dryRunMode;
-  const putsAllowed  = (isEntryWindow("put") && !vixFallingPause && !spyRecovering && !openingBlock && !macroBullish) || dryRunMode;
+  const macroBullish  = (marketContext.macro?.mode === "aggressive");
+  const pdtCount      = countRecentDayTrades();
+  const pdtBlocked    = !dryRunMode && pdtCount >= PDT_LIMIT;
+  if (pdtBlocked) logEvent("filter", `PDT limit reached (${pdtCount}/${PDT_LIMIT} day trades in 5 days) — no new entries`);
+
+  const callsAllowed = (isEntryWindow("call") && !openingBlock && !finalHourBlock && !pdtBlocked) || dryRunMode;
+  const putsAllowed  = (isEntryWindow("put") && !vixFallingPause && !spyRecovering && !openingBlock && !finalHourBlock && !macroBullish && !pdtBlocked) || dryRunMode;
   if (macroBullish && !dryRunMode) logEvent("filter", `Macro bullish (${marketContext.macro?.signal}) — puts blocked`);
   if (vixFallingPause && !dryRunMode) logEvent("filter", "VIX falling — put entries paused this scan");
 
@@ -3753,7 +3860,15 @@ async function runScan() {
   const openingBlock   = etMinSinceOpen >= 0 && etMinSinceOpen < 15 && !dryRunMode;
   if (openingBlock) {
     logEvent("filter", `Opening volatility block (${etMinSinceOpen}min since open) — entries paused until 9:45am`);
-    // Don't return — fall through to new entry section which checks openingBlock flag
+  }
+
+  // ── FINAL HOUR BLOCK — no new entries after 3pm ───────────────────────
+  // Any position opened after 3pm will almost certainly need same-day management
+  // = day trade. Block entries in final hour to preserve day trade count.
+  const etHourEntry    = scanET.getHours() + scanET.getMinutes() / 60;
+  const finalHourBlock = etHourEntry >= 15.0 && !dryRunMode;
+  if (finalHourBlock) {
+    logEvent("filter", `Final hour block — no new entries after 3pm (PDT protection)`);
   }
   if (state.circuitOpen === false || state.weeklyCircuitOpen === false) return;
   if (state.consecutiveLosses >= CONSEC_LOSS_LIMIT) return;
@@ -4661,6 +4776,9 @@ app.get("/api/state", async (req, res) => {
     betaWeightedDelta:  calcBetaWeightedDelta(),
     dataQuality:        state.dataQuality || { realTrades: 0, estimatedTrades: 0, totalTrades: 0 },
     alpacaCash:         state.alpacaCash || null,
+    pdtCount:           countRecentDayTrades(),
+    pdtLimit:           PDT_LIMIT,
+    pdtBlocked:         countRecentDayTrades() >= PDT_LIMIT,
     reconcileStatus:    state.reconcileStatus || "unknown",
     orphanCount:        state.orphanCount || 0,
     lastReconcile:      state.lastReconcile || null,
@@ -4777,13 +4895,32 @@ app.post("/api/full-reset", async (req, res) => {
 
 // Emergency close all positions
 app.post("/api/emergency-close", async (req, res) => {
-  const count = state.positions.length;
-  for (const pos of [...state.positions]) {
-    await closePosition(pos.ticker, "emergency-manual");
+  const snapshot = [...state.positions]; // snapshot before any mutations
+  const count    = snapshot.length;
+  let closed = 0, failed = 0;
+
+  logEvent("circuit", `EMERGENCY CLOSE ALL initiated — ${count} positions`);
+
+  for (const pos of snapshot) {
+    try {
+      const result = await closePosition(pos.ticker, "emergency-manual");
+      if (result !== false) closed++;
+      else failed++;
+    } catch(e) {
+      failed++;
+      logEvent("error", `Emergency close failed for ${pos.ticker}: ${e.message}`);
+      // Force remove even if closePosition errored
+      const idx = state.positions.findIndex(p => p.ticker === pos.ticker);
+      if (idx !== -1) state.positions.splice(idx, 1);
+    }
   }
-  logEvent("circuit", `EMERGENCY CLOSE ALL - ${count} positions closed manually`);
-  await saveStateNow();
-  res.json({ ok: true, closed: count });
+
+  logEvent("circuit", `EMERGENCY CLOSE ALL complete — ${closed} closed, ${failed} failed`);
+
+  // Force save regardless of errors
+  try { await saveStateNow(); } catch(e) { logEvent("error", `Post-emergency save failed: ${e.message}`); }
+
+  res.json({ ok: true, closed, failed, total: count });
 });
 
 // Test options chain endpoint — verify Pro data access
