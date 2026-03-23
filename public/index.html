@@ -1091,6 +1091,16 @@ function renderPositions() {
         <div class="greek-chip"><span class="greek-label">V VEGA</span><span class="greek-val">${p.greeks?.vega||'--'}</span></div>
         ${p.trailStop ? `<div class="greek-chip"><span class="greek-label">TRAIL STOP</span><span class="greek-val" style="color:var(--orange)">$${p.trailStop.toFixed(2)}</span></div>` : ''}
       </div>
+      ${p.estimatedAH ? `
+        <div style="margin-top:8px;padding:6px 8px;background:#0a1a10;border:1px solid #1a3a20;border-radius:6px">
+          <div style="font-size:9px;color:#44aa66;margin-bottom:4px">⏱ AFTER-HOURS ESTIMATE (${p.estimatedAH.source})</div>
+          <div style="display:flex;gap:16px;flex-wrap:wrap">
+            <div><span style="font-size:9px;color:var(--muted)">EST. OPTION </span><span style="font-weight:700;color:${p.estimatedAH.pct>=0?'#44ff88':'#ff6666'}">$${p.estimatedAH.price.toFixed(2)}</span></div>
+            <div><span style="font-size:9px;color:var(--muted)">EST. P&amp;L </span><span style="font-weight:700;color:${p.estimatedAH.pnl>=0?'#44ff88':'#ff6666'}">${p.estimatedAH.pnl>=0?'+':''}$${p.estimatedAH.pnl.toFixed(2)} (${p.estimatedAH.pct>=0?'+':''}${p.estimatedAH.pct}%)</span></div>
+            <div><span style="font-size:9px;color:var(--muted)">${p.ticker} STOCK </span><span style="font-weight:700;color:var(--blue)">$${p.estimatedAH.stockPrice.toFixed(2)}</span></div>
+            <div style="align-self:center"><span style="font-size:9px;color:#555">upd: ${new Date(p.estimatedAH.updatedAt).toLocaleTimeString()}</span></div>
+          </div>
+        </div>` : ''}
       <div style="font-size:10px;color:var(--muted);margin-top:8px">Opened: ${new Date(p.openDate).toLocaleString()}</div>
     </div>`;
   }).join('');
