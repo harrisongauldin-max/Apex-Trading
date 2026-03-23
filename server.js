@@ -472,6 +472,26 @@ async function initState() {
         state.lastReconcile = new Date().toISOString();
         state.reconcileStatus = ghosts === 0 && orphans === 0 ? "ok" : "warning";
         state.orphanCount = orphans;
+
+        // Sync BIL position from Alpaca — ensures cashETFShares matches real position
+        const bilPos = alpacaPositions.find(p => p.symbol === CASH_ETF);
+        if (bilPos) {
+          const realShares = parseInt(bilPos.qty);
+          const realValue  = parseFloat(bilPos.market_value);
+          if (realShares !== state.cashETFShares) {
+            console.log(`[RECONCILE] BIL sync: APEX had ${state.cashETFShares} shares, Alpaca has ${realShares} — updating`);
+            state.cashETFShares = realShares;
+            state.cashETFValue  = realValue;
+            state.cashETFPrice  = parseFloat(bilPos.current_price || 91);
+          } else {
+            console.log(`[RECONCILE] BIL OK — ${realShares} shares @ $${parseFloat(bilPos.current_price||91).toFixed(2)}`);
+          }
+        } else if (state.cashETFShares > 0) {
+          // APEX thinks we have BIL but Alpaca doesn't — clear it
+          console.log(`[RECONCILE] BIL ghost — APEX had ${state.cashETFShares} shares, Alpaca has none — clearing`);
+          state.cashETFShares = 0;
+          state.cashETFValue  = 0;
+        }
       }
     } catch(e) {
       console.log("[RECONCILE] Failed:", e.message, "— proceeding with saved state");
@@ -2241,17 +2261,16 @@ function getDeployableCash() {
 }
 
 async function rebalanceCashETF() {
-  // Never execute during dry run or outside market hours — BIL is a real order
+  // Never execute during dry run or outside market hours — BIL is a real Alpaca order
   if (dryRunMode || !isMarketHours()) return;
-  // Goal: always keep CASH_ETF_TARGET ($1,500) parked in BIL as the ETF half of the floor
-  // The other $1,500 stays liquid as the cash half of the floor
+
   const currentETF    = state.cashETFValue || 0;
   const currentShares = state.cashETFShares || 0;
   const diff          = CASH_ETF_TARGET - currentETF;
 
   if (Math.abs(diff) < CASH_ETF_MIN) return; // already balanced
 
-  // Get BIL price
+  // Get live BIL price
   let bilPrice = 91;
   try {
     const p = await getStockQuote(CASH_ETF);
@@ -2259,27 +2278,57 @@ async function rebalanceCashETF() {
   } catch(e) {}
 
   if (diff > 0 && state.cash > CAPITAL_FLOOR + diff) {
-    // Buy BIL to top up to $1,500 target
+    // ── BUY BIL — submit real Alpaca order ─────────────────────────────
     const sharesToBuy = Math.floor(diff / bilPrice);
     if (sharesToBuy < 1) return;
-    const cost = sharesToBuy * bilPrice;
-    state.cash          = parseFloat((state.cash - cost).toFixed(2));
-    state.cashETFShares  = currentShares + sharesToBuy;
-    state.cashETFValue   = parseFloat((state.cashETFShares * bilPrice).toFixed(2));
-    state.cashETFPrice   = bilPrice;
-    logEvent("etf", `BIL rebalance - bought ${sharesToBuy} shares @ $${bilPrice.toFixed(2)} | ETF floor: ${fmt(state.cashETFValue)} | liquid: ${fmt(state.cash)}`);
-    await saveStateNow();
+    try {
+      const orderResp = await alpacaPost("/orders", {
+        symbol:        CASH_ETF,
+        qty:           sharesToBuy,
+        side:          "buy",
+        type:          "market",      // BIL is highly liquid — market order is fine
+        time_in_force: "day",
+      });
+      if (orderResp && orderResp.id) {
+        const cost = sharesToBuy * bilPrice;
+        state.cash          = parseFloat((state.cash - cost).toFixed(2));
+        state.cashETFShares  = currentShares + sharesToBuy;
+        state.cashETFValue   = parseFloat((state.cashETFShares * bilPrice).toFixed(2));
+        state.cashETFPrice   = bilPrice;
+        logEvent("etf", `BIL bought ${sharesToBuy} shares @ $${bilPrice.toFixed(2)} | order:${orderResp.id} | ETF floor: ${fmt(state.cashETFValue)} | liquid: ${fmt(state.cash)}`);
+        await saveStateNow();
+      } else {
+        logEvent("warn", `BIL buy order failed — response: ${JSON.stringify(orderResp)?.slice(0,120)}`);
+      }
+    } catch(e) {
+      logEvent("error", `BIL buy order error: ${e.message}`);
+    }
 
   } else if (diff < 0 && currentShares > 0) {
-    // Sell excess BIL back to cash
+    // ── SELL BIL — submit real Alpaca order ────────────────────────────
     const sharesToSell = Math.min(currentShares, Math.ceil(Math.abs(diff) / bilPrice));
     if (sharesToSell < 1) return;
-    const proceeds = parseFloat((sharesToSell * bilPrice).toFixed(2));
-    state.cash          = parseFloat((state.cash + proceeds).toFixed(2));
-    state.cashETFShares  = currentShares - sharesToSell;
-    state.cashETFValue   = parseFloat((state.cashETFShares * bilPrice).toFixed(2));
-    logEvent("etf", `BIL rebalance - sold ${sharesToSell} shares | ETF floor: ${fmt(state.cashETFValue)} | liquid: ${fmt(state.cash)}`);
-    await saveStateNow();
+    try {
+      const orderResp = await alpacaPost("/orders", {
+        symbol:        CASH_ETF,
+        qty:           sharesToSell,
+        side:          "sell",
+        type:          "market",
+        time_in_force: "day",
+      });
+      if (orderResp && orderResp.id) {
+        const proceeds = parseFloat((sharesToSell * bilPrice).toFixed(2));
+        state.cash          = parseFloat((state.cash + proceeds).toFixed(2));
+        state.cashETFShares  = currentShares - sharesToSell;
+        state.cashETFValue   = parseFloat((state.cashETFShares * bilPrice).toFixed(2));
+        logEvent("etf", `BIL sold ${sharesToSell} shares @ $${bilPrice.toFixed(2)} | order:${orderResp.id} | ETF floor: ${fmt(state.cashETFValue)} | liquid: ${fmt(state.cash)}`);
+        await saveStateNow();
+      } else {
+        logEvent("warn", `BIL sell order failed — response: ${JSON.stringify(orderResp)?.slice(0,120)}`);
+      }
+    } catch(e) {
+      logEvent("error", `BIL sell order error: ${e.message}`);
+    }
   }
 }
 
@@ -2291,12 +2340,28 @@ async function ensureLiquidCash(needed) {
   const bilPrice     = state.cashETFPrice || 91;
   const sharesToSell = Math.min(state.cashETFShares || 0, Math.ceil(shortfall / bilPrice));
   if (sharesToSell < 1) return;
-  const proceeds = parseFloat((sharesToSell * bilPrice).toFixed(2));
-  state.cash          = parseFloat((state.cash + proceeds).toFixed(2));
-  state.cashETFShares  = (state.cashETFShares || 0) - sharesToSell;
-  state.cashETFValue   = parseFloat((state.cashETFShares * bilPrice).toFixed(2));
-  logEvent("etf", `BIL liquidated ${fmt(proceeds)} to fund trade | liquid: ${fmt(state.cash)}`);
-  await saveStateNow();
+  // Submit real Alpaca sell order
+  try {
+    const orderResp = await alpacaPost("/orders", {
+      symbol:        CASH_ETF,
+      qty:           sharesToSell,
+      side:          "sell",
+      type:          "market",
+      time_in_force: "day",
+    });
+    if (orderResp && orderResp.id) {
+      const proceeds = parseFloat((sharesToSell * bilPrice).toFixed(2));
+      state.cash          = parseFloat((state.cash + proceeds).toFixed(2));
+      state.cashETFShares  = (state.cashETFShares || 0) - sharesToSell;
+      state.cashETFValue   = parseFloat((state.cashETFShares * bilPrice).toFixed(2));
+      logEvent("etf", `BIL liquidated ${sharesToSell} shares — ${fmt(proceeds)} freed | order:${orderResp.id} | liquid: ${fmt(state.cash)}`);
+      await saveStateNow();
+    } else {
+      logEvent("warn", `BIL liquidation order failed — ${JSON.stringify(orderResp)?.slice(0,120)}`);
+    }
+  } catch(e) {
+    logEvent("error", `BIL liquidation error: ${e.message}`);
+  }
 }
 
 // - Sector ETF Confirmation -
