@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8"/>
 <meta name="viewport" content="width=device-width,initial-scale=1"/>
-<title>APEX v3.90 — Professional Options Agent</title>
+<title>APEX v3.95 — Professional Options Agent</title>
 <style>
 :root{
   --bg:#07101f;--panel:#0a1628;--border:#0d3050;--text:#cce8ff;--muted:#336688;
@@ -113,7 +113,7 @@ input[type=text]:focus{border-color:var(--blue)}
     <div class="logo-icon">▲</div>
     <div class="logo-text">
       <h1>APEX</h1>
-      <p>PROFESSIONAL OPTIONS AGENT v3.90 · ALPACA PAPER</p>
+      <p>PROFESSIONAL OPTIONS AGENT v3.95 · ALPACA PAPER</p>
     </div>
   </div>
   <div class="header-right">
@@ -373,6 +373,12 @@ input[type=text]:focus{border-color:var(--blue)}
       <span style="font-size:11px;color:var(--muted)">BUDGET:</span>
       <input type="number" id="budget-input" placeholder="10000" min="100" max="1000000" style="background:var(--panel);border:1px solid var(--border);color:var(--text);padding:6px 10px;border-radius:6px;font-family:var(--font);font-size:11px;width:100px;outline:none"/>
       <button class="btn btn-gold" onclick="setBudget()">SET</button>
+    </div>
+    <div style="display:flex;align-items:center;gap:6px">
+      <span style="font-size:11px;color:var(--muted)">BLOCK TICKER:</span>
+      <input type="text" id="blacklist-input" placeholder="TSLA" maxlength="6" style="background:var(--panel);border:1px solid var(--border);color:var(--text);padding:6px 10px;border-radius:6px;font-family:var(--font);font-size:11px;width:70px;outline:none;text-transform:uppercase"/>
+      <button class="btn btn-red" onclick="blacklistTicker()">BLOCK</button>
+      <span id="blacklist-display" style="font-size:10px;color:#ff8888"></span>
     </div>
   </div>
 
@@ -774,6 +780,15 @@ function renderMetrics() {
   document.getElementById('pos-count').textContent = (state.positions || []).length;
   document.getElementById('today-trades').textContent = state.todayTrades || 0;
 
+  // F14: Update blacklist display
+  const blacklist = state.tickerBlacklist || [];
+  const blDisplay = document.getElementById('blacklist-display');
+  if (blDisplay) {
+    blDisplay.innerHTML = blacklist.length
+      ? blacklist.map(t => `<span onclick="unblacklistTicker('${t}')" style="cursor:pointer;margin-right:4px;background:#2a0000;padding:2px 5px;border-radius:3px" title="Click to unblock">${t} ✕</span>`).join('')
+      : '<span style="color:#555">none</span>';
+  }
+
   // PDT remaining day trades
   const pdtUsed      = state.pdtCount || 0;
   const pdtLimit     = state.pdtLimit || 3;
@@ -1140,6 +1155,12 @@ function renderJournal() {
         </div>
       </div>
       <div class="journal-reasoning">${e.reasoning || '--'}</div>
+      ${(isOpen && e.scoreReasons && e.scoreReasons.length) ? ('<div style="margin-top:4px;padding:4px 0;border-top:1px solid #1a2a3a">' + e.scoreReasons.map(function(r) {
+        var isNeg = r.indexOf('(-') > -1 || r.indexOf('contradicts') > -1 || r.indexOf('bad for') > -1 || r.indexOf('capped') > -1 || r.indexOf('fighting') > -1 || r.indexOf('Neither') > -1;
+        var isPos = !isNeg && r.indexOf('(+') > -1 && r.indexOf('+0)') === -1;
+        var col = isNeg ? '#ff7766' : isPos ? '#88dd88' : '#666';
+        return '<span style="font-size:10px;color:' + col + ';display:block;line-height:1.5">' + r + '</span>';
+      }).join('') + '</div>') : ''}
       <div class="journal-meta">
         <span>${new Date(e.time).toLocaleString()}</span>
         ${isOpen ? `<span>δ ${e.delta}</span><span>IV ${e.iv}%</span><span>VIX ${e.vix}</span>` : `<span>Reason: ${e.reason}</span>`}
@@ -1675,6 +1696,20 @@ async function resetMonth() {
   if (!confirm("Reset month? This resets cash to $5,000 and clears today's trade count.")) return;
   await fetch('/api/reset-month', {method:'POST'});
   await fetchState();
+}
+
+// F14: Blacklist ticker
+async function blacklistTicker() {
+  const input  = document.getElementById('blacklist-input');
+  const ticker = (input.value || '').toUpperCase().trim();
+  if (!ticker) return;
+  await fetch('/api/blacklist/' + ticker, { method: 'POST' });
+  input.value = '';
+  loadState();
+}
+async function unblacklistTicker(ticker) {
+  await fetch('/api/blacklist/' + ticker, { method: 'DELETE' });
+  loadState();
 }
 
 async function setBudget() {
