@@ -167,6 +167,11 @@ input[type=text]:focus{border-color:var(--blue)}
       <div class="metric-sm" id="etf-value" style="color:var(--blue)">$0.00</div>
       <div class="sub" id="etf-shares">0 shares · $1,500 floor target</div>
     </div>
+    <div class="card">
+      <div class="card-title">Alpaca Account</div>
+      <div class="metric-sm" id="alpaca-cash" style="color:var(--muted)">$--</div>
+      <div class="sub" id="alpaca-cash-sub">paper balance</div>
+    </div>
   </div>
 
   <div class="grid4" style="margin-bottom:12px">
@@ -361,7 +366,7 @@ input[type=text]:focus{border-color:var(--blue)}
     <button class="btn" style="background:#0a1f3a;border:1px solid #00c4ff;color:#00c4ff" onclick="downloadDayReport()">📊 DAY REPORT</button>
     <div style="display:flex;align-items:center;gap:6px">
       <span style="font-size:11px;color:var(--muted)">BUDGET:</span>
-      <input type="number" id="budget-input" placeholder="5000" min="100" max="1000000" style="background:var(--panel);border:1px solid var(--border);color:var(--text);padding:6px 10px;border-radius:6px;font-family:var(--font);font-size:11px;width:100px;outline:none"/>
+      <input type="number" id="budget-input" placeholder="10000" min="100" max="1000000" style="background:var(--panel);border:1px solid var(--border);color:var(--text);padding:6px 10px;border-radius:6px;font-family:var(--font);font-size:11px;width:100px;outline:none"/>
       <button class="btn btn-gold" onclick="setBudget()">SET</button>
     </div>
   </div>
@@ -726,18 +731,27 @@ function renderHeader() {
 
 function renderMetrics() {
   const pnl    = state.realizedPnL || 0;
-  const weekly = (state.cash || 0) - (state.weekStartCash || 5000);
+  const weekly = (state.cash || 0) - (state.weekStartCash || state.customBudget || 10000);
 
   document.getElementById('cash').textContent = fmt(state.cash);
-  document.getElementById('cash-sub').textContent = `of $5,000 budget`;
+  const budgetAmt = state.customBudget && state.customBudget > 0 ? state.customBudget : (state.cash || 10000);
+  document.getElementById('cash-sub').textContent = `of ${fmt(budgetAmt)} budget`;
   document.getElementById('pnl').textContent = (pnl >= 0 ? '+' : '') + fmt(pnl);
   document.getElementById('pnl').style.color = pnl >= 0 ? 'var(--green)' : 'var(--red)';
-  document.getElementById('pnl-sub').textContent = `daily: ${fmt((state.cash||0)-(state.dayStartCash||5000))}`;
+  document.getElementById('pnl-sub').textContent = `daily: ${fmt((state.cash||0)-(state.dayStartCash||state.customBudget||10000))}`;
 
   const heat = state.heatPct || 0;
   document.getElementById('heat').textContent = heat.toFixed(1) + '%';
   document.getElementById('etf-value').textContent  = '$' + (state.cashETFValue || 0).toFixed(2);
   document.getElementById('etf-shares').textContent = (state.cashETFShares || 0) + ' shares · $1,500 floor target · ~5% APY';
+  // Alpaca account balance — shows actual paper/live account value
+  if (state.alpacaCash) {
+    document.getElementById('alpaca-cash').textContent = fmt(state.alpacaCash);
+    const customBudget = state.customBudget && state.customBudget > 0 ? state.customBudget : null;
+    document.getElementById('alpaca-cash-sub').textContent = customBudget
+      ? `APEX using ${fmt(customBudget)} of this`
+      : 'paper balance · synced on boot';
+  }
   document.getElementById('heat').style.color = heat > 50 ? 'var(--red)' : heat > 35 ? 'var(--orange)' : 'var(--green)';
   const fill = document.getElementById('heat-fill');
   // Scale bar width against MAX_HEAT (60%) so 60% fills the bar completely
@@ -960,7 +974,7 @@ function renderMetrics() {
   const grossW  = wins.reduce((s,t) => s+t.pnl, 0);
   const grossL  = Math.abs(losses.reduce((s,t) => s+t.pnl, 0));
   const pf      = grossL > 0 ? (grossW / grossL).toFixed(2) : '∞';
-  const maxDD   = (state.cash||0) - (state.peakCash||5000);
+  const maxDD   = (state.cash||0) - (state.peakCash||state.customBudget||10000);
 
   const el = id => document.getElementById(id);
   if (el('win-rate'))      { el('win-rate').textContent = wr + '%'; el('win-sub').textContent = `${wins.length}W / ${losses.length}L of ${trades.length}`; }
