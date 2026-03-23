@@ -3517,7 +3517,26 @@ async function runScan() {
     const macro = await getMacroNews();
     marketContext.macro = macro;
     if (macro.mode !== "normal") {
-      logEvent("macro", `[5min] Macro: ${macro.signal} | ${macro.triggers.slice(0,3).join(", ")}`);
+      logEvent("macro", `[5min] Macro: ${macro.signal} (${macro.scoreModifier > 0 ? "+" : ""}${macro.scoreModifier}) | ${macro.triggers.slice(0,3).join(", ")}`);
+    }
+
+    // Strongly bearish macro — close all calls immediately
+    if (macro.mode === "defensive" && state.circuitOpen) {
+      logEvent("macro", `DEFENSIVE MODE — macro strongly bearish: ${macro.triggers.join(", ")} — closing calls`);
+      for (const pos of [...state.positions]) {
+        if (pos.optionType === "call") await closePosition(pos.ticker, "macro-defensive");
+      }
+    }
+
+    // Strongly bullish macro — close losing puts (thesis broken by macro tailwind)
+    if (macro.mode === "aggressive" && !dryRunMode) {
+      logEvent("macro", `BULLISH MACRO — ${macro.signal}: ${macro.triggers.slice(0,3).join(", ")} — closing losing puts`);
+      for (const pos of [...state.positions]) {
+        if (pos.optionType !== "put") continue;
+        const curP = pos.currentPrice || pos.premium;
+        const chg  = (curP - pos.premium) / pos.premium;
+        if (chg < -0.05) await closePosition(pos.ticker, "macro-bullish");
+      }
     }
     logEvent("scan", `[5min] Regime:${regime.regime}(${regime.confidence}%) | Kelly:${marketContext.kelly.contracts}x | Global:${marketContext.globalMarket.signal} | Streak:${marketContext.streaks.currentStreak}x${marketContext.streaks.currentType}`);
   }
@@ -3546,28 +3565,7 @@ async function runScan() {
     } catch(e) {
       marketContext.putCallRatio = state.vix > 30 ? { ratio: 1.3, signal: "fear" } : state.vix > 20 ? { ratio: 1.0, signal: "neutral" } : { ratio: 0.7, signal: "greed" };
     }
-    logEvent("scan", `[15min] Macro:${macro.signal}(${macro.scoreModifier > 0 ? "+" : ""}${macro.scoreModifier}) | F&G:${fg.score} | DXY:${dxy.trend} | Yield:${yc.signal}`);
-
-    // If macro is strongly bearish - close all calls immediately
-    if (macro.mode === "defensive" && state.circuitOpen) {
-      logEvent("macro", `DEFENSIVE MODE - macro strongly bearish: ${macro.triggers.join(", ")} - closing call positions`);
-      for (const pos of [...state.positions]) {
-        if (pos.optionType === "call") await closePosition(pos.ticker, "macro-defensive");
-      }
-    }
-
-    // Bullish macro: close losing puts — thesis broken by macro tailwind
-    if (macro.mode === "aggressive" && !dryRunMode) {
-      logEvent("macro", `BULLISH MACRO — ${macro.signal}: ${macro.triggers.slice(0,3).join(", ")} — closing losing puts`);
-      for (const pos of [...state.positions]) {
-        if (pos.optionType !== "put") continue;
-        const curP = pos.currentPrice || pos.premium;
-        const chg  = (curP - pos.premium) / pos.premium;
-        if (chg < -0.05) { // losing 5%+ — macro has turned against the position
-          await closePosition(pos.ticker, "macro-bullish");
-        }
-      }
-    }
+    logEvent("scan", `[15min] F&G:${fg.score} | DXY:${dxy.trend} | Yield:${yc.signal}`);
   }
 
   // -- HOUR TIER (every 60 minutes) --
@@ -3816,6 +3814,16 @@ async function runScan() {
   }
 
   // 2. New entries — check if any entry type is valid
+  // ── OPENING VOLATILITY BLOCK — no new entries in first 15 min ──────────
+  const etMinSinceOpen = (scanET.getHours() - 9) * 60 + scanET.getMinutes() - 30;
+  const openingBlock   = etMinSinceOpen >= 0 && etMinSinceOpen < 15 && !dryRunMode;
+  if (openingBlock) logEvent("filter", `Opening volatility block (${etMinSinceOpen}min since open) — entries paused until 9:45am`);
+
+  // ── FINAL HOUR BLOCK — no new entries after 3pm (PDT protection) ─────
+  const etHourEntry    = scanET.getHours() + scanET.getMinutes() / 60;
+  const finalHourBlock = etHourEntry >= 15.0 && !dryRunMode;
+  if (finalHourBlock) logEvent("filter", `Final hour block — no new entries after 3pm (PDT protection)`);
+
   const macroBullish  = (marketContext.macro?.mode === "aggressive");
   const pdtCount      = countRecentDayTrades();
   const pdtBlocked    = !dryRunMode && pdtCount >= PDT_LIMIT;
@@ -3853,23 +3861,7 @@ async function runScan() {
   }
   if (!callsAllowed && !putsAllowed) return;
 
-  // ── OPENING VOLATILITY BLOCK — no new entries in first 15 min ──────────
-  // First 15 minutes = price discovery, wide spreads, macro news reactions
-  // Position management (exits, stops, trails) still runs — only new entries blocked
-  const etMinSinceOpen = (scanET.getHours() - 9) * 60 + scanET.getMinutes() - 30;
-  const openingBlock   = etMinSinceOpen >= 0 && etMinSinceOpen < 15 && !dryRunMode;
-  if (openingBlock) {
-    logEvent("filter", `Opening volatility block (${etMinSinceOpen}min since open) — entries paused until 9:45am`);
-  }
-
-  // ── FINAL HOUR BLOCK — no new entries after 3pm ───────────────────────
-  // Any position opened after 3pm will almost certainly need same-day management
-  // = day trade. Block entries in final hour to preserve day trade count.
-  const etHourEntry    = scanET.getHours() + scanET.getMinutes() / 60;
-  const finalHourBlock = etHourEntry >= 15.0 && !dryRunMode;
-  if (finalHourBlock) {
-    logEvent("filter", `Final hour block — no new entries after 3pm (PDT protection)`);
-  }
+  // [opening/final hour blocks moved above callsAllowed]
   if (state.circuitOpen === false || state.weeklyCircuitOpen === false) return;
   if (state.consecutiveLosses >= CONSEC_LOSS_LIMIT) return;
   if (state.cash <= CAPITAL_FLOOR) return;
