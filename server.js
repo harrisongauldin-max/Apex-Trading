@@ -3814,6 +3814,30 @@ async function runScan() {
   }
 
   // 2. New entries — check if any entry type is valid
+  // Fetch SPY data first — needed for spyRecovering which gates putsAllowed
+  const spyPrice     = await getStockQuote("SPY") || 500;
+  if (spyPrice) state._liveSPY = spyPrice;
+  const spyBars      = await getStockBars("SPY", 5);
+  const spyReturn    = spyBars.length >= 5 ? (spyBars[spyBars.length-1].c - spyBars[0].o) / spyBars[0].o : 0;
+  const spyIntraday  = await getIntradayBars("SPY");
+  const spyRecovering = (() => {
+    if (spyIntraday.length >= 15) {
+      const recent  = spyIntraday.slice(-15);
+      const spyMove = (recent[recent.length-1].c - recent[0].c) / recent[0].c;
+      if (spyMove > 0.003) return true;
+    }
+    if (spyBars.length >= 2) {
+      const dayReturn = (spyBars[spyBars.length-1].c - spyBars[spyBars.length-2].c) / spyBars[spyBars.length-2].c;
+      if (dayReturn > 0.005) return true;
+    }
+    if (spyIntraday.length >= 3) {
+      const fromOpen = (spyIntraday[spyIntraday.length-1].c - spyIntraday[0].o) / spyIntraday[0].o;
+      if (fromOpen > 0.005) return true;
+    }
+    return false;
+  })();
+  if (spyRecovering) logEvent("filter", `SPY recovery detected — puts blocked`);
+
   // ── OPENING VOLATILITY BLOCK — no new entries in first 15 min ──────────
   const etMinSinceOpen = (scanET.getHours() - 9) * 60 + scanET.getMinutes() - 30;
   const openingBlock   = etMinSinceOpen >= 0 && etMinSinceOpen < 15 && !dryRunMode;
@@ -3890,38 +3914,7 @@ async function runScan() {
     return;
   }
 
-  // Get SPY price for relative strength + intraday momentum
-  const spyPrice     = await getStockQuote("SPY") || 500;
-  if (spyPrice) state._liveSPY = spyPrice; // cache for beta-weighted delta calc
-  const spyBars      = await getStockBars("SPY", 5);
-  const spyReturn    = spyBars.length >= 5 ? (spyBars[spyBars.length-1].c - spyBars[0].o) / spyBars[0].o : 0;
-  // SPY 15-min momentum — if SPY is recovering, puts are fighting the tape
-  const spyIntraday  = await getIntradayBars("SPY");
-  const spyRecovering = (() => {
-    // Check 1: 15-minute intraday momentum (original check)
-    if (spyIntraday.length >= 15) {
-      const recent   = spyIntraday.slice(-15);
-      const spyMove  = (recent[recent.length-1].c - recent[0].c) / recent[0].c;
-      if (spyMove > 0.003) return true; // up 0.3%+ in last 15 min
-    }
-    // Check 2: Gap-up detection — SPY up 0.5%+ from prior close
-    // Catches Trump-style announcements that cause a gap at open
-    // spyReturn is already calculated from daily bars (today open vs 5 days ago open)
-    // Use a direct prev-close comparison instead
-    if (spyBars.length >= 2) {
-      const prevClose  = spyBars[spyBars.length-2].c;
-      const curPrice   = spyBars[spyBars.length-1].c;
-      const dayReturn  = (curPrice - prevClose) / prevClose;
-      if (dayReturn > 0.005) return true; // up 0.5%+ from yesterday = strong recovery
-    }
-    // Check 3: Intraday from open — even with few bars
-    if (spyIntraday.length >= 3) {
-      const fromOpen = (spyIntraday[spyIntraday.length-1].c - spyIntraday[0].o) / spyIntraday[0].o;
-      if (fromOpen > 0.005) return true; // up 0.5%+ from today's open
-    }
-    return false;
-  })();
-  if (spyRecovering) logEvent("filter", `SPY recovery detected — puts blocked (day move or gap-up)`);
+  // [SPY fetch moved above callsAllowed]
 
   // Gap detection - large gap down = put opportunity, gap up = call opportunity
   let marketGapDirection = null;
