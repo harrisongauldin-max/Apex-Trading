@@ -185,6 +185,11 @@ input[type=text]:focus{border-color:var(--blue)}
       <div class="metric-sm" id="today-trades">0</div>
       <div class="sub">heat controlled</div>
     </div>
+    <div class="card" id="pdt-card">
+      <div class="card-title">Day Trades Left</div>
+      <div class="metric-sm" id="pdt-remaining" style="color:var(--green)">3</div>
+      <div class="sub" id="pdt-sub">of 3 this week</div>
+    </div>
     <div class="card">
       <div class="card-title">Consec. Losses</div>
       <div class="metric-sm" id="consec-loss">0</div>
@@ -768,6 +773,30 @@ function renderMetrics() {
 
   document.getElementById('pos-count').textContent = (state.positions || []).length;
   document.getElementById('today-trades').textContent = state.todayTrades || 0;
+
+  // PDT remaining day trades
+  const pdtUsed      = state.pdtCount || 0;
+  const pdtLimit     = state.pdtLimit || 3;
+  const pdtRemaining = Math.max(0, pdtLimit - pdtUsed);
+  const pdtBlocked   = state.pdtBlocked || false;
+  const pdtEl        = document.getElementById('pdt-remaining');
+  const pdtCard      = document.getElementById('pdt-card');
+  const pdtSub       = document.getElementById('pdt-sub');
+  pdtEl.textContent  = pdtBlocked ? 'BLOCKED' : pdtRemaining;
+  pdtSub.textContent = pdtUsed + ' of ' + pdtLimit + ' used this week';
+  if (pdtBlocked || pdtRemaining === 0) {
+    pdtEl.style.color  = 'var(--red)';
+    pdtCard.style.borderColor = '#ff4444';
+    pdtCard.style.background  = '#1a0505';
+  } else if (pdtRemaining === 1) {
+    pdtEl.style.color  = '#ffaa00';
+    pdtCard.style.borderColor = '#ffaa00';
+    pdtCard.style.background  = '';
+  } else {
+    pdtEl.style.color  = 'var(--green)';
+    pdtCard.style.borderColor = '';
+    pdtCard.style.background  = '';
+  }
   document.getElementById('consec-loss').textContent = state.consecutiveLosses || 0;
   document.getElementById('consec-loss').style.color = (state.consecutiveLosses||0) >= 2 ? 'var(--red)' : 'var(--text)';
   document.getElementById('last-scan').textContent = fmtTime(state.lastScan);
