@@ -1,5 +1,5 @@
 // -
-// APEX v3.90 - Professional Options Trading Agent
+// APEX v3.95 - Professional Options Trading Agent
 // Alpaca Paper Trading Edition
 // -
 const express    = require("express");
@@ -200,6 +200,7 @@ function defaultState() {
     lastScan:         null,
     vix:              15,
     dataQuality:      { realTrades: 0, estimatedTrades: 0, totalTrades: 0 },
+    tickerBlacklist:  [], // tickers blocked for today — clears on morning reset
   };
 }
 
@@ -218,8 +219,7 @@ async function redisSave(data) {
         cost: t.cost, score: t.score, delta: t.delta, iv: t.iv, vix: t.vix,
         optionType: t.optionType, pnl: t.pnl, pct: t.pct, reason: t.reason,
         washSaleFlag: t.washSaleFlag || false,
-        // Trim scoreReasons to 3 max
-        scoreReasons: (t.scoreReasons || []).slice(0, 3),
+        scoreReasons: (t.scoreReasons || []).slice(0, 8), // F13: keep up to 8 for transparency
       };
     }),
     // tradeLog is display-only — keep last 100
@@ -601,6 +601,24 @@ function calcMomentum(bars) {
 }
 
 // Calculate IV Rank - where is current IV vs 52-week range
+// ── F15: OI clustering / max pain ────────────────────────────────────────
+function calcMaxPain(contracts) {
+  if (!contracts || contracts.length < 5) return null;
+  const strikeOI = {};
+  for (const c of contracts) {
+    const strike = parseFloat(c.strike_price || c.strike || 0);
+    const oi     = parseInt(c.open_interest || 0);
+    if (strike > 0) strikeOI[strike] = (strikeOI[strike] || 0) + oi;
+  }
+  let maxOI = 0, maxPainStrike = 0, totalOI = 0;
+  for (const [strike, oi] of Object.entries(strikeOI)) {
+    totalOI += oi;
+    if (oi > maxOI) { maxOI = oi; maxPainStrike = parseFloat(strike); }
+  }
+  const sorted = Object.entries(strikeOI).sort((a,b) => b[1]-a[1]).slice(0,3);
+  return { maxPainStrike, maxOIAtStrike: maxOI, totalOI, topStrikes: sorted.map(([s,o]) => ({ strike: parseFloat(s), oi: o })) };
+}
+
 function calcIVRank(currentIV, bars) {
   if (bars.length < 30) return 50;
   // Approximate historical vol from price bars
@@ -1006,11 +1024,12 @@ function scorePutSetup(stock, relStrength, adx, volume, avgVolume, vix = 20) {
   else if (stock.rsi <= 45)                  { score += 5;  reasons.push(`RSI ${stock.rsi} - oversold caution (+5)`); }
   else                                       { reasons.push(`RSI ${stock.rsi} neutral for put (+0)`); }
 
-  // MACD — REDUCED to 10pts max (confirms direction, doesn't lead it)
+  // MACD — confirms direction. Bullish MACD on a put = contradicting signal = PENALTY
   if (stock.macd.includes("bearish crossover")) { score += 10; reasons.push("MACD bearish crossover (+10)"); }
   else if (stock.macd.includes("bearish"))      { score += 7;  reasons.push("MACD bearish (+7)"); }
   else if (stock.macd.includes("neutral"))      { score += 3;  reasons.push("MACD neutral (+3)"); }
-  else                                          { reasons.push("MACD bullish - bad for put (+0)"); }
+  else if (stock.macd.includes("bullish crossover")) { score -= 12; reasons.push("MACD bullish crossover — contradicts put (-12)"); }
+  else                                          { score -= 8;  reasons.push("MACD bullish — contradicts put (-8)"); }
 
   // IV Percentile — ADJUSTED for VIX environment
   // High VIX: high IVP is expected and acceptable — options are expensive but moves are big
@@ -1054,7 +1073,33 @@ function scorePutSetup(stock, relStrength, adx, volume, avgVolume, vix = 20) {
   else if (adx && adx > 25) { score += 10; reasons.push(`ADX ${adx} - strong trend (+10)`); }
   else if (adx && adx > 18) { score += 5;  reasons.push(`ADX ${adx} - emerging trend (+5)`); }
 
-  return { score: Math.min(score, 100), reasons };
+  // ── F6: Signal consensus gate ──────────────────────────────────────────
+  // 90+ score requires at least 3 independent bullish signals
+  // Prevents weak setups from hitting 100 on environmental factors alone
+  const bullishSignals = [
+    stock.rsi >= 65,
+    stock.macd.includes("bearish"),
+    stock.momentum === "recovering",
+    (relStrength < 0.97),
+    (adx && adx > 25),
+    (volume > avgVolume * 1.2),
+  ].filter(Boolean).length;
+  if (score >= 90 && bullishSignals < 3) {
+    score = 80; // cap at 80 — not enough independent signals
+    reasons.push(`Score capped at 80 — only ${bullishSignals}/3 required signals agree`);
+  }
+
+  // ── F11: Entry quality gate — RSI and MACD must agree ───────────────────
+  // If RSI says overbought (bearish for stock) but MACD says bullish,
+  // the two primary signals conflict. Flag it.
+  const rsiPutSignal  = stock.rsi >= 65;
+  const macdPutSignal = stock.macd.includes("bearish");
+  if (!rsiPutSignal && !macdPutSignal) {
+    score = Math.max(0, score - 15);
+    reasons.push("Neither RSI nor MACD confirm put direction (-15)");
+  }
+
+  return { score: Math.min(Math.max(score, 0), 100), reasons };
 }
 
 // - Alpaca API -
@@ -1297,6 +1342,26 @@ async function getPreMarketData(ticker) {
 }
 
 // - Beta-Weighted Portfolio Delta -
+// ── F16: Aggregate vega + gamma ──────────────────────────────────────────
+function calcAggregateGreeks() {
+  if (!state.positions || !state.positions.length) return { vega: 0, gamma: 0, vegaDollar: 0, vegaRisk: "LOW" };
+  let totalVega = 0, totalGamma = 0;
+  for (const pos of state.positions) {
+    const vega     = parseFloat(pos.greeks?.vega  || 0);
+    const gamma    = parseFloat(pos.greeks?.gamma || 0);
+    const mult     = (pos.contracts || 1) * 100;
+    totalVega  += vega  * mult;
+    totalGamma += gamma * mult;
+  }
+  const vegaDollar = parseFloat((totalVega * 0.01 * 100).toFixed(2));
+  return {
+    vega:       parseFloat(totalVega.toFixed(4)),
+    gamma:      parseFloat(totalGamma.toFixed(4)),
+    vegaDollar, // $ change per 1pt VIX move
+    vegaRisk:   Math.abs(vegaDollar) > 500 ? "HIGH" : Math.abs(vegaDollar) > 200 ? "MEDIUM" : "LOW",
+  };
+}
+
 function calcBetaWeightedDelta() {
   if (!state.positions || !state.positions.length) return 0;
   // Use cached SPY price from scan context, or fetch fresh — never use hardcoded value
@@ -1561,6 +1626,25 @@ async function detectMarketRegime() {
 }
 
 // Regime-based score modifier
+// ── F9: Regime strategy profiles ────────────────────────────────────────
+// Each regime has different min score, max positions, and exit tightness
+function getRegimeProfile(regime) {
+  switch(regime) {
+    case "trending_bear":
+      return { minScore: 75, maxPositions: 6, trailMult: 1.0, label: "Trending Bear — puts on bounces" };
+    case "trending_bull":
+      return { minScore: 85, maxPositions: 4, trailMult: 0.8, label: "Trending Bull — puts need high conviction" };
+    case "choppy":
+      return { minScore: 90, maxPositions: 3, trailMult: 0.7, label: "Choppy — tight exits, high threshold" };
+    case "breakdown":
+      return { minScore: 70, maxPositions: 8, trailMult: 1.2, label: "Breakdown — aggressive puts" };
+    case "crash":
+      return { minScore: 65, maxPositions: 9, trailMult: 1.3, label: "Crash — maximum puts" };
+    default:
+      return { minScore: 70, maxPositions: 6, trailMult: 1.0, label: "Neutral" };
+  }
+}
+
 function getRegimeModifier(regime, optionType) {
   const modifiers = {
     trending_bull: { call: 15,  put: -15 },
@@ -2400,6 +2484,21 @@ async function checkSectorETF(stock) {
   return { pass: true, reason: null, putBoost: 0 };
 }
 
+// Weekly trend check — is stock above or below its 10-week MA?
+async function getWeeklyTrend(ticker) {
+  try {
+    const cached = getCached('weekly:' + ticker);
+    if (cached) return cached;
+    const bars = await getStockBars(ticker, 70); // 70 days = ~14 weeks
+    if (bars.length < 50) return setCache('weekly:' + ticker, { trend: 'neutral', above10wk: null });
+    const ma10w = bars.slice(-50).reduce((s, b) => s + b.c, 0) / 50;
+    const price = bars[bars.length-1].c;
+    const pctFromMA = (price - ma10w) / ma10w;
+    const trend = pctFromMA > 0.02 ? 'above' : pctFromMA < -0.02 ? 'below' : 'at';
+    return setCache('weekly:' + ticker, { trend, ma10w: parseFloat(ma10w.toFixed(2)), pctFromMA: parseFloat((pctFromMA*100).toFixed(1)), above10wk: price > ma10w });
+  } catch(e) { return { trend: 'neutral', above10wk: null }; }
+}
+
 // - Pre-trade Filters -
 async function checkAllFilters(stock, price) {
   const fails = [];
@@ -3074,11 +3173,12 @@ async function executeTrade(stock, price, score, scoreReasons, vix, optionType =
     contracts,
     cost:          finalCost,
     score,
-    scoreReasons:  scoreReasons.slice(0, 5), // cap at 5 reasons — full list not needed in Redis
+    scoreReasons:  scoreReasons, // F13: full list for dashboard transparency
     delta:         contract.greeks.delta,
     iv:            parseFloat(((contract.iv||0.3)*100).toFixed(1)),
     vix,
     washSaleFlag:  stock._washSaleWarning || false,
+    scoreReasons,  // F13: full signal breakdown
     reasoning:     `Score ${score}/100. ${scoreReasons.slice(0,3).join(". ")}.${stock._washSaleWarning ? " ⚠ WASH SALE WARNING." : ""}`,
   });
   if (state.tradeJournal.length > 100) state.tradeJournal = state.tradeJournal.slice(0,100);
@@ -3487,6 +3587,11 @@ async function runScan() {
     portfolioGreeks.gamma = parseFloat(portfolioGreeks.gamma.toFixed(4));
     portfolioGreeks.vega  = parseFloat(portfolioGreeks.vega.toFixed(2));
     marketContext.portfolioGreeks = portfolioGreeks;
+    marketContext.vegaExposure    = calcAggregateGreeks();
+    if (state.positions.length > 0) {
+      const ve = marketContext.vegaExposure;
+      logEvent("scan", `[Vega] $${ve.vegaDollar}/pt VIX move | Risk:${ve.vegaRisk}`);
+    }
     if (state.positions.length > 0) {
       logEvent("scan", `[Greeks] Δ:${portfolioGreeks.delta} Θ:${portfolioGreeks.theta}/day Γ:${portfolioGreeks.gamma} V:${portfolioGreeks.vega}`);
     }
@@ -3737,6 +3842,28 @@ async function runScan() {
       await closePosition(pos.ticker, "target"); continue;
     }
 
+    // ── F10: THESIS DEGRADATION — re-score entry conditions every hour ──────
+    // If the original entry thesis has weakened significantly, partial close
+    // regardless of price movement — the edge is gone even if position is flat
+    if (hoursOpen >= 1 && Math.floor(hoursOpen) > (pos._lastThesisCheck || 0)) {
+      pos._lastThesisCheck = Math.floor(hoursOpen);
+      try {
+        const tBars  = await getStockBars(pos.ticker, 20);
+        if (tBars.length >= 15) {
+          const curRSI = calcRSI(tBars);
+          const entryRSI = pos.entryRSI || (pos.optionType === "put" ? 75 : 30);
+          // For puts: if RSI has dropped from overbought to neutral, thesis weakening
+          const rsiReversed = pos.optionType === "put" && entryRSI >= 65 && curRSI < 50;
+          // For calls: if RSI has risen from oversold to neutral, thesis weakening
+          const callRsiReversed = pos.optionType === "call" && entryRSI <= 40 && curRSI > 55;
+          if ((rsiReversed || callRsiReversed) && !pos.partialClosed && chg < 0.10) {
+            logEvent("scan", `${pos.ticker} thesis degradation — RSI moved from ${entryRSI} to ${curRSI.toFixed(0)} — partial close`);
+            await partialClose(pos.ticker);
+          }
+        }
+      } catch(e) {}
+    }
+
     // 6. TIME STOP — 7 days with no meaningful move
     if (daysOpen >= TIME_STOP_DAYS && Math.abs(chg) < TIME_STOP_MOVE) {
       logEvent("scan", `${pos.ticker} time-stop — ${daysOpen.toFixed(0)}d, only ${(chg*100).toFixed(1)}% move`);
@@ -3838,6 +3965,15 @@ async function runScan() {
   })();
   if (spyRecovering) logEvent("filter", `SPY recovery detected — puts blocked`);
 
+  // ── F17: Benchmark-adjusted entry threshold ────────────────────────────
+  // If SPY already down 1.5%+ today, the easy money on puts may be gone
+  // Require higher conviction (score 85+) to enter puts when market already sold off
+  const spyAlreadyDown = spyBars.length >= 2 &&
+    (spyBars[spyBars.length-1].c - spyBars[spyBars.length-2].c) / spyBars[spyBars.length-2].c < -0.015;
+  if (spyAlreadyDown && !dryRunMode) {
+    logEvent("filter", `SPY already down 1.5%+ today — raising put threshold to 85 (move may be priced in)`);
+  }
+
   // ── OPENING VOLATILITY BLOCK — no new entries in first 15 min ──────────
   const etMinSinceOpen = (scanET.getHours() - 9) * 60 + scanET.getMinutes() - 30;
   const openingBlock   = etMinSinceOpen >= 0 && etMinSinceOpen < 15 && !dryRunMode;
@@ -3905,6 +4041,15 @@ async function runScan() {
     return;
   }
 
+  // ── F8: High-beta correlation block ─────────────────────────────────────
+  // Max 2 simultaneous positions with beta > 1.5 — prevents HOOD+ROKU+DKNG all open
+  // These are effectively the same bet — all crash together in a market reversal
+  const highBetaPositions = state.positions.filter(p => (p.beta || 1) > 1.5).length;
+  if (highBetaPositions >= 2) {
+    logEvent("filter", `High-beta correlation block — ${highBetaPositions} positions with beta>1.5 already open`);
+    // Only block high-beta new entries — let lower beta through
+  }
+
   // Burst entry cooldown — max 3 new positions per 10 minutes
   // Prevents over-concentration at a single market moment (e.g. after reset)
   const tenMinAgo = Date.now() - 10 * 60 * 1000;
@@ -3944,7 +4089,7 @@ async function runScan() {
     const results = await Promise.all(
       batch.map(async stock => {
         try {
-          const [price, bars, intradayBars, sectorResult, preMarket, newsArticles, analystData, eqScore, liveBeta] = await Promise.all([
+          const [price, bars, intradayBars, sectorResult, preMarket, newsArticles, analystData, eqScore, liveBeta, weeklyTrend] = await Promise.all([
             getStockQuote(stock.ticker),
             getStockBars(stock.ticker, 60),
             getIntradayBars(stock.ticker),
@@ -3954,17 +4099,18 @@ async function runScan() {
             getAnalystActivity(stock.ticker),
             getEarningsQualityScore(stock.ticker, []),
             (function() {
-              // Beta: cached 60 min — changes slowly, no need to fetch every scan
               const cached = getCached('beta:' + stock.ticker);
               if (cached) return Promise.resolve(cached);
               return getLiveBeta(stock.ticker);
             })(),
+            getWeeklyTrend(stock.ticker),
           ]);
           // Store live beta on stock object for liveStock construction
           if (liveBeta && liveBeta > 0) {
             stock._liveBeta = liveBeta;
             setCache('beta:' + stock.ticker, liveBeta);
           }
+          if (weeklyTrend) stock._weeklyTrend = weeklyTrend;
           return { stock, price, bars, intradayBars, sectorResult, preMarket, newsArticles, analystData, eqScore };
         } catch(e) {
           return { stock, price: null, bars: [], intradayBars: [], sectorResult: { pass:true, putBoost:0 }, preMarket:null, newsArticles:[], analystData:{ modifier:0, signal:"neutral", upgrades:[], downgrades:[] }, eqScore:{ signal:"neutral" } };
@@ -3979,6 +4125,12 @@ async function runScan() {
   const scored = [];
   for (const { stock, price, bars, intradayBars, sectorResult, preMarket, newsArticles, analystData, eqScore } of stockData) {
     if (state.positions.find(p=>p.ticker===stock.ticker)) continue;
+
+    // ── F14: Check ticker blacklist ───────────────────────────────────────
+    if ((state.tickerBlacklist || []).includes(stock.ticker)) {
+      logEvent("filter", `${stock.ticker} blacklisted — skipping`);
+      continue;
+    }
 
     // Ticker cooldown — 30 minutes after closing same ticker before re-entry
     // Prevents rapid re-entry after expiry-roll or stop (e.g. ROKU entering 3x in 45 min)
@@ -4154,9 +4306,24 @@ async function runScan() {
     if (isLastHour && (state.vix >= 25 || volDecline)) timeOfDayMult = 0.80;
     else if (isLateDay && state.vix >= 30)              timeOfDayMult = 0.90;
 
+    // ── F7: Weekly trend filter ──────────────────────────────────────────────
+    // Fetch cached weekly trend (60-min cache, no extra API call)
+    const weeklyTrend = stock._weeklyTrend || { trend: 'neutral', above10wk: null };
+
     // Score both call and put setups using live signals
     const callSetup = scoreSetup(liveStock, relStrength, signals.adx, todayVol, avgVol);
     const putSetup  = scorePutSetup(liveStock, relStrength, signals.adx, todayVol, avgVol, state.vix);
+
+    // Weekly trend adjustment — fighting a bullish weekly trend on puts needs higher conviction
+    if (weeklyTrend.above10wk === true) {
+      // Stock above 10-week MA = in uptrend = puts fighting the larger trend
+      putSetup.score = Math.max(0, putSetup.score - 10);
+      putSetup.reasons.push(`Above 10-wk MA $${weeklyTrend.ma10w} — puts fighting trend (-10)`);
+    } else if (weeklyTrend.above10wk === false) {
+      // Stock below 10-week MA = in downtrend = puts aligned with larger trend
+      putSetup.score = Math.min(100, putSetup.score + 8);
+      putSetup.reasons.push(`Below 10-wk MA $${weeklyTrend.ma10w} — aligned with downtrend (+8)`);
+    }
 
     // Volume context for puts — high volume confirms distribution, but capitulation
     // (extreme high volume) can signal reversal. Use nuanced scoring.
@@ -4371,8 +4538,12 @@ async function runScan() {
 
     // After 1PM ET, afternoon session is noisier — require higher conviction
     const etHourNow = scanET.getHours() + scanET.getMinutes() / 60;
-    const afternoonMinScore = etHourNow >= 13 ? 85 : 0; // 85+ required after 1PM ET
-    const effectiveMinScore = Math.max(ddProtocol.minScore || MIN_SCORE, afternoonMinScore);
+    const afternoonMinScore = etHourNow >= 13 ? 85 : 0;
+    const benchmarkMinScore = spyAlreadyDown && optionType === "put" ? 85 : 0;
+    // F9: Use regime profile min score
+    const regimeProfile    = getRegimeProfile(marketContext.regime?.regime || "neutral");
+    const regimeMinScore   = regimeProfile.minScore;
+    const effectiveMinScore = Math.max(ddProtocol.minScore || MIN_SCORE, afternoonMinScore, benchmarkMinScore, regimeMinScore);
     if (bestScore < effectiveMinScore) {
       logEvent("filter", `${stock.ticker} call:${callSetup.score} put:${putSetup.score} - below ${effectiveMinScore} (${etHourNow >= 13 ? "afternoon" : ddProtocol.level} protocol) - skip`);
       continue;
@@ -4438,6 +4609,13 @@ async function runScan() {
         continue;
       }
       logEvent("filter", `${stock.ticker} - bypassing filter for PUT: ${reason}`);
+    }
+
+    // ── F8: Block high-beta entry if correlation limit reached ──────────────
+    const stockBeta = stock.beta || stock._liveBeta || 1.0;
+    if (stockBeta > 1.5 && highBetaPositions >= 2 && !dryRunMode) {
+      logEvent("filter", `${stock.ticker} beta:${stockBeta.toFixed(1)} — high-beta limit reached (${highBetaPositions}/2)`);
+      continue;
     }
 
     // Liquidity pre-check — block before executeTrade if contract is clearly unfillable
@@ -4519,6 +4697,43 @@ function calcADX(bars, period = 14) {
 }
 
 // - Email System -
+// ── F12: Enhanced morning briefing ───────────────────────────────────────
+async function sendMorningBriefing() {
+  if (!GMAIL_USER || !GMAIL_PASS) return;
+  try {
+    const positions = state.positions || [];
+    const trades    = (state.closedTrades || []).slice(0, 10);
+    const pdtUsed   = countRecentDayTrades();
+    const posHTML   = positions.length ? positions.map(p => {
+      const dte = p.expDays || '?';
+      const chg = p.currentPrice && p.premium ? (((p.currentPrice - p.premium)/p.premium)*100).toFixed(1) : '?';
+      return `<tr><td>${p.ticker}</td><td>${p.optionType.toUpperCase()}</td><td>$${p.strike}</td><td>${dte}d</td><td style="color:${parseFloat(chg)>=0?'#44ff88':'#ff4444'}">${chg}%</td></tr>`;
+    }).join('') : '<tr><td colspan="5" style="color:#888">No open positions</td></tr>';
+    const macro = marketContext.macro || { signal: 'neutral', triggers: [] };
+    await mailer.sendMail({
+      from: GMAIL_USER, to: GMAIL_USER,
+      subject: `APEX Morning Briefing — VIX ${state.vix} | ${positions.length} positions | ${new Date().toLocaleDateString()}`,
+      html: `<div style="font-family:monospace;background:#07101f;color:#cce8ff;padding:20px;max-width:600px">
+        <h2 style="color:#00c4ff;margin:0 0 16px">APEX Morning Briefing</h2>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:16px">
+          <div style="background:#0d1f0d;padding:8px;border-radius:4px"><span style="color:#888">VIX</span><br><strong style="font-size:18px;color:${state.vix>30?'#ff4444':state.vix>20?'#ffaa00':'#44ff88'}">${state.vix}</strong></div>
+          <div style="background:#0d1f0d;padding:8px;border-radius:4px"><span style="color:#888">Cash</span><br><strong style="font-size:18px">$${(state.cash||0).toFixed(0)}</strong></div>
+          <div style="background:#0d1f0d;padding:8px;border-radius:4px"><span style="color:#888">Day Trades Left</span><br><strong style="font-size:18px;color:${pdtUsed>=3?'#ff4444':pdtUsed===2?'#ffaa00':'#44ff88'}">${Math.max(0,3-pdtUsed)}/3</strong></div>
+          <div style="background:#0d1f0d;padding:8px;border-radius:4px"><span style="color:#888">Macro</span><br><strong style="font-size:14px;color:${macro.mode==='aggressive'?'#44ff88':macro.mode==='defensive'?'#ff4444':'#cce8ff'}">${macro.signal}</strong></div>
+        </div>
+        <h3 style="color:#888;font-size:12px;margin:0 0 8px">OPEN POSITIONS</h3>
+        <table style="width:100%;border-collapse:collapse;font-size:12px">
+          <tr style="color:#888"><th>Ticker</th><th>Type</th><th>Strike</th><th>DTE</th><th>P&L</th></tr>
+          ${posHTML}
+        </table>
+        ${macro.triggers.length ? `<div style="margin-top:12px;padding:8px;background:#1a0a0a;border-left:3px solid #ff4444"><strong>Macro Flags:</strong> ${macro.triggers.join(', ')}</div>` : ''}
+        <p style="color:#555;font-size:10px;margin-top:16px">Entry window: 9:45am–3pm ET | No entries first 15min or last hour</p>
+      </div>`
+    });
+    logEvent("scan", "Morning briefing email sent");
+  } catch(e) { console.error("[EMAIL] Morning briefing error:", e.message); }
+}
+
 const mailer = nodemailer.createTransport({
   service: "gmail",
   auth: { user: GMAIL_USER, pass: GMAIL_PASS },
@@ -4678,20 +4893,145 @@ setInterval(() => {
   if (day >= 1 && day <= 5) runScan();
 }, 30000);
 
+// ── F3: After-hours context update — every 15 min Mon-Fri outside market hours ──
+// Updates macro news, VIX proxy, Fear&Greed overnight
+// Ensures APEX walks into market open with fresh context, not stale data
+async function updateAfterHoursContext() {
+  const et  = getETTime();
+  const day = et.getDay();
+  if (day === 0 || day === 6) return; // skip weekends
+  if (isMarketHours()) return; // market scan handles this during hours
+  try {
+    // Update macro news — catches overnight geopolitical/Fed news
+    const macro = await getMacroNews();
+    marketContext.macro = macro;
+    if (macro.mode !== "normal") {
+      logEvent("macro", `[AH] Overnight macro: ${macro.signal} — ${macro.triggers.slice(0,3).join(", ")}`);
+    }
+    // Update Fear & Greed
+    const fg = await getFearAndGreed();
+    marketContext.fearGreed = fg;
+    // Update VIX proxy via VIXY quote
+    const newVIX = await getVIX();
+    if (newVIX) state.vix = newVIX;
+    // Flag positions at risk for morning open
+    if (state.positions.length > 0 && macro.mode === "aggressive") {
+      logEvent("warn", `[AH] Bullish macro overnight — ${state.positions.filter(p=>p.optionType==="put").length} puts may be at risk at open`);
+    }
+    logEvent("scan", `[AH] Context updated | VIX:${state.vix} | F&G:${fg.score} | Macro:${macro.signal}`);
+    markDirty();
+  } catch(e) { console.error("[AH] Context update error:", e.message); }
+}
+setInterval(() => {
+  const day = getETTime().getDay();
+  if (day >= 1 && day <= 5) updateAfterHoursContext();
+}, 15 * 60 * 1000); // every 15 minutes
+
 // Dedicated state flush every 30 seconds — decoupled from scan timing
 // Ensures dirty state is persisted even if scan is slow or skipped
 setInterval(() => {
   flushStateIfDirty().catch(e => console.error("Flush interval error:", e.message));
 }, 30000);
 
+// ── F4: Alpaca account balance sync every 5 minutes ───────────────────────
+// Display only — keeps dashboard alpacaCash current without affecting trading logic
+setInterval(async () => {
+  if (!ALPACA_KEY) return;
+  try {
+    const acct = await alpacaGet("/account");
+    if (acct && acct.cash) {
+      const newCash = parseFloat(acct.cash);
+      if (newCash !== state.alpacaCash) {
+        state.alpacaCash = newCash;
+        markDirty(); // persist updated balance
+      }
+    }
+  } catch(e) {} // silent — display only, non-critical
+}, 5 * 60 * 1000);
+
+// ── F2: Pre-market carry-over assessment (9:00 AM ET) ────────────────────
+// Checks overnight positions against pre-market conditions
+// Flags positions likely to need immediate action at open
+async function premarketAssessment() {
+  if (!state.positions.length) return;
+  try {
+    // Refresh macro context before assessment
+    const macro = await getMacroNews();
+    marketContext.macro = macro;
+    const fg = await getFearAndGreed();
+    marketContext.fearGreed = fg;
+    const vix = await getVIX();
+    if (vix) state.vix = vix;
+
+    logEvent("scan", `[PREMARKET] Assessing ${state.positions.length} carry-over positions | VIX:${state.vix} | Macro:${macro.signal}`);
+
+    const flags = [];
+    for (const pos of state.positions) {
+      const reasons = [];
+      // Check macro alignment
+      if (pos.optionType === "put" && macro.mode === "aggressive") {
+        reasons.push("Bullish macro overnight — put thesis at risk");
+      }
+      if (pos.optionType === "call" && macro.mode === "defensive") {
+        reasons.push("Bearish macro overnight — call thesis at risk");
+      }
+      // Check VIX spike against short-DTE positions
+      const dte = pos.expDays || 30;
+      if (state.vix > 40 && dte <= 7) {
+        reasons.push(`VIX ${state.vix} + DTE ${dte} — extreme gamma risk at open`);
+      }
+      // Flag DTE <= 3 (expiring very soon)
+      if (dte <= 3) {
+        reasons.push(`${dte}DTE — expiring imminently`);
+      }
+      if (reasons.length > 0) {
+        flags.push({ ticker: pos.ticker, reasons });
+        logEvent("warn", `[PREMARKET] ${pos.ticker}: ${reasons.join(" | ")}`);
+      } else {
+        logEvent("scan", `[PREMARKET] ${pos.ticker}: OK for open`);
+      }
+    }
+
+    // Send email if any positions flagged
+    if (flags.length > 0 && GMAIL_USER && GMAIL_PASS) {
+      const flagHTML = flags.map(f =>
+        `<div style="margin:8px 0;padding:8px;background:#1a0a0a;border-left:3px solid #ff4444">
+          <strong>${f.ticker}</strong>: ${f.reasons.join(" | ")}
+        </div>`
+      ).join("");
+      await mailer.sendMail({
+        from: GMAIL_USER, to: GMAIL_USER,
+        subject: `APEX Pre-Market Alert — ${flags.length} position(s) flagged`,
+        html: `<div style="font-family:monospace;background:#07101f;color:#cce8ff;padding:20px">
+          <h2 style="color:#ffaa00">⚠ Pre-Market Position Review</h2>
+          <p>VIX: ${state.vix} | Macro: ${macro.signal} | F&G: ${fg.score}</p>
+          ${flagHTML}
+          <p style="color:#888;font-size:11px">Market opens in ~30 minutes. Review flagged positions.</p>
+        </div>`
+      }).catch(e => console.error("[PREMARKET] Email error:", e.message));
+    }
+    markDirty();
+  } catch(e) { console.error("[PREMARKET] Assessment error:", e.message); }
+}
+
 // Morning reset + email 13:00 UTC = 9:00 AM EDT (UTC-4, DST in effect Mar-Nov)
 // Note: becomes 14:00 UTC = 9:00 AM EST in winter (Nov-Mar)
+// Pre-market assessment 8:45 AM ET (12:45 UTC EDT / 13:45 UTC EST)
+cron.schedule("45 12 * * 1-5", async () => {
+  await premarketAssessment();
+});
+cron.schedule("45 13 * * 1-5", async () => {
+  await premarketAssessment(); // winter fallback
+});
+
 cron.schedule("0 13 * * 1-5", async () => {
   state.dayStartCash      = state.cash;
   state.todayTrades       = 0;
   state.consecutiveLosses = 0;
   state.circuitOpen       = true;
+  state.tickerBlacklist   = []; // clear daily blacklist at market open
   await saveStateNow();
+  await sendMorningBriefing();
   sendEmail("morning");
 });
 
@@ -4760,8 +5100,16 @@ app.get("/api/state", async (req, res) => {
     uptime:             process.uptime(),
     betaWeightedDelta:  calcBetaWeightedDelta(),
     dataQuality:        state.dataQuality || { realTrades: 0, estimatedTrades: 0, totalTrades: 0 },
+    dataQualityPct:     (function() {
+      // F1 fix: use real/(real+estimated) not real/totalTrades
+      const dq = state.dataQuality || {};
+      const real = dq.realTrades || 0;
+      const est  = dq.estimatedTrades || 0;
+      return (real + est) > 0 ? Math.round(real / (real + est) * 100) : 100;
+    })(),
     alpacaCash:         state.alpacaCash || null,
     pdtCount:           countRecentDayTrades(),
+    tickerBlacklist:    state.tickerBlacklist || [],
     pdtLimit:           PDT_LIMIT,
     pdtBlocked:         countRecentDayTrades() >= PDT_LIMIT,
     reconcileStatus:    state.reconcileStatus || "unknown",
@@ -4801,7 +5149,14 @@ app.post("/api/test-email", async (req, res) => {
   if (!GMAIL_USER || !GMAIL_PASS) {
     return res.json({ error: "Email not configured — check GMAIL_USER and GMAIL_APP_PASSWORD in Railway" });
   }
+  // type=morning sends the full morning briefing for testing
+  const type = (req.body && req.body.type) || "ping";
   try {
+    if (type === "morning") {
+      await sendMorningBriefing();
+      logEvent("email", `Morning briefing test email sent to ${GMAIL_USER}`);
+      return res.json({ ok: true, message: `Morning briefing sent to ${GMAIL_USER}` });
+    }
     await mailer.sendMail({
       from:    GMAIL_USER,
       to:      GMAIL_USER,
@@ -5864,6 +6219,28 @@ app.post("/api/set-budget", async (req, res) => {
 });
 app.get("/health",           (req,res) => res.json({status:"ok",uptime:process.uptime(),vix:state.vix,positions:state.positions.length}));
 
+// ── F14: Ticker blacklist endpoints ─────────────────────────────────────
+app.post("/api/blacklist/:ticker", async (req, res) => {
+  const ticker = req.params.ticker.toUpperCase();
+  if (!state.tickerBlacklist) state.tickerBlacklist = [];
+  if (!state.tickerBlacklist.includes(ticker)) {
+    state.tickerBlacklist.push(ticker);
+    logEvent("filter", `${ticker} manually blacklisted for today`);
+    await saveStateNow();
+  }
+  res.json({ ok: true, blacklist: state.tickerBlacklist });
+});
+app.delete("/api/blacklist/:ticker", async (req, res) => {
+  const ticker = req.params.ticker.toUpperCase();
+  state.tickerBlacklist = (state.tickerBlacklist || []).filter(t => t !== ticker);
+  logEvent("filter", `${ticker} removed from blacklist`);
+  await saveStateNow();
+  res.json({ ok: true, blacklist: state.tickerBlacklist });
+});
+app.get("/api/blacklist", (req, res) => {
+  res.json({ blacklist: state.tickerBlacklist || [] });
+});
+
 // Redis round-trip test — write a known value, read it back, confirm they match
 // Hit this endpoint after deploy to verify persistence is working before live trading
 app.get("/api/test-redis", async (req, res) => {
@@ -5980,7 +6357,7 @@ process.on("unhandledRejection", (reason, promise) => {
 // Boot sequence - load state from Redis then start server
 initState().then(() => {
   app.listen(PORT, () => {
-    console.log(`APEX v3.90 running on port ${PORT}`);
+    console.log(`APEX v3.95 running on port ${PORT}`);
     console.log(`Alpaca key:  ${ALPACA_KEY?"SET":"NOT SET"}`);
     console.log(`Gmail:       ${GMAIL_USER||"NOT SET"}`);
     console.log(`Redis:       ${REDIS_URL?"SET":"NOT SET - using file fallback"}`);
