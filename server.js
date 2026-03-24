@@ -2207,42 +2207,24 @@ async function getAgentMacroAnalysis(headlines) {
   if (_agentMacroCache.result && Date.now() - _agentMacroCache.fetchedAt < AGENT_MACRO_CACHE_MS) {
     return _agentMacroCache.result;
   }
-  const systemPrompt = `You are a professional options trader's macro analyst. You read financial news headlines and assess their impact on US equity markets and options positioning.
+  const systemPrompt = `Options trading macro analyst. Read headlines, return JSON only — no other text.
 
-Your job: analyze the provided headlines and return a JSON object with your assessment.
+{"signal":"strongly bearish"|"bearish"|"mild bearish"|"neutral"|"mild bullish"|"bullish"|"strongly bullish","confidence":"high"|"medium"|"low","modifier":-20to15,"mode":"defensive"|"cautious"|"normal"|"aggressive","reasoning":"1 sentence","affectedTickers":[],"bearishTickers":[],"bullishTickers":[],"keyThemes":[],"topStories":[{"headline":"","source":"","direction":"bearish"|"bullish"|"neutral","importance":"high"|"medium"|"low"}]}
 
-Respond ONLY with valid JSON, no other text. Format:
-{
-  "signal": "strongly bearish" | "bearish" | "mild bearish" | "neutral" | "mild bullish" | "bullish" | "strongly bullish",
-  "confidence": "high" | "medium" | "low",
-  "modifier": number between -20 and +15,
-  "mode": "defensive" | "cautious" | "normal" | "aggressive",
-  "reasoning": "1-2 sentence plain English explanation",
-  "affectedTickers": ["array of ticker symbols directly mentioned or clearly affected"],
-  "bearishTickers": ["tickers where puts are favored right now"],
-  "bullishTickers": ["tickers where calls are favored right now"],
-  "keyThemes": ["array of 2-4 key macro themes e.g. tariffs, Fed, earnings"],
-  "topStories": [
-    {"headline": "...", "source": "...", "direction": "bearish"|"bullish"|"neutral", "importance": "high"|"medium"|"low"}
-  ]
-}
+Rules: modifier -20=crash risk, +15=major rally. defensive=puts only. Focus on next 4 hours. Stale headlines(>6h)=neutral/low. Use tools only for data not in the prompt.`;
 
-Guidelines:
-- modifier -20 = strongly bearish (major crash risk), +15 = strongly bullish (major rally catalyst)
-- "defensive" mode = only put entries, no calls; "aggressive" = both, prefer calls
-- Focus on what MATTERS for options traders in the next 4 hours, not long-term
-- Distinguish between stock-specific news and broad macro news
-- If headlines are stale (>6 hours old) or irrelevant, return neutral with low confidence`;
-
-  const userPrompt = `Current market context:
-- VIX: ${state.vix || 20}
+  // Pre-fetch market status so agent doesn't need to tool-call for it
+  const mktStatus = await agentTool_getMarketStatus().catch(() => ({}));
+  const userPrompt = `Market snapshot (live data — no need to call getMarketStatus):
+- VIX: ${mktStatus.vix || state.vix || 20} | SPY: ${mktStatus.spy?.price || '--'} (${mktStatus.spy?.dayChangePct || '--'}%)
+- Breadth: ${mktStatus.breadth ? (mktStatus.breadth*100).toFixed(0)+'%' : '--'} | Fear&Greed: ${mktStatus.fearGreed || '--'}
 - Time: ${new Date().toLocaleTimeString('en-US', {timeZone:'America/New_York'})} ET
-- Open positions: ${(state.positions||[]).map(p => p.ticker).join(', ') || 'none'}
+- Open positions: ${(state.positions||[]).map(p => p.ticker + '(' + (p.optionType==='put'?'P':'C') + ')').join(', ') || 'none'}
 
 Headlines to analyze (newest first):
 ${headlines.slice(0, 15).map((h, i) => (i+1) + '. ' + h).join('\n')}
 
-Analyze these headlines and return your JSON assessment.`;
+Analyze and return your JSON. Use tools only if you need data not shown above.`;
 
   const raw = await callClaudeAgent(systemPrompt, userPrompt, 1200, true); // useTools=true
   if (!raw) return null;
@@ -2264,17 +2246,11 @@ Analyze these headlines and return your JSON assessment.`;
 // Returns { score, label, reasoning, recommendation }
 async function getAgentRescore(pos) {
   if (!ANTHROPIC_API_KEY) return null;
-  const systemPrompt = `You are a professional options trader reviewing an open position. Assess whether the original entry thesis still holds given current conditions.
+  const systemPrompt = `Options position analyst. Does the entry thesis still hold? Return JSON only.
 
-Respond ONLY with valid JSON:
-{
-  "score": number 0-95,
-  "label": "STRONG" | "VALID" | "WEAK" | "DEGRADED" | "INVALID",
-  "reasoning": "1 sentence explanation",
-  "recommendation": "HOLD" | "WATCH" | "EXIT"
-}
+{"score":0-95,"label":"STRONG"|"VALID"|"WEAK"|"DEGRADED"|"INVALID","confidence":"high"|"medium"|"low","reasoning":"1 sentence","recommendation":"HOLD"|"WATCH"|"EXIT"}
 
-Score meaning: 85+ = thesis fully intact, 70-84 = mostly valid, 50-69 = weakening, <50 = thesis broken`;
+Score: 85+=intact, 70-84=mostly valid, 50-69=weakening, <50=broken. Use getLiveSignals to check current RSI/momentum before deciding.`;
 
   const daysOpen   = ((Date.now() - new Date(pos.openDate).getTime()) / 86400000).toFixed(1);
   const chgPct     = pos.currentPrice && pos.premium
@@ -2565,8 +2541,11 @@ async function getMacroNews() {
     }
 
     // ── Agent enhancement — replace keyword scoring with Claude analysis ───
-    // If agent available, use it. Keep keyword results as fallback data.
-    if (ANTHROPIC_API_KEY && headlines.length > 0) {
+    // Only use agent during market hours + 30min pre/post — saves ~40% API cost
+    const etNow = getETTime();
+    const etH = etNow.getHours() + etNow.getMinutes() / 60;
+    const agentWindowOpen = etH >= 8.5 && etH <= 17.0; // 8:30am–5pm ET
+    if (ANTHROPIC_API_KEY && headlines.length > 0 && agentWindowOpen) {
       try {
         const agentResult = await getAgentMacroAnalysis(headlines);
         if (agentResult) {
@@ -4203,6 +4182,59 @@ function snapshotPortfolioValue() {
   markDirty();
 }
 
+// ── Parallel agent rescore — runs once per hour for overnight positions ───
+// Batches all overnight positions into parallel Claude calls
+// Much faster than sequential (7 positions = ~5s parallel vs ~35s sequential)
+async function runAgentRescore() {
+  if (!ANTHROPIC_API_KEY || !isMarketHours()) return;
+  const currentHour = new Date().getHours();
+  if (!state._agentRescoreHour) state._agentRescoreHour = {};
+
+  const overnight = (state.positions || []).filter(p => {
+    const daysOpen = (Date.now() - new Date(p.openDate).getTime()) / 86400000;
+    const lastHour = state._agentRescoreHour[p.ticker] || -1;
+    return daysOpen >= 1 && currentHour !== lastHour;
+  });
+
+  if (!overnight.length) return;
+  logEvent("scan", `[AGENT] Parallel rescore: ${overnight.length} overnight positions`);
+
+  // Mark all as rescored this hour before firing — prevents double-fire
+  overnight.forEach(p => { state._agentRescoreHour[p.ticker] = currentHour; });
+
+  // Fire all rescores in parallel
+  const results = await Promise.allSettled(overnight.map(p => getAgentRescore(p)));
+
+  const toClose = [];
+  results.forEach((result, i) => {
+    const pos = overnight[i];
+    if (result.status !== 'fulfilled' || !result.value) return;
+    const rescore = result.value;
+    pos._liveRescore = { ...rescore, updatedAt: new Date().toISOString() };
+    logEvent("scan", `[AGENT] ${pos.ticker}: ${rescore.label} (${rescore.score}/95) — ${rescore.recommendation} | ${rescore.reasoning||''}`);
+
+    // Queue auto-exit candidates
+    const curP = pos.currentPrice || pos.premium;
+    const chg  = (curP - pos.premium) / pos.premium;
+    if (state.agentAutoExitEnabled &&
+        rescore.recommendation === "EXIT" &&
+        rescore.confidence === "high" &&
+        chg < 0) {
+      toClose.push(pos.ticker);
+    }
+  });
+
+  // Execute closes sequentially after all rescores complete
+  for (const ticker of toClose) {
+    const pos = (state.positions||[]).find(p => p.ticker === ticker);
+    if (!pos) continue;
+    logEvent("warn", `[AGENT] AUTO-EXIT ${ticker} — ${pos._liveRescore?.label} | ${pos._liveRescore?.reasoning}`);
+    await closePosition(ticker, "agent-exit");
+  }
+
+  if (toClose.length > 0) markDirty();
+}
+
 // - Main Scan Engine -
 let scanRunning  = false;
 let lastMedScan  = 0;  // 5 minute tier
@@ -4359,6 +4391,7 @@ async function runScan() {
     }
     logEvent("scan", `[5min] Regime:${regime.regime}(${regime.confidence}%) | Kelly:${marketContext.kelly.contracts}x | Global:${marketContext.globalMarket.signal} | Streak:${marketContext.streaks.currentStreak}x${marketContext.streaks.currentType}`);
     snapshotPortfolioValue(); // record portfolio value every 5 min
+    runAgentRescore();        // parallel hourly rescore for overnight positions (non-blocking)
   }
 
 
@@ -4626,35 +4659,7 @@ async function runScan() {
       await closePosition(pos.ticker, "time-stop"); continue;
     }
 
-    // ── AGENT RESCORE — once per hour on overnight positions ──────────────
-    // Only fires on positions opened previous day or earlier
-    // AUTO-EXIT: closes losing positions if agent returns EXIT + high confidence
-    if (daysOpen >= 1 && ANTHROPIC_API_KEY && isMarketHours()) {
-      const currentHour = new Date().getHours();
-      if (!state._agentRescoreHour) state._agentRescoreHour = {};
-      const lastRescoreHour = state._agentRescoreHour[pos.ticker] || -1;
-      if (currentHour !== lastRescoreHour) {
-        state._agentRescoreHour[pos.ticker] = currentHour;
-        try {
-          const rescore = await getAgentRescore(pos);
-          if (rescore) {
-            pos._liveRescore = { ...rescore, updatedAt: new Date().toISOString() };
-            logEvent("scan", `[AGENT] ${pos.ticker} rescore: ${rescore.label} (${rescore.score}/95) — ${rescore.recommendation} | ${rescore.reasoning || ''}`);
-            // Auto-exit: only if enabled + EXIT + high confidence + position is losing
-            if (state.agentAutoExitEnabled &&
-                rescore.recommendation === "EXIT" &&
-                rescore.confidence === "high" &&
-                chg < 0) {
-              logEvent("warn", `[AGENT] AUTO-EXIT ${pos.ticker} — ${rescore.label} score ${rescore.score}/95 | ${rescore.reasoning}`);
-              await closePosition(pos.ticker, "agent-exit");
-              continue;
-            }
-          }
-        } catch(agentErr) {
-          console.log("[AGENT] Rescore error:", agentErr.message);
-        }
-      }
-    }
+    // Agent rescore handled in parallel batch after scan loop (see runAgentRescore below)
 
     // 7. EXPIRY ROLL — DTE <= 7, close winners (losers hit stop first)
     if (dte <= 7 && chg > 0) {
@@ -6257,6 +6262,18 @@ cron.schedule("0 13 * * 1-5", async () => {
   state.consecutiveLosses = 0;
   state.circuitOpen       = true;
   state.tickerBlacklist   = []; // clear daily blacklist at market open
+  // Prune stale state objects to keep Redis payload lean
+  state._agentRescoreHour = {}; // reset hourly tracker daily
+  if (state._oversoldCount) {
+    // Only keep tickers still in watchlist — prune closed/removed tickers
+    const watchTickers = new Set(WATCHLIST.map(s => s.ticker));
+    Object.keys(state._oversoldCount).forEach(t => { if (!watchTickers.has(t)) delete state._oversoldCount[t]; });
+  }
+  // Prune portfolio snapshots older than 30 days
+  if (state.portfolioSnapshots && state.portfolioSnapshots.length > 2500) {
+    const cutoff = Date.now() - 30 * 24 * 60 * 60 * 1000;
+    state.portfolioSnapshots = state.portfolioSnapshots.filter(s => new Date(s.t).getTime() > cutoff);
+  }
   await saveStateNow();
   await sendMorningBriefing();
   sendEmail("morning");
