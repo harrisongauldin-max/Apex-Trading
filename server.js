@@ -7,7 +7,6 @@ const cron       = require("node-cron");
 const fetch      = require("node-fetch");
 const fs         = require("fs");
 const path       = require("path");
-const nodemailer = require("nodemailer");
 
 const app  = express();
 const PORT = process.env.PORT || 3000;
@@ -4653,23 +4652,20 @@ async function runScan() {
     logEvent("error", `runScan crashed: ${e.message} | stack: ${e.stack?.split("\n")[1]?.trim() || "unknown"}`);
     // Track consecutive scan failures — alert after 3 in a row
     state._scanFailures = (state._scanFailures || 0) + 1;
-    if (state._scanFailures >= 3 && GMAIL_USER && GMAIL_PASS && isMarketHours()) {
-      try {
-        await mailer.sendMail({
-          from: GMAIL_USER, to: GMAIL_USER,
-          subject: `APEX ALERT — Scanner failing (${state._scanFailures} errors)`,
-          html: `<div style="font-family:monospace;background:#07101f;color:#ff5555;padding:20px">
-            <h2>⚠ APEX Scanner Error</h2>
-            <p>Consecutive scan failures: <strong>${state._scanFailures}</strong></p>
-            <p>Last error: ${e.message}</p>
-            <p>Time: ${new Date().toISOString()}</p>
-            <p>Open positions: ${state.positions.length}</p>
-            <p>Cash: $${state.cash}</p>
-            <p><strong>Check Railway logs immediately.</strong></p>
-          </div>`
-        });
-        logEvent("warn", `Scan failure alert sent — ${state._scanFailures} consecutive errors`);
-      } catch(mailErr) { console.error("Failure alert email error:", mailErr.message); }
+    if (state._scanFailures >= 3 && RESEND_API_KEY && GMAIL_USER && isMarketHours()) {
+      await sendResendEmail(
+        `APEX ALERT — Scanner failing (${state._scanFailures} errors)`,
+        `<div style="font-family:monospace;background:#07101f;color:#ff5555;padding:20px">
+          <h2>⚠ APEX Scanner Error</h2>
+          <p>Consecutive scan failures: <strong>${state._scanFailures}</strong></p>
+          <p>Last error: ${e.message}</p>
+          <p>Time: ${new Date().toISOString()}</p>
+          <p>Open positions: ${state.positions.length}</p>
+          <p>Cash: $${state.cash}</p>
+          <p><strong>Check Railway logs immediately.</strong></p>
+        </div>`
+      );
+      logEvent("warn", `Scan failure alert sent — ${state._scanFailures} consecutive errors`);
     }
   } finally {
     // Reset failure counter on successful scan completion
@@ -4710,10 +4706,9 @@ async function sendMorningBriefing() {
       return `<tr><td>${p.ticker}</td><td>${p.optionType.toUpperCase()}</td><td>$${p.strike}</td><td>${dte}d</td><td style="color:${parseFloat(chg)>=0?'#44ff88':'#ff4444'}">${chg}%</td></tr>`;
     }).join('') : '<tr><td colspan="5" style="color:#888">No open positions</td></tr>';
     const macro = marketContext.macro || { signal: 'neutral', triggers: [] };
-    await mailer.sendMail({
-      from: GMAIL_USER, to: GMAIL_USER,
-      subject: `APEX Morning Briefing — VIX ${state.vix} | ${positions.length} positions | ${new Date().toLocaleDateString()}`,
-      html: `<div style="font-family:monospace;background:#07101f;color:#cce8ff;padding:20px;max-width:600px">
+    await sendResendEmail(
+      `APEX Morning Briefing — VIX ${state.vix} | ${positions.length} positions | ${new Date().toLocaleDateString()}`,
+      `<div style="font-family:monospace;background:#07101f;color:#cce8ff;padding:20px;max-width:600px">
         <h2 style="color:#00c4ff;margin:0 0 16px">APEX Morning Briefing</h2>
         <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:16px">
           <div style="background:#0d1f0d;padding:8px;border-radius:4px"><span style="color:#888">VIX</span><br><strong style="font-size:18px;color:${state.vix>30?'#ff4444':state.vix>20?'#ffaa00':'#44ff88'}">${state.vix}</strong></div>
@@ -4726,29 +4721,15 @@ async function sendMorningBriefing() {
           <tr style="color:#888"><th>Ticker</th><th>Type</th><th>Strike</th><th>DTE</th><th>P&L</th></tr>
           ${posHTML}
         </table>
-        ${macro.triggers.length ? `<div style="margin-top:12px;padding:8px;background:#1a0a0a;border-left:3px solid #ff4444"><strong>Macro Flags:</strong> ${macro.triggers.join(', ')}</div>` : ''}
+        ${macro.triggers.length ? '<div style="margin-top:12px;padding:8px;background:#1a0a0a;border-left:3px solid #ff4444"><strong>Macro Flags:</strong> ' + macro.triggers.join(', ') + '</div>' : ''}
         <p style="color:#555;font-size:10px;margin-top:16px">Entry window: 9:45am–3pm ET | No entries first 15min or last hour</p>
       </div>`
-    });
+    );
     logEvent("scan", "Morning briefing email sent");
   } catch(e) { console.error("[EMAIL] Morning briefing error:", e.message); }
 }
 
-const mailer = nodemailer.createTransport({
-  service: "gmail",
-  auth: { user: GMAIL_USER, pass: GMAIL_PASS },
-});
-// Verify SMTP connection on startup — logs any auth issues immediately
-if (GMAIL_USER && GMAIL_PASS) {
-  mailer.verify(function(error) {
-    if (error) {
-      console.log("[EMAIL] SMTP verification FAILED:", error.message);
-      console.log("[EMAIL] Check GMAIL_USER and GMAIL_APP_PASSWORD in Railway env vars");
-    } else {
-      console.log("[EMAIL] SMTP verified — Gmail ready ✅");
-    }
-  });
-}
+// nodemailer removed — email now via Resend API (sendResendEmail)
 
 function buildEmailHTML(type) {
   const pnl    = realizedPnL();
@@ -4837,12 +4818,12 @@ ${type === "morning" ? `
 }
 
 async function sendEmail(type) {
-  if (!GMAIL_USER || !GMAIL_PASS) { logEvent("warn", "Email not configured"); return; }
+  if (!RESEND_API_KEY || !GMAIL_USER) { logEvent("warn", "Email not configured"); return; }
   const subject = type === "morning"
     ? `APEX Morning Briefing - ${new Date().toLocaleDateString()}`
     : `APEX EOD Report - P&L ${(state.cash-state.dayStartCash)>=0?"+":""}$${(state.cash-state.dayStartCash).toFixed(2)}`;
   try {
-    await mailer.sendMail({ from:GMAIL_USER, to:GMAIL_USER, subject, html:buildEmailHTML(type) });
+    await sendResendEmail(subject, buildEmailHTML(type));
     logEvent("email", `${type} email sent to ${GMAIL_USER}`);
   } catch(e) { logEvent("error", `Email failed: ${e.message}`); }
 }
@@ -5072,22 +5053,21 @@ async function premarketAssessment() {
     }
 
     // Send email if any positions flagged
-    if (flags.length > 0 && GMAIL_USER && GMAIL_PASS) {
+    if (flags.length > 0 && RESEND_API_KEY && GMAIL_USER) {
       const flagHTML = flags.map(f =>
         `<div style="margin:8px 0;padding:8px;background:#1a0a0a;border-left:3px solid #ff4444">
           <strong>${f.ticker}</strong>: ${f.reasons.join(" | ")}
         </div>`
       ).join("");
-      await mailer.sendMail({
-        from: GMAIL_USER, to: GMAIL_USER,
-        subject: `APEX Pre-Market Alert — ${flags.length} position(s) flagged`,
-        html: `<div style="font-family:monospace;background:#07101f;color:#cce8ff;padding:20px">
+      await sendResendEmail(
+        `APEX Pre-Market Alert — ${flags.length} position(s) flagged`,
+        `<div style="font-family:monospace;background:#07101f;color:#cce8ff;padding:20px">
           <h2 style="color:#ffaa00">⚠ Pre-Market Position Review</h2>
           <p>VIX: ${state.vix} | Macro: ${macro.signal} | F&G: ${fg.score}</p>
           ${flagHTML}
           <p style="color:#888;font-size:11px">Market opens in ~30 minutes. Review flagged positions.</p>
         </div>`
-      }).catch(e => console.error("[PREMARKET] Email error:", e.message));
+      );
     }
     markDirty();
   } catch(e) { console.error("[PREMARKET] Assessment error:", e.message); }
@@ -5122,16 +5102,14 @@ cron.schedule("*/15 13-20 * * 1-5", async () => {
   if (!isMarketHours()) return;
   const lastScan    = state.lastScan ? new Date(state.lastScan) : null;
   const minsSinceLastScan = lastScan ? (Date.now() - lastScan.getTime()) / 60000 : 999;
-  if (minsSinceLastScan > 15 && minsSinceLastScan < 999 && GMAIL_USER && GMAIL_PASS) {
+  if (minsSinceLastScan > 15 && minsSinceLastScan < 999 && RESEND_API_KEY && GMAIL_USER) {
     logEvent("warn", `Health check: no scan in ${minsSinceLastScan.toFixed(0)} minutes - sending alert`);
-    mailer.sendMail({
-      from: GMAIL_USER,
-      to:   GMAIL_USER,
-      subject: "APEX ALERT - Scanner may be down",
-      html: `<p>APEX has not scanned in ${minsSinceLastScan.toFixed(0)} minutes during market hours.</p>
+    sendResendEmail(
+      "APEX ALERT - Scanner may be down",
+      `<p>APEX has not scanned in ${minsSinceLastScan.toFixed(0)} minutes during market hours.</p>
              <p>Last scan: ${state.lastScan || "unknown"}</p>
              <p>Check Railway logs immediately.</p>`
-    }).catch(e => console.error("Health alert email failed:", e.message));
+    );
   }
 });
 
@@ -5153,12 +5131,11 @@ cron.schedule("0 13 * * 1", async () => {
   state.monthlyProfit = 0;
   state.monthStart    = new Date().toLocaleDateString();
   await saveStateNow();
-  if (GMAIL_USER && GMAIL_PASS) {
-    mailer.sendMail({
-      from:GMAIL_USER, to:GMAIL_USER,
-      subject:`APEX Monthly Report - ${et.toLocaleDateString("en-US",{month:"long",year:"numeric"})}`,
-      text: report,
-    }).catch(e => logEvent("error","Monthly email: "+e.message));
+  if (RESEND_API_KEY && GMAIL_USER) {
+    sendResendEmail(
+      `APEX Monthly Report - ${et.toLocaleDateString("en-US",{month:"long",year:"numeric"})}`,
+      `<pre style="font-family:monospace;background:#07101f;color:#cce8ff;padding:20px">${report}</pre>`
+    );
   }
 });
 
@@ -5226,7 +5203,7 @@ app.post("/api/close/:tkr",  async (req,res) => {
 // Test email endpoint — sends a test email immediately
 app.post("/api/test-email", async (req, res) => {
   if (!GMAIL_USER || !GMAIL_PASS) {
-    return res.json({ error: "Email not configured — check GMAIL_USER and GMAIL_APP_PASSWORD in Railway" });
+    return res.json({ error: "Email not configured — set RESEND_API_KEY and GMAIL_USER in Railway env vars" });
   }
   // type=morning sends the full morning briefing for testing
   const type = (req.body && req.body.type) || "ping";
@@ -5236,17 +5213,15 @@ app.post("/api/test-email", async (req, res) => {
       logEvent("email", `Morning briefing test email sent to ${GMAIL_USER}`);
       return res.json({ ok: true, message: `Morning briefing sent to ${GMAIL_USER}` });
     }
-    await mailer.sendMail({
-      from:    GMAIL_USER,
-      to:      GMAIL_USER,
-      subject: `APEX Email Test - ${new Date().toLocaleTimeString()}`,
-      html:    `<div style="font-family:monospace;background:#07101f;color:#00ff88;padding:20px;border-radius:8px">
+    await sendResendEmail(
+      `APEX Email Test - ${new Date().toLocaleTimeString()}`,
+      `<div style="font-family:monospace;background:#07101f;color:#00ff88;padding:20px;border-radius:8px">
         <h2>✅ APEX Email Working</h2>
-        <p style="color:#cce8ff">If you received this, Gmail notifications are configured correctly.</p>
-        <p style="color:#336688">GMAIL_USER: ${GMAIL_USER}</p>
+        <p style="color:#cce8ff">If you received this, Resend is configured correctly.</p>
+        <p style="color:#336688">Recipient: ${GMAIL_USER}</p>
         <p style="color:#336688">Sent at: ${new Date().toISOString()}</p>
       </div>`
-    });
+    );
     logEvent("email", `Test email sent to ${GMAIL_USER}`);
     res.json({ ok: true, message: `Test email sent to ${GMAIL_USER}` });
   } catch(e) {
