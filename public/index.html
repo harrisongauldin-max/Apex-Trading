@@ -818,7 +818,11 @@ function renderMetrics() {
 
   // Data quality
   const dq    = state.dataQuality || { realTrades: 0, estimatedTrades: 0, totalTrades: 0 };
-  const dqPct = dq.totalTrades > 0 ? Math.round(dq.realTrades / dq.totalTrades * 100) : 100;
+  // Fix: use real/(real+estimated) — totalTrades includes dry runs and inflates denominator
+  const dqReal2 = dq.realTrades || 0;
+  const dqEst2  = dq.estimatedTrades || 0;
+  const dqPct   = state.dataQualityPct !== undefined ? state.dataQualityPct
+                : (dqReal2 + dqEst2 > 0 ? Math.round(dqReal2 / (dqReal2 + dqEst2) * 100) : 100);
   const dqEl  = document.getElementById('dq-pct');
   if (dqEl) {
     dqEl.textContent = dqPct + '% real';
