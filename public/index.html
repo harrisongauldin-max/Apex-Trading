@@ -823,7 +823,7 @@ function renderSPY() {
     const labels = bars.map((b,i) => i % 15 === 0 ? new Date(b.t).toLocaleTimeString('en-US',{hour:'2-digit',minute:'2-digit'}) : '');
     const col    = (spyData.dayChange || 0) >= 0 ? '#00ff88' : '#ff5555';
     if (spyChartInstance) spyChartInstance.destroy();
-    ctx.canvas.height = 50;
+    ctx.height = 50;
     spyChartInstance = new SimpleChart(ctx.getContext('2d'), {
       labels, data: prices, color: col, fill: true, label: 'SPY'
     });
@@ -887,7 +887,7 @@ function renderPortfolioChart() {
   if (portChartInstance) portChartInstance.destroy();
 
   // Use SimpleChart — already has $ Y-axis labels and fill support
-  ctx.canvas.height = 120;
+  ctx.height = 120;
   portChartInstance = new SimpleChart(ctx.getContext('2d'), {
     labels, data, color, fill: true, label: 'Portfolio Value'
   });
