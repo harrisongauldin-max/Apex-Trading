@@ -1,5 +1,5 @@
 // -
-// APEX v3.95 - Professional Options Trading Agent
+// APEX v4.0 - Professional Options Trading Agent
 // Alpaca Paper Trading Edition
 // -
 const express    = require("express");
@@ -205,7 +205,8 @@ function defaultState() {
     tickerBlacklist:  [], // tickers blocked for today — clears on morning reset
     exitStats:        {}, // running tally per exit reason: { count, wins, totalPnl, avgPnl, winRate }
     agentAutoExitEnabled: false, // controlled by dashboard toggle
-    _agentRescoreHour: {}, // tracks last rescore hour per ticker
+    _agentRescoreHour:   {}, // tracks last rescore hour per ticker (overnight)
+    _agentRescoreMinute: {}, // tracks last rescore time per ticker (same-day)
     portfolioSnapshots: [], // time-series portfolio value: [{t, v}] sampled every 5 min
   };
 }
@@ -2106,7 +2107,7 @@ async function callClaudeAgent(systemPrompt, userPrompt, maxTokens = 800, useToo
         "content-type":      "application/json",
       },
       body: JSON.stringify(body),
-    }), 20000);
+    }), 30000);
 
     if (!res.ok) {
       const err = await res.text();
@@ -2143,7 +2144,7 @@ async function callClaudeAgent(systemPrompt, userPrompt, maxTokens = 800, useToo
           "content-type":      "application/json",
         },
         body: JSON.stringify({ model: ANTHROPIC_MODEL, max_tokens: maxTokens, system: systemPrompt, messages: followMessages }),
-      }), 20000);
+      }), 30000);
 
       if (!followRes.ok) return null;
       const followData = await followRes.json();
@@ -4255,33 +4256,49 @@ function checkMacroShift(newSignal) {
 // Much faster than sequential (7 positions = ~5s parallel vs ~35s sequential)
 async function runAgentRescore() {
   if (!ANTHROPIC_API_KEY || !isMarketHours()) return;
+  const now         = Date.now();
   const currentHour = new Date().getHours();
-  if (!state._agentRescoreHour) state._agentRescoreHour = {};
+  if (!state._agentRescoreHour)    state._agentRescoreHour    = {};
+  if (!state._agentRescoreMinute)  state._agentRescoreMinute  = {};
 
-  const overnight = (state.positions || []).filter(p => {
-    const daysOpen = (Date.now() - new Date(p.openDate).getTime()) / 86400000;
-    const lastHour = state._agentRescoreHour[p.ticker] || -1;
-    return daysOpen >= 1 && currentHour !== lastHour;
+  // Rescore ALL open positions — different cadence by age:
+  // Same-day positions: every 30 minutes (more volatile, need more attention)
+  // Overnight positions: every hour
+  const SAME_DAY_INTERVAL   = 30 * 60 * 1000; // 30 minutes
+  const OVERNIGHT_INTERVAL  = 60 * 60 * 1000; // 60 minutes
+
+  const toRescore = (state.positions || []).filter(p => {
+    const daysOpen  = (now - new Date(p.openDate).getTime()) / 86400000;
+    const isOvernight = daysOpen >= 1;
+    const interval  = isOvernight ? OVERNIGHT_INTERVAL : SAME_DAY_INTERVAL;
+    const lastRescore = isOvernight
+      ? (state._agentRescoreHour[p.ticker] !== currentHour ? 0 : now) // hour-based for overnight
+      : (state._agentRescoreMinute[p.ticker] || 0); // time-based for same-day
+    if (isOvernight) return state._agentRescoreHour[p.ticker] !== currentHour;
+    return (now - lastRescore) >= interval;
   });
 
-  if (!overnight.length) return;
-  logEvent("scan", `[AGENT] Parallel rescore: ${overnight.length} overnight positions`);
+  if (!toRescore.length) return;
+  logEvent("scan", `[AGENT] Auto-rescore: ${toRescore.length} position(s)`);
 
-  // Mark all as rescored this hour before firing — prevents double-fire
-  overnight.forEach(p => { state._agentRescoreHour[p.ticker] = currentHour; });
+  // Mark as rescored before firing
+  toRescore.forEach(p => {
+    const daysOpen = (now - new Date(p.openDate).getTime()) / 86400000;
+    if (daysOpen >= 1) state._agentRescoreHour[p.ticker]   = currentHour;
+    else               state._agentRescoreMinute[p.ticker] = now;
+  });
 
-  // Fire all rescores in parallel
-  const results = await Promise.allSettled(overnight.map(p => getAgentRescore(p)));
+  // Fire all in parallel
+  const results = await Promise.allSettled(toRescore.map(p => getAgentRescore(p)));
 
   const toClose = [];
   results.forEach((result, i) => {
-    const pos = overnight[i];
+    const pos = toRescore[i];
     if (result.status !== 'fulfilled' || !result.value) return;
     const rescore = result.value;
     pos._liveRescore = { ...rescore, updatedAt: new Date().toISOString() };
     logEvent("scan", `[AGENT] ${pos.ticker}: ${rescore.label} (${rescore.score}/95) — ${rescore.recommendation} | ${rescore.reasoning||''}`);
 
-    // Queue auto-exit candidates
     const curP = pos.currentPrice || pos.premium;
     const chg  = (curP - pos.premium) / pos.premium;
     if (state.agentAutoExitEnabled &&
@@ -4292,7 +4309,6 @@ async function runAgentRescore() {
     }
   });
 
-  // Execute closes sequentially after all rescores complete
   for (const ticker of toClose) {
     const pos = (state.positions||[]).find(p => p.ticker === ticker);
     if (!pos) continue;
@@ -4300,7 +4316,7 @@ async function runAgentRescore() {
     await closePosition(ticker, "agent-exit");
   }
 
-  if (toClose.length > 0) markDirty();
+  if (results.some(r => r.status === 'fulfilled') || toClose.length > 0) markDirty();
 }
 
 // - Main Scan Engine -
@@ -5831,7 +5847,7 @@ async function sendMorningBriefing() {
     // ── Footer ────────────────────────────────────────────────────────
     const footer = `
       <div style="border-top:3px double #333;margin-top:16px;padding-top:8px;text-align:center;font-size:9px;color:#999;letter-spacing:1px">
-        APEX v3.95 · Entry window 9:45am–3pm ET · No entries first 15min or last hour
+        APEX v4.0 · Entry window 9:45am–3pm ET · No entries first 15min or last hour
       </div>`;
 
     // ── Assemble ──────────────────────────────────────────────────────
@@ -6343,7 +6359,7 @@ async function premarketAssessment() {
             <em>These are recommendations only. APEX will manage exits automatically at open.</em>
           </div>
           <div style="border-top:3px double #333;margin-top:12px;padding-top:8px;text-align:center;font-size:9px;color:#999;letter-spacing:1px">
-            APEX v3.95 · Market opens in ~45 minutes · Entry window 9:45am ET
+            APEX v4.0 · Market opens in ~45 minutes · Entry window 9:45am ET
           </div>
         </div>`
       );
@@ -6369,7 +6385,8 @@ cron.schedule("0 13 * * 1-5", async () => {
   state.circuitOpen       = true;
   state.tickerBlacklist   = []; // clear daily blacklist at market open
   // Prune stale state objects to keep Redis payload lean
-  state._agentRescoreHour = {}; // reset hourly tracker daily
+  state._agentRescoreHour   = {}; // reset hourly tracker daily
+  state._agentRescoreMinute = {}; // reset 30-min tracker daily
   if (state._oversoldCount) {
     // Only keep tickers still in watchlist — prune closed/removed tickers
     const watchTickers = new Set(WATCHLIST.map(s => s.ticker));
@@ -6627,11 +6644,13 @@ app.post("/api/agent-auto-exit", (req, res) => {
 app.get("/api/rescore/:ticker", async (req, res) => {
   const pos = (state.positions || []).find(p => p.ticker === req.params.ticker);
   if (!pos) return res.json({ error: "Position not found" });
-  if (!ANTHROPIC_API_KEY) return res.json({ error: "Agent not configured" });
+  if (!ANTHROPIC_API_KEY) return res.json({ error: "Agent not configured — set ANTHROPIC_API_KEY in Railway" });
+  // Set longer timeout for agent calls — tool use requires 2 round trips
+  req.setTimeout(60000);
+  res.setTimeout(60000);
   try {
     const result = await getAgentRescore(pos);
-    if (!result) return res.json({ error: "Agent unavailable" });
-    // Cache on position object so dashboard can show without re-fetching
+    if (!result) return res.json({ error: "Agent returned no result — check Railway logs" });
     pos._liveRescore = { ...result, updatedAt: new Date().toISOString() };
     res.json(pos._liveRescore);
   } catch(e) {
@@ -7760,7 +7779,7 @@ process.on("unhandledRejection", (reason, promise) => {
 // Boot sequence - load state from Redis then start server
 initState().then(() => {
   app.listen(PORT, () => {
-    console.log(`APEX v3.95 running on port ${PORT}`);
+    console.log(`APEX v4.0 running on port ${PORT}`);
     console.log(`Alpaca key:  ${ALPACA_KEY?"SET":"NOT SET"}`);
     console.log(`Gmail:       ${GMAIL_USER||"NOT SET"}`);
     console.log(`Resend:      ${RESEND_API_KEY?"SET ✅":"NOT SET — email disabled"}`);
