@@ -814,40 +814,18 @@ function renderSPY() {
   vixEl.style.color    = spyData.vix > 30 ? 'var(--red)' : spyData.vix > 20 ? 'var(--gold)' : 'var(--green)';
   updEl.textContent    = spyData.updatedAt ? new Date(spyData.updatedAt).toLocaleTimeString() : '--';
 
-  // Mini chart
+  // Mini chart using SimpleChart
   const bars = spyData.chartBars || [];
-  if (bars.length > 0) {
+  if (bars.length > 1) {
     const ctx = document.getElementById('spy-chart');
     if (!ctx) return;
     const prices = bars.map(b => b.c);
-    const labels = bars.map(b => '');
-    const firstPrice = prices[0];
-    const barColors  = prices.map(p => p >= firstPrice ? 'rgba(0,255,136,0.6)' : 'rgba(255,80,80,0.6)');
+    const labels = bars.map((b,i) => i % 15 === 0 ? new Date(b.t).toLocaleTimeString('en-US',{hour:'2-digit',minute:'2-digit'}) : '');
+    const col    = (spyData.dayChange || 0) >= 0 ? '#00ff88' : '#ff5555';
     if (spyChartInstance) spyChartInstance.destroy();
-    spyChartInstance = new Chart(ctx.getContext('2d'), {
-      type: 'bar',
-      data: {
-        labels,
-        datasets: [{
-          data:            prices,
-          backgroundColor: barColors,
-          borderWidth:     0,
-        }]
-      },
-      options: {
-        responsive:          true,
-        maintainAspectRatio: false,
-        plugins: { legend: { display: false }, tooltip: { enabled: false } },
-        scales: {
-          x: { display: false },
-          y: {
-            display:  false,
-            min:      Math.min(...prices) * 0.9995,
-            max:      Math.max(...prices) * 1.0005,
-          }
-        },
-        animation: { duration: 0 },
-      }
+    ctx.canvas.height = 50;
+    spyChartInstance = new SimpleChart(ctx.getContext('2d'), {
+      labels, data: prices, color: col, fill: true, label: 'SPY'
     });
   }
 }
@@ -908,47 +886,10 @@ function renderPortfolioChart() {
   if (!ctx) return;
   if (portChartInstance) portChartInstance.destroy();
 
-  portChartInstance = new Chart(ctx.getContext('2d'), {
-    type: 'line',
-    data: {
-      labels,
-      datasets: [{
-        data,
-        borderColor:     color,
-        borderWidth:     2,
-        backgroundColor: bgColor,
-        fill:            true,
-        pointRadius:     0,
-        pointHoverRadius: 4,
-        tension:         0.3,
-      }]
-    },
-    options: {
-      responsive:          true,
-      maintainAspectRatio: false,
-      interaction: { intersect: false, mode: 'index' },
-      plugins: {
-        legend: { display: false },
-        tooltip: {
-          callbacks: {
-            label: ctx => '$' + parseFloat(ctx.raw).toFixed(2)
-          }
-        }
-      },
-      scales: {
-        x: {
-          ticks: { color: '#555', font: { size: 9 }, maxTicksLimit: 8, maxRotation: 0 },
-          grid:  { color: '#1a2a3a' }
-        },
-        y: {
-          ticks: { color: '#555', font: { size: 9 }, callback: v => '$' + v.toFixed(0) },
-          grid:  { color: '#1a2a3a' },
-          min:   Math.min(...data) * 0.995,
-          max:   Math.max(...data) * 1.005,
-        }
-      },
-      animation: { duration: 200 },
-    }
+  // Use SimpleChart — already has $ Y-axis labels and fill support
+  ctx.canvas.height = 120;
+  portChartInstance = new SimpleChart(ctx.getContext('2d'), {
+    labels, data, color, fill: true, label: 'Portfolio Value'
   });
 }
 let health = {};
