@@ -1279,30 +1279,33 @@ function renderMetrics() {
       if (exitCountEl) exitCountEl.textContent = totalExits + ' total exits tracked';
       // Sort by count desc
       const sorted = exitKeys.sort((a,b) => exitStats[b].count - exitStats[a].count);
-      exitStatsEl.innerHTML = `
-        <table style="width:100%;border-collapse:collapse;font-size:12px">
-          <tr style="background:var(--panel)">
-            <th style="padding:8px 12px;text-align:left;font-size:10px;color:var(--muted);font-weight:600;letter-spacing:1px;border-bottom:1px solid var(--border)">EXIT REASON</th>
-            <th style="padding:8px 12px;text-align:center;font-size:10px;color:var(--muted);font-weight:600;letter-spacing:1px;border-bottom:1px solid var(--border)">TRADES</th>
-            <th style="padding:8px 12px;text-align:center;font-size:10px;color:var(--muted);font-weight:600;letter-spacing:1px;border-bottom:1px solid var(--border)">WIN RATE</th>
-            <th style="padding:8px 12px;text-align:right;font-size:10px;color:var(--muted);font-weight:600;letter-spacing:1px;border-bottom:1px solid var(--border)">AVG P&L</th>
-            <th style="padding:8px 12px;text-align:right;font-size:10px;color:var(--muted);font-weight:600;letter-spacing:1px;border-bottom:1px solid var(--border)">TOTAL P&L</th>
-          </tr>
-          ${sorted.map(k => {
-            const s = exitStats[k];
-            const wrColor = s.winRate >= 60 ? 'var(--green)' : s.winRate >= 40 ? 'var(--gold)' : 'var(--red)';
-            const avgColor = s.avgPnl >= 0 ? 'var(--green)' : 'var(--red)';
-            const totColor = s.totalPnl >= 0 ? 'var(--green)' : 'var(--red)';
-            const label = k.replace(/-/g,' ').replace(/\w/g,c=>c.toUpperCase());
-            return `<tr style="border-bottom:1px solid var(--border)">
-              <td style="padding:8px 12px;font-weight:600">\${label}</td>
-              <td style="padding:8px 12px;text-align:center;color:var(--muted)">\${s.count}</td>
-              <td style="padding:8px 12px;text-align:center;font-weight:700;color:\${wrColor}">\${s.winRate}%</td>
-              <td style="padding:8px 12px;text-align:right;font-weight:700;color:\${avgColor}">\${s.avgPnl >= 0 ? '+' : ''}\$\${Math.abs(s.avgPnl).toFixed(2)}</td>
-              <td style="padding:8px 12px;text-align:right;color:\${totColor}">\${s.totalPnl >= 0 ? '+' : ''}\$\${Math.abs(s.totalPnl).toFixed(2)}</td>
-            </tr>`;
-          }).join('')}
-        </table>`;
+      // Build table via string concat — avoids nested template literal issues
+      let tableHTML = '<table style="width:100%;border-collapse:collapse;font-size:12px">';
+      tableHTML += '<tr style="background:var(--panel)">';
+      tableHTML += '<th style="padding:8px 12px;text-align:left;font-size:10px;color:var(--muted);font-weight:600;letter-spacing:1px;border-bottom:1px solid var(--border)">EXIT REASON</th>';
+      tableHTML += '<th style="padding:8px 12px;text-align:center;font-size:10px;color:var(--muted);font-weight:600;letter-spacing:1px;border-bottom:1px solid var(--border)">TRADES</th>';
+      tableHTML += '<th style="padding:8px 12px;text-align:center;font-size:10px;color:var(--muted);font-weight:600;letter-spacing:1px;border-bottom:1px solid var(--border)">WIN RATE</th>';
+      tableHTML += '<th style="padding:8px 12px;text-align:right;font-size:10px;color:var(--muted);font-weight:600;letter-spacing:1px;border-bottom:1px solid var(--border)">AVG P&L</th>';
+      tableHTML += '<th style="padding:8px 12px;text-align:right;font-size:10px;color:var(--muted);font-weight:600;letter-spacing:1px;border-bottom:1px solid var(--border)">TOTAL P&L</th>';
+      tableHTML += '</tr>';
+      sorted.forEach(function(k) {
+        const s        = exitStats[k];
+        const wrColor  = s.winRate >= 60 ? 'var(--green)' : s.winRate >= 40 ? 'var(--gold)' : 'var(--red)';
+        const avgColor = s.avgPnl >= 0 ? 'var(--green)' : 'var(--red)';
+        const totColor = s.totalPnl >= 0 ? 'var(--green)' : 'var(--red)';
+        const label    = k.replace(/-/g,' ').replace(/\b\w/g, function(c){ return c.toUpperCase(); });
+        const avgSign  = s.avgPnl >= 0 ? '+' : '';
+        const totSign  = s.totalPnl >= 0 ? '+' : '';
+        tableHTML += '<tr style="border-bottom:1px solid var(--border)">';
+        tableHTML += '<td style="padding:8px 12px;font-weight:600">' + label + '</td>';
+        tableHTML += '<td style="padding:8px 12px;text-align:center;color:var(--muted)">' + s.count + '</td>';
+        tableHTML += '<td style="padding:8px 12px;text-align:center;font-weight:700;color:' + wrColor + '">' + s.winRate + '%</td>';
+        tableHTML += '<td style="padding:8px 12px;text-align:right;font-weight:700;color:' + avgColor + '">' + avgSign + '$' + Math.abs(s.avgPnl).toFixed(2) + '</td>';
+        tableHTML += '<td style="padding:8px 12px;text-align:right;color:' + totColor + '">' + totSign + '$' + Math.abs(s.totalPnl).toFixed(2) + '</td>';
+        tableHTML += '</tr>';
+      });
+      tableHTML += '</table>';
+      exitStatsEl.innerHTML = tableHTML;
     }
   }
 
