@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8"/>
 <meta name="viewport" content="width=device-width,initial-scale=1"/>
-<title>APEX v3.95 — Professional Options Agent</title>
+<title>APEX v4.0 — Professional Options Agent</title>
 <style>
 :root{
   --bg:#07101f;--panel:#0a1628;--border:#0d3050;--text:#cce8ff;--muted:#336688;
@@ -113,7 +113,7 @@ input[type=text]:focus{border-color:var(--blue)}
     <div class="logo-icon">▲</div>
     <div class="logo-text">
       <h1>APEX</h1>
-      <p>PROFESSIONAL OPTIONS AGENT v3.95 · ALPACA PAPER</p>
+      <p>PROFESSIONAL OPTIONS AGENT v4.0 · ALPACA PAPER</p>
     </div>
   </div>
   <div class="header-right">
@@ -956,12 +956,13 @@ function updateAgentToggleUI() {
 async function rescorePos(ticker) {
   // Show loading state
   const btn = document.querySelector(`button[onclick="rescorePos('${ticker}')"]`);
-  if (btn) { btn.textContent = '...'; btn.disabled = true; }
+  if (btn) { btn.textContent = '⏳ asking Claude...'; btn.disabled = true; }
   try {
     const res  = await fetch('/api/rescore/' + ticker);
     const data = await res.json();
     if (data.error) {
       console.warn('Rescore error:', data.error);
+      alert('Rescore error: ' + data.error);
       if (btn) { btn.textContent = '↻ RESCORE'; btn.disabled = false; }
       return;
     }
@@ -970,6 +971,7 @@ async function rescorePos(ticker) {
     if (pos) { pos._liveRescore = data; renderPositions(); }
   } catch(e) {
     console.error('Rescore failed:', e);
+    alert('Rescore failed: ' + e.message);
     if (btn) { btn.textContent = '↻ RESCORE'; btn.disabled = false; }
   }
 }
