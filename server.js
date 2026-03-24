@@ -4877,45 +4877,181 @@ async function sendMorningBriefing() {
   if (!RESEND_API_KEY || !GMAIL_USER) return;
   try {
     const positions = state.positions || [];
-    const trades    = (state.closedTrades || []).slice(0, 10);
     const pdtUsed   = countRecentDayTrades();
-    const posHTML   = positions.length ? positions.map(p => {
-      const dte = p.expDays || '?';
-      const chg = p.currentPrice && p.premium ? (((p.currentPrice - p.premium)/p.premium)*100).toFixed(1) : '?';
-      const dteDays = p.expDate ? Math.max(0, Math.round((new Date(p.expDate) - new Date()) / 86400000)) : '?';
-      return `<tr><td>${p.ticker}</td><td>${p.optionType.toUpperCase()}</td><td>$${p.strike}</td><td>${dteDays}d</td><td style="color:${parseFloat(chg)>=0?'#44ff88':'#ff4444'}">${chg}%</td></tr>`;
-    }).join('') : '<tr><td colspan="5" style="color:#888">No open positions</td></tr>';
-    const macro = marketContext.macro || { signal: 'neutral', triggers: [] };
-    await sendResendEmail(
-      `APEX Morning Briefing — VIX ${state.vix} | ${positions.length} positions | ${new Date().toLocaleDateString()}`,
-      `<div style="font-family:monospace;background:#07101f;color:#cce8ff;padding:20px;max-width:600px">
-        <h2 style="color:#00c4ff;margin:0 0 16px">APEX Morning Briefing</h2>
-        <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:16px">
-          <div style="background:#0d1f0d;padding:8px;border-radius:4px"><span style="color:#888">VIX</span><br><strong style="font-size:18px;color:${state.vix>30?'#ff4444':state.vix>20?'#ffaa00':'#44ff88'}">${state.vix}</strong></div>
-          <div style="background:#0d1f0d;padding:8px;border-radius:4px"><span style="color:#888">Cash</span><br><strong style="font-size:18px">$${(state.cash||0).toFixed(0)}</strong></div>
-          <div style="background:#0d1f0d;padding:8px;border-radius:4px"><span style="color:#888">Day Trades Left</span><br><strong style="font-size:18px;color:${pdtUsed>=3?'#ff4444':pdtUsed===2?'#ffaa00':'#44ff88'}">${Math.max(0,3-pdtUsed)}/3</strong></div>
-          <div style="background:#0d1f0d;padding:8px;border-radius:4px"><span style="color:#888">Macro</span><br><strong style="font-size:14px;color:${macro.mode==='aggressive'?'#44ff88':macro.mode==='defensive'?'#ff4444':'#cce8ff'}">${macro.signal}</strong></div>
+    const pdtLeft   = Math.max(0, 3 - pdtUsed);
+    const macro     = marketContext.macro || { signal: 'neutral', triggers: [], topStories: [], headlines: [] };
+    const today     = new Date();
+    const dateStr   = today.toLocaleDateString('en-US', { weekday:'long', month:'long', day:'numeric', year:'numeric' });
+    const macroSignal = (macro.signal || 'neutral').toUpperCase();
+
+    // ── Divider helper ───────────────────────────────────────────────────
+    const divider = '<div style="border-top:1px solid #333;margin:14px 0"></div>';
+    const sectionHead = (title) =>
+      `<div style="font-family:Georgia,serif;font-size:10px;font-weight:bold;letter-spacing:2px;color:#555;text-transform:uppercase;margin-bottom:6px">${title}</div>`;
+
+    // ── Header ───────────────────────────────────────────────────────────
+    const header = `
+      <div style="text-align:center;border-bottom:3px double #333;padding-bottom:12px;margin-bottom:12px">
+        <div style="font-family:Georgia,serif;font-size:22px;font-weight:bold;color:#111;letter-spacing:1px">APEX TRADING DESK</div>
+        <div style="font-size:10px;color:#555;margin-top:4px;letter-spacing:1px">${dateStr.toUpperCase()}</div>
+      </div>
+      <div style="display:flex;gap:0;border:1px solid #ccc;margin-bottom:4px">
+        <div style="flex:1;text-align:center;padding:8px;border-right:1px solid #ccc">
+          <div style="font-size:9px;color:#555;letter-spacing:1px">VIX</div>
+          <div style="font-size:20px;font-weight:bold;color:${state.vix>30?'#cc0000':state.vix>20?'#cc6600':'#006600'}">${state.vix}</div>
         </div>
-        <h3 style="color:#888;font-size:12px;margin:0 0 8px">OPEN POSITIONS</h3>
-        <table style="width:100%;border-collapse:collapse;font-size:12px">
-          <tr style="color:#888"><th>Ticker</th><th>Type</th><th>Strike</th><th>DTE</th><th>P&L</th></tr>
-          ${posHTML}
-        </table>
-        ${macro.triggers.length ? '<div style="margin-top:12px;padding:8px;background:#1a0a0a;border-left:3px solid #ff4444"><strong>Macro Signals:</strong> ' + macro.triggers.join(', ') + '</div>' : ''}
-        ${(macro.topStories && macro.topStories.length) ? `
-        <div style="margin-top:12px">
-          <h3 style="color:#888;font-size:12px;margin:0 0 8px">CURRENT EVENTS (${macro.sourceCount || 'Alpaca'})</h3>
-          ${macro.topStories.slice(0,5).map(s =>
-            '<div style="margin-bottom:6px;padding:6px 8px;background:#0a0f1a;border-left:3px solid ' +
-            (s.direction === 'bullish' ? '#44ff88' : '#ff4444') + '">' +
-            '<span style="font-size:9px;color:' + (s.direction === 'bullish' ? '#44ff88' : '#ff4444') + '">' +
-            s.direction.toUpperCase() + ' · ' + (s.source || 'news') + (s.recencyMult >= 2 ? ' · 🔴 BREAKING' : s.recencyMult >= 1.5 ? ' · RECENT' : '') + '</span>' +
-            '<div style="font-size:11px;color:#cce8ff;margin-top:2px">' + s.headline + '</div>' +
-            '</div>'
-          ).join('')}
-        </div>` : ''}
-        <p style="color:#555;font-size:10px;margin-top:16px">Entry window: 9:45am–3pm ET | No entries first 15min or last hour | Sources: Alpaca + Marketaux</p>
-      </div>`
+        <div style="flex:1;text-align:center;padding:8px;border-right:1px solid #ccc">
+          <div style="font-size:9px;color:#555;letter-spacing:1px">CASH</div>
+          <div style="font-size:16px;font-weight:bold;color:#111">$${(state.cash||0).toFixed(0)}</div>
+        </div>
+        <div style="flex:1;text-align:center;padding:8px;border-right:1px solid #ccc">
+          <div style="font-size:9px;color:#555;letter-spacing:1px">DAY TRADES</div>
+          <div style="font-size:16px;font-weight:bold;color:${pdtLeft===0?'#cc0000':pdtLeft===1?'#cc6600':'#111'}">${pdtLeft}/3</div>
+        </div>
+        <div style="flex:1;text-align:center;padding:8px">
+          <div style="font-size:9px;color:#555;letter-spacing:1px">MACRO</div>
+          <div style="font-size:12px;font-weight:bold;color:${macro.mode==='aggressive'?'#006600':macro.mode==='defensive'?'#cc0000':'#333'}">${macroSignal}</div>
+        </div>
+      </div>`;
+
+    // ── Positions table ───────────────────────────────────────────────────
+    const posRows = positions.length ? positions.map(p => {
+      const chg     = p.currentPrice && p.premium ? (((p.currentPrice - p.premium)/p.premium)*100).toFixed(1) : '?';
+      const dteDays = p.expDate ? Math.max(0, Math.round((new Date(p.expDate) - today) / 86400000)) : '?';
+      const pnlNum  = parseFloat(chg);
+      const warn    = pnlNum <= -12 ? ' ⚠' : '';
+      const pnlColor = pnlNum >= 0 ? '#006600' : '#cc0000';
+      return `<tr style="border-bottom:1px solid #eee">
+        <td style="padding:5px 4px;font-weight:bold">${p.ticker}${warn}</td>
+        <td style="padding:5px 4px;color:#555">${p.optionType.toUpperCase()}</td>
+        <td style="padding:5px 4px">$${p.strike}</td>
+        <td style="padding:5px 4px;color:#555">${dteDays}d</td>
+        <td style="padding:5px 4px;font-weight:bold;color:${pnlColor}">${pnlNum>=0?'+':''}${chg}%</td>
+      </tr>`;
+    }).join('') : '<tr><td colspan="5" style="padding:8px;color:#999;font-style:italic">No open positions</td></tr>';
+
+    const posTable = `
+      <table style="width:100%;border-collapse:collapse;font-size:12px;font-family:monospace">
+        <tr style="border-bottom:2px solid #333">
+          <th style="padding:5px 4px;text-align:left;font-size:10px;letter-spacing:1px">TICKER</th>
+          <th style="padding:5px 4px;text-align:left;font-size:10px;letter-spacing:1px">TYPE</th>
+          <th style="padding:5px 4px;text-align:left;font-size:10px;letter-spacing:1px">STRIKE</th>
+          <th style="padding:5px 4px;text-align:left;font-size:10px;letter-spacing:1px">DTE</th>
+          <th style="padding:5px 4px;text-align:left;font-size:10px;letter-spacing:1px">P&amp;L</th>
+        </tr>
+        ${posRows}
+      </table>`;
+
+    // ── Position news (latest headline per ticker) ─────────────────────
+    let posNewsHTML = '';
+    if (positions.length > 0) {
+      const posNewsItems = [];
+      for (const pos of positions) {
+        try {
+          const news = await getNewsForTicker(pos.ticker);
+          if (news && news.length > 0) {
+            const article = news[0];
+            const ageHrs  = ((Date.now() - new Date(article.created_at||0).getTime()) / 3600000).toFixed(0);
+            posNewsItems.push(
+              `<div style="margin-bottom:8px;padding-bottom:8px;border-bottom:1px solid #eee">
+                <span style="font-weight:bold;font-size:11px">${pos.ticker}</span>
+                <span style="font-size:10px;color:#555"> — ${article.headline}</span>
+                <div style="font-size:9px;color:#999;margin-top:2px">${ageHrs}h ago</div>
+              </div>`
+            );
+          }
+        } catch(e) {}
+      }
+      if (posNewsItems.length > 0) {
+        posNewsHTML = divider + sectionHead('Position News') + posNewsItems.join('');
+      }
+    }
+
+    // ── Top headlines (regardless of keyword match) ────────────────────
+    const allHeadlines = macro.headlines || [];
+    const topStories   = macro.topStories || [];
+    // Combine: credible keyword stories first, then fill with general headlines
+    const storySet = new Set();
+    const storyItems = [];
+    for (const s of topStories.slice(0,3)) {
+      if (!storySet.has(s.headline)) {
+        storySet.add(s.headline);
+        const tag = s.recencyMult >= 2 ? 'BREAKING' : s.recencyMult >= 1.5 ? 'RECENT' : '';
+        storyItems.push(
+          `<div style="margin-bottom:8px;padding-bottom:8px;border-bottom:1px solid #eee">
+            ${tag ? `<span style="font-size:9px;font-weight:bold;color:${s.direction==='bullish'?'#006600':'#cc0000'};letter-spacing:1px">${tag} · ${(s.source||'').toUpperCase()} · ${s.direction.toUpperCase()}</span><br>` : ''}
+            <span style="font-size:11px;color:#111">${s.headline}</span>
+          </div>`
+        );
+      }
+    }
+    for (const h of allHeadlines) {
+      if (storyItems.length >= 5) break;
+      if (!storySet.has(h)) {
+        storySet.add(h);
+        storyItems.push(
+          `<div style="margin-bottom:8px;padding-bottom:8px;border-bottom:1px solid #eee">
+            <span style="font-size:11px;color:#111">${h}</span>
+          </div>`
+        );
+      }
+    }
+    const headlinesHTML = storyItems.length > 0
+      ? divider + sectionHead(`Top Stories (${macro.sourceCount || 'Alpaca'})`) + storyItems.join('')
+      : '';
+
+    // ── Economic calendar ─────────────────────────────────────────────
+    const todayStr   = today.toISOString().split('T')[0];
+    const calEvents  = getUpcomingMacroEvents(1).filter(e => e.date === todayStr);
+    const tomorrowEvents = getUpcomingMacroEvents(2).filter(e => e.date !== todayStr);
+    let calHTML = '';
+    if (calEvents.length > 0 || tomorrowEvents.length > 0) {
+      const calItems = [];
+      calEvents.forEach(e => calItems.push(
+        `<div style="margin-bottom:4px">
+          <span style="font-weight:bold;color:${e.impact==='high'?'#cc0000':'#333'}">TODAY</span>
+          <span style="font-size:11px;margin-left:8px">${e.event}</span>
+          <span style="font-size:9px;color:#999;margin-left:4px">${e.impact.toUpperCase()} IMPACT</span>
+        </div>`
+      ));
+      tomorrowEvents.forEach(e => calItems.push(
+        `<div style="margin-bottom:4px">
+          <span style="color:#555">TOMORROW</span>
+          <span style="font-size:11px;margin-left:8px">${e.event}</span>
+          <span style="font-size:9px;color:#999;margin-left:4px">${e.impact.toUpperCase()} IMPACT</span>
+        </div>`
+      ));
+      calHTML = divider + sectionHead("Economic Calendar") + calItems.join('');
+    }
+
+    // ── Macro triggers ────────────────────────────────────────────────
+    const triggersHTML = macro.triggers && macro.triggers.length
+      ? divider + `<div style="font-size:10px;color:#555"><strong style="letter-spacing:1px">MACRO SIGNALS:</strong> ${macro.triggers.join(' · ')}</div>`
+      : '';
+
+    // ── Footer ────────────────────────────────────────────────────────
+    const footer = `
+      <div style="border-top:3px double #333;margin-top:16px;padding-top:8px;text-align:center;font-size:9px;color:#999;letter-spacing:1px">
+        APEX v3.95 · Entry window 9:45am–3pm ET · No entries first 15min or last hour
+      </div>`;
+
+    // ── Assemble ──────────────────────────────────────────────────────
+    const html = `
+      <div style="font-family:Georgia,serif;background:#ffffff;color:#111;padding:24px;max-width:620px;border:1px solid #ccc">
+        ${header}
+        ${divider}
+        ${sectionHead('Open Positions — ' + positions.length + ' active')}
+        ${posTable}
+        ${triggersHTML}
+        ${headlinesHTML}
+        ${posNewsHTML}
+        ${calHTML}
+        ${footer}
+      </div>`;
+
+    await sendResendEmail(
+      `APEX Trading Desk — ${dateStr} | VIX ${state.vix} | ${positions.length} positions`,
+      html
     );
     logEvent("scan", "Morning briefing email sent");
   } catch(e) { console.error("[EMAIL] Morning briefing error:", e.message); }
