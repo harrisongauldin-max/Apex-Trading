@@ -18,6 +18,7 @@ const ALPACA_BASE       = "https://paper-api.alpaca.markets/v2";
 const ALPACA_DATA       = "https://data.alpaca.markets/v2";
 const ALPACA_OPTIONS    = "https://paper-api.alpaca.markets/v2";    // confirmed: options contracts
 const ALPACA_OPT_SNAP   = "https://data.alpaca.markets/v1beta1";    // confirmed: options snapshots/greeks
+const ALPACA_NEWS       = "https://data.alpaca.markets/v1beta1";    // news endpoint lives on v1beta1 not v2
 
 // ── Data Cache — declared early so all functions can use it ──────────────
 // Slow-changing data cached to reduce API calls and Railway connection pressure
@@ -1285,7 +1286,7 @@ async function getNewsForTicker(ticker) {
   const cached = getCached('news:' + ticker);
   if (cached) return cached;
   try {
-    const data = await alpacaGet(`/news?symbols=${ticker}&limit=5`, ALPACA_DATA);
+    const data = await alpacaGet(`/news?symbols=${ticker}&limit=5`, ALPACA_NEWS);
     const articles = data && data.news ? data.news : [];
     if (articles.length > 0) return setCache('news:' + ticker, articles);
 
@@ -1422,7 +1423,7 @@ async function getAnalystActivity(ticker) {
   const cached = getCached('analyst:' + ticker);
   if (cached) return cached;
   try {
-    const data = await alpacaGet(`/news?symbols=${ticker}&limit=10`, ALPACA_DATA);
+    const data = await alpacaGet(`/news?symbols=${ticker}&limit=10`, ALPACA_NEWS);
     const articles = data && data.news ? data.news : [];
     const upgrades   = [];
     const downgrades = [];
@@ -2110,7 +2111,7 @@ async function getMacroNews() {
   try {
     // Fetch from both sources in parallel — Alpaca + Marketaux
     const [alpacaData, marketauxArticles] = await Promise.all([
-      alpacaGet(`/news?limit=50`, ALPACA_DATA),
+      alpacaGet(`/news?limit=50`, ALPACA_NEWS),
       getMarketauxNews(),
     ]);
 
@@ -3722,12 +3723,13 @@ async function manageStockPositions() {
 // Keeps last 30 days — older snapshots pruned automatically
 function snapshotPortfolioValue() {
   if (!isMarketHours()) return; // only during market hours
-  // Total value = cash + current market value of open positions
+  // Total value = cash + open options positions + BIL ETF holdings
   const posValue = (state.positions || []).reduce((s, p) => {
     const curPrice = p.currentPrice || p.premium;
     return s + (curPrice * 100 * (p.contracts || 1) * (p.partialClosed ? 0.5 : 1));
   }, 0);
-  const totalValue = parseFloat((state.cash + posValue).toFixed(2));
+  const etfValue   = stockValue(); // BIL shares at cost
+  const totalValue = parseFloat((state.cash + posValue + etfValue).toFixed(2));
   if (!state.portfolioSnapshots) state.portfolioSnapshots = [];
   state.portfolioSnapshots.push({ t: new Date().toISOString(), v: totalValue });
   // Prune to last 30 days (30 days × 78 snapshots/day at 5-min intervals = ~2340)
@@ -4033,11 +4035,15 @@ async function runScan() {
     // ── EXIT HIERARCHY ────────────────────────────────────────────────────
     // Order matters — earlier checks take priority over later ones
 
-    // 1. FAST STOP — -20% in first 48 hours (noise filter, not full stop)
-    if (hoursOpen <= FAST_STOP_HOURS && chg <= -(pos.fastStopPct || FAST_STOP_PCT)) {
-      logEvent("scan", `${pos.ticker} fast-stop ${(chg*100).toFixed(0)}% in ${hoursOpen.toFixed(0)}hrs`);
+    // 1. FAST STOP — -20% in first 48 hours but NOT in first 2 hours
+    // Minimum 2-hour hold prevents noise exits on opening volatility
+    const fastStopEligible = hoursOpen >= 2 && hoursOpen <= FAST_STOP_HOURS;
+    if (fastStopEligible && chg <= -(pos.fastStopPct || FAST_STOP_PCT)) {
+      logEvent("scan", `${pos.ticker} fast-stop ${(chg*100).toFixed(0)}% in ${hoursOpen.toFixed(1)}hrs`);
       await closePosition(pos.ticker, "fast-stop"); continue;
     }
+    // Hard stop still fires immediately at any time if loss exceeds stop loss
+    // (covered by exit #2 below — fast-stop just prevents premature exits in first 2 hours)
 
     // 2. HARD STOP — -35% at any time
     if (chg <= -STOP_LOSS_PCT) {
@@ -4380,15 +4386,21 @@ async function runScan() {
       continue;
     }
 
-    // Ticker cooldown — 30 minutes after closing same ticker before re-entry
-    // Prevents rapid re-entry after expiry-roll or stop (e.g. ROKU entering 3x in 45 min)
-    const TICKER_COOLDOWN_MS = 30 * 60 * 1000;
+    // Ticker cooldown — differentiated by exit reason
+    // fast-stop: 15 min (fell fast, might keep falling, short buffer)
+    // stop/hard-stop: 60 min (real losing trade, need confirmation before re-entry)
+    // target/partial: 0 min (hit profit, conditions may still be valid)
+    // 50ma-break/thesis/manual: 0 min (thesis-based exit, re-entry needs fresh signal anyway)
+    const COOLDOWN_BY_REASON = { "fast-stop": 15, "stop": 60, "stop-loss": 60 };
     const recentClose = (state.closedTrades || []).find(t =>
-      t.ticker === stock.ticker && t.closeTime && (Date.now() - t.closeTime) < TICKER_COOLDOWN_MS
+      t.ticker === stock.ticker && t.closeTime &&
+      (Date.now() - t.closeTime) < ((COOLDOWN_BY_REASON[t.reason] || 0) * 60 * 1000)
     );
     if (recentClose) {
-      const minsAgo = ((Date.now() - recentClose.closeTime) / 60000).toFixed(0);
-      logEvent("filter", `${stock.ticker} cooldown — closed ${minsAgo}min ago (${recentClose.reason}) — wait ${Math.ceil((TICKER_COOLDOWN_MS - (Date.now() - recentClose.closeTime)) / 60000)}min`);
+      const cooldownMins = COOLDOWN_BY_REASON[recentClose.reason] || 0;
+      const minsAgo   = ((Date.now() - recentClose.closeTime) / 60000).toFixed(0);
+      const waitMins  = Math.ceil((cooldownMins * 60 * 1000 - (Date.now() - recentClose.closeTime)) / 60000);
+      logEvent("filter", `${stock.ticker} cooldown — closed ${minsAgo}min ago (${recentClose.reason}) — wait ${waitMins}min`);
       continue;
     }
 
