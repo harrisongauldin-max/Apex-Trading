@@ -1997,7 +1997,7 @@ async function getMarketauxNews() {
   const MARKETAUX_KEY = process.env.MARKETAUX_KEY || "";
   if (!MARKETAUX_KEY) return [];
   try {
-    const url = `https://api.marketaux.com/v1/news/all?language=en&limit=10&api_token=${MARKETAUX_KEY}&filter_entities=true&must_have_entities=false`;
+    const url = `https://api.marketaux.com/v1/news/all?language=en&limit=20&api_token=${MARKETAUX_KEY}&filter_entities=true&must_have_entities=false`;
     const res  = await withTimeout(fetch(url), 8000);
     if (!res.ok) return [];
     const data = await res.json();
@@ -2071,7 +2071,7 @@ async function getMacroNews() {
   try {
     // Fetch from both sources in parallel — Alpaca + Marketaux
     const [alpacaData, marketauxArticles] = await Promise.all([
-      alpacaGet(`/news?limit=20`, ALPACA_DATA),
+      alpacaGet(`/news?limit=50`, ALPACA_DATA),
       getMarketauxNews(),
     ]);
 
@@ -2158,7 +2158,7 @@ async function getMacroNews() {
       topStories: topStories.slice(0, 5),
       sectorBearish: [...sectorImpact.bearish],
       sectorBullish: [...sectorImpact.bullish],
-      headlines: headlines.slice(0, 5),
+      headlines: headlines.slice(0, 15),
       sourceCount,
       updatedAt: new Date().toISOString(),
     };
@@ -4996,9 +4996,21 @@ async function sendMorningBriefing() {
         );
       }
     }
+    // Always show at least 3 recent headlines — even on quiet nights
+    // If no keyword stories, show raw headlines so the section is never empty
+    if (storyItems.length === 0 && allHeadlines.length > 0) {
+      allHeadlines.slice(0, 3).forEach(h => {
+        storyItems.push(
+          `<div style="margin-bottom:8px;padding-bottom:8px;border-bottom:1px solid #eee">
+            <span style="font-size:11px;color:#111">${h}</span>
+          </div>`
+        );
+      });
+    }
     const headlinesHTML = storyItems.length > 0
       ? divider + sectionHead(`Top Stories (${macro.sourceCount || 'Alpaca'})`) + storyItems.join('')
-      : '';
+      : divider + sectionHead('Top Stories') +
+        '<div style="font-size:11px;color:#999;font-style:italic">No market news available overnight — check back at market open.</div>';
 
     // ── Economic calendar ─────────────────────────────────────────────
     const todayStr   = today.toISOString().split('T')[0];
