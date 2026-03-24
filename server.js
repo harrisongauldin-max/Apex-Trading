@@ -204,6 +204,8 @@ function defaultState() {
     dataQuality:      { realTrades: 0, estimatedTrades: 0, totalTrades: 0 },
     tickerBlacklist:  [], // tickers blocked for today — clears on morning reset
     exitStats:        {}, // running tally per exit reason: { count, wins, totalPnl, avgPnl, winRate }
+    agentAutoExitEnabled: false, // controlled by dashboard toggle
+    _agentRescoreHour: {}, // tracks last rescore hour per ticker
     portfolioSnapshots: [], // time-series portfolio value: [{t, v}] sampled every 5 min
   };
 }
@@ -4624,6 +4626,36 @@ async function runScan() {
       await closePosition(pos.ticker, "time-stop"); continue;
     }
 
+    // ── AGENT RESCORE — once per hour on overnight positions ──────────────
+    // Only fires on positions opened previous day or earlier
+    // AUTO-EXIT: closes losing positions if agent returns EXIT + high confidence
+    if (daysOpen >= 1 && ANTHROPIC_API_KEY && isMarketHours()) {
+      const currentHour = new Date().getHours();
+      if (!state._agentRescoreHour) state._agentRescoreHour = {};
+      const lastRescoreHour = state._agentRescoreHour[pos.ticker] || -1;
+      if (currentHour !== lastRescoreHour) {
+        state._agentRescoreHour[pos.ticker] = currentHour;
+        try {
+          const rescore = await getAgentRescore(pos);
+          if (rescore) {
+            pos._liveRescore = { ...rescore, updatedAt: new Date().toISOString() };
+            logEvent("scan", `[AGENT] ${pos.ticker} rescore: ${rescore.label} (${rescore.score}/95) — ${rescore.recommendation} | ${rescore.reasoning || ''}`);
+            // Auto-exit: only if enabled + EXIT + high confidence + position is losing
+            if (state.agentAutoExitEnabled &&
+                rescore.recommendation === "EXIT" &&
+                rescore.confidence === "high" &&
+                chg < 0) {
+              logEvent("warn", `[AGENT] AUTO-EXIT ${pos.ticker} — ${rescore.label} score ${rescore.score}/95 | ${rescore.reasoning}`);
+              await closePosition(pos.ticker, "agent-exit");
+              continue;
+            }
+          }
+        } catch(agentErr) {
+          console.log("[AGENT] Rescore error:", agentErr.message);
+        }
+      }
+    }
+
     // 7. EXPIRY ROLL — DTE <= 7, close winners (losers hit stop first)
     if (dte <= 7 && chg > 0) {
       logEvent("scan", `${pos.ticker} expiry-roll — ${dte}DTE with profit`);
@@ -6307,6 +6339,7 @@ app.get("/api/state", async (req, res) => {
     pdtBlocked:         countRecentDayTrades() >= PDT_LIMIT,
     exitStats:          state.exitStats || {},
     agentMacro:         state._agentMacro || null,
+    agentAutoExitEnabled: state.agentAutoExitEnabled || false,
     portfolioSnapshots: state.portfolioSnapshots || [],
     reconcileStatus:    state.reconcileStatus || "unknown",
     orphanCount:        state.orphanCount || 0,
@@ -6455,6 +6488,15 @@ app.post("/api/emergency-close", async (req, res) => {
   try { await saveStateNow(); } catch(e) { logEvent("error", `Post-emergency save failed: ${e.message}`); }
 
   res.json({ ok: true, closed, failed, total: count });
+});
+
+// ── Agent auto-exit toggle endpoint ──────────────────────────────────────
+app.post("/api/agent-auto-exit", (req, res) => {
+  const { enabled } = req.body;
+  state.agentAutoExitEnabled = !!enabled;
+  markDirty();
+  logEvent("scan", `[AGENT] Auto-exit ${enabled ? "ENABLED" : "DISABLED"}`);
+  res.json({ ok: true, enabled: state.agentAutoExitEnabled });
 });
 
 // ── Live position rescore endpoint ───────────────────────────────────────
