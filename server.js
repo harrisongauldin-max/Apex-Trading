@@ -32,7 +32,7 @@ function getCached(key, ttl = SLOW_CACHE_TTL) {
 }
 function setCache(key, data) { _slowCache.set(key, { data, ts: Date.now() }); return data; }
 const GMAIL_USER        = process.env.GMAIL_USER        || "";
-const GMAIL_PASS        = process.env.GMAIL_APP_PASSWORD|| "";
+const RESEND_API_KEY    = process.env.RESEND_API_KEY    || "";
 const STATE_FILE        = path.join(__dirname, "state.json");
 const REDIS_URL         = process.env.UPSTASH_REDIS_REST_URL  || "";
 const REDIS_TOKEN       = process.env.UPSTASH_REDIS_REST_TOKEN || "";
@@ -4695,7 +4695,7 @@ function calcADX(bars, period = 14) {
 // - Email System -
 // ── F12: Enhanced morning briefing ───────────────────────────────────────
 async function sendMorningBriefing() {
-  if (!GMAIL_USER || !GMAIL_PASS) return;
+  if (!RESEND_API_KEY || !GMAIL_USER) return;
   try {
     const positions = state.positions || [];
     const trades    = (state.closedTrades || []).slice(0, 10);
@@ -5236,7 +5236,7 @@ app.post("/api/close/:tkr",  async (req,res) => {
 });
 // Test email endpoint — sends a test email immediately
 app.post("/api/test-email", async (req, res) => {
-  if (!GMAIL_USER || !GMAIL_PASS) {
+  if (!RESEND_API_KEY || !GMAIL_USER) {
     return res.json({ error: "Email not configured — set RESEND_API_KEY and GMAIL_USER in Railway env vars" });
   }
   // type=morning sends the full morning briefing for testing
