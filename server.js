@@ -1873,30 +1873,104 @@ async function checkScaleIns() {
 }
 
 // ── Macro News Scanner -
+// ── Macro keyword scoring with weights ────────────────────────────────────
+// Each keyword has a weight (1-3) — high-impact events score more than minor ones
+// Weight 3 = major market-moving event (Fed decision, war, ceasefire)
+// Weight 2 = significant but not immediate (data misses, sector-specific)
+// Weight 1 = minor signal (single company, regional story)
+
 const MACRO_BEARISH_KEYWORDS = [
-  "fed rate hike", "rate hike", "hawkish", "tightening", "quantitative tightening",
-  "inflation surge", "cpi beat", "inflation hot", "tariff", "trade war", "sanctions",
-  "war", "military strike", "invasion", "conflict escalation", "strait", "blockade",
-  "recession", "gdp miss", "gdp contraction", "unemployment rise", "jobless claims surge",
-  "bank failure", "credit crunch", "debt ceiling", "default", "downgrade",
-  "oil spike", "energy crisis", "supply shock", "shortage"
+  // Fed / monetary tightening (weight 3)
+  { kw: "fed rate hike",          w: 3 }, { kw: "rate hike",               w: 2 },
+  { kw: "hawkish",                w: 2 }, { kw: "quantitative tightening", w: 2 },
+  { kw: "tightening",             w: 1 },
+  // Inflation (weight 2-3)
+  { kw: "inflation surge",        w: 3 }, { kw: "cpi beat",                w: 3 },
+  { kw: "inflation hot",          w: 2 }, { kw: "pce beat",                w: 2 },
+  { kw: "core inflation",         w: 2 },
+  // Trade / tariffs (weight 2-3)
+  { kw: "tariff",                 w: 2 }, { kw: "trade war",               w: 3 },
+  { kw: "sanctions",              w: 2 }, { kw: "export controls",         w: 2 },
+  { kw: "chip ban",               w: 2 }, { kw: "china tariff",            w: 3 },
+  { kw: "china tensions",         w: 2 }, { kw: "taiwan strait",           w: 3 },
+  // Geopolitical conflict (weight 2-3)
+  { kw: "war",                    w: 3 }, { kw: "military strike",         w: 3 },
+  { kw: "invasion",               w: 3 }, { kw: "conflict escalation",     w: 3 },
+  { kw: "blockade",               w: 2 }, { kw: "strait",                  w: 2 },
+  // Economic weakness (weight 2-3)
+  { kw: "recession",              w: 3 }, { kw: "gdp miss",                w: 3 },
+  { kw: "gdp contraction",        w: 3 }, { kw: "unemployment rise",       w: 2 },
+  { kw: "jobless claims surge",   w: 2 }, { kw: "layoffs",                 w: 2 },
+  { kw: "job cuts",               w: 1 },
+  // Financial stress (weight 2-3)
+  { kw: "bank failure",           w: 3 }, { kw: "credit crunch",           w: 3 },
+  { kw: "debt ceiling",           w: 2 }, { kw: "default",                 w: 3 },
+  { kw: "downgrade",              w: 2 }, { kw: "bank run",                w: 3 },
+  { kw: "regional banks",         w: 2 }, { kw: "liquidity crisis",        w: 3 },
+  // Energy / supply (weight 1-2)
+  { kw: "oil spike",              w: 2 }, { kw: "energy crisis",           w: 2 },
+  { kw: "supply shock",           w: 2 }, { kw: "shortage",                w: 1 },
+  { kw: "opec cut",               w: 2 }, { kw: "production cut",          w: 2 },
+  // Market stress (weight 2-3)
+  { kw: "yield inversion",        w: 2 }, { kw: "10-2 spread",             w: 2 },
+  { kw: "volatility surge",       w: 2 }, { kw: "government shutdown",     w: 2 },
+  { kw: "shutdown",               w: 1 }, { kw: "dollar strengthening",    w: 1 },
+  { kw: "earnings miss",          w: 2 }, { kw: "guidance cut",            w: 2 },
+  { kw: "profit warning",         w: 2 },
 ];
 
 const MACRO_BULLISH_KEYWORDS = [
-  // Fed / monetary
-  "fed rate cut", "rate cut", "dovish", "easing", "quantitative easing", "stimulus",
-  "soft landing", "inflation cooling", "cpi miss", "inflation slows", "pause rate",
-  // Economic strength
-  "strong jobs", "unemployment falls", "gdp beat", "gdp growth", "beat expectations",
-  // Geopolitical resolution — this morning's scenario
-  "ceasefire", "peace deal", "peace talks", "end to conflict", "truce", "accord",
-  "sanctions lifted", "sanctions relief", "tariff pause", "tariff suspended",
-  "tariff removed", "tariff cut", "trade deal", "trade agreement", "trade truce",
-  "iran deal", "us-iran", "deescalation", "de-escalation", "diplomatic",
-  "trump deal", "trade resolution", "agreement reached",
-  // Market relief
-  "oil falls", "energy prices drop", "supply chain recovery", "risk on",
-  "market rally", "stocks surge", "rally on"
+  // Fed / monetary easing (weight 3)
+  { kw: "fed rate cut",           w: 3 }, { kw: "rate cut",                w: 2 },
+  { kw: "dovish",                 w: 2 }, { kw: "quantitative easing",     w: 2 },
+  { kw: "easing",                 w: 1 }, { kw: "stimulus",                w: 2 },
+  { kw: "soft landing",           w: 2 }, { kw: "pause rate",              w: 2 },
+  // Inflation cooling (weight 2-3)
+  { kw: "inflation cooling",      w: 2 }, { kw: "cpi miss",                w: 3 },
+  { kw: "inflation slows",        w: 2 }, { kw: "pce miss",                w: 2 },
+  { kw: "disinflation",           w: 2 },
+  // Economic strength (weight 2)
+  { kw: "strong jobs",            w: 2 }, { kw: "unemployment falls",      w: 2 },
+  { kw: "gdp beat",               w: 3 }, { kw: "gdp growth",              w: 2 },
+  { kw: "beat expectations",      w: 1 }, { kw: "consumer confidence rises",w: 2 },
+  { kw: "retail sales beat",      w: 2 }, { kw: "earnings beat",           w: 2 },
+  { kw: "record earnings",        w: 2 }, { kw: "guidance raised",         w: 2 },
+  { kw: "profit beat",            w: 2 },
+  // Geopolitical resolution (weight 2-3)
+  { kw: "ceasefire",              w: 3 }, { kw: "peace deal",              w: 3 },
+  { kw: "peace talks",            w: 2 }, { kw: "truce",                   w: 3 },
+  { kw: "accord",                 w: 2 }, { kw: "end to conflict",         w: 3 },
+  { kw: "deescalation",           w: 2 }, { kw: "de-escalation",           w: 2 },
+  { kw: "diplomatic",             w: 1 },
+  // Trade resolution (weight 2-3)
+  { kw: "tariff pause",           w: 3 }, { kw: "tariff suspended",        w: 3 },
+  { kw: "tariff removed",         w: 3 }, { kw: "tariff cut",              w: 2 },
+  { kw: "trade deal",             w: 3 }, { kw: "trade agreement",         w: 3 },
+  { kw: "trade truce",            w: 2 }, { kw: "sanctions lifted",        w: 2 },
+  { kw: "sanctions relief",       w: 2 }, { kw: "iran deal",               w: 3 },
+  { kw: "us-iran",                w: 2 }, { kw: "trump deal",              w: 2 },
+  { kw: "trade resolution",       w: 2 }, { kw: "agreement reached",       w: 2 },
+  // China positive (weight 2)
+  { kw: "china stimulus",         w: 2 }, { kw: "pboc",                    w: 2 },
+  { kw: "beijing stimulus",       w: 2 },
+  // Debt / budget resolution (weight 2)
+  { kw: "debt deal",              w: 2 }, { kw: "budget deal",             w: 2 },
+  { kw: "continuing resolution",  w: 1 },
+  // Tech / AI optimism (weight 1-2)
+  { kw: "ai breakthrough",        w: 1 }, { kw: "nvidia beat",             w: 2 },
+  // Market / energy relief (weight 1-2)
+  { kw: "oil falls",              w: 2 }, { kw: "energy prices drop",      w: 2 },
+  { kw: "supply chain recovery",  w: 2 }, { kw: "risk on",                 w: 1 },
+  { kw: "market rally",           w: 1 }, { kw: "stocks surge",            w: 1 },
+];
+
+// Credible source list — articles from these sources get a 1.5x weight multiplier
+// Lower-tier sources (blogs, forums) stay at 1.0x
+const CREDIBLE_SOURCES = [
+  "reuters", "bloomberg", "ap ", "associated press", "wall street journal", "wsj",
+  "financial times", "ft ", "cnbc", "federal reserve", "fed ", "white house",
+  "treasury", "sec ", "imf", "world bank", "ecb", "bank of england",
+  "new york times", "washington post", "the economist"
 ];
 
 // Sector-specific impact from macro events
@@ -1904,88 +1978,193 @@ const SECTOR_MACRO_IMPACT = {
   "rate hike":     { bearish: ["Technology", "Financial"], bullish: [] },
   "rate cut":      { bearish: [], bullish: ["Technology", "Financial"] },
   "oil spike":     { bearish: ["Consumer", "Technology"], bullish: ["Energy"] },
-  "oil falls":     { bearish: [], bullish: ["Consumer", "Technology"] },
+  "opec cut":      { bearish: ["Consumer", "Technology"], bullish: ["Energy"] },
+  "oil falls":     { bearish: ["Energy"], bullish: ["Consumer", "Technology"] },
   "tariff":        { bearish: ["Technology", "Consumer"], bullish: [] },
+  "china tariff":  { bearish: ["Technology", "Consumer"], bullish: [] },
   "trade deal":    { bearish: [], bullish: ["Technology", "Consumer"] },
   "recession":     { bearish: ["Financial", "Consumer", "Technology"], bullish: [] },
   "stimulus":      { bearish: [], bullish: ["Technology", "Financial", "Consumer"] },
+  "chip ban":      { bearish: ["Technology"], bullish: [] },
+  "bank failure":  { bearish: ["Financial"], bullish: [] },
+  "ai breakthrough":{ bearish: [], bullish: ["Technology"] },
 };
+
+// ── Marketaux news fetch ──────────────────────────────────────────────────
+// Returns top financial headlines from credible sources
+// Requires MARKETAUX_KEY env var — gracefully skips if not set
+async function getMarketauxNews() {
+  const MARKETAUX_KEY = process.env.MARKETAUX_KEY || "";
+  if (!MARKETAUX_KEY) return [];
+  try {
+    const url = `https://api.marketaux.com/v1/news/all?language=en&limit=10&api_token=${MARKETAUX_KEY}&filter_entities=true&must_have_entities=false`;
+    const res  = await withTimeout(fetch(url), 8000);
+    if (!res.ok) return [];
+    const data = await res.json();
+    if (!data.data) return [];
+    return data.data.map(a => ({
+      headline:   a.title || "",
+      summary:    a.description || "",
+      source:     (a.source || "").toLowerCase(),
+      publishedAt: a.published_at || new Date().toISOString(),
+      url:        a.url || "",
+    }));
+  } catch(e) {
+    console.log("[MARKETAUX] Fetch error:", e.message);
+    return [];
+  }
+}
+
+// ── Score a single article against keyword lists ──────────────────────────
+// Returns { bearishScore, bullishScore, triggers, sectorImpact }
+// Applies: keyword weight × source credibility × recency multiplier
+function scoreArticle(article) {
+  const text       = (article.headline + " " + (article.summary || "")).toLowerCase();
+  const source     = (article.source || "").toLowerCase();
+  const ageMinutes = (Date.now() - new Date(article.publishedAt || 0).getTime()) / 60000;
+
+  // Source credibility multiplier
+  const isCredible    = CREDIBLE_SOURCES.some(s => source.includes(s) || text.includes(s));
+  const sourceMult    = isCredible ? 1.5 : 1.0;
+
+  // Recency multiplier — news within 2 hours is most relevant
+  const recencyMult   = ageMinutes < 120  ? 2.0   // last 2 hours — breaking news
+                      : ageMinutes < 360  ? 1.5   // last 6 hours
+                      : ageMinutes < 720  ? 1.2   // last 12 hours
+                      : ageMinutes < 1440 ? 1.0   // last 24 hours
+                      : 0.5;                      // older — deprioritize
+
+  let bearishScore = 0, bullishScore = 0;
+  const triggers = [], sectorImpact = { bearish: new Set(), bullish: new Set() };
+
+  for (const entry of MACRO_BEARISH_KEYWORDS) {
+    if (text.includes(entry.kw)) {
+      const pts = entry.w * sourceMult * recencyMult;
+      bearishScore += pts;
+      triggers.push({ kw: entry.kw, pts: parseFloat(pts.toFixed(1)), direction: "bearish" });
+      const impact = SECTOR_MACRO_IMPACT[entry.kw];
+      if (impact) {
+        impact.bearish.forEach(s => sectorImpact.bearish.add(s));
+        impact.bullish.forEach(s => sectorImpact.bullish.add(s));
+      }
+    }
+  }
+
+  for (const entry of MACRO_BULLISH_KEYWORDS) {
+    if (text.includes(entry.kw)) {
+      const pts = entry.w * sourceMult * recencyMult;
+      bullishScore += pts;
+      triggers.push({ kw: entry.kw, pts: parseFloat(pts.toFixed(1)), direction: "bullish" });
+      const impact = SECTOR_MACRO_IMPACT[entry.kw];
+      if (impact) {
+        impact.bullish.forEach(s => sectorImpact.bullish.add(s));
+        impact.bearish.forEach(s => sectorImpact.bearish.add(s));
+      }
+    }
+  }
+
+  return { bearishScore, bullishScore, triggers, sectorImpact,
+    sourceMult, recencyMult, isCredible };
+}
 
 async function getMacroNews() {
   try {
-    // Pull general market news from Alpaca - no ticker filter = macro headlines
-    const data = await alpacaGet(`/news?limit=20`, ALPACA_DATA);
-    const articles = data && data.news ? data.news : [];
+    // Fetch from both sources in parallel — Alpaca + Marketaux
+    const [alpacaData, marketauxArticles] = await Promise.all([
+      alpacaGet(`/news?limit=20`, ALPACA_DATA),
+      getMarketauxNews(),
+    ]);
 
-    let bearishScore = 0;
-    let bullishScore = 0;
-    const triggers   = [];
-    const headlines  = [];
+    const alpacaArticles = (alpacaData && alpacaData.news ? alpacaData.news : []).map(a => ({
+      headline:    a.headline || "",
+      summary:     a.summary  || "",
+      source:      (a.author  || "alpaca").toLowerCase(),
+      publishedAt: a.created_at || new Date().toISOString(),
+    }));
+
+    // Deduplicate by headline similarity — avoid double-counting same story
+    const allArticles = [...alpacaArticles];
+    for (const ma of marketauxArticles) {
+      const isDupe = alpacaArticles.some(a =>
+        a.headline.toLowerCase().slice(0,40) === ma.headline.toLowerCase().slice(0,40)
+      );
+      if (!isDupe) allArticles.push(ma);
+    }
+
+    let totalBearish = 0, totalBullish = 0;
+    const allTriggers  = [];
     const sectorImpact = { bearish: new Set(), bullish: new Set() };
+    const headlines    = []; // for email display
+    const topStories   = []; // credible/recent stories for email
 
-    for (const article of articles) {
-      const text = (article.headline + " " + (article.summary || "")).toLowerCase();
-      headlines.push(article.headline);
+    for (const article of allArticles) {
+      const scored = scoreArticle(article);
+      totalBearish += scored.bearishScore;
+      totalBullish += scored.bullishScore;
+      scored.triggers.forEach(t => allTriggers.push(t));
+      scored.sectorImpact.bearish.forEach(s => sectorImpact.bearish.add(s));
+      scored.sectorImpact.bullish.forEach(s => sectorImpact.bullish.add(s));
 
-      // Check bearish keywords
-      for (const kw of MACRO_BEARISH_KEYWORDS) {
-        if (text.includes(kw)) {
-          bearishScore++;
-          triggers.push(kw);
-          // Check sector impact
-          for (const [key, impact] of Object.entries(SECTOR_MACRO_IMPACT)) {
-            if (kw.includes(key)) {
-              impact.bearish.forEach(s => sectorImpact.bearish.add(s));
-              impact.bullish.forEach(s => sectorImpact.bullish.add(s));
-            }
-          }
-        }
-      }
+      if (article.headline) headlines.push(article.headline);
 
-      // Check bullish keywords
-      for (const kw of MACRO_BULLISH_KEYWORDS) {
-        if (text.includes(kw)) {
-          bullishScore++;
-          triggers.push(kw);
-          for (const [key, impact] of Object.entries(SECTOR_MACRO_IMPACT)) {
-            if (kw.includes(key)) {
-              impact.bullish.forEach(s => sectorImpact.bullish.add(s));
-              impact.bearish.forEach(s => sectorImpact.bearish.add(s));
-            }
-          }
-        }
+      // Track top stories for email — credible sources with meaningful scores
+      if (scored.isCredible && (scored.bearishScore > 0 || scored.bullishScore > 0)) {
+        topStories.push({
+          headline:  article.headline,
+          source:    article.source,
+          direction: scored.bullishScore > scored.bearishScore ? "bullish" : "bearish",
+          score:     Math.max(scored.bullishScore, scored.bearishScore),
+          recencyMult: scored.recencyMult,
+        });
       }
     }
 
-    const net = bullishScore - bearishScore;
-    let signal = "neutral";
-    let scoreModifier = 0;
-    let mode = "normal";
+    // Sort top stories by score desc, keep top 5
+    topStories.sort((a, b) => b.score - a.score);
 
-    if (net <= -4)      { signal = "strongly bearish"; scoreModifier = -20; mode = "defensive"; }
-    else if (net <= -2) { signal = "bearish";          scoreModifier = -10; mode = "cautious";  }
+    const net = totalBullish - totalBearish;
+    let signal = "neutral", scoreModifier = 0, mode = "normal";
+    // Weighted scoring needs higher threshold than count-based
+    if (net <= -6)      { signal = "strongly bearish"; scoreModifier = -20; mode = "defensive"; }
+    else if (net <= -3) { signal = "bearish";          scoreModifier = -10; mode = "cautious";  }
     else if (net <= -1) { signal = "mild bearish";     scoreModifier = -5;  mode = "cautious";  }
-    else if (net >= 4)  { signal = "strongly bullish"; scoreModifier = 15;  mode = "aggressive";}
-    else if (net >= 2)  { signal = "bullish";          scoreModifier = 8;   mode = "normal";    }
+    else if (net >= 6)  { signal = "strongly bullish"; scoreModifier = 15;  mode = "aggressive";}
+    else if (net >= 3)  { signal = "bullish";          scoreModifier = 8;   mode = "normal";    }
     else if (net >= 1)  { signal = "mild bullish";     scoreModifier = 4;   mode = "normal";    }
 
-    const uniqueTriggers = [...new Set(triggers)].slice(0, 5);
+    // Get unique top triggers by score
+    const triggerMap = {};
+    for (const t of allTriggers) {
+      if (!triggerMap[t.kw] || triggerMap[t.kw] < t.pts) triggerMap[t.kw] = t.pts;
+    }
+    const uniqueTriggers = Object.entries(triggerMap)
+      .sort((a,b) => b[1]-a[1])
+      .slice(0, 5)
+      .map(([kw]) => kw);
+
+    const sourceCount = marketauxArticles.length > 0
+      ? `Alpaca(${alpacaArticles.length}) + Marketaux(${marketauxArticles.length})`
+      : `Alpaca(${alpacaArticles.length})`;
+
     if (uniqueTriggers.length > 0) {
-      logEvent("macro", `Macro signal: ${signal} | triggers: ${uniqueTriggers.join(", ")} | modifier: ${scoreModifier > 0 ? "+" : ""}${scoreModifier}`);
+      logEvent("macro", `Macro: ${signal} | ${sourceCount} | triggers: ${uniqueTriggers.join(", ")} | modifier: ${scoreModifier > 0 ? "+" : ""}${scoreModifier}`);
     }
 
     return {
       signal, scoreModifier, mode,
-      bearishScore, bullishScore,
+      bearishScore: parseFloat(totalBearish.toFixed(1)),
+      bullishScore: parseFloat(totalBullish.toFixed(1)),
       triggers: uniqueTriggers,
+      topStories: topStories.slice(0, 5),
       sectorBearish: [...sectorImpact.bearish],
       sectorBullish: [...sectorImpact.bullish],
       headlines: headlines.slice(0, 5),
+      sourceCount,
       updatedAt: new Date().toISOString(),
     };
   } catch(e) {
     logEvent("error", `getMacroNews: ${e.message}`);
-    return { signal: "neutral", scoreModifier: 0, mode: "normal", triggers: [], sectorBearish: [], sectorBullish: [] };
+    return { signal: "neutral", scoreModifier: 0, mode: "normal", triggers: [], topStories: [], sectorBearish: [], sectorBullish: [] };
   }
 }
 
@@ -4703,7 +4882,8 @@ async function sendMorningBriefing() {
     const posHTML   = positions.length ? positions.map(p => {
       const dte = p.expDays || '?';
       const chg = p.currentPrice && p.premium ? (((p.currentPrice - p.premium)/p.premium)*100).toFixed(1) : '?';
-      return `<tr><td>${p.ticker}</td><td>${p.optionType.toUpperCase()}</td><td>$${p.strike}</td><td>${dte}d</td><td style="color:${parseFloat(chg)>=0?'#44ff88':'#ff4444'}">${chg}%</td></tr>`;
+      const dteDays = p.expDate ? Math.max(0, Math.round((new Date(p.expDate) - new Date()) / 86400000)) : '?';
+      return `<tr><td>${p.ticker}</td><td>${p.optionType.toUpperCase()}</td><td>$${p.strike}</td><td>${dteDays}d</td><td style="color:${parseFloat(chg)>=0?'#44ff88':'#ff4444'}">${chg}%</td></tr>`;
     }).join('') : '<tr><td colspan="5" style="color:#888">No open positions</td></tr>';
     const macro = marketContext.macro || { signal: 'neutral', triggers: [] };
     await sendResendEmail(
@@ -4721,8 +4901,20 @@ async function sendMorningBriefing() {
           <tr style="color:#888"><th>Ticker</th><th>Type</th><th>Strike</th><th>DTE</th><th>P&L</th></tr>
           ${posHTML}
         </table>
-        ${macro.triggers.length ? '<div style="margin-top:12px;padding:8px;background:#1a0a0a;border-left:3px solid #ff4444"><strong>Macro Flags:</strong> ' + macro.triggers.join(', ') + '</div>' : ''}
-        <p style="color:#555;font-size:10px;margin-top:16px">Entry window: 9:45am–3pm ET | No entries first 15min or last hour</p>
+        ${macro.triggers.length ? '<div style="margin-top:12px;padding:8px;background:#1a0a0a;border-left:3px solid #ff4444"><strong>Macro Signals:</strong> ' + macro.triggers.join(', ') + '</div>' : ''}
+        ${(macro.topStories && macro.topStories.length) ? `
+        <div style="margin-top:12px">
+          <h3 style="color:#888;font-size:12px;margin:0 0 8px">CURRENT EVENTS (${macro.sourceCount || 'Alpaca'})</h3>
+          ${macro.topStories.slice(0,5).map(s =>
+            '<div style="margin-bottom:6px;padding:6px 8px;background:#0a0f1a;border-left:3px solid ' +
+            (s.direction === 'bullish' ? '#44ff88' : '#ff4444') + '">' +
+            '<span style="font-size:9px;color:' + (s.direction === 'bullish' ? '#44ff88' : '#ff4444') + '">' +
+            s.direction.toUpperCase() + ' · ' + (s.source || 'news') + (s.recencyMult >= 2 ? ' · 🔴 BREAKING' : s.recencyMult >= 1.5 ? ' · RECENT' : '') + '</span>' +
+            '<div style="font-size:11px;color:#cce8ff;margin-top:2px">' + s.headline + '</div>' +
+            '</div>'
+          ).join('')}
+        </div>` : ''}
+        <p style="color:#555;font-size:10px;margin-top:16px">Entry window: 9:45am–3pm ET | No entries first 15min or last hour | Sources: Alpaca + Marketaux</p>
       </div>`
     );
     logEvent("scan", "Morning briefing email sent");
@@ -6448,11 +6640,13 @@ initState().then(() => {
     console.log(`APEX v3.95 running on port ${PORT}`);
     console.log(`Alpaca key:  ${ALPACA_KEY?"SET":"NOT SET"}`);
     console.log(`Gmail:       ${GMAIL_USER||"NOT SET"}`);
+    console.log(`Resend:      ${RESEND_API_KEY?"SET ✅":"NOT SET — email disabled"}`);
+    console.log(`Marketaux:   ${process.env.MARKETAUX_KEY?"SET ✅":"NOT SET — add key for credible source news"}`);
     console.log(`Redis:       ${REDIS_URL?"SET":"NOT SET - using file fallback"}`);
     console.log(`Budget:      $${state.cash} | Floor: $${CAPITAL_FLOOR}`);
     console.log(`Positions:   ${state.positions.length} open`);
     console.log(`Trades:      ${(state.closedTrades||[]).length} closed trades in history`);
     console.log(`Scan:        every 30 seconds, 9AM-4PM ET Mon-Fri`);
-    console.log(`Entry window: 10AM-3:30PM ET`);
+    console.log(`Entry window: 9:45AM-3PM ET`);
   });
 });
