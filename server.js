@@ -4731,6 +4731,40 @@ async function sendMorningBriefing() {
 
 // nodemailer removed — email now via Resend API (sendResendEmail)
 
+// ── Resend email helper ───────────────────────────────────────────────────
+async function sendResendEmail(subject, html) {
+  if (!RESEND_API_KEY || !GMAIL_USER) {
+    console.log("[EMAIL] Resend not configured — set RESEND_API_KEY and GMAIL_USER in Railway");
+    return false;
+  }
+  try {
+    const res  = await withTimeout(fetch("https://api.resend.com/emails", {
+      method:  "POST",
+      headers: {
+        "Authorization": `Bearer ${RESEND_API_KEY}`,
+        "Content-Type":  "application/json",
+      },
+      body: JSON.stringify({
+        from:    "APEX Trading <onboarding@resend.dev>",
+        to:      [GMAIL_USER],
+        subject,
+        html,
+      }),
+    }), 10000);
+    const data = await res.json();
+    if (data.id) {
+      console.log(`[EMAIL] Sent via Resend: ${data.id}`);
+      return true;
+    } else {
+      console.log("[EMAIL] Resend error:", JSON.stringify(data));
+      return false;
+    }
+  } catch(e) {
+    console.log("[EMAIL] Resend failed:", e.message);
+    return false;
+  }
+}
+
 function buildEmailHTML(type) {
   const pnl    = realizedPnL();
   const trades = state.closedTrades;
