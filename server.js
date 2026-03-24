@@ -154,7 +154,7 @@ const WATCHLIST = [
   { ticker:"COIN",  sector:"Financial",   momentum:"recovering", rsi:48, macd:"forming base",          catalyst:"Crypto market recovery",  ivr:65, beta:2.2, earningsDate:null },
   { ticker:"HOOD",  sector:"Financial",   momentum:"recovering", rsi:46, macd:"neutral",          catalyst:"Retail trading volume recovery",  ivr:68, beta:2.0, earningsDate:null },
   { ticker:"MSTR",  sector:"Financial",   momentum:"recovering", rsi:48, macd:"forming base",          catalyst:"Bitcoin treasury strategy",  ivr:80, beta:3.0, earningsDate:null },
-  { ticker:"SQ",    sector:"Financial",   momentum:"recovering", rsi:45, macd:"neutral",          catalyst:"Bitcoin + fintech recovery",  ivr:60, beta:2.0, earningsDate:null },
+  // SQ removed — Alpaca data feed stale (620000+ minutes old), no live quotes available
   // -- Consumer & E-commerce --
   { ticker:"TSLA",  sector:"Consumer",    momentum:"recovering", rsi:44, macd:"neutral",      catalyst:"Q1 delivery data",  ivr:61, beta:2.0, earningsDate:null },
   { ticker:"NFLX",  sector:"Consumer",    momentum:"strong",     rsi:60, macd:"bullish",        catalyst:"Ad-supported tier growth",  ivr:38, beta:1.4, earningsDate:null },
@@ -2234,6 +2234,7 @@ Analyze and return your JSON. Use tools only if you need data not shown above.`;
     if (!parsed.signal || parsed.modifier === undefined) return null;
     _agentMacroCache = { result: parsed, fetchedAt: Date.now() };
     logEvent("macro", `[AGENT] Macro: ${parsed.signal} (${parsed.confidence}) | ${parsed.reasoning?.slice(0,80)}`);
+    checkMacroShift(parsed.signal); // trigger position rescores if macro shifted
     return parsed;
   } catch(e) {
     console.log("[AGENT] Failed to parse macro response:", raw.slice(0,100));
@@ -2539,6 +2540,8 @@ async function getMacroNews() {
     if (uniqueTriggers.length > 0) {
       logEvent("macro", `Macro: ${signal} | ${sourceCount} | triggers: ${uniqueTriggers.join(", ")} | modifier: ${scoreModifier > 0 ? "+" : ""}${scoreModifier}`);
     }
+    // Check for macro shift even on keyword path
+    checkMacroShift(signal);
 
     // ── Agent enhancement — replace keyword scoring with Claude analysis ───
     // Only use agent during market hours + 30min pre/post — saves ~40% API cost
@@ -3139,9 +3142,9 @@ async function checkAllFilters(stock, price) {
   // 5. Consecutive losses
   if (state.consecutiveLosses >= CONSEC_LOSS_LIMIT) return { pass:false, reason:`${CONSEC_LOSS_LIMIT} consecutive losses - paused for day` };
 
-  // 6. Position limits per ticker - max 3 total, max 2 of same type (call/put)
+  // 6. Same-ticker limit — allow up to 2 positions per ticker (entry + roll)
   const existingPositions = state.positions.filter(p => p.ticker === stock.ticker);
-  if (existingPositions.length >= 3) return { pass:false, reason:`Already have 3 positions in ${stock.ticker} - max reached` };
+  if (existingPositions.length >= 2) return { pass:false, reason:`Already have 2 positions in ${stock.ticker}` };
 
   // 7. Portfolio heat
   if (heatPct() >= MAX_HEAT) return { pass:false, reason:`Portfolio heat at ${(heatPct()*100).toFixed(0)}% max` };
@@ -3150,11 +3153,9 @@ async function checkAllFilters(stock, price) {
   const sectorExp = state.positions.filter(p=>p.sector===stock.sector).reduce((s,p)=>s+p.cost,0);
   if (sectorExp / totalCap() >= MAX_SECTOR_PCT) return { pass:false, reason:`${stock.sector} sector at ${MAX_SECTOR_PCT*100}% limit` };
 
-  // 9. Correlated positions (max 2 per sector) + no opposite bets
-  const sectorPositions = state.positions.filter(p => p.sector === stock.sector);
-  if (sectorPositions.length >= 3) return { pass:false, reason:`Already have 3 positions in ${stock.sector}` };
-  // Detect opposite sector bets — don't have both calls and puts in same sector
-  // (passed in via optionType from scan loop context)
+  // 9. Sector concentration — rely on MAX_SECTOR_PCT and correlation blocks
+  // Hard per-sector count removed — heat % and correlation blocks handle this
+  // (opposite sector bet detection handled by same-ticker opposite direction check in scan loop)
 
   // 10. Dynamic vol filter — realized vs implied gap (replaces static IVR_MAX)
   // If implied vol >> realized vol, options are overpriced — skip
@@ -4182,6 +4183,73 @@ function snapshotPortfolioValue() {
   markDirty();
 }
 
+// ── Trigger-based agent rescore ──────────────────────────────────────────
+// Fires immediately when specific conditions change — smarter than time-based
+// Three triggers:
+//   1. Rapid loss: position drops 5%+ in a single scan
+//   2. RSI reversal: stock RSI crosses key level (put thesis reversing)
+//   3. Macro shift: macro signal changes tier (neutral→bearish etc)
+//
+// Each trigger fires at most once per 15 minutes per position to prevent spam
+const TRIGGER_COOLDOWN_MS = 15 * 60 * 1000;
+
+async function triggerRescore(pos, triggerReason) {
+  if (!ANTHROPIC_API_KEY) return;
+  const now = Date.now();
+  if (!pos._triggerRescoreCooldown) pos._triggerRescoreCooldown = {};
+  const lastFired = pos._triggerRescoreCooldown[triggerReason] || 0;
+  if (now - lastFired < TRIGGER_COOLDOWN_MS) return; // cooldown active
+  pos._triggerRescoreCooldown[triggerReason] = now;
+
+  logEvent("warn", `[AGENT] Trigger rescore: ${pos.ticker} — ${triggerReason}`);
+  try {
+    const rescore = await getAgentRescore(pos);
+    if (!rescore) return;
+    pos._liveRescore = { ...rescore, updatedAt: new Date().toISOString(), trigger: triggerReason };
+    logEvent("scan", `[AGENT] ${pos.ticker} trigger result: ${rescore.label} (${rescore.score}/95) — ${rescore.recommendation} | ${rescore.reasoning||''}`);
+
+    // Auto-exit if enabled + EXIT + high confidence + position losing
+    const curP = pos.currentPrice || pos.premium;
+    const chg  = (curP - pos.premium) / pos.premium;
+    if (state.agentAutoExitEnabled &&
+        rescore.recommendation === "EXIT" &&
+        rescore.confidence === "high" &&
+        chg < 0) {
+      logEvent("warn", `[AGENT] TRIGGER AUTO-EXIT ${pos.ticker} — trigger: ${triggerReason} | ${rescore.reasoning}`);
+      await closePosition(pos.ticker, "agent-exit");
+    }
+    markDirty();
+  } catch(e) {
+    console.log("[AGENT] Trigger rescore error:", e.message);
+  }
+}
+
+// ── Macro shift detector ──────────────────────────────────────────────────
+// Tracks previous macro signal — fires rescore on all positions when signal changes tier
+let _prevMacroSignal = "neutral";
+const MACRO_TIERS = {
+  "strongly bearish": 0, "bearish": 1, "mild bearish": 2,
+  "neutral": 3,
+  "mild bullish": 4, "bullish": 5, "strongly bullish": 6,
+};
+function checkMacroShift(newSignal) {
+  if (!newSignal || !ANTHROPIC_API_KEY) return;
+  const prevTier = MACRO_TIERS[_prevMacroSignal] ?? 3;
+  const newTier  = MACRO_TIERS[newSignal] ?? 3;
+  const shift    = Math.abs(newTier - prevTier);
+  if (shift >= 2) {
+    // Significant macro shift — rescore all positions
+    const direction = newTier < prevTier ? "bearish shift" : "bullish shift";
+    logEvent("warn", `[AGENT] Macro shift: ${_prevMacroSignal} → ${newSignal} (${direction}) — triggering position rescores`);
+    const positions = state.positions || [];
+    // Fire in parallel — non-blocking
+    Promise.allSettled(
+      positions.map(pos => triggerRescore(pos, `macro-shift: ${_prevMacroSignal}→${newSignal}`))
+    );
+  }
+  _prevMacroSignal = newSignal;
+}
+
 // ── Parallel agent rescore — runs once per hour for overnight positions ───
 // Batches all overnight positions into parallel Claude calls
 // Much faster than sequential (7 positions = ~5s parallel vs ~35s sequential)
@@ -4507,6 +4575,44 @@ async function runScan() {
     // Update peak cash for drawdown tracking
     const curCash = state.cash + openRisk() + realizedPnL();
     if (curCash > (state.peakCash || MONTHLY_BUDGET)) state.peakCash = curCash;
+
+    // ── TRIGGER 1: Rapid loss — 5%+ drop since last scan ────────────────
+    // Most important trigger — catches fast-moving adverse positions
+    if (ANTHROPIC_API_KEY && isMarketHours()) {
+      const prevChg  = pos._prevScanChg || chg;
+      const scanDrop = chg - prevChg; // how much moved this scan
+      if (scanDrop <= -0.05 && chg < 0) {
+        // Non-blocking fire
+        triggerRescore(pos, `rapid-loss: ${(scanDrop*100).toFixed(1)}% this scan`);
+      }
+      pos._prevScanChg = chg; // store for next scan
+
+      // ── TRIGGER 2: RSI reversal — put thesis degrading ──────────────
+      // Only check once per 5 minutes to avoid RSI noise
+      const lastRSICheck = pos._lastRSITriggerCheck || 0;
+      if (Date.now() - lastRSICheck > 5 * 60 * 1000) {
+        pos._lastRSITriggerCheck = Date.now();
+        try {
+          const rsiB = await getStockBars(pos.ticker, 20);
+          if (rsiB.length >= 14) {
+            const liveRSI   = calcRSI(rsiB);
+            const entryRSI  = pos.entryRSI || 70;
+            const prevRSI   = pos._prevRSI || liveRSI;
+            pos._prevRSI    = liveRSI;
+            // Put thesis: entered when RSI was high (overbought)
+            // Trigger if RSI has recovered significantly from entry level
+            const putThesisDegrading = pos.optionType === "put" &&
+              entryRSI >= 65 && liveRSI < 45 && prevRSI >= 50;
+            // Call thesis: entered when RSI was low (oversold)
+            const callThesisDegrading = pos.optionType === "call" &&
+              entryRSI <= 40 && liveRSI > 55 && prevRSI <= 50;
+            if (putThesisDegrading || callThesisDegrading) {
+              triggerRescore(pos, `rsi-reversal: entry ${entryRSI} → now ${liveRSI.toFixed(0)}`);
+            }
+          }
+        } catch(e) {}
+      }
+    }
 
     // ── PDT-AWARE HOLD LOGIC ──────────────────────────────────────────────
     // If position opened today — be reluctant to close it same-day (day trade)
