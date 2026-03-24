@@ -832,6 +832,28 @@ function renderSPY() {
 
 // Fetch SPY immediately and then every 60 seconds
 fetchSPY();
+
+// ── Live rescore function ──────────────────────────────────────────────────
+async function rescorePos(ticker) {
+  // Show loading state
+  const btn = document.querySelector(`button[onclick="rescorePos('${ticker}')"]`);
+  if (btn) { btn.textContent = '...'; btn.disabled = true; }
+  try {
+    const res  = await fetch('/api/rescore/' + ticker);
+    const data = await res.json();
+    if (data.error) {
+      console.warn('Rescore error:', data.error);
+      if (btn) { btn.textContent = '↻ RESCORE'; btn.disabled = false; }
+      return;
+    }
+    // Inject result into state and re-render
+    const pos = (state.positions || []).find(p => p.ticker === ticker);
+    if (pos) { pos._liveRescore = data; renderPositions(); }
+  } catch(e) {
+    console.error('Rescore failed:', e);
+    if (btn) { btn.textContent = '↻ RESCORE'; btn.disabled = false; }
+  }
+}
 setInterval(fetchSPY, 60000);
 
 // ── Portfolio Value Chart ──────────────────────────────────────────────────
@@ -933,6 +955,18 @@ function renderHeader() {
   const vix = state.vix || 0;
   vs.textContent = `VIX ${vix.toFixed(1)}`;
   vs.className   = 'status-pill ' + (vix > 30 ? 'pill-red' : vix > 20 ? 'pill-orange' : 'pill-blue');
+  // Agent macro pill
+  const agentPill = document.getElementById('agent-macro-pill');
+  if (agentPill && state.agentMacro) {
+    const am = state.agentMacro;
+    const col = am.signal.includes('bearish') ? 'pill-red' : am.signal.includes('bullish') ? 'pill-green' : 'pill-blue';
+    agentPill.textContent = '🤖 ' + am.signal.toUpperCase() + (am.agentConfidence ? ' (' + am.agentConfidence + ')' : '');
+    agentPill.className   = 'status-pill ' + col;
+    agentPill.title       = am.agentReasoning || '';
+    agentPill.style.display = '';
+  } else if (agentPill) {
+    agentPill.style.display = 'none';
+  }
 }
 
 function renderMetrics() {
@@ -1319,7 +1353,14 @@ function renderPositions() {
           ${p.breakevenLocked ? '<span style="font-size:9px;padding:2px 6px;border-radius:10px;background:rgba(0,255,136,.1);color:var(--green)">BE LOCKED</span>' : ''}
         </div>
         <div style="display:flex;align-items:center;gap:8px">
-          <span style="font-size:11px;font-weight:700;color:${scoreColor}">Score: ${score}/100</span>
+          <span style="font-size:11px;font-weight:700;color:${scoreColor}">Entry: ${score}/100</span>
+          ${(function() {
+            if (p._liveRescore) {
+              var lrCol = p._liveRescore.score >= 75 ? 'var(--green)' : p._liveRescore.score >= 55 ? 'var(--gold)' : 'var(--red)';
+              return '<span style="font-size:11px;font-weight:700;margin-left:4px;padding:2px 6px;border-radius:4px;background:rgba(0,0,0,.3);color:' + lrCol + '">Live: ' + p._liveRescore.score + ' ' + p._liveRescore.label + '</span>';
+            }
+            return '<button onclick="rescorePos(\'' + p.ticker + '\')" style="font-size:9px;padding:2px 7px;background:rgba(0,196,255,.1);border:1px solid var(--blue);border-radius:4px;color:var(--blue);cursor:pointer">↻ RESCORE</button>';
+          })()}
           <button class="btn btn-red" style="padding:3px 10px;font-size:10px" onclick="closePos('${p.ticker}')">CLOSE</button>
         </div>
       </div>
@@ -1354,6 +1395,12 @@ function renderPositions() {
             <div style="align-self:center"><span style="font-size:9px;color:#555">upd: ${new Date(p.estimatedAH.updatedAt).toLocaleTimeString()}</span></div>
           </div>
         </div>` : ''}
+      ${(function() {
+        if (!p._liveRescore) return '';
+        var recCol = p._liveRescore.recommendation === 'HOLD' ? 'var(--green)' : p._liveRescore.recommendation === 'WATCH' ? 'var(--gold)' : 'var(--red)';
+        var updStr = p._liveRescore.updatedAt ? new Date(p._liveRescore.updatedAt).toLocaleTimeString() : '';
+        return '<div style="margin-top:6px;padding:5px 8px;background:rgba(0,0,0,.3);border-radius:4px;font-size:10px;display:flex;justify-content:space-between;align-items:center"><span style="color:' + recCol + '">⬤ ' + p._liveRescore.recommendation + '</span><span style="color:var(--muted);font-style:italic;margin-left:8px">' + (p._liveRescore.reasoning||'') + '</span><span style="color:#444;font-size:9px;margin-left:8px">upd: ' + updStr + '</span></div>';
+      })()}
       <div style="font-size:10px;color:var(--muted);margin-top:8px">Opened: ${new Date(p.openDate).toLocaleString()}</div>
     </div>`;
   }).join('');
