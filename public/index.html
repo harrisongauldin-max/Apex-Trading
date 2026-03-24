@@ -140,6 +140,54 @@ input[type=text]:focus{border-color:var(--blue)}
 
 <!-- ═══════════════ TRADING TAB ═══════════════ -->
 <div id="tab-trading" class="content active">
+  <!-- SPY Live Tracker -->
+  <div class="card" style="margin-bottom:12px;padding:12px 16px">
+    <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px">
+      <div style="display:flex;align-items:center;gap:20px">
+        <div>
+          <div style="font-size:10px;color:var(--muted);letter-spacing:1px;margin-bottom:2px">S&P 500 · SPY</div>
+          <div style="display:flex;align-items:baseline;gap:8px">
+            <span id="spy-price" style="font-size:26px;font-weight:700;font-family:var(--font)">$--</span>
+            <span id="spy-change" style="font-size:14px;font-weight:700">--</span>
+            <span id="spy-change-dollar" style="font-size:11px;color:var(--muted)">--</span>
+          </div>
+        </div>
+        <div style="border-left:1px solid var(--border);padding-left:20px">
+          <div style="font-size:10px;color:var(--muted);letter-spacing:1px;margin-bottom:2px">VIX</div>
+          <div id="spy-vix" style="font-size:24px;font-weight:700;font-family:var(--font)">--</div>
+        </div>
+        <div style="border-left:1px solid var(--border);padding-left:20px">
+          <div style="font-size:10px;color:var(--muted);letter-spacing:1px;margin-bottom:2px">LAST UPDATE</div>
+          <div id="spy-updated" style="font-size:11px;color:var(--muted)">--</div>
+        </div>
+      </div>
+      <div style="flex:1;min-width:200px;max-width:400px">
+        <canvas id="spy-chart" height="50" style="width:100%"></canvas>
+      </div>
+    </div>
+  </div>
+
+  <!-- Portfolio Value Chart -->
+  <div class="card" style="margin-bottom:12px;padding:12px 16px">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
+      <div>
+        <div style="font-size:10px;color:var(--muted);letter-spacing:1px">PORTFOLIO VALUE</div>
+        <div style="display:flex;align-items:baseline;gap:10px;margin-top:2px">
+          <span id="port-value" style="font-size:20px;font-weight:700">$--</span>
+          <span id="port-change" style="font-size:13px;font-weight:700">--</span>
+        </div>
+      </div>
+      <div style="display:flex;gap:6px">
+        <button onclick="setPortWindow('1D')" id="port-btn-1D" class="btn" style="padding:3px 10px;font-size:10px;background:var(--blue);border-color:var(--blue)">1D</button>
+        <button onclick="setPortWindow('1W')" id="port-btn-1W" class="btn" style="padding:3px 10px;font-size:10px">1W</button>
+        <button onclick="setPortWindow('1M')" id="port-btn-1M" class="btn" style="padding:3px 10px;font-size:10px">1M</button>
+        <button onclick="setPortWindow('ALL')" id="port-btn-ALL" class="btn" style="padding:3px 10px;font-size:10px">ALL</button>
+      </div>
+    </div>
+    <canvas id="portfolio-chart" height="120"></canvas>
+    <div style="font-size:9px;color:var(--muted);margin-top:6px">Sampled every 5 minutes during market hours</div>
+  </div>
+
   <div class="grid4" style="margin-bottom:12px">
     <div class="card">
       <div class="card-title">Cash Available</div>
@@ -732,6 +780,177 @@ async function fetchState() {
     renderAll();
   } catch(e) { console.error('Fetch error:', e); }
 }
+
+// ── SPY Live Tracker ───────────────────────────────────────────────────────
+let spyData = null;
+let spyChartInstance = null;
+
+async function fetchSPY() {
+  try {
+    const res  = await fetch('/api/spy');
+    spyData    = await res.json();
+    renderSPY();
+  } catch(e) { console.error('SPY fetch error:', e); }
+}
+
+function renderSPY() {
+  if (!spyData || spyData.error) return;
+  const priceEl  = document.getElementById('spy-price');
+  const changeEl = document.getElementById('spy-change');
+  const dollarEl = document.getElementById('spy-change-dollar');
+  const vixEl    = document.getElementById('spy-vix');
+  const updEl    = document.getElementById('spy-updated');
+  if (!priceEl) return;
+
+  const chg = spyData.dayChange || 0;
+  const col  = chg >= 0 ? 'var(--green)' : 'var(--red)';
+
+  priceEl.textContent  = spyData.price ? '$' + spyData.price.toFixed(2) : '$--';
+  priceEl.style.color  = col;
+  changeEl.textContent = (chg >= 0 ? '+' : '') + chg.toFixed(2) + '%';
+  changeEl.style.color = col;
+  dollarEl.textContent = spyData.dayChangeDollar ? ((spyData.dayChangeDollar >= 0 ? '+$' : '-$') + Math.abs(spyData.dayChangeDollar).toFixed(2)) : '';
+  vixEl.textContent    = spyData.vix ? spyData.vix.toFixed(2) : '--';
+  vixEl.style.color    = spyData.vix > 30 ? 'var(--red)' : spyData.vix > 20 ? 'var(--gold)' : 'var(--green)';
+  updEl.textContent    = spyData.updatedAt ? new Date(spyData.updatedAt).toLocaleTimeString() : '--';
+
+  // Mini chart
+  const bars = spyData.chartBars || [];
+  if (bars.length > 0) {
+    const ctx = document.getElementById('spy-chart');
+    if (!ctx) return;
+    const prices = bars.map(b => b.c);
+    const labels = bars.map(b => '');
+    const firstPrice = prices[0];
+    const barColors  = prices.map(p => p >= firstPrice ? 'rgba(0,255,136,0.6)' : 'rgba(255,80,80,0.6)');
+    if (spyChartInstance) spyChartInstance.destroy();
+    spyChartInstance = new Chart(ctx.getContext('2d'), {
+      type: 'bar',
+      data: {
+        labels,
+        datasets: [{
+          data:            prices,
+          backgroundColor: barColors,
+          borderWidth:     0,
+        }]
+      },
+      options: {
+        responsive:          true,
+        maintainAspectRatio: false,
+        plugins: { legend: { display: false }, tooltip: { enabled: false } },
+        scales: {
+          x: { display: false },
+          y: {
+            display:  false,
+            min:      Math.min(...prices) * 0.9995,
+            max:      Math.max(...prices) * 1.0005,
+          }
+        },
+        animation: { duration: 0 },
+      }
+    });
+  }
+}
+
+// Fetch SPY immediately and then every 60 seconds
+fetchSPY();
+setInterval(fetchSPY, 60000);
+
+// ── Portfolio Value Chart ──────────────────────────────────────────────────
+let portWindow = '1D';
+let portChartInstance = null;
+
+function setPortWindow(w) {
+  portWindow = w;
+  ['1D','1W','1M','ALL'].forEach(k => {
+    const btn = document.getElementById('port-btn-' + k);
+    if (btn) {
+      btn.style.background = k === w ? 'var(--blue)' : '';
+      btn.style.borderColor = k === w ? 'var(--blue)' : '';
+    }
+  });
+  renderPortfolioChart();
+}
+
+function renderPortfolioChart() {
+  const snapshots = (state.portfolioSnapshots || []);
+  if (!snapshots.length) return;
+
+  const now    = Date.now();
+  const cutoffs = { '1D': 24*60*60*1000, '1W': 7*24*60*60*1000, '1M': 30*24*60*60*1000, 'ALL': Infinity };
+  const cutoff  = now - (cutoffs[portWindow] || Infinity);
+  const filtered = snapshots.filter(s => new Date(s.t).getTime() >= cutoff);
+  if (!filtered.length) return;
+
+  const labels = filtered.map(s => {
+    const d = new Date(s.t);
+    if (portWindow === '1D') return d.toLocaleTimeString('en-US', { hour:'2-digit', minute:'2-digit' });
+    return d.toLocaleDateString('en-US', { month:'short', day:'numeric' });
+  });
+  const data   = filtered.map(s => s.v);
+  const first  = data[0];
+  const last   = data[data.length - 1];
+  const change = last - first;
+  const changePct = first > 0 ? ((change / first) * 100).toFixed(2) : '0.00';
+  const isUp   = change >= 0;
+  const color  = isUp ? '#00ff88' : '#ff5555';
+  const bgColor = isUp ? 'rgba(0,255,136,0.08)' : 'rgba(255,85,85,0.08)';
+
+  // Update header
+  const portValueEl  = document.getElementById('port-value');
+  const portChangeEl = document.getElementById('port-change');
+  if (portValueEl)  portValueEl.textContent  = '$' + last.toFixed(2);
+  if (portValueEl)  portValueEl.style.color  = color;
+  if (portChangeEl) portChangeEl.textContent = (isUp ? '+' : '') + change.toFixed(2) + ' (' + (isUp ? '+' : '') + changePct + '%)';
+  if (portChangeEl) portChangeEl.style.color = color;
+
+  const ctx = document.getElementById('portfolio-chart');
+  if (!ctx) return;
+  if (portChartInstance) portChartInstance.destroy();
+
+  portChartInstance = new Chart(ctx.getContext('2d'), {
+    type: 'line',
+    data: {
+      labels,
+      datasets: [{
+        data,
+        borderColor:     color,
+        borderWidth:     2,
+        backgroundColor: bgColor,
+        fill:            true,
+        pointRadius:     0,
+        pointHoverRadius: 4,
+        tension:         0.3,
+      }]
+    },
+    options: {
+      responsive:          true,
+      maintainAspectRatio: false,
+      interaction: { intersect: false, mode: 'index' },
+      plugins: {
+        legend: { display: false },
+        tooltip: {
+          callbacks: {
+            label: ctx => '$' + parseFloat(ctx.raw).toFixed(2)
+          }
+        }
+      },
+      scales: {
+        x: {
+          ticks: { color: '#555', font: { size: 9 }, maxTicksLimit: 8, maxRotation: 0 },
+          grid:  { color: '#1a2a3a' }
+        },
+        y: {
+          ticks: { color: '#555', font: { size: 9 }, callback: v => '$' + v.toFixed(0) },
+          grid:  { color: '#1a2a3a' },
+          min:   Math.min(...data) * 0.995,
+          max:   Math.max(...data) * 1.005,
+        }
+      },
+      animation: { duration: 200 },
+    }
+  });
+}
 let health = {};
 
 function fmt(n) { return '$' + parseFloat(n || 0).toFixed(2); }
@@ -752,6 +971,7 @@ function renderAll() {
   renderActivityLog();
   renderStocks();
   renderJournal();
+  renderPortfolioChart();
 }
 
 function renderMarketContext() { /* handled in renderMetrics */ }
@@ -1086,15 +1306,13 @@ function renderMetrics() {
     }
   }
 
-  // ── Max positions panel ────────────────────────────────────────────────
-  const maxPosLimit = state.maxPositions || 5;
-  const openCount   = (state.positions || []).length;
-  const slotsLeft   = Math.max(0, maxPosLimit - openCount);
+  // Position limit removed — panel updated to show heat only
   if (document.getElementById('max-pos-limit')) {
-    document.getElementById('max-pos-limit').textContent = maxPosLimit;
+    const openCount = (state.positions || []).length;
+    document.getElementById('max-pos-limit').textContent = '∞';
     document.getElementById('max-pos-open').textContent  = openCount;
-    document.getElementById('max-pos-open').style.color  = openCount >= maxPosLimit ? 'var(--red)' : 'var(--green)';
-    document.getElementById('max-pos-sub').textContent   = slotsLeft + ' slot' + (slotsLeft !== 1 ? 's' : '') + ' remaining';
+    document.getElementById('max-pos-open').style.color  = 'var(--green)';
+    document.getElementById('max-pos-sub').textContent   = 'limited by heat & correlation';
     document.getElementById('max-pos-heat').textContent  = (state.heatPct || 0) + '%';
     document.getElementById('max-pos-heat').style.color  = (state.heatPct || 0) >= 60 ? 'var(--red)' : (state.heatPct || 0) >= 40 ? 'var(--gold)' : 'var(--green)';
   }
