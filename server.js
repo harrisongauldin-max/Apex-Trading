@@ -2248,29 +2248,52 @@ Analyze and return your JSON. Use tools only if you need data not shown above.`;
 // Returns { score, label, reasoning, recommendation }
 async function getAgentRescore(pos) {
   if (!ANTHROPIC_API_KEY) return null;
+
+  const daysOpen = ((Date.now() - new Date(pos.openDate).getTime()) / 86400000).toFixed(1);
+  const chgPct   = pos.currentPrice && pos.premium
+    ? ((pos.currentPrice - pos.premium) / pos.premium * 100).toFixed(1) : '0';
+  const isProfit = parseFloat(chgPct) > 0;
+  const isPDT    = isDayTrade(pos); // opened today
+  const pdtLeft  = Math.max(0, PDT_LIMIT - countRecentDayTrades());
+  const alpacaBal= state.alpacaCash || state.cash || 0;
+  const pdtProtected = alpacaBal < 25000 && isPDT;
+
   const systemPrompt = `Options position analyst. Does the entry thesis still hold? Return JSON only.
 
 {"score":0-95,"label":"STRONG"|"VALID"|"WEAK"|"DEGRADED"|"INVALID","confidence":"high"|"medium"|"low","reasoning":"1 sentence","recommendation":"HOLD"|"WATCH"|"EXIT"}
 
-Score: 85+=intact, 70-84=mostly valid, 50-69=weakening, <50=broken. Use getLiveSignals to check current RSI/momentum before deciding.`;
+Critical rules:
+- NEVER recommend EXIT on a profitable position (P&L > 0) — the exit system handles profit taking
+- If PDT protected (same-day position, account <$25k): max recommendation is WATCH, never EXIT
+- Score: 85+=intact, 70-84=mostly valid, 50-69=weakening, <50=broken
+- Use getLiveSignals to check current RSI/momentum before deciding`;
 
-  const daysOpen   = ((Date.now() - new Date(pos.openDate).getTime()) / 86400000).toFixed(1);
-  const chgPct     = pos.currentPrice && pos.premium
-    ? ((pos.currentPrice - pos.premium) / pos.premium * 100).toFixed(1) : '0';
   const userPrompt = `Position to rescore:
 - ${pos.ticker} ${pos.optionType.toUpperCase()} $${pos.strike} exp ${pos.expDate}
-- Entry: $${pos.premium} | Current: $${pos.currentPrice || pos.premium} | P&L: ${chgPct}%
-- Opened: ${daysOpen} days ago | DTE remaining: ${Math.max(0, Math.round((new Date(pos.expDate)-new Date())/86400000))}d
+- Entry: $${pos.premium} | Current: $${pos.currentPrice || pos.premium} | P&L: ${chgPct}% ${isProfit ? '(PROFITABLE — do not recommend EXIT)' : ''}
+- Opened: ${daysOpen} days ago | DTE: ${Math.max(0, Math.round((new Date(pos.expDate)-new Date())/86400000))}d
 - Entry score: ${pos.score}/100 | Entry reasons: ${(pos.reasons||[]).slice(0,4).join('; ')}
-- Stock price: $${pos.price || '--'} | RSI at entry: ${pos.entryRSI || '--'}
-- Current VIX: ${state.vix} | Macro signal: ${(state._agentMacro || {}).signal || 'neutral'}
+- Stock: $${pos.price || '--'} | Entry RSI: ${pos.entryRSI || '--'}
+- VIX: ${state.vix} | Macro: ${(state._agentMacro || {}).signal || 'neutral'}
+${pdtProtected ? '- PDT PROTECTED: opened today, account <$25k — max recommendation is WATCH' : ''}
+${pdtLeft <= 1 && !pdtProtected ? '- PDT WARNING: only ' + pdtLeft + ' day trade(s) remaining — avoid EXIT unless thesis clearly broken' : ''}
 
-Does the put thesis still hold? Score and recommend.`;
+Does the thesis still hold? Score and recommend.`;
 
-  const raw = await callClaudeAgent(systemPrompt, userPrompt, 600, true); // useTools=true
+  const raw = await callClaudeAgent(systemPrompt, userPrompt, 600, true);
   if (!raw) return null;
   try {
-    return JSON.parse(raw);
+    const parsed = JSON.parse(raw);
+    // Server-side safety guards — never trust agent alone
+    if (isProfit && parsed.recommendation === "EXIT") {
+      parsed.recommendation = "WATCH";
+      parsed.reasoning = "(Auto-adjusted: position profitable — exit system manages profit taking) " + (parsed.reasoning || '');
+    }
+    if (pdtProtected && parsed.recommendation === "EXIT") {
+      parsed.recommendation = "WATCH";
+      parsed.reasoning = "(Auto-adjusted: PDT protected same-day position) " + (parsed.reasoning || '');
+    }
+    return parsed;
   } catch(e) { return null; }
 }
 
@@ -4209,13 +4232,17 @@ async function triggerRescore(pos, triggerReason) {
     pos._liveRescore = { ...rescore, updatedAt: new Date().toISOString(), trigger: triggerReason };
     logEvent("scan", `[AGENT] ${pos.ticker} trigger result: ${rescore.label} (${rescore.score}/95) — ${rescore.recommendation} | ${rescore.reasoning||''}`);
 
-    // Auto-exit if enabled + EXIT + high confidence + position losing
+    // Auto-exit if enabled + EXIT + high confidence + position losing + not PDT protected
     const curP = pos.currentPrice || pos.premium;
     const chg  = (curP - pos.premium) / pos.premium;
+    const posIsPDT = isDayTrade(pos);
+    const posAlpacaBal = state.alpacaCash || state.cash || 0;
+    const posPDTProtected = posAlpacaBal < 25000 && posIsPDT;
     if (state.agentAutoExitEnabled &&
         rescore.recommendation === "EXIT" &&
         rescore.confidence === "high" &&
-        chg < 0) {
+        chg < 0 &&
+        !posPDTProtected) {
       logEvent("warn", `[AGENT] TRIGGER AUTO-EXIT ${pos.ticker} — trigger: ${triggerReason} | ${rescore.reasoning}`);
       await closePosition(pos.ticker, "agent-exit");
     }
@@ -4281,11 +4308,17 @@ async function runAgentRescore() {
   if (!toRescore.length) return;
   logEvent("scan", `[AGENT] Auto-rescore: ${toRescore.length} position(s)`);
 
-  // Mark as rescored before firing
-  toRescore.forEach(p => {
+  // Mark as rescored — stagger same-day positions by 3 minutes each
+  // Prevents all positions hitting 30-min mark simultaneously next cycle
+  toRescore.forEach((p, i) => {
     const daysOpen = (now - new Date(p.openDate).getTime()) / 86400000;
-    if (daysOpen >= 1) state._agentRescoreHour[p.ticker]   = currentHour;
-    else               state._agentRescoreMinute[p.ticker] = now;
+    if (daysOpen >= 1) {
+      state._agentRescoreHour[p.ticker]   = currentHour;
+    } else {
+      // Stagger by 3 minutes per position index so they don't all fire together
+      const stagger = i * 3 * 60 * 1000;
+      state._agentRescoreMinute[p.ticker] = now - stagger;
+    }
   });
 
   // Fire all in parallel
@@ -4301,10 +4334,14 @@ async function runAgentRescore() {
 
     const curP = pos.currentPrice || pos.premium;
     const chg  = (curP - pos.premium) / pos.premium;
+    const posIsPDTp = isDayTrade(pos);
+    const posAlpacaBalp = state.alpacaCash || state.cash || 0;
+    const posPDTProtectedp = posAlpacaBalp < 25000 && posIsPDTp;
     if (state.agentAutoExitEnabled &&
         rescore.recommendation === "EXIT" &&
         rescore.confidence === "high" &&
-        chg < 0) {
+        chg < 0 &&
+        !posPDTProtectedp) {
       toClose.push(pos.ticker);
     }
   });
