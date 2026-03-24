@@ -2033,25 +2033,38 @@ const SECTOR_MACRO_IMPACT = {
 // ── Marketaux news fetch ──────────────────────────────────────────────────
 // Returns top financial headlines from credible sources
 // Requires MARKETAUX_KEY env var — gracefully skips if not set
+// Marketaux cache — only fetch every 30 minutes to stay within free tier (100/day)
+let _marketauxCache = { data: [], fetchedAt: 0 };
+const MARKETAUX_CACHE_MS = 60 * 60 * 1000; // 60 minutes — stays well under free tier 100/day limit
+
 async function getMarketauxNews() {
   const MARKETAUX_KEY = process.env.MARKETAUX_KEY || "";
   if (!MARKETAUX_KEY) return [];
+  // Return cached data if fresh enough
+  if (_marketauxCache.data.length > 0 && Date.now() - _marketauxCache.fetchedAt < MARKETAUX_CACHE_MS) {
+    return _marketauxCache.data;
+  }
   try {
     const url = `https://api.marketaux.com/v1/news/all?language=en&limit=20&api_token=${MARKETAUX_KEY}&filter_entities=true&must_have_entities=false`;
     const res  = await withTimeout(fetch(url), 8000);
-    if (!res.ok) return [];
+    if (!res.ok) return _marketauxCache.data; // return stale on error
     const data = await res.json();
-    if (!data.data) return [];
-    return data.data.map(a => ({
-      headline:   a.title || "",
-      summary:    a.description || "",
-      source:     (a.source || "").toLowerCase(),
-      publishedAt: a.published_at || new Date().toISOString(),
-      url:        a.url || "",
-    }));
+    if (!data.data) return _marketauxCache.data;
+    _marketauxCache = {
+      fetchedAt: Date.now(),
+      data: data.data.map(a => ({
+        headline:    a.title || "",
+        summary:     a.description || "",
+        source:      (a.source || "").toLowerCase(),
+        publishedAt: a.published_at || new Date().toISOString(),
+        url:         a.url || "",
+      }))
+    };
+    console.log(`[MARKETAUX] Fetched ${_marketauxCache.data.length} articles`);
+    return _marketauxCache.data;
   } catch(e) {
     console.log("[MARKETAUX] Fetch error:", e.message);
-    return [];
+    return _marketauxCache.data; // return stale on error
   }
 }
 
