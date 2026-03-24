@@ -200,6 +200,7 @@ function defaultState() {
     vix:              15,
     dataQuality:      { realTrades: 0, estimatedTrades: 0, totalTrades: 0 },
     tickerBlacklist:  [], // tickers blocked for today — clears on morning reset
+    exitStats:        {}, // running tally per exit reason: { count, wins, totalPnl, avgPnl, winRate }
   };
 }
 
@@ -3532,9 +3533,19 @@ async function closePosition(ticker, reason, exitPremium = null) {
     recordDayTrade(pos, reason);
   }
   state.closedTrades.push({ ticker, pnl, pct, date:new Date().toLocaleDateString(), reason, score:pos.score||0, closeTime: Date.now() });
-  // Cap closedTrades at 500 — older trades archived in tradeJournal
-  // Prevents Redis payload from growing unbounded over many trading days
+  // Cap closedTrades at 200
   if (state.closedTrades.length > 200) state.closedTrades = state.closedTrades.slice(0, 200);
+
+  // ── Exit performance tracking ─────────────────────────────────────────
+  if (!state.exitStats) state.exitStats = {};
+  if (!state.exitStats[reason]) state.exitStats[reason] = { count:0, wins:0, totalPnl:0, avgPnl:0, winRate:0 };
+  const es = state.exitStats[reason];
+  es.count++;
+  if (pnl > 0) es.wins++;
+  es.totalPnl  = parseFloat((es.totalPnl + pnl).toFixed(2));
+  es.avgPnl    = parseFloat((es.totalPnl / es.count).toFixed(2));
+  es.winRate   = parseFloat(((es.wins / es.count) * 100).toFixed(1));
+  logEvent("scan", `Exit stats [${reason}]: ${es.count} trades | win ${es.winRate}% | avg P&L $${es.avgPnl}`);
   await saveStateNow(); // force immediate save on trade close
 
   // Update consecutive losses
@@ -3702,6 +3713,14 @@ async function manageStockPositions() {
       await saveStateNow();
     }
   }
+}
+
+// ── Max positions based on account size ──────────────────────────────────
+function getMaxPositions() {
+  const budget = state.customBudget || state.cash || 10000;
+  if (budget < 10000)  return 5;   // under $10k — max 5 positions
+  if (budget < 25000)  return 8;   // $10k-$25k — max 8
+  return 12;                        // above $25k — max 12
 }
 
 // - Main Scan Engine -
@@ -4759,6 +4778,13 @@ async function runScan() {
     const regimeProfile    = getRegimeProfile(marketContext.regime?.regime || "neutral");
     const regimeMinScore   = regimeProfile.minScore;
     const effectiveMinScore = Math.max(ddProtocol.minScore || MIN_SCORE, afternoonMinScore, benchmarkMinScore, regimeMinScore);
+
+    // ── F2: Max positions check ────────────────────────────────────────
+    const maxPos = Math.min(getMaxPositions(), regimeProfile.maxPositions);
+    if (state.positions.length >= maxPos && !dryRunMode) {
+      logEvent("filter", `Max positions reached (${state.positions.length}/${maxPos}) — no new entries`);
+      continue;
+    }
     if (bestScore < effectiveMinScore) {
       logEvent("filter", `${stock.ticker} call:${callSetup.score} put:${putSetup.score} - below ${effectiveMinScore} (${etHourNow >= 13 ? "afternoon" : ddProtocol.level} protocol) - skip`);
       continue;
@@ -5453,57 +5479,165 @@ setInterval(async () => {
 async function premarketAssessment() {
   if (!state.positions.length) return;
   try {
-    // Refresh macro context before assessment
     const macro = await getMacroNews();
     marketContext.macro = macro;
-    const fg = await getFearAndGreed();
-    marketContext.fearGreed = fg;
-    const vix = await getVIX();
+    const fg   = await getFearAndGreed();
+    const vix  = await getVIX();
     if (vix) state.vix = vix;
+    marketContext.fearGreed = fg;
 
-    logEvent("scan", `[PREMARKET] Assessing ${state.positions.length} carry-over positions | VIX:${state.vix} | Macro:${macro.signal}`);
+    logEvent("scan", `[PREMARKET] Assessing ${state.positions.length} positions | VIX:${state.vix} | Macro:${macro.signal}`);
 
-    const flags = [];
+    // Assess each position — build recommendation
+    const assessments = [];
     for (const pos of state.positions) {
-      const reasons = [];
-      // Check macro alignment
+      const reasons   = [];
+      const riskFlags = [];
+      let recommendation = "HOLD"; // default
+
+      // ── P&L check ────────────────────────────────────────────────────
+      const curP  = pos.currentPrice || (pos.estimatedAH ? pos.estimatedAH.price : null) || pos.premium;
+      const chg   = ((curP - pos.premium) / pos.premium) * 100;
+      const pnlEst= ((curP - pos.premium) * 100 * (pos.contracts||1)).toFixed(0);
+      const isAH  = !pos.currentPrice && pos.estimatedAH;
+
+      if (chg <= -20) {
+        riskFlags.push(`Down ${chg.toFixed(1)}% — near stop loss`);
+        recommendation = "CLOSE";
+      } else if (chg <= -10) {
+        riskFlags.push(`Down ${chg.toFixed(1)}% — monitor closely`);
+        recommendation = "WATCH";
+      } else if (chg >= 20) {
+        riskFlags.push(`Up ${chg.toFixed(1)}% — consider taking profit`);
+        recommendation = "WATCH";
+      }
+
+      // ── Thesis check ─────────────────────────────────────────────────
+      try {
+        const bars = await getStockBars(pos.ticker, 20);
+        if (bars.length >= 14) {
+          const curRSI   = calcRSI(bars);
+          const entryRSI = pos.entryRSI || 70;
+          if (pos.optionType === "put" && entryRSI >= 65 && curRSI < 50) {
+            riskFlags.push(`RSI recovered from ${entryRSI} → ${curRSI.toFixed(0)} — put thesis degraded`);
+            if (recommendation === "HOLD") recommendation = "WATCH";
+          }
+        }
+      } catch(e) {}
+
+      // ── Macro alignment ───────────────────────────────────────────────
       if (pos.optionType === "put" && macro.mode === "aggressive") {
-        reasons.push("Bullish macro overnight — put thesis at risk");
+        riskFlags.push("Bullish macro overnight — put thesis at risk");
+        recommendation = "WATCH";
       }
       if (pos.optionType === "call" && macro.mode === "defensive") {
-        reasons.push("Bearish macro overnight — call thesis at risk");
+        riskFlags.push("Bearish macro overnight — call thesis at risk");
+        recommendation = "WATCH";
       }
-      // Check VIX spike against short-DTE positions
-      const dte = pos.expDays || 30;
-      if (state.vix > 40 && dte <= 7) {
-        reasons.push(`VIX ${state.vix} + DTE ${dte} — extreme gamma risk at open`);
-      }
-      // Flag DTE <= 3 (expiring very soon)
+
+      // ── DTE checks ───────────────────────────────────────────────────
+      const dte = pos.expDate
+        ? Math.max(0, Math.round((new Date(pos.expDate) - new Date()) / MS_PER_DAY))
+        : (pos.expDays || 30);
       if (dte <= 3) {
-        reasons.push(`${dte}DTE — expiring imminently`);
+        riskFlags.push(`${dte}DTE — expiring imminently, theta accelerating`);
+        recommendation = "CLOSE";
+      } else if (dte <= 7 && state.vix > 35) {
+        riskFlags.push(`${dte}DTE + VIX ${state.vix} — short-dated in high vol`);
+        if (recommendation === "HOLD") recommendation = "WATCH";
       }
-      if (reasons.length > 0) {
-        flags.push({ ticker: pos.ticker, reasons });
-        logEvent("warn", `[PREMARKET] ${pos.ticker}: ${reasons.join(" | ")}`);
-      } else {
-        logEvent("scan", `[PREMARKET] ${pos.ticker}: OK for open`);
+
+      // ── VIX extreme ──────────────────────────────────────────────────
+      if (state.vix > 45) {
+        riskFlags.push(`VIX ${state.vix} — extreme volatility, wide spreads at open`);
       }
+
+      assessments.push({
+        ticker:         pos.ticker,
+        optionType:     pos.optionType,
+        strike:         pos.strike,
+        dte,
+        chg:            parseFloat(chg.toFixed(1)),
+        pnlEst:         parseFloat(pnlEst),
+        curP:           parseFloat(curP.toFixed(2)),
+        isAH,
+        recommendation,
+        riskFlags,
+      });
+
+      const emoji = recommendation === "CLOSE" ? "🔴" : recommendation === "WATCH" ? "🟡" : "🟢";
+      logEvent(recommendation === "HOLD" ? "scan" : "warn",
+        `[PREMARKET] ${emoji} ${pos.ticker} — ${recommendation} | ${chg.toFixed(1)}% | ${riskFlags.join(" | ") || "OK"}`
+      );
     }
 
-    // Send email if any positions flagged
-    if (flags.length > 0 && RESEND_API_KEY && GMAIL_USER) {
-      const flagHTML = flags.map(f =>
-        `<div style="margin:8px 0;padding:8px;background:#1a0a0a;border-left:3px solid #ff4444">
-          <strong>${f.ticker}</strong>: ${f.reasons.join(" | ")}
-        </div>`
+    // Always send email — show full picture even on quiet mornings
+    if (RESEND_API_KEY && GMAIL_USER) {
+      const closes = assessments.filter(a => a.recommendation === "CLOSE");
+      const watches = assessments.filter(a => a.recommendation === "WATCH");
+      const holds  = assessments.filter(a => a.recommendation === "HOLD");
+      const subject = closes.length
+        ? `APEX Pre-Market — ${closes.length} CLOSE, ${watches.length} WATCH | ${new Date().toLocaleDateString()}`
+        : `APEX Pre-Market — All Clear | ${new Date().toLocaleDateString()}`;
+
+      const rowColor = (rec) => rec === "CLOSE" ? "#cc0000" : rec === "WATCH" ? "#cc6600" : "#006600";
+      const rows = assessments.map(a => `
+        <tr style="border-bottom:1px solid #eee">
+          <td style="padding:6px 4px;font-weight:bold">${a.ticker}</td>
+          <td style="padding:6px 4px;color:#555">${a.optionType.toUpperCase()} $${a.strike}</td>
+          <td style="padding:6px 4px;color:#555">${a.dte}d</td>
+          <td style="padding:6px 4px;color:${a.chg>=0?'#006600':'#cc0000'};font-weight:bold">${a.chg>=0?'+':''}${a.chg}%${a.isAH?' <small style="color:#999">(est)</small>':''}</td>
+          <td style="padding:6px 4px;font-weight:bold;color:${rowColor(a.recommendation)}">${a.recommendation}</td>
+          <td style="padding:6px 4px;font-size:10px;color:#555">${a.riskFlags.join(" · ") || "—"}</td>
+        </tr>`
       ).join("");
-      await sendResendEmail(
-        `APEX Pre-Market Alert — ${flags.length} position(s) flagged`,
-        `<div style="font-family:monospace;background:#07101f;color:#cce8ff;padding:20px">
-          <h2 style="color:#ffaa00">⚠ Pre-Market Position Review</h2>
-          <p>VIX: ${state.vix} | Macro: ${macro.signal} | F&G: ${fg.score}</p>
-          ${flagHTML}
-          <p style="color:#888;font-size:11px">Market opens in ~30 minutes. Review flagged positions.</p>
+
+      await sendResendEmail(subject, `
+        <div style="font-family:Georgia,serif;background:#fff;color:#111;padding:24px;max-width:700px;border:1px solid #ccc">
+          <div style="text-align:center;border-bottom:3px double #333;padding-bottom:12px;margin-bottom:16px">
+            <div style="font-size:20px;font-weight:bold;letter-spacing:1px">APEX PRE-MARKET ASSESSMENT</div>
+            <div style="font-size:10px;color:#555;margin-top:4px;letter-spacing:1px">${new Date().toLocaleDateString('en-US',{weekday:'long',month:'long',day:'numeric'}).toUpperCase()} · 8:45AM ET</div>
+          </div>
+          <div style="display:flex;gap:0;border:1px solid #ccc;margin-bottom:16px">
+            <div style="flex:1;text-align:center;padding:8px;border-right:1px solid #ccc">
+              <div style="font-size:9px;color:#555;letter-spacing:1px">VIX</div>
+              <div style="font-size:18px;font-weight:bold;color:${state.vix>30?'#cc0000':'#333'}">${state.vix}</div>
+            </div>
+            <div style="flex:1;text-align:center;padding:8px;border-right:1px solid #ccc">
+              <div style="font-size:9px;color:#555;letter-spacing:1px">MACRO</div>
+              <div style="font-size:14px;font-weight:bold;color:${macro.mode==='aggressive'?'#006600':macro.mode==='defensive'?'#cc0000':'#333'}">${macro.signal.toUpperCase()}</div>
+            </div>
+            <div style="flex:1;text-align:center;padding:8px;border-right:1px solid #ccc">
+              <div style="font-size:9px;color:#555;letter-spacing:1px">CLOSE</div>
+              <div style="font-size:18px;font-weight:bold;color:${closes.length?'#cc0000':'#333'}">${closes.length}</div>
+            </div>
+            <div style="flex:1;text-align:center;padding:8px;border-right:1px solid #ccc">
+              <div style="font-size:9px;color:#555;letter-spacing:1px">WATCH</div>
+              <div style="font-size:18px;font-weight:bold;color:${watches.length?'#cc6600':'#333'}">${watches.length}</div>
+            </div>
+            <div style="flex:1;text-align:center;padding:8px">
+              <div style="font-size:9px;color:#555;letter-spacing:1px">HOLD</div>
+              <div style="font-size:18px;font-weight:bold;color:#006600">${holds.length}</div>
+            </div>
+          </div>
+          <table style="width:100%;border-collapse:collapse;font-size:12px;font-family:monospace">
+            <tr style="border-bottom:2px solid #333">
+              <th style="padding:5px 4px;text-align:left;font-size:10px;letter-spacing:1px">TICKER</th>
+              <th style="padding:5px 4px;text-align:left;font-size:10px;letter-spacing:1px">CONTRACT</th>
+              <th style="padding:5px 4px;text-align:left;font-size:10px;letter-spacing:1px">DTE</th>
+              <th style="padding:5px 4px;text-align:left;font-size:10px;letter-spacing:1px">P&amp;L</th>
+              <th style="padding:5px 4px;text-align:left;font-size:10px;letter-spacing:1px">ACTION</th>
+              <th style="padding:5px 4px;text-align:left;font-size:10px;letter-spacing:1px">FLAGS</th>
+            </tr>
+            ${rows}
+          </table>
+          <div style="border-top:1px solid #ccc;margin-top:12px;padding-top:8px;font-size:10px;color:#555">
+            ${macro.triggers && macro.triggers.length ? '<strong>Macro signals:</strong> ' + macro.triggers.join(' · ') + '<br>' : ''}
+            <em>These are recommendations only. APEX will manage exits automatically at open.</em>
+          </div>
+          <div style="border-top:3px double #333;margin-top:12px;padding-top:8px;text-align:center;font-size:9px;color:#999;letter-spacing:1px">
+            APEX v3.95 · Market opens in ~45 minutes · Entry window 9:45am ET
+          </div>
         </div>`
       );
     }
@@ -5603,9 +5737,11 @@ app.get("/api/state", async (req, res) => {
     })(),
     alpacaCash:         state.alpacaCash || null,
     pdtCount:           countRecentDayTrades(),
+    maxPositions:       getMaxPositions(),
     tickerBlacklist:    state.tickerBlacklist || [],
     pdtLimit:           PDT_LIMIT,
     pdtBlocked:         countRecentDayTrades() >= PDT_LIMIT,
+    exitStats:          state.exitStats || {},
     reconcileStatus:    state.reconcileStatus || "unknown",
     orphanCount:        state.orphanCount || 0,
     lastReconcile:      state.lastReconcile || null,
