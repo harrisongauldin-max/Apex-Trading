@@ -1265,12 +1265,49 @@ async function getEarningsDate(ticker) {
 // - News Feed -
 // [cache block moved to top of file]
 
+// Company name map for Marketaux search fallback
+const COMPANY_NAMES = {
+  NVDA:"Nvidia", AAPL:"Apple", MSFT:"Microsoft", AMZN:"Amazon", META:"Meta",
+  GOOGL:"Alphabet Google", AMD:"AMD Advanced Micro", AVGO:"Broadcom", ARM:"ARM Holdings",
+  MU:"Micron", SMCI:"Super Micro", CRM:"Salesforce", NOW:"ServiceNow", SNOW:"Snowflake",
+  CRWD:"CrowdStrike", PANW:"Palo Alto Networks", NET:"Cloudflare",
+  JPM:"JPMorgan", BAC:"Bank of America", C:"Citigroup", MS:"Morgan Stanley",
+  COIN:"Coinbase", HOOD:"Robinhood", MSTR:"MicroStrategy", SQ:"Block Square",
+  TSLA:"Tesla", NFLX:"Netflix", UBER:"Uber", SHOP:"Shopify",
+  DKNG:"DraftKings", NKE:"Nike", ROKU:"Roku", PLTR:"Palantir",
+  WFC:"Wells Fargo", BABA:"Alibaba", TTD:"The Trade Desk",
+  SPY:"S&P 500", QQQ:"Nasdaq",
+};
+
 async function getNewsForTicker(ticker) {
   const cached = getCached('news:' + ticker);
   if (cached) return cached;
   try {
     const data = await alpacaGet(`/news?symbols=${ticker}&limit=5`, ALPACA_DATA);
-    return setCache('news:' + ticker, data && data.news ? data.news : []);
+    const articles = data && data.news ? data.news : [];
+    if (articles.length > 0) return setCache('news:' + ticker, articles);
+
+    // Alpaca returned nothing — try Marketaux with company name
+    const MARKETAUX_KEY = process.env.MARKETAUX_KEY || "";
+    if (MARKETAUX_KEY) {
+      const name    = COMPANY_NAMES[ticker] || ticker;
+      const url     = `https://api.marketaux.com/v1/news/all?search=${encodeURIComponent(name)}&language=en&limit=3&api_token=${MARKETAUX_KEY}`;
+      const res     = await withTimeout(fetch(url), 6000);
+      if (res.ok) {
+        const mxData = await res.json();
+        if (mxData.data && mxData.data.length > 0) {
+          // Normalize to Alpaca format
+          const normalized = mxData.data.map(a => ({
+            headline:   a.title || "",
+            summary:    a.description || "",
+            created_at: a.published_at || new Date().toISOString(),
+            author:     a.source || "Marketaux",
+          }));
+          return setCache('news:' + ticker, normalized);
+        }
+      }
+    }
+    return setCache('news:' + ticker, []);
   } catch(e) { return []; }
 }
 
@@ -4879,7 +4916,13 @@ async function sendMorningBriefing() {
     const positions = state.positions || [];
     const pdtUsed   = countRecentDayTrades();
     const pdtLeft   = Math.max(0, 3 - pdtUsed);
-    const macro     = marketContext.macro || { signal: 'neutral', triggers: [], topStories: [], headlines: [] };
+    // Fetch fresh macro + news at send time — don't rely on cached context
+    const freshMacro = await getMacroNews();
+    marketContext.macro = freshMacro;
+    const macro = freshMacro;
+
+    // Also fetch Marketaux directly for guaranteed fresh headlines
+    const mxDirect = await getMarketauxNews();
     const today     = new Date();
     const dateStr   = today.toLocaleDateString('en-US', { weekday:'long', month:'long', day:'numeric', year:'numeric' });
     const macroSignal = (macro.signal || 'neutral').toUpperCase();
@@ -4916,17 +4959,26 @@ async function sendMorningBriefing() {
 
     // ── Positions table ───────────────────────────────────────────────────
     const posRows = positions.length ? positions.map(p => {
-      const chg     = p.currentPrice && p.premium ? (((p.currentPrice - p.premium)/p.premium)*100).toFixed(1) : '?';
-      const dteDays = p.expDate ? Math.max(0, Math.round((new Date(p.expDate) - today) / 86400000)) : '?';
-      const pnlNum  = parseFloat(chg);
-      const warn    = pnlNum <= -12 ? ' ⚠' : '';
-      const pnlColor = pnlNum >= 0 ? '#006600' : '#cc0000';
+      const dteDays   = p.expDate ? Math.max(0, Math.round((new Date(p.expDate) - today) / 86400000)) : '?';
+      // Use live price if available, fall back to after-hours estimate, then show entry
+      const useAH     = !p.currentPrice && p.estimatedAH;
+      const curPrice  = p.currentPrice || (useAH ? p.estimatedAH.price : null);
+      const chgNum    = curPrice && p.premium ? ((curPrice - p.premium) / p.premium * 100) : null;
+      const chgStr    = chgNum !== null ? chgNum.toFixed(1) : '—';
+      const pnlDollar = chgNum !== null ? ((curPrice - p.premium) * 100 * (p.contracts||1)).toFixed(0) : '—';
+      const warn      = chgNum !== null && chgNum <= -12 ? ' ⚠' : '';
+      const pnlColor  = chgNum === null ? '#555' : chgNum >= 0 ? '#006600' : '#cc0000';
+      const estLabel  = useAH ? '<span style="font-size:8px;color:#999"> est</span>' : '';
+      const stockPx   = p.price ? ` <span style="font-size:9px;color:#999">· ${p.ticker} $${p.price.toFixed(2)}</span>` : '';
       return `<tr style="border-bottom:1px solid #eee">
         <td style="padding:5px 4px;font-weight:bold">${p.ticker}${warn}</td>
-        <td style="padding:5px 4px;color:#555">${p.optionType.toUpperCase()}</td>
-        <td style="padding:5px 4px">$${p.strike}</td>
+        <td style="padding:5px 4px;color:#555">${p.optionType.toUpperCase()} $${p.strike}</td>
         <td style="padding:5px 4px;color:#555">${dteDays}d</td>
-        <td style="padding:5px 4px;font-weight:bold;color:${pnlColor}">${pnlNum>=0?'+':''}${chg}%</td>
+        <td style="padding:5px 4px">
+          <span style="font-size:9px;color:#555">entry $${p.premium}</span>
+          ${curPrice ? ` → <span style="color:${pnlColor};font-weight:bold">$${curPrice.toFixed(2)}${estLabel}</span>` : ''}
+        </td>
+        <td style="padding:5px 4px;font-weight:bold;color:${pnlColor}">${chgNum!==null?(chgNum>=0?'+':'')+chgStr+'%':'—'}${stockPx}</td>
       </tr>`;
     }).join('') : '<tr><td colspan="5" style="padding:8px;color:#999;font-style:italic">No open positions</td></tr>';
 
@@ -4934,10 +4986,10 @@ async function sendMorningBriefing() {
       <table style="width:100%;border-collapse:collapse;font-size:12px;font-family:monospace">
         <tr style="border-bottom:2px solid #333">
           <th style="padding:5px 4px;text-align:left;font-size:10px;letter-spacing:1px">TICKER</th>
-          <th style="padding:5px 4px;text-align:left;font-size:10px;letter-spacing:1px">TYPE</th>
-          <th style="padding:5px 4px;text-align:left;font-size:10px;letter-spacing:1px">STRIKE</th>
+          <th style="padding:5px 4px;text-align:left;font-size:10px;letter-spacing:1px">CONTRACT</th>
           <th style="padding:5px 4px;text-align:left;font-size:10px;letter-spacing:1px">DTE</th>
-          <th style="padding:5px 4px;text-align:left;font-size:10px;letter-spacing:1px">P&amp;L</th>
+          <th style="padding:5px 4px;text-align:left;font-size:10px;letter-spacing:1px">PRICE</th>
+          <th style="padding:5px 4px;text-align:left;font-size:10px;letter-spacing:1px">P&amp;L · STOCK</th>
         </tr>
         ${posRows}
       </table>`;
@@ -4997,7 +5049,6 @@ async function sendMorningBriefing() {
       }
     }
     // Always show at least 3 recent headlines — even on quiet nights
-    // If no keyword stories, show raw headlines so the section is never empty
     if (storyItems.length === 0 && allHeadlines.length > 0) {
       allHeadlines.slice(0, 3).forEach(h => {
         storyItems.push(
@@ -5007,10 +5058,23 @@ async function sendMorningBriefing() {
         );
       });
     }
+    // Last resort: use pre-fetched Marketaux headlines directly
+    if (storyItems.length === 0 && mxDirect && mxDirect.length > 0) {
+      mxDirect.slice(0, 5).forEach(a => {
+        if (a.headline && !storySet.has(a.headline)) {
+          storySet.add(a.headline);
+          storyItems.push(
+            `<div style="margin-bottom:8px;padding-bottom:8px;border-bottom:1px solid #eee">
+              <span style="font-size:9px;color:#555;letter-spacing:1px">${(a.source||'MARKETAUX').toUpperCase()}</span><br>
+              <span style="font-size:11px;color:#111">${a.headline}</span>
+            </div>`
+          );
+        }
+      });
+    }
     const headlinesHTML = storyItems.length > 0
-      ? divider + sectionHead(`Top Stories (${macro.sourceCount || 'Alpaca'})`) + storyItems.join('')
-      : divider + sectionHead('Top Stories') +
-        '<div style="font-size:11px;color:#999;font-style:italic">No market news available overnight — check back at market open.</div>';
+      ? divider + sectionHead(`Top Stories (${macro.sourceCount || 'Alpaca + Marketaux'})`) + storyItems.join('')
+      : ''; // omit section entirely if truly nothing available
 
     // ── Economic calendar ─────────────────────────────────────────────
     const todayStr   = today.toISOString().split('T')[0];
