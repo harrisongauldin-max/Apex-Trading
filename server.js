@@ -962,6 +962,19 @@ function scoreSetup(stock, relStrength, adx, volume, avgVolume) {
 // - Mean Reversion Call Scoring -
 // Fires when quality stocks are oversold in a high-VIX environment
 // These are discounted calls on beaten-down names — not trend-following
+// ── Oversold RSI tracker — stored in state per ticker ────────────────────
+// Tracks how many consecutive scans a ticker has had RSI ≤ 35
+// Used to detect genuine capitulation vs single-scan noise
+function updateOversoldTracker(ticker, rsi) {
+  if (!state._oversoldCount) state._oversoldCount = {};
+  if (rsi <= 35) {
+    state._oversoldCount[ticker] = (state._oversoldCount[ticker] || 0) + 1;
+  } else {
+    state._oversoldCount[ticker] = 0;
+  }
+  return state._oversoldCount[ticker] || 0;
+}
+
 function scoreMeanReversionCall(stock, relStrength, adx, bars, vix) {
   let score = 0;
   const reasons = [];
@@ -977,6 +990,11 @@ function scoreMeanReversionCall(stock, relStrength, adx, bars, vix) {
   else if (stock.rsi <= 42)                   { score += 12; reasons.push(`RSI ${stock.rsi} - oversold (+12)`); }
   else if (stock.rsi <= 48)                   { score += 5;  reasons.push(`RSI ${stock.rsi} - near oversold (+5)`); }
   else return { score: 0, reasons: [`RSI ${stock.rsi} not oversold — skip mean reversion`] };
+
+  // Multi-scan oversold bonus — RSI ≤ 35 for 2+ consecutive scans = genuine capitulation
+  const oversoldScans = state._oversoldCount ? (state._oversoldCount[stock.ticker] || 0) : 0;
+  if (oversoldScans >= 3)      { score += 15; reasons.push(`Oversold ${oversoldScans} consecutive scans — capitulation (+15)`); }
+  else if (oversoldScans >= 2) { score += 8;  reasons.push(`Oversold ${oversoldScans} consecutive scans (+8)`); }
 
   // Drawdown from recent high — how cheap is the stock? (25pts)
   if (bars && bars.length >= 20) {
@@ -1064,11 +1082,13 @@ function scorePutSetup(stock, relStrength, adx, volume, avgVolume, vix = 20) {
     score += 5; reasons.push("Average volume (+5)");
   } else { reasons.push("Low volume (+0)"); }
 
-  // Relative weakness vs SPY — RAISED to 15pts max
-  if (relStrength < 0.93)      { score += 15; reasons.push(`Weak vs SPY: ${((relStrength-1)*100).toFixed(1)}% (+15)`); }
-  else if (relStrength < 0.97) { score += 8;  reasons.push(`Weak vs SPY: ${((relStrength-1)*100).toFixed(1)}% (+8)`); }
-  else if (relStrength < 1.0)  { score += 3;  reasons.push(`Slightly weak vs SPY (+3)`); }
+  // Relative weakness vs SPY — capped at 15pts, tracked for group cap
+  let spyWeakPts = 0;
+  if (relStrength < 0.93)      { spyWeakPts = 15; reasons.push(`Weak vs SPY: ${((relStrength-1)*100).toFixed(1)}% (+15)`); }
+  else if (relStrength < 0.97) { spyWeakPts = 8;  reasons.push(`Weak vs SPY: ${((relStrength-1)*100).toFixed(1)}% (+8)`); }
+  else if (relStrength < 1.0)  { spyWeakPts = 3;  reasons.push(`Slightly weak vs SPY (+3)`); }
   else                         { reasons.push(`Outperforming SPY - bad for put (+0)`); }
+  score += spyWeakPts;
 
   // ADX — RAISED to 15pts max (strong downtrend is a top-tier confirmation)
   if (adx && adx > 35)      { score += 15; reasons.push(`ADX ${adx} - very strong downtrend (+15)`); }
@@ -1101,7 +1121,9 @@ function scorePutSetup(stock, relStrength, adx, volume, avgVolume, vix = 20) {
     reasons.push("Neither RSI nor MACD confirm put direction (-15)");
   }
 
-  return { score: Math.min(Math.max(score, 0), 100), reasons };
+  // Hard cap at 95 — a 100/100 is now mathematically impossible
+  // Forces discrimination between setups even in broad selloffs
+  return { score: Math.min(Math.max(score, 0), 95), reasons };
 }
 
 // - Alpaca API -
@@ -4646,6 +4668,8 @@ async function runScan() {
     // Log intraday data quality
     if (signals.hasIntraday) {
       logEvent("filter", `${stock.ticker} intraday RSI:${signals.rsi} MACD:${signals.macd} MOM:${signals.momentum} VWAP:$${signals.intradayVWAP?.toFixed(2)} VolPace:${signals.volPaceRatio?.toFixed(1)}x`);
+      // Update oversold tracker — feeds capitulation call detection in MR scoring
+      updateOversoldTracker(stock.ticker, signals.rsi);
     }
 
     // Time of day adjustment — only penalize late entries when VIX elevated OR volume declining
@@ -4669,14 +4693,15 @@ async function runScan() {
 
     // Weekly trend adjustment — fighting a bullish weekly trend on puts needs higher conviction
     if (weeklyTrend.above10wk === true) {
-      // Stock above 10-week MA = in uptrend = puts fighting the larger trend
       putSetup.score = Math.max(0, putSetup.score - 10);
       putSetup.reasons.push(`Above 10-wk MA $${weeklyTrend.ma10w} — puts fighting trend (-10)`);
     } else if (weeklyTrend.above10wk === false) {
-      // Stock below 10-week MA = in downtrend = puts aligned with larger trend
-      putSetup.score = Math.min(100, putSetup.score + 8);
+      putSetup.score = Math.min(95, putSetup.score + 8);
       putSetup.reasons.push(`Below 10-wk MA $${weeklyTrend.ma10w} — aligned with downtrend (+8)`);
     }
+
+    // Track relative weakness points to enforce group cap below
+    let relWeaknessPoints = 0;
 
     // Volume context for puts — high volume confirms distribution, but capitulation
     // (extreme high volume) can signal reversal. Use nuanced scoring.
@@ -4716,15 +4741,21 @@ async function runScan() {
     }
 
     // Relative sector weakness — real edge vs just broad market selloff
-    // If stock is performing in line with or better than its sector, the put signal is weaker
+    // GROUP CAP: SPY weakness + sector peer weakness + weekly MA together capped at 25pts
+    // Prevents broad selloffs from adding 38+ pts of undifferentiated market weakness
+    const SPY_WEAKNESS_GROUP_CAP = 25;
+
     if (relToSector < 0.97) {
-      // Stock lagging sector by 3%+ = genuine relative weakness = boost put score
       const relBoost = relToSector < 0.93 ? 15 : 8;
-      putSetup.score = Math.min(100, putSetup.score + relBoost);
-      putSetup.reasons.push(`Weak vs sector peers: ${((relToSector-1)*100).toFixed(1)}% (+${relBoost})`);
+      const cappedRelBoost = Math.min(relBoost, Math.max(0, SPY_WEAKNESS_GROUP_CAP - relWeaknessPoints));
+      if (cappedRelBoost > 0) {
+        putSetup.score = Math.min(95, putSetup.score + cappedRelBoost);
+        putSetup.reasons.push(`Weak vs sector peers: ${((relToSector-1)*100).toFixed(1)}% (+${cappedRelBoost})`);
+        relWeaknessPoints += cappedRelBoost;
+      } else {
+        putSetup.reasons.push(`Weak vs sector peers: ${((relToSector-1)*100).toFixed(1)}% (+0 — group cap reached)`);
+      }
     } else if (relToSector > 1.03) {
-      // Stock outperforming sector — this is a sector-wide move not stock-specific
-      // Reduce put score — less edge when whole sector is moving together
       putSetup.score = Math.max(0, putSetup.score - 10);
       putSetup.reasons.push(`Outperforming sector peers (+${((relToSector-1)*100).toFixed(1)}%) — sector-wide move (-10)`);
     }
@@ -4920,8 +4951,21 @@ async function runScan() {
     scored.push({ stock: liveStock, price, score: bestScore, reasons: bestReasons, optionType, isMeanReversion: isMR });
   }
 
-  // Sort by score
+  // Sort by score descending
   scored.sort((a,b) => b.score - a.score);
+
+  // ── Relative score ranking — only enter top 20% of today's candidates ────
+  // Prevents entering 8 positions simultaneously on a broad selloff day
+  // where every stock scores 90+ just because the market is down
+  if (scored.length >= 5) {
+    const topN       = Math.max(1, Math.ceil(scored.length * 0.20));
+    const cutoffScore = scored[topN - 1]?.score || 0;
+    const aboveCutoff = scored.filter(s => s.score >= cutoffScore);
+    // Only keep top 20% — but always keep at least 1 candidate
+    scored.length = 0;
+    aboveCutoff.forEach(s => scored.push(s));
+    logEvent("filter", `Score ranking: keeping top ${aboveCutoff.length} of candidates (cutoff: ${cutoffScore})`);
+  }
 
   // ── PARALLEL OPTIONS PREFETCH ─────────────────────────────────────────────
   // Fetch options chains for all scored stocks simultaneously before executing
