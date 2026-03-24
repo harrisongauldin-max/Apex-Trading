@@ -2837,36 +2837,70 @@ async function checkAllFilters(stock, price) {
 // Short DTE = take profits fast, trail tight (theta kills you)
 // Monthly   = moderate targets, standard trail
 // LEAPS     = let winners run, wide trail
-function getDTEExitParams(dte) {
+function getDTEExitParams(dte, daysOpen = 0) {
+  // PDT-aware target adjustment
+  const pdtRemaining = Math.max(0, PDT_LIMIT - countRecentDayTrades());
+  const pdtTight     = pdtRemaining <= 1;
+  const pdtLocked    = pdtRemaining === 0;
+
+  // ── Overnight tier adjustment ─────────────────────────────────────────
+  // Theta burns overnight — take profits sooner on held positions
+  // Partials: sell half at partialPct, close remainder at takeProfitPct
+  // 1-contract positions: partialPct escalates to full close (handled in partialClose)
+  let overnightMult = 1.0;
+  let overnightLabel = "";
+  if (daysOpen >= 2) {
+    overnightMult  = 0.60; // 2+ days old — 15% target on monthly (was 25%)
+    overnightLabel = "(2D+)";
+  } else if (daysOpen >= 1) {
+    overnightMult  = 0.75; // opened yesterday — 20% target on monthly (was 26.7%)
+    overnightLabel = "(OVERNIGHT)";
+  }
+
   if (dte <= 21) {
-    // Short-dated (7-21 DTE) — fastest exits, theta kills you and PDT risk is high
+    const base = pdtLocked ? 0.12 : pdtTight ? 0.15 : 0.20;
+    const tp   = parseFloat((base * overnightMult).toFixed(3));
+    const part = parseFloat((tp * 0.60).toFixed(3)); // partial at 60% of target
+    const ride = parseFloat((tp * 1.30).toFixed(3)); // remainder rides to 130% of target
     return {
-      takeProfitPct:  0.20,  // 20% target — in and out fast
+      takeProfitPct:  tp,
+      partialPct:     part,
+      ridePct:        ride,
       stopLossPct:    0.35,
-      fastStopPct:    0.15,  // -15% fast stop — tight on short-dated
-      trailActivate:  0.12,  // trail kicks in at +12%
-      trailStop:      0.07,  // 7% trail — very tight
-      label:          "SHORT-DTE",
+      fastStopPct:    0.15,
+      trailActivate:  pdtLocked ? 0.08 : pdtTight ? 0.10 : 0.12,
+      trailStop:      pdtLocked ? 0.05 : 0.07,
+      label:          (pdtLocked ? "SHORT-DTE(PDT-LOCKED)" : pdtTight ? "SHORT-DTE(PDT-TIGHT)" : "SHORT-DTE") + overnightLabel,
     };
   } else if (dte <= 45) {
-    // Monthly — tighter than before, preserves day trades
+    const base = pdtLocked ? 0.18 : pdtTight ? 0.22 : 0.30;
+    const tp   = parseFloat((base * overnightMult).toFixed(3));
+    const part = parseFloat((tp * 0.60).toFixed(3));
+    const ride = parseFloat((tp * 1.30).toFixed(3));
     return {
-      takeProfitPct:  0.30,  // 30% target (was 50%)
+      takeProfitPct:  tp,
+      partialPct:     part,
+      ridePct:        ride,
       stopLossPct:    0.35,
       fastStopPct:    0.20,
-      trailActivate:  0.18,  // trail at +18% (was +30%)
-      trailStop:      0.10,  // 10% trail (was 15%)
-      label:          "MONTHLY",
+      trailActivate:  pdtLocked ? 0.12 : pdtTight ? 0.15 : 0.18,
+      trailStop:      pdtLocked ? 0.07 : pdtTight ? 0.08 : 0.10,
+      label:          (pdtLocked ? "MONTHLY(PDT-LOCKED)" : pdtTight ? "MONTHLY(PDT-TIGHT)" : "MONTHLY") + overnightLabel,
     };
   } else {
-    // LEAPS / long-dated — still let run but tighter than before
+    const base = pdtLocked ? 0.30 : pdtTight ? 0.40 : 0.50;
+    const tp   = parseFloat((base * overnightMult).toFixed(3));
+    const part = parseFloat((tp * 0.60).toFixed(3));
+    const ride = parseFloat((tp * 1.30).toFixed(3));
     return {
-      takeProfitPct:  0.50,  // 50% target (was 80%)
+      takeProfitPct:  tp,
+      partialPct:     part,
+      ridePct:        ride,
       stopLossPct:    0.35,
       fastStopPct:    0.20,
-      trailActivate:  0.25,  // trail at +25% (was +40%)
-      trailStop:      0.12,  // 12% trail (was 20%)
-      label:          "LEAPS",
+      trailActivate:  pdtLocked ? 0.18 : pdtTight ? 0.20 : 0.25,
+      trailStop:      pdtLocked ? 0.09 : pdtTight ? 0.10 : 0.12,
+      label:          (pdtLocked ? "LEAPS(PDT-LOCKED)" : pdtTight ? "LEAPS(PDT-TIGHT)" : "LEAPS") + overnightLabel,
     };
   }
 }
@@ -3290,7 +3324,7 @@ async function executeTrade(stock, price, score, scoreReasons, vix, optionType =
   // Recalculate cost/target/stop using final premium (may have been updated by fill)
   const finalCost     = parseFloat((contract.premium * 100 * contracts).toFixed(2));
   // Use DTE-tiered exit params — short-dated options need faster exits
-  const exitParams    = getDTEExitParams(contract.expDays || 30);
+  const exitParams    = getDTEExitParams(contract.expDays || 30, 0); // 0 days open — fresh entry
   const finalTarget   = parseFloat((contract.premium * (1 + exitParams.takeProfitPct)).toFixed(2));
   const finalStop     = parseFloat((contract.premium * (1 - exitParams.stopLossPct)).toFixed(2));
   const finalBreakeven = optionType === "put"
@@ -3612,6 +3646,15 @@ async function closePosition(ticker, reason, exitPremium = null) {
 async function partialClose(ticker) {
   const pos = state.positions.find(p => p.ticker === ticker);
   if (!pos || pos.partialClosed) return;
+
+  // 1-contract positions can't be split — treat partial close as full close
+  // Math.floor(1/2) = 0 which would skip the Alpaca order silently
+  if ((pos.contracts || 1) === 1) {
+    logEvent("partial", `${ticker} 1-contract position — escalating partial to full close`);
+    await closePosition(ticker, "target");
+    return;
+  }
+
   pos.partialClosed = true;
   // Use real options price if available, otherwise use current tracked price
   let ep = pos.currentPrice || pos.premium * 1.5;
@@ -4016,34 +4059,69 @@ async function runScan() {
     // Let minor moves ride overnight to avoid consuming a day trade
     const openedToday    = isDayTrade(pos); // opened same calendar day
     const etHourForPDT   = scanET.getHours() + scanET.getMinutes() / 60;
-    const inFinalHour    = etHourForPDT >= 15.0; // after 3pm ET
-    const pdtHoldMode    = openedToday && inFinalHour && !dryRunMode;
-    // In PDT hold mode: only hard stop (-35%) or deeply losing (-25%+) closes same-day
-    // Everything else holds overnight — trail, target, time-stop, 50MA all deferred
-    if (pdtHoldMode && chg > -0.25) {
-      // Minor loser or winner — hold overnight, don't day trade
-      if (chg >= 0) {
-        logEvent("scan", `${pos.ticker} +${(chg*100).toFixed(0)}% — holding overnight (PDT mode, avoid day trade)`);
-      } else {
-        logEvent("scan", `${pos.ticker} ${(chg*100).toFixed(0)}% — holding overnight (PDT mode, -25% threshold not reached)`);
+    const inFinalHour    = etHourForPDT >= 15.0;
+
+    // ── PDT PROTECTION — sub-$25k accounts ───────────────────────────────
+    // Below $25k: never day-trade unless position hits +65% gain or -30% loss
+    // This preserves all 3 day trades for positions that genuinely need them
+    // Above $25k (Alpaca cash): normal operation resumes automatically
+    const alpacaBalance  = state.alpacaCash || state.cash || 0;
+    const belowPDTLimit  = alpacaBalance < 25000;
+    const PDT_PROFIT_EXIT = 0.65;  // +65% — take the money, worth the day trade
+    const PDT_LOSS_EXIT   = 0.30;  // -30% — deep enough loss to warrant cutting
+
+    if (openedToday && belowPDTLimit && !dryRunMode) {
+      // Profit emergency — +65% is exceptional, take it
+      if (chg >= PDT_PROFIT_EXIT) {
+        logEvent("scan", `${pos.ticker} PDT EMERGENCY PROFIT +${(chg*100).toFixed(0)}% — exiting same-day (above 65% threshold)`);
+        await closePosition(pos.ticker, "target"); continue;
       }
+      // Loss emergency — -30% to -35% is severe, worth burning a day trade
+      if (chg <= -PDT_LOSS_EXIT) {
+        logEvent("scan", `${pos.ticker} PDT EMERGENCY LOSS ${(chg*100).toFixed(0)}% — exiting same-day (below -30% threshold)`);
+        await closePosition(pos.ticker, "fast-stop"); continue;
+      }
+      // Hard stop always fires — -35% is catastrophic
+      if (chg <= -STOP_LOSS_PCT) {
+        logEvent("scan", `${pos.ticker} hard stop ${(chg*100).toFixed(0)}% — exiting same-day`);
+        await closePosition(pos.ticker, "stop"); continue;
+      }
+      // Everything else — hold overnight, don't burn a day trade
+      const reason = chg >= 0
+        ? `+${(chg*100).toFixed(0)}% (need 65% for same-day exit)`
+        : `${(chg*100).toFixed(0)}% (need -30% for same-day stop)`;
+      logEvent("scan", `${pos.ticker} holding overnight — PDT protection | ${reason}`);
       pos.price = price; pos.currentPrice = curP;
       markDirty();
-      continue; // skip all exits below for today's positions after 3pm
+      continue;
+    }
+
+    // After-3pm hold mode (above $25k accounts still respect this)
+    const pdtHoldMode = openedToday && inFinalHour && !dryRunMode && !belowPDTLimit;
+    if (pdtHoldMode && chg > -0.25) {
+      logEvent("scan", `${pos.ticker} holding overnight (after 3pm, avoid day trade)`);
+      pos.price = price; pos.currentPrice = curP;
+      markDirty();
+      continue;
     }
 
     // ── EXIT HIERARCHY ────────────────────────────────────────────────────
     // Order matters — earlier checks take priority over later ones
+    // Applies to: overnight positions (opened previous day or earlier)
+    // OR: same-day positions on accounts above $25k
+
+    // Refresh exit params based on current daysOpen — targets tighten overnight
+    const currentExitParams = getDTEExitParams(pos.expDays || 30, daysOpen);
+    const activeTakeProfitPct = currentExitParams.takeProfitPct;
+    const activePartialPct    = currentExitParams.partialPct || (activeTakeProfitPct * 0.60);
+    const activeRidePct       = currentExitParams.ridePct    || (activeTakeProfitPct * 1.30);
 
     // 1. FAST STOP — -20% in first 48 hours but NOT in first 2 hours
-    // Minimum 2-hour hold prevents noise exits on opening volatility
     const fastStopEligible = hoursOpen >= 2 && hoursOpen <= FAST_STOP_HOURS;
     if (fastStopEligible && chg <= -(pos.fastStopPct || FAST_STOP_PCT)) {
       logEvent("scan", `${pos.ticker} fast-stop ${(chg*100).toFixed(0)}% in ${hoursOpen.toFixed(1)}hrs`);
       await closePosition(pos.ticker, "fast-stop"); continue;
     }
-    // Hard stop still fires immediately at any time if loss exceeds stop loss
-    // (covered by exit #2 below — fast-stop just prevents premature exits in first 2 hours)
 
     // 2. HARD STOP — -35% at any time
     if (chg <= -STOP_LOSS_PCT) {
@@ -4080,19 +4158,21 @@ async function runScan() {
       }
     }
 
-    // 4. PARTIAL CLOSE — at 60% of take profit target
-    if (!pos.partialClosed && chg >= (pos.takeProfitPct ? pos.takeProfitPct * 0.6 : PARTIAL_CLOSE_PCT)) {
-      logEvent("scan", `${pos.ticker} partial close at +${(chg*100).toFixed(0)}%`);
+    // 4. PARTIAL CLOSE — at 60% of active take profit target
+    // Uses live overnight-adjusted params — tighter targets on older positions
+    if (!pos.partialClosed && chg >= activePartialPct) {
+      logEvent("scan", `${pos.ticker} partial close at +${(chg*100).toFixed(0)}% [${currentExitParams.label}] (partial threshold: +${(activePartialPct*100).toFixed(0)}%)`);
       await partialClose(pos.ticker);
     }
 
-    // 5. FULL TARGET — take profit (remainder after partial rides to 100%)
-    if (pos.partialClosed && chg >= RIDE_TARGET_PCT) {
-      logEvent("scan", `${pos.ticker} remainder +100% target`);
+    // 5. FULL TARGET — take profit
+    // After partial: remainder rides to 130% of target then closes
+    if (pos.partialClosed && chg >= activeRidePct) {
+      logEvent("scan", `${pos.ticker} remainder target +${(chg*100).toFixed(0)}% [${currentExitParams.label}]`);
       await closePosition(pos.ticker, "target"); continue;
     }
-    if (!pos.partialClosed && chg >= (pos.takeProfitPct || TAKE_PROFIT_PCT)) {
-      logEvent("scan", `${pos.ticker} take profit +${(chg*100).toFixed(0)}% [${pos.dteLabel||"MONTHLY"}]`);
+    if (!pos.partialClosed && chg >= activeTakeProfitPct) {
+      logEvent("scan", `${pos.ticker} take profit +${(chg*100).toFixed(0)}% [${currentExitParams.label}]`);
       await closePosition(pos.ticker, "target"); continue;
     }
 
