@@ -201,6 +201,7 @@ function defaultState() {
     dataQuality:      { realTrades: 0, estimatedTrades: 0, totalTrades: 0 },
     tickerBlacklist:  [], // tickers blocked for today — clears on morning reset
     exitStats:        {}, // running tally per exit reason: { count, wins, totalPnl, avgPnl, winRate }
+    portfolioSnapshots: [], // time-series portfolio value: [{t, v}] sampled every 5 min
   };
 }
 
@@ -3715,12 +3716,24 @@ async function manageStockPositions() {
   }
 }
 
-// ── Max positions based on account size ──────────────────────────────────
-function getMaxPositions() {
-  const budget = state.customBudget || state.cash || 10000;
-  if (budget < 10000)  return 5;   // under $10k — max 5 positions
-  if (budget < 25000)  return 8;   // $10k-$25k — max 8
-  return 12;                        // above $25k — max 12
+// ── Portfolio value snapshot ─────────────────────────────────────────────
+// Samples total portfolio value (cash + open positions at cost) every 5 minutes
+// Stored as [{t: ISO timestamp, v: dollar value}]
+// Keeps last 30 days — older snapshots pruned automatically
+function snapshotPortfolioValue() {
+  if (!isMarketHours()) return; // only during market hours
+  // Total value = cash + current market value of open positions
+  const posValue = (state.positions || []).reduce((s, p) => {
+    const curPrice = p.currentPrice || p.premium;
+    return s + (curPrice * 100 * (p.contracts || 1) * (p.partialClosed ? 0.5 : 1));
+  }, 0);
+  const totalValue = parseFloat((state.cash + posValue).toFixed(2));
+  if (!state.portfolioSnapshots) state.portfolioSnapshots = [];
+  state.portfolioSnapshots.push({ t: new Date().toISOString(), v: totalValue });
+  // Prune to last 30 days (30 days × 78 snapshots/day at 5-min intervals = ~2340)
+  const cutoff = Date.now() - 30 * 24 * 60 * 60 * 1000;
+  state.portfolioSnapshots = state.portfolioSnapshots.filter(s => new Date(s.t).getTime() > cutoff);
+  markDirty();
 }
 
 // - Main Scan Engine -
@@ -3878,6 +3891,7 @@ async function runScan() {
       }
     }
     logEvent("scan", `[5min] Regime:${regime.regime}(${regime.confidence}%) | Kelly:${marketContext.kelly.contracts}x | Global:${marketContext.globalMarket.signal} | Streak:${marketContext.streaks.currentStreak}x${marketContext.streaks.currentType}`);
+    snapshotPortfolioValue(); // record portfolio value every 5 min
   }
 
 
@@ -4779,12 +4793,7 @@ async function runScan() {
     const regimeMinScore   = regimeProfile.minScore;
     const effectiveMinScore = Math.max(ddProtocol.minScore || MIN_SCORE, afternoonMinScore, benchmarkMinScore, regimeMinScore);
 
-    // ── F2: Max positions check ────────────────────────────────────────
-    const maxPos = Math.min(getMaxPositions(), regimeProfile.maxPositions);
-    if (state.positions.length >= maxPos && !dryRunMode) {
-      logEvent("filter", `Max positions reached (${state.positions.length}/${maxPos}) — no new entries`);
-      continue;
-    }
+    // Position limit removed — rely on heat % and correlation blocks
     if (bestScore < effectiveMinScore) {
       logEvent("filter", `${stock.ticker} call:${callSetup.score} put:${putSetup.score} - below ${effectiveMinScore} (${etHourNow >= 13 ? "afternoon" : ddProtocol.level} protocol) - skip`);
       continue;
@@ -5457,21 +5466,30 @@ setInterval(() => {
   flushStateIfDirty().catch(e => console.error("Flush interval error:", e.message));
 }, 30000);
 
-// ── F4: Alpaca account balance sync every 5 minutes ───────────────────────
-// Display only — keeps dashboard alpacaCash current without affecting trading logic
+// ── F4: Alpaca account balance sync every 60 seconds ─────────────────────
+// Syncs both display (alpacaCash) and internal cash ledger (state.cash)
+// Keeps APEX aligned with actual Alpaca fills — prevents P&L drift
 setInterval(async () => {
   if (!ALPACA_KEY) return;
   try {
     const acct = await alpacaGet("/account");
     if (acct && acct.cash) {
-      const newCash = parseFloat(acct.cash);
-      if (newCash !== state.alpacaCash) {
-        state.alpacaCash = newCash;
-        markDirty(); // persist updated balance
+      const alpacaCash = parseFloat(acct.cash);
+      state.alpacaCash = alpacaCash; // always update display
+
+      // Also sync state.cash if no custom budget and drift > $5
+      const hasCustomBudget = state.customBudget && state.customBudget > 0 && state.customBudget !== MONTHLY_BUDGET;
+      if (!hasCustomBudget) {
+        const drift = Math.abs(alpacaCash - state.cash);
+        if (drift > 5.00) {
+          logEvent("scan", `[CASH SYNC] Alpaca: $${alpacaCash.toFixed(2)} | APEX: $${state.cash.toFixed(2)} | drift: $${drift.toFixed(2)} — syncing`);
+          state.cash = alpacaCash;
+        }
       }
+      markDirty();
     }
-  } catch(e) {} // silent — display only, non-critical
-}, 5 * 60 * 1000);
+  } catch(e) {} // silent — non-critical
+}, 60 * 1000); // every 60 seconds
 
 // ── F2: Pre-market carry-over assessment (9:00 AM ET) ────────────────────
 // Checks overnight positions against pre-market conditions
@@ -5737,11 +5755,12 @@ app.get("/api/state", async (req, res) => {
     })(),
     alpacaCash:         state.alpacaCash || null,
     pdtCount:           countRecentDayTrades(),
-    maxPositions:       getMaxPositions(),
+
     tickerBlacklist:    state.tickerBlacklist || [],
     pdtLimit:           PDT_LIMIT,
     pdtBlocked:         countRecentDayTrades() >= PDT_LIMIT,
     exitStats:          state.exitStats || {},
+    portfolioSnapshots: state.portfolioSnapshots || [],
     reconcileStatus:    state.reconcileStatus || "unknown",
     orphanCount:        state.orphanCount || 0,
     lastReconcile:      state.lastReconcile || null,
@@ -5889,6 +5908,33 @@ app.post("/api/emergency-close", async (req, res) => {
   try { await saveStateNow(); } catch(e) { logEvent("error", `Post-emergency save failed: ${e.message}`); }
 
   res.json({ ok: true, closed, failed, total: count });
+});
+
+// ── SPY live data endpoint ────────────────────────────────────────────────
+app.get("/api/spy", async (req, res) => {
+  try {
+    const [quote, bars, intradayBars] = await Promise.all([
+      getStockQuote("SPY"),
+      getStockBars("SPY", 2),          // for day change %
+      getIntradayBars("SPY"),          // 1-min bars for chart
+    ]);
+    const prevClose  = bars.length >= 2 ? bars[bars.length-2].c : null;
+    const dayChange  = quote && prevClose ? parseFloat(((quote - prevClose) / prevClose * 100).toFixed(2)) : 0;
+    const dayChangeDollar = quote && prevClose ? parseFloat((quote - prevClose).toFixed(2)) : 0;
+    // Return last 60 1-min bars for the mini chart
+    const chartBars  = (intradayBars || []).slice(-60).map(b => ({ t: b.t, c: b.c, o: b.o }));
+    res.json({
+      price:          quote ? parseFloat(quote.toFixed(2)) : null,
+      prevClose:      prevClose ? parseFloat(prevClose.toFixed(2)) : null,
+      dayChange,
+      dayChangeDollar,
+      vix:            state.vix || null,
+      chartBars,
+      updatedAt:      new Date().toISOString(),
+    });
+  } catch(e) {
+    res.json({ error: e.message });
+  }
 });
 
 // Test options chain endpoint — verify Pro data access
