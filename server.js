@@ -34,6 +34,8 @@ function getCached(key, ttl = SLOW_CACHE_TTL) {
 function setCache(key, data) { _slowCache.set(key, { data, ts: Date.now() }); return data; }
 const GMAIL_USER        = process.env.GMAIL_USER        || "";
 const RESEND_API_KEY    = process.env.RESEND_API_KEY    || "";
+const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY || "";
+const ANTHROPIC_MODEL   = "claude-sonnet-4-5";  // Best quality/cost for financial reasoning
 const STATE_FILE        = path.join(__dirname, "state.json");
 const REDIS_URL         = process.env.UPSTASH_REDIS_REST_URL  || "";
 const REDIS_TOKEN       = process.env.UPSTASH_REDIS_REST_TOKEN || "";
@@ -2055,6 +2057,107 @@ const SECTOR_MACRO_IMPACT = {
 // ── Marketaux news fetch ──────────────────────────────────────────────────
 // Returns top financial headlines from credible sources
 // Requires MARKETAUX_KEY env var — gracefully skips if not set
+// ── Claude Agent Helper ──────────────────────────────────────────────────
+// Single reusable function for all Claude API calls in APEX
+// Falls back gracefully if key not set or call fails
+// Agent tools definition — passed to Claude API for tool use
+const AGENT_TOOLS = [
+  {
+    name: "getQuote",
+    description: "Get current live price and day change % for a stock ticker",
+    input_schema: { type: "object", properties: { ticker: { type: "string", description: "Stock ticker symbol e.g. AAPL" } }, required: ["ticker"] }
+  },
+  {
+    name: "getLiveSignals",
+    description: "Get live technical signals for a stock: RSI, momentum, VWAP",
+    input_schema: { type: "object", properties: { ticker: { type: "string" } }, required: ["ticker"] }
+  },
+  {
+    name: "getPositionStatus",
+    description: "Get full status of an open position including P&L, DTE, Greeks, entry reasons",
+    input_schema: { type: "object", properties: { ticker: { type: "string" } }, required: ["ticker"] }
+  },
+  {
+    name: "getMarketStatus",
+    description: "Get overall market status: SPY price/change, VIX, breadth, PDT remaining, cash",
+    input_schema: { type: "object", properties: {} }
+  }
+];
+
+async function callClaudeAgent(systemPrompt, userPrompt, maxTokens = 800, useTools = false) {
+  if (!ANTHROPIC_API_KEY) return null;
+  try {
+    const messages = [{ role: "user", content: userPrompt }];
+    const body = {
+      model:      ANTHROPIC_MODEL,
+      max_tokens: maxTokens,
+      system:     systemPrompt,
+      messages,
+    };
+    if (useTools) body.tools = AGENT_TOOLS;
+
+    const res = await withTimeout(fetch("https://api.anthropic.com/v1/messages", {
+      method:  "POST",
+      headers: {
+        "x-api-key":         ANTHROPIC_API_KEY,
+        "anthropic-version": "2023-06-01",
+        "content-type":      "application/json",
+      },
+      body: JSON.stringify(body),
+    }), 20000);
+
+    if (!res.ok) {
+      const err = await res.text();
+      console.log("[AGENT] API error:", err.slice(0, 150));
+      return null;
+    }
+
+    const data = await res.json();
+
+    // Handle tool use — agent wants to fetch live data
+    if (useTools && data.stop_reason === "tool_use") {
+      const toolCalls  = data.content.filter(b => b.type === "tool_use");
+      const toolResults= await dispatchAgentTools(toolCalls);
+
+      // Continue conversation with tool results
+      const followMessages = [
+        { role: "user",      content: userPrompt },
+        { role: "assistant", content: data.content },
+        {
+          role: "user",
+          content: toolCalls.map(tc => ({
+            type:        "tool_result",
+            tool_use_id: tc.id,
+            content:     JSON.stringify(toolResults[tc.name + (tc.input.ticker ? '_' + tc.input.ticker : '')] || toolResults[tc.name] || {}),
+          }))
+        }
+      ];
+
+      const followRes = await withTimeout(fetch("https://api.anthropic.com/v1/messages", {
+        method:  "POST",
+        headers: {
+          "x-api-key":         ANTHROPIC_API_KEY,
+          "anthropic-version": "2023-06-01",
+          "content-type":      "application/json",
+        },
+        body: JSON.stringify({ model: ANTHROPIC_MODEL, max_tokens: maxTokens, system: systemPrompt, messages: followMessages }),
+      }), 20000);
+
+      if (!followRes.ok) return null;
+      const followData = await followRes.json();
+      const text = followData.content?.find(b => b.type === "text")?.text || "";
+      return text.replace(/^```json\s*/i, "").replace(/\s*```$/i, "").trim();
+    }
+
+    // Normal text response
+    const text = data.content?.find(b => b.type === "text")?.text || "";
+    return text.replace(/^```json\s*/i, "").replace(/\s*```$/i, "").trim();
+  } catch(e) {
+    console.log("[AGENT] Call failed:", e.message);
+    return null;
+  }
+}
+
 // Marketaux cache — only fetch every 30 minutes to stay within free tier (100/day)
 let _marketauxCache = { data: [], fetchedAt: 0 };
 const MARKETAUX_CACHE_MS = 60 * 60 * 1000; // 60 minutes — stays well under free tier 100/day limit
@@ -2087,6 +2190,240 @@ async function getMarketauxNews() {
   } catch(e) {
     console.log("[MARKETAUX] Fetch error:", e.message);
     return _marketauxCache.data; // return stale on error
+  }
+}
+
+// ── Agent-powered macro analysis ─────────────────────────────────────────
+// Replaces keyword matching with genuine language understanding
+// Falls back to keyword system if agent unavailable
+let _agentMacroCache = { result: null, fetchedAt: 0 };
+const AGENT_MACRO_CACHE_MS = 5 * 60 * 1000; // 5 minutes — matches scan tier
+
+async function getAgentMacroAnalysis(headlines) {
+  if (!ANTHROPIC_API_KEY || !headlines || headlines.length === 0) return null;
+  // Return cached result if fresh
+  if (_agentMacroCache.result && Date.now() - _agentMacroCache.fetchedAt < AGENT_MACRO_CACHE_MS) {
+    return _agentMacroCache.result;
+  }
+  const systemPrompt = `You are a professional options trader's macro analyst. You read financial news headlines and assess their impact on US equity markets and options positioning.
+
+Your job: analyze the provided headlines and return a JSON object with your assessment.
+
+Respond ONLY with valid JSON, no other text. Format:
+{
+  "signal": "strongly bearish" | "bearish" | "mild bearish" | "neutral" | "mild bullish" | "bullish" | "strongly bullish",
+  "confidence": "high" | "medium" | "low",
+  "modifier": number between -20 and +15,
+  "mode": "defensive" | "cautious" | "normal" | "aggressive",
+  "reasoning": "1-2 sentence plain English explanation",
+  "affectedTickers": ["array of ticker symbols directly mentioned or clearly affected"],
+  "bearishTickers": ["tickers where puts are favored right now"],
+  "bullishTickers": ["tickers where calls are favored right now"],
+  "keyThemes": ["array of 2-4 key macro themes e.g. tariffs, Fed, earnings"],
+  "topStories": [
+    {"headline": "...", "source": "...", "direction": "bearish"|"bullish"|"neutral", "importance": "high"|"medium"|"low"}
+  ]
+}
+
+Guidelines:
+- modifier -20 = strongly bearish (major crash risk), +15 = strongly bullish (major rally catalyst)
+- "defensive" mode = only put entries, no calls; "aggressive" = both, prefer calls
+- Focus on what MATTERS for options traders in the next 4 hours, not long-term
+- Distinguish between stock-specific news and broad macro news
+- If headlines are stale (>6 hours old) or irrelevant, return neutral with low confidence`;
+
+  const userPrompt = `Current market context:
+- VIX: ${state.vix || 20}
+- Time: ${new Date().toLocaleTimeString('en-US', {timeZone:'America/New_York'})} ET
+- Open positions: ${(state.positions||[]).map(p => p.ticker).join(', ') || 'none'}
+
+Headlines to analyze (newest first):
+${headlines.slice(0, 15).map((h, i) => (i+1) + '. ' + h).join('\n')}
+
+Analyze these headlines and return your JSON assessment.`;
+
+  const raw = await callClaudeAgent(systemPrompt, userPrompt, 1200, true); // useTools=true
+  if (!raw) return null;
+  try {
+    const parsed = JSON.parse(raw);
+    // Validate required fields
+    if (!parsed.signal || parsed.modifier === undefined) return null;
+    _agentMacroCache = { result: parsed, fetchedAt: Date.now() };
+    logEvent("macro", `[AGENT] Macro: ${parsed.signal} (${parsed.confidence}) | ${parsed.reasoning?.slice(0,80)}`);
+    return parsed;
+  } catch(e) {
+    console.log("[AGENT] Failed to parse macro response:", raw.slice(0,100));
+    return null;
+  }
+}
+
+// ── Live rescore agent ────────────────────────────────────────────────────
+// Rescores an open position against current conditions
+// Returns { score, label, reasoning, recommendation }
+async function getAgentRescore(pos) {
+  if (!ANTHROPIC_API_KEY) return null;
+  const systemPrompt = `You are a professional options trader reviewing an open position. Assess whether the original entry thesis still holds given current conditions.
+
+Respond ONLY with valid JSON:
+{
+  "score": number 0-95,
+  "label": "STRONG" | "VALID" | "WEAK" | "DEGRADED" | "INVALID",
+  "reasoning": "1 sentence explanation",
+  "recommendation": "HOLD" | "WATCH" | "EXIT"
+}
+
+Score meaning: 85+ = thesis fully intact, 70-84 = mostly valid, 50-69 = weakening, <50 = thesis broken`;
+
+  const daysOpen   = ((Date.now() - new Date(pos.openDate).getTime()) / 86400000).toFixed(1);
+  const chgPct     = pos.currentPrice && pos.premium
+    ? ((pos.currentPrice - pos.premium) / pos.premium * 100).toFixed(1) : '0';
+  const userPrompt = `Position to rescore:
+- ${pos.ticker} ${pos.optionType.toUpperCase()} $${pos.strike} exp ${pos.expDate}
+- Entry: $${pos.premium} | Current: $${pos.currentPrice || pos.premium} | P&L: ${chgPct}%
+- Opened: ${daysOpen} days ago | DTE remaining: ${Math.max(0, Math.round((new Date(pos.expDate)-new Date())/86400000))}d
+- Entry score: ${pos.score}/100 | Entry reasons: ${(pos.reasons||[]).slice(0,4).join('; ')}
+- Stock price: $${pos.price || '--'} | RSI at entry: ${pos.entryRSI || '--'}
+- Current VIX: ${state.vix} | Macro signal: ${(state._agentMacro || {}).signal || 'neutral'}
+
+Does the put thesis still hold? Score and recommend.`;
+
+  const raw = await callClaudeAgent(systemPrompt, userPrompt, 600, true); // useTools=true
+  if (!raw) return null;
+  try {
+    return JSON.parse(raw);
+  } catch(e) { return null; }
+}
+
+// ── Agent Tool Functions ─────────────────────────────────────────────────
+// These are called by the agent mid-reasoning to fetch live data from Alpaca
+
+// Tool 1: Live quote + pre-market
+async function agentTool_getQuote(ticker) {
+  try {
+    const quote    = await getStockQuote(ticker);
+    const bars     = await getStockBars(ticker, 2);
+    const prevClose= bars.length >= 2 ? bars[bars.length-2].c : null;
+    const dayChg   = quote && prevClose ? ((quote - prevClose) / prevClose * 100).toFixed(2) : null;
+    return { ticker, price: quote, dayChangePct: dayChg, prevClose };
+  } catch(e) { return { ticker, error: e.message }; }
+}
+
+// Tool 2: Live RSI + MACD + momentum from fresh bars
+async function agentTool_getLiveSignals(ticker) {
+  try {
+    const bars = await getStockBars(ticker, 30);
+    if (!bars || bars.length < 14) return { ticker, error: "insufficient data" };
+    const rsi  = calcRSI(bars);
+    const intraday = await getIntradayBars(ticker, 78);
+    const vwap = intraday && intraday.length > 0
+      ? intraday.reduce((s,b) => s + b.c, 0) / intraday.length : null;
+    const price = bars[bars.length-1].c;
+    const momentum = bars.length >= 5
+      ? (price > bars[bars.length-5].c * 1.02 ? "strong"
+        : price < bars[bars.length-5].c * 0.98 ? "recovering" : "steady")
+      : "steady";
+    return { ticker, rsi: parseFloat(rsi.toFixed(1)), momentum, vwap: vwap ? parseFloat(vwap.toFixed(2)) : null, price: parseFloat(price.toFixed(2)) };
+  } catch(e) { return { ticker, error: e.message }; }
+}
+
+// Tool 3: Full position status
+async function agentTool_getPositionStatus(ticker) {
+  const pos = (state.positions || []).find(p => p.ticker === ticker);
+  if (!pos) return { ticker, error: "not in portfolio" };
+  const chgPct = pos.currentPrice && pos.premium
+    ? ((pos.currentPrice - pos.premium) / pos.premium * 100).toFixed(1) : "0";
+  const dteLeft = pos.expDate
+    ? Math.max(0, Math.round((new Date(pos.expDate) - new Date()) / 86400000)) : null;
+  const daysOpen = ((Date.now() - new Date(pos.openDate).getTime()) / 86400000).toFixed(1);
+  return {
+    ticker, optionType: pos.optionType, strike: pos.strike, expDate: pos.expDate,
+    entryPrice: pos.premium, currentPrice: pos.currentPrice || pos.premium,
+    pnlPct: parseFloat(chgPct), pnlDollar: parseFloat(((pos.currentPrice||pos.premium) - pos.premium) * 100).toFixed(0),
+    dteLeft, daysOpen: parseFloat(daysOpen),
+    entryScore: pos.score, entryRSI: pos.entryRSI,
+    delta: pos.greeks?.delta, theta: pos.greeks?.theta,
+    partialClosed: pos.partialClosed,
+    entryReasons: (pos.reasons || []).slice(0, 4),
+  };
+}
+
+// Tool 4: SPY + market breadth
+async function agentTool_getMarketStatus() {
+  try {
+    const spyQuote = await getStockQuote("SPY");
+    const spyBars  = await getStockBars("SPY", 5);
+    const prevClose= spyBars.length >= 2 ? spyBars[spyBars.length-2].c : null;
+    const dayChg   = spyQuote && prevClose ? ((spyQuote - prevClose) / prevClose * 100).toFixed(2) : null;
+    return {
+      spy: { price: spyQuote, dayChangePct: dayChg },
+      vix: state.vix,
+      breadth: state._breadth || null,
+      fearGreed: marketContext.fearGreed?.score || null,
+      pdtRemaining: Math.max(0, 3 - countRecentDayTrades()),
+      cash: parseFloat((state.cash||0).toFixed(2)),
+      openPositions: (state.positions||[]).length,
+    };
+  } catch(e) { return { error: e.message }; }
+}
+
+// Dispatch tool calls from agent response
+async function dispatchAgentTools(toolCalls) {
+  const results = {};
+  for (const call of toolCalls) {
+    try {
+      if (call.name === "getQuote")          results[call.name + '_' + call.input.ticker] = await agentTool_getQuote(call.input.ticker);
+      else if (call.name === "getLiveSignals")   results[call.name + '_' + call.input.ticker] = await agentTool_getLiveSignals(call.input.ticker);
+      else if (call.name === "getPositionStatus") results[call.name + '_' + call.input.ticker] = await agentTool_getPositionStatus(call.input.ticker);
+      else if (call.name === "getMarketStatus")   results["getMarketStatus"] = await agentTool_getMarketStatus();
+    } catch(e) { results[call.name] = { error: e.message }; }
+  }
+  return results;
+}
+
+// ── Agent morning briefing writer ────────────────────────────────────────
+// Called at 8:45am ET — writes the analyst narrative for the morning email
+async function getAgentMorningBriefing(positions, macro, headlines) {
+  if (!ANTHROPIC_API_KEY) return null;
+
+  const systemPrompt = `You are the head of a proprietary options trading desk writing a morning briefing for a solo trader.
+Write in the style of a senior analyst — direct, confident, actionable.
+No fluff, no disclaimers, no "please note". Just what matters.
+
+You have tools to fetch live market data — use them to get current prices and signals before writing.
+
+Your briefing has three parts:
+1. MARKET OPEN (2-3 sentences): What is the macro setup going into today's open? VIX, SPY direction, key themes.
+2. POSITION REVIEW (1 sentence per position): For each open position, check its current status and say whether to hold, watch, or exit and why.
+3. OPPORTUNITIES (1-2 sentences): Any mean reversion call opportunities forming? Any positions approaching targets?
+
+Keep the entire briefing under 200 words. Be specific with numbers.`;
+
+  const positionList = positions.map(p =>
+    p.ticker + ' ' + p.optionType.toUpperCase() + ' $' + p.strike +
+    ' | Entry $' + p.premium + ' | DTE ' + (p.expDate ? Math.max(0,Math.round((new Date(p.expDate)-new Date())/86400000)) : '?') + 'd'
+  ).join('\n');
+
+  const userPrompt = `Today is ${new Date().toLocaleDateString('en-US',{weekday:'long',month:'long',day:'numeric'})}.
+
+Current macro signal: ${macro.signal || 'neutral'} ${macro.agentReasoning ? '— ' + macro.agentReasoning : ''}
+VIX: ${state.vix} | Cash: $${(state.cash||0).toFixed(0)} | PDT remaining: ${Math.max(0,3-countRecentDayTrades())}/3
+
+Open positions:
+${positionList || 'None'}
+
+Key headlines overnight:
+${headlines.slice(0,5).join('\n')}
+
+Use your tools to check current prices and signals for each position, then write the morning briefing.`;
+
+  try {
+    const raw = await callClaudeAgent(systemPrompt, userPrompt, 1500, true);
+    if (!raw) return null;
+    // Return as plain text — not JSON
+    return raw;
+  } catch(e) {
+    console.log("[AGENT] Morning briefing error:", e.message);
+    return null;
   }
 }
 
@@ -2225,6 +2562,54 @@ async function getMacroNews() {
       logEvent("macro", `Macro: ${signal} | ${sourceCount} | triggers: ${uniqueTriggers.join(", ")} | modifier: ${scoreModifier > 0 ? "+" : ""}${scoreModifier}`);
     }
 
+    // ── Agent enhancement — replace keyword scoring with Claude analysis ───
+    // If agent available, use it. Keep keyword results as fallback data.
+    if (ANTHROPIC_API_KEY && headlines.length > 0) {
+      try {
+        const agentResult = await getAgentMacroAnalysis(headlines);
+        if (agentResult) {
+          // Store for rescore use
+          state._agentMacro = agentResult;
+          // Map agent result to expected format
+          const agentModeMap = {
+            "strongly bearish": { modifier: -20, mode: "defensive" },
+            "bearish":          { modifier: -10, mode: "cautious"  },
+            "mild bearish":     { modifier: -5,  mode: "cautious"  },
+            "neutral":          { modifier: 0,   mode: "normal"    },
+            "mild bullish":     { modifier: 4,   mode: "normal"    },
+            "bullish":          { modifier: 8,   mode: "normal"    },
+            "strongly bullish": { modifier: 15,  mode: "aggressive"},
+          };
+          const mapped = agentModeMap[agentResult.signal] || { modifier: 0, mode: "normal" };
+          return {
+            signal:       agentResult.signal,
+            scoreModifier:mapped.modifier,
+            mode:         agentResult.mode || mapped.mode,
+            triggers:     agentResult.keyThemes || [],
+            topStories:   (agentResult.topStories || []).slice(0, 5).map(s => ({
+              headline:    s.headline,
+              source:      s.source || "agent",
+              direction:   s.direction || "neutral",
+              score:       s.importance === "high" ? 10 : s.importance === "medium" ? 5 : 2,
+              recencyMult: 2.0,
+            })),
+            sectorBearish: [...sectorImpact.bearish],
+            sectorBullish: [...sectorImpact.bullish],
+            headlines:     headlines.slice(0, 15),
+            agentReasoning: agentResult.reasoning || "",
+            agentConfidence: agentResult.confidence || "medium",
+            bearishTickers: agentResult.bearishTickers || [],
+            bullishTickers: agentResult.bullishTickers || [],
+            sourceCount:   sourceCount + " + Claude",
+            updatedAt:     new Date().toISOString(),
+          };
+        }
+      } catch(agentErr) {
+        logEvent("warn", `[AGENT] Macro analysis failed, using keywords: ${agentErr.message}`);
+      }
+    }
+
+    // Keyword fallback
     return {
       signal, scoreModifier, mode,
       bearishScore: parseFloat(totalBearish.toFixed(1)),
@@ -5111,6 +5496,17 @@ async function sendMorningBriefing() {
     const dateStr   = today.toLocaleDateString('en-US', { weekday:'long', month:'long', day:'numeric', year:'numeric' });
     const macroSignal = (macro.signal || 'neutral').toUpperCase();
 
+    // ── Agent narrative briefing ─────────────────────────────────────────
+    let agentNarrative = null;
+    if (ANTHROPIC_API_KEY) {
+      try {
+        agentNarrative = await getAgentMorningBriefing(positions, macro, macro.headlines || []);
+        logEvent("scan", "[AGENT] Morning briefing written by Claude");
+      } catch(e) {
+        console.log("[AGENT] Morning briefing failed:", e.message);
+      }
+    }
+
     // ── Divider helper ───────────────────────────────────────────────────
     const divider = '<div style="border-top:1px solid #333;margin:14px 0"></div>';
     const sectionHead = (title) =>
@@ -5300,6 +5696,7 @@ async function sendMorningBriefing() {
       <div style="font-family:Georgia,serif;background:#ffffff;color:#111;padding:24px;max-width:620px;border:1px solid #ccc">
         ${header}
         ${divider}
+        ${agentNarrative ? sectionHead('ANALYST BRIEFING — APEX INTELLIGENCE') + '<div style="font-family:Georgia,serif;font-size:13px;color:#111;line-height:1.7;white-space:pre-wrap;padding:8px 0">' + agentNarrative + '</div>' + divider : ''}
         ${sectionHead('Open Positions — ' + positions.length + ' active')}
         ${posTable}
         ${triggersHTML}
@@ -5909,6 +6306,7 @@ app.get("/api/state", async (req, res) => {
     pdtLimit:           PDT_LIMIT,
     pdtBlocked:         countRecentDayTrades() >= PDT_LIMIT,
     exitStats:          state.exitStats || {},
+    agentMacro:         state._agentMacro || null,
     portfolioSnapshots: state.portfolioSnapshots || [],
     reconcileStatus:    state.reconcileStatus || "unknown",
     orphanCount:        state.orphanCount || 0,
@@ -6057,6 +6455,23 @@ app.post("/api/emergency-close", async (req, res) => {
   try { await saveStateNow(); } catch(e) { logEvent("error", `Post-emergency save failed: ${e.message}`); }
 
   res.json({ ok: true, closed, failed, total: count });
+});
+
+// ── Live position rescore endpoint ───────────────────────────────────────
+// Called by dashboard to get agent-powered live rescore for each position
+app.get("/api/rescore/:ticker", async (req, res) => {
+  const pos = (state.positions || []).find(p => p.ticker === req.params.ticker);
+  if (!pos) return res.json({ error: "Position not found" });
+  if (!ANTHROPIC_API_KEY) return res.json({ error: "Agent not configured" });
+  try {
+    const result = await getAgentRescore(pos);
+    if (!result) return res.json({ error: "Agent unavailable" });
+    // Cache on position object so dashboard can show without re-fetching
+    pos._liveRescore = { ...result, updatedAt: new Date().toISOString() };
+    res.json(pos._liveRescore);
+  } catch(e) {
+    res.json({ error: e.message });
+  }
 });
 
 // ── SPY live data endpoint ────────────────────────────────────────────────
@@ -7185,6 +7600,7 @@ initState().then(() => {
     console.log(`Gmail:       ${GMAIL_USER||"NOT SET"}`);
     console.log(`Resend:      ${RESEND_API_KEY?"SET ✅":"NOT SET — email disabled"}`);
     console.log(`Marketaux:   ${process.env.MARKETAUX_KEY?"SET ✅":"NOT SET — add key for credible source news"}`);
+    console.log(`Claude Agent:${ANTHROPIC_API_KEY?"SET ✅ — AI macro analysis + rescore enabled":"NOT SET — using keyword fallback"}`);
     console.log(`Redis:       ${REDIS_URL?"SET":"NOT SET - using file fallback"}`);
     console.log(`Budget:      $${state.cash} | Floor: $${CAPITAL_FLOOR}`);
     console.log(`Positions:   ${state.positions.length} open`);
