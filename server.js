@@ -842,28 +842,10 @@ function isEntryWindow(optionType = null) {
 
   const minsSinceMidnight = h * 60 + m;
   const marketClose       = 15 * 60 + 30; // 3:30 PM
+  const entryStart        = 9 * 60 + 45;  // 9:45 AM — both calls and puts
 
-  // Puts can enter from 9:45 AM when conditions warrant (gap down, high VIX, sector weakness)
-  const putEarlyStart     = 9 * 60 + 45;  // 9:45 AM
-  const callStart         = 10 * 60;       // 10:00 AM
-
-  if (minsSinceMidnight > marketClose) return false; // after 3:30 PM always false
-
-  if (optionType === "put") {
-    // Allow puts from 9:45 AM but only when market shows weakness
-    const isEarlyWindow  = minsSinceMidnight >= putEarlyStart && minsSinceMidnight < callStart;
-    if (isEarlyWindow) {
-      const vix        = state.vix || 15;
-      const macro      = marketContext?.macroCalendar?.modifier || 0;
-      // Only allow early puts when VIX elevated OR macro event day
-      // Spread check happens at contract selection — MAX_SPREAD_PCT tightened to 8% for early window
-      return vix >= 25 || macro < 0;
-    }
-    return minsSinceMidnight >= callStart;
-  }
-
-  // Calls always wait for 10 AM
-  return minsSinceMidnight >= callStart;
+  if (minsSinceMidnight > marketClose) return false;
+  return minsSinceMidnight >= entryStart;
 }
 
 function isDST(date) {
@@ -1834,20 +1816,21 @@ function getDrawdownProtocol() {
   const peak      = state.peakCash || MONTHLY_BUDGET;
   const current   = state.cash + (state.positions || []).reduce((s, p) => s + p.cost, 0);
   const drawdown  = (current - peak) / peak * 100;
-  const losses    = state.consecutiveLosses || 0;
 
-  // Only trigger drawdown protocol if we have actual trade history
-  // Prevents false triggers on fresh accounts or after restarts
-  if (trades.length < 3 && losses === 0) {
+  // Only trigger if we have actual trade history
+  if (trades.length < 3) {
     return { level: "normal", sizeMultiplier: 1.0, message: "Normal operations.", minScore: MIN_SCORE };
   }
 
-  if (drawdown <= -20 || losses >= 5) {
-    return { level: "critical", sizeMultiplier: 0.25, message: "CRITICAL - 25% position sizing. Calls only on A+ setups (85+).", minScore: 85 };
-  } else if (drawdown <= -15 || losses >= 4) {
-    return { level: "severe",   sizeMultiplier: 0.50, message: "SEVERE - 50% position sizing. Score threshold raised to 80.", minScore: 80 };
-  } else if (drawdown <= -10 || losses >= 3) {
-    return { level: "caution",  sizeMultiplier: 0.75, message: "CAUTION - 75% position sizing. Score threshold raised to 75.", minScore: 75 };
+  // Keep size reduction only — minScore always stays at MIN_SCORE
+  // Score quality is now handled by agent confidence and scoring system
+  // Raising the score bar after a loss day was preventing recovery entries
+  if (drawdown <= -20) {
+    return { level: "critical", sizeMultiplier: 0.25, message: "CRITICAL drawdown — 25% position sizing.", minScore: MIN_SCORE };
+  } else if (drawdown <= -15) {
+    return { level: "severe",   sizeMultiplier: 0.50, message: "SEVERE drawdown — 50% position sizing.", minScore: MIN_SCORE };
+  } else if (drawdown <= -10) {
+    return { level: "caution",  sizeMultiplier: 0.75, message: "CAUTION drawdown — 75% position sizing.", minScore: MIN_SCORE };
   }
   return { level: "normal", sizeMultiplier: 1.0, message: "Normal operations.", minScore: MIN_SCORE };
 }
@@ -3163,8 +3146,7 @@ async function checkAllFilters(stock, price) {
   if (state.cash <= CAPITAL_FLOOR) return { pass:false, reason:`Cash at capital floor (${fmt(CAPITAL_FLOOR)})` };
 
 
-  // 5. Consecutive losses
-  if (state.consecutiveLosses >= CONSEC_LOSS_LIMIT) return { pass:false, reason:`${CONSEC_LOSS_LIMIT} consecutive losses - paused for day` };
+  // 5. Consecutive losses — REMOVED: agent handles thesis quality, not a counter
 
   // 6. Same-ticker limit — allow up to 2 positions per ticker (entry + roll)
   const existingPositions = state.positions.filter(p => p.ticker === stock.ticker);
@@ -4913,21 +4895,9 @@ async function runScan() {
     }
     return false;
   })();
-  if (spyRecovering) logEvent("filter", `SPY recovery detected — puts blocked`);
-
-  // ── F17: Benchmark-adjusted entry threshold ────────────────────────────
-  // If SPY already down 1.5%+ today, the easy money on puts may be gone
-  // Require higher conviction (score 85+) to enter puts when market already sold off
-  const spyAlreadyDown = spyBars.length >= 2 &&
-    (spyBars[spyBars.length-1].c - spyBars[spyBars.length-2].c) / spyBars[spyBars.length-2].c < -0.015;
-  if (spyAlreadyDown && !dryRunMode) {
-    logEvent("filter", `SPY already down 1.5%+ today — raising put threshold to 85 (move may be priced in)`);
-  }
-
-  // ── OPENING VOLATILITY BLOCK — no new entries in first 15 min ──────────
-  const etMinSinceOpen = (scanET.getHours() - 9) * 60 + scanET.getMinutes() - 30;
-  const openingBlock   = etMinSinceOpen >= 0 && etMinSinceOpen < 15 && !dryRunMode;
-  if (openingBlock) logEvent("filter", `Opening volatility block (${etMinSinceOpen}min since open) — entries paused until 9:45am`);
+  // SPY recovery: agent macro handles this — spyRecovering no longer blocks puts
+  // spyAlreadyDown: removed — agent scores this into individual stock signals already
+  const spyAlreadyDown = false; // disabled — agent macro signal replaces this
 
   // ── FINAL HOUR BLOCK — no new entries after 3pm (PDT protection) ─────
   const etHourEntry    = scanET.getHours() + scanET.getMinutes() / 60;
@@ -4939,8 +4909,23 @@ async function runScan() {
   const pdtBlocked    = !dryRunMode && pdtCount >= PDT_LIMIT;
   if (pdtBlocked) logEvent("filter", `PDT limit reached (${pdtCount}/${PDT_LIMIT} day trades in 5 days) — no new entries`);
 
-  const callsAllowed = (isEntryWindow("call") && !openingBlock && !finalHourBlock && !pdtBlocked) || dryRunMode;
-  const putsAllowed  = (isEntryWindow("put") && !vixFallingPause && !spyRecovering && !openingBlock && !finalHourBlock && !macroBullish && !pdtBlocked) || dryRunMode;
+  // Agent macro signal gates puts — replaces blunt SPY recovery detector
+  // puts blocked only when agent explicitly says aggressive/bullish AND SPY gap is large
+  const spyGapUp = (() => {
+    if (spyBars.length >= 2) {
+      const prevClose  = spyBars[spyBars.length-2].c;
+      const curSPY     = spyBars[spyBars.length-1].c;
+      const gapPct     = (curSPY - prevClose) / prevClose;
+      // Only block puts on a genuinely large gap-up open (1.5%+) in first 15 min
+      const etMinSince = (scanET.getHours() - 9) * 60 + scanET.getMinutes() - 30;
+      return gapPct > 0.015 && etMinSince >= 0 && etMinSince < 15;
+    }
+    return false;
+  })();
+  if (spyGapUp && !dryRunMode) logEvent("filter", `SPY gap-up open >1.5% — delaying puts 15min for price discovery`);
+
+  const callsAllowed = (isEntryWindow("call") && !finalHourBlock && !pdtBlocked) || dryRunMode;
+  const putsAllowed  = (isEntryWindow("put") && !vixFallingPause && !spyGapUp && !finalHourBlock && !macroBullish && !pdtBlocked) || dryRunMode;
   if (macroBullish && !dryRunMode) logEvent("filter", `Macro bullish (${marketContext.macro?.signal}) — puts blocked`);
   if (vixFallingPause && !dryRunMode) logEvent("filter", "VIX falling — put entries paused this scan");
 
@@ -4973,7 +4958,7 @@ async function runScan() {
 
   // [opening/final hour blocks moved above callsAllowed]
   if (state.circuitOpen === false || state.weeklyCircuitOpen === false) return;
-  if (state.consecutiveLosses >= CONSEC_LOSS_LIMIT) return;
+  // consecutive loss gate removed — agent macro and score quality gates entries
   if (state.cash <= CAPITAL_FLOOR) return;
 
   // ── PORTFOLIO GREEKS LIMITS ────────────────────────────────────────────
@@ -5501,14 +5486,14 @@ async function runScan() {
     }
     const bestReasons = optionType === "put" ? putSetup.reasons : callSetup.reasons;
 
-    // After 1PM ET, afternoon session is noisier — require higher conviction
+    // Effective min score — agent macro and scoring system handle quality
+    // Removed: afternoonMinScore (was raising bar to 85 after 1pm)
+    // Removed: benchmarkMinScore (was raising bar when SPY already down)
+    // Both were preventing good entries at exactly the wrong times
     const etHourNow = scanET.getHours() + scanET.getMinutes() / 60;
-    const afternoonMinScore = etHourNow >= 13 ? 85 : 0;
-    const benchmarkMinScore = spyAlreadyDown && optionType === "put" ? 85 : 0;
-    // F9: Use regime profile min score
     const regimeProfile    = getRegimeProfile(marketContext.regime?.regime || "neutral");
     const regimeMinScore   = regimeProfile.minScore;
-    const effectiveMinScore = Math.max(ddProtocol.minScore || MIN_SCORE, afternoonMinScore, benchmarkMinScore, regimeMinScore);
+    const effectiveMinScore = Math.max(ddProtocol.minScore || MIN_SCORE, regimeMinScore);
 
     // Position limit removed — rely on heat % and correlation blocks
     if (bestScore < effectiveMinScore) {
