@@ -3789,6 +3789,12 @@ async function executeSpreadTrade(stock, price, score, scoreReasons, vix, option
   let buyOrderId  = null;
   let sellOrderId = null;
 
+  // ── DRY RUN — log what would happen, don't submit orders ─────────────
+  if (dryRunMode) {
+    logEvent("dryrun", `WOULD BUY SPREAD ${stock.ticker} $${buyContract.strike}/${sellContract.strike} ${optionType.toUpperCase()} exp ${buyContract.expDate} | net debit $${netDebit} | max profit $${maxProfit} | max loss $${maxLoss} | cost $${finalCost} | score ${score}`);
+    return null;
+  }
+
   if (buyContract.symbol && sellContract.symbol && !dryRunMode) {
     try {
       // Submit buy leg
@@ -4767,9 +4773,9 @@ async function runScan() {
   // -- MEDIUM TIER (every 5 minutes) --
   if (now - lastMedScan > 5 * 60 * 1000) { // 5-minute tier
     lastMedScan = now;
-    const [breadth, rotation] = await Promise.all([getMarketBreadth(), getSectorRotation()]);
+    const breadth = await getMarketBreadth();
     marketContext.breadth        = breadth;
-    marketContext.sectorRotation = rotation;
+    // sectorRotation removed — SPY/QQQ index trading doesn't need sector rotation
     // Rebalance BIL ETF
     await rebalanceCashETF();
     state.lastRebalance = now;
@@ -4781,14 +4787,12 @@ async function runScan() {
       logEvent("macro", `Calendar: ${calMod.message || calMod.events.map(e => e.event + " in " + e.daysTo + "d").join(", ")}`);
     }
     // Run async market context calls in parallel
-    const [regime, benchmark, globalMarket] = await Promise.all([
+    const [regime, benchmark] = await Promise.all([
       detectMarketRegime(),
       getBenchmarkComparison(),
-      getGlobalMarketSignal(),
     ]);
     marketContext.regime      = regime;
     marketContext.benchmark   = benchmark;
-    marketContext.globalMarket= globalMarket;
 
     // Synchronous calculations (no API calls)
     // Portfolio Greeks — track total delta/theta/vega/gamma across all positions
@@ -4818,7 +4822,7 @@ async function runScan() {
     marketContext.concentration    = checkConcentrationRisk();
     marketContext.drawdownProtocol = getDrawdownProtocol();
     marketContext.stressTest       = runStressTest();
-    marketContext.monteCarlo       = runMonteCarlo(500);
+    // marketContext.monteCarlo removed — SPY/QQQ strategy doesn't use Monte Carlo
     marketContext.kelly            = calcKellySize(20);
     marketContext.relativeValue    = getRelativeValueScreening();
     marketContext.streaks          = getStreakAnalysis();
@@ -4833,9 +4837,7 @@ async function runScan() {
     // These need to run after context is updated
     await Promise.all([checkTailRiskHedge(), checkScaleIns()]);
 
-    // Check earnings plays
-    await checkEarningsPlays();
-    await manageEarningsPlayExits();
+    // Earnings plays removed — SPY/QQQ don't have earnings dates
 
     // Macro news on 5-min tier — catches breaking news within 5 minutes not 15
     const macro = await getMacroNews();
@@ -4913,8 +4915,7 @@ async function runScan() {
     logEvent("scan", `[1hr] Earnings: ${updated} updated, ${cleared} stale dates cleared`);
   }
 
-  // Manage stock positions
-  await manageStockPositions();
+  // Individual stock positions disabled — SPY/QQQ only
 
   // 1. Manage existing options positions
   // Prefetch news for all open positions in parallel — avoids per-position fetches inside loop
@@ -5782,7 +5783,9 @@ async function runScan() {
         if (state.positions.some(p => p.ticker === "SPY" && p.optionType === "call")) callSetup.score = Math.min(callSetup.score, 30);
       }
     } else {
-      callSetup = scoreSetup(liveStock, relStrength, signals.adx, todayVol, avgVol);
+      // Individual stocks: use scorePutSetup/scoreCallSetup
+      // scoreSetup removed — scoreIndexSetup handles SPY/QQQ, scorePutSetup handles individual stocks
+      callSetup = { score: 0, reasons: ["Individual stocks disabled"], tradeType: "none" };
       putSetup  = scorePutSetup(liveStock, relStrength, signals.adx, todayVol, avgVol, state.vix);
     }
 
