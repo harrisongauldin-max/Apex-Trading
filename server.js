@@ -207,6 +207,9 @@ function defaultState() {
     agentAutoExitEnabled: false, // controlled by dashboard toggle
     _agentRescoreHour:   {}, // tracks last rescore hour per ticker (overnight)
     _agentRescoreMinute: {}, // tracks last rescore time per ticker (same-day)
+    _macroReversalAt:    null,  // timestamp of last macro-reversal exit batch
+    _macroReversalCount: 0,     // how many positions closed in the reversal batch
+    _macroReversalSPY:   null,  // SPY price at time of reversal — for comparison
     portfolioSnapshots: [], // time-series portfolio value: [{t, v}] sampled every 5 min
   };
 }
@@ -1026,9 +1029,12 @@ function scorePutSetup(stock, relStrength, adx, volume, avgVolume, vix = 20) {
   else                                       { score += 0;  reasons.push("Strong momentum - bad for put (+0)"); }
 
   // RSI — RAISED to 20pts (more reliable signal, especially in trending markets)
+  // RSI ≤ 35 = stock already crashed — put thesis is GONE, not a valid entry
+  // RSI 36-45 = oversold, apply meaningful penalty not a bonus
   if (stock.rsi >= 72)                       { score += 20; reasons.push(`RSI ${stock.rsi} - overbought (+20)`); }
   else if (stock.rsi >= 65 && stock.rsi < 72){ score += 12; reasons.push(`RSI ${stock.rsi} - elevated (+12)`); }
-  else if (stock.rsi <= 45)                  { score += 5;  reasons.push(`RSI ${stock.rsi} - oversold caution (+5)`); }
+  else if (stock.rsi <= 35)                  { score -= 30; reasons.push(`RSI ${stock.rsi} - stock already crashed, put thesis gone (-30)`); }
+  else if (stock.rsi <= 45)                  { score -= 10; reasons.push(`RSI ${stock.rsi} - oversold, put thesis weak (-10)`); }
   else                                       { reasons.push(`RSI ${stock.rsi} neutral for put (+0)`); }
 
   // MACD — confirms direction. Bullish MACD on a put = contradicting signal = PENALTY
@@ -1085,6 +1091,11 @@ function scorePutSetup(stock, relStrength, adx, volume, avgVolume, vix = 20) {
   // ── F6: Signal consensus gate ──────────────────────────────────────────
   // 90+ score requires at least 3 independent bullish signals
   // Prevents weak setups from hitting 100 on environmental factors alone
+  // Hard block: RSI ≤ 35 means stock already crashed — no put entry regardless of other signals
+  if (stock.rsi <= 35) {
+    return { score: Math.max(0, score), reasons }; // score will be very low due to -30 above
+  }
+
   const bullishSignals = [
     stock.rsi >= 65,
     stock.macd.includes("bearish"),
@@ -4924,8 +4935,62 @@ async function runScan() {
   })();
   if (spyGapUp && !dryRunMode) logEvent("filter", `SPY gap-up open >1.5% — delaying puts 15min for price discovery`);
 
+  // ── CONDITION-BASED POST-REVERSAL COOLDOWN ──────────────────────────────
+  // After macro-reversal closes puts, don't re-enter until conditions confirm
+  // bearish again. Prevents immediate re-entry on the same bounce.
+  // Three conditions must ALL be true before puts are allowed again:
+  //   1. Agent macro signal is bearish (mild/bearish/strongly bearish)
+  //   2. SPY has not recovered above the reversal price level
+  //   3. At least 30 minutes have elapsed since the reversal
+  let postReversalBlock = false;
+  if (state._macroReversalAt && !dryRunMode) {
+    const minsSinceReversal = (Date.now() - state._macroReversalAt) / 60000;
+    const agentSignal       = (state._agentMacro || {}).signal || "neutral";
+    const agentBearish      = ["bearish", "strongly bearish", "mild bearish"].includes(agentSignal);
+    const agentConfidence   = (state._agentMacro || {}).agentConfidence || (state._agentMacro || {}).confidence || "low";
+
+    // Condition 1: minimum 30 minutes
+    const minTimeElapsed = minsSinceReversal >= 30;
+
+    // Condition 2: agent macro must be bearish
+    const macroConfirmedBearish = agentBearish;
+
+    // Condition 3: SPY must not be above reversal level
+    const spyAboveReversal = state._macroReversalSPY && spyPrice > state._macroReversalSPY * 1.005;
+
+    // Extra gate: if large reversal (5+ positions), require high confidence
+    const largeReversal = (state._macroReversalCount || 0) >= 5;
+    const confidenceOk  = !largeReversal || agentConfidence === "high";
+
+    if (!minTimeElapsed || !macroConfirmedBearish || spyAboveReversal || !confidenceOk) {
+      postReversalBlock = true;
+      const reasons = [];
+      if (!minTimeElapsed)        reasons.push(`${minsSinceReversal.toFixed(0)}min elapsed (need 30)`);
+      if (!macroConfirmedBearish) reasons.push(`agent macro: ${agentSignal} (need bearish)`);
+      if (spyAboveReversal)       reasons.push(`SPY above reversal level $${state._macroReversalSPY?.toFixed(2)}`);
+      if (!confidenceOk)          reasons.push(`large reversal needs high confidence (have: ${agentConfidence})`);
+      logEvent("filter", `Post-reversal cooldown active — ${reasons.join(" | ")}`);
+    } else {
+      // All conditions met — clear the cooldown
+      logEvent("filter", `Post-reversal cooldown cleared — macro confirmed bearish, conditions met`);
+      state._macroReversalAt    = null;
+      state._macroReversalCount = 0;
+      state._macroReversalSPY   = null;
+      markDirty();
+    }
+  }
+
+  // ── FIX 3: Puts require agent macro to be bearish — neutral is not enough ──
+  // Macro neutral = market is uncertain = wrong time for directional put entries
+  const agentMacroSignal  = (state._agentMacro || {}).signal || "neutral";
+  const putsMacroAllowed  = ["bearish", "strongly bearish", "mild bearish", "neutral"].includes(agentMacroSignal);
+  // Note: neutral allowed but only if agent has actually run (not default)
+  // If no agent macro yet, fall back to keyword signal
+  const agentHasRun       = !!state._agentMacro;
+  const macroClearForPuts = !agentHasRun || putsMacroAllowed;
+
   const callsAllowed = (isEntryWindow("call") && !finalHourBlock && !pdtBlocked) || dryRunMode;
-  const putsAllowed  = (isEntryWindow("put") && !vixFallingPause && !spyGapUp && !finalHourBlock && !macroBullish && !pdtBlocked) || dryRunMode;
+  const putsAllowed  = (isEntryWindow("put") && !vixFallingPause && !spyGapUp && !postReversalBlock && !finalHourBlock && !macroBullish && !pdtBlocked) || dryRunMode;
   if (macroBullish && !dryRunMode) logEvent("filter", `Macro bullish (${marketContext.macro?.signal}) — puts blocked`);
   if (vixFallingPause && !dryRunMode) logEvent("filter", "VIX falling — put entries paused this scan");
 
@@ -4937,7 +5002,8 @@ async function runScan() {
     const prevClose  = spyBars[spyBars.length-2].c;
     const curSPY     = spyBars[spyBars.length-1].c;
     const spyDayMove = (curSPY - prevClose) / prevClose;
-    if (spyDayMove > 0.01) { // SPY up 1%+ = strong macro reversal
+    if (spyDayMove > 0.025) { // SPY up 2.5%+ = genuine macro reversal
+      let reversalCount = 0;
       for (const pos of [...state.positions]) {
         if (pos.optionType !== "put") continue;
         const snap = posSnapshots[pos.contractSymbol];
@@ -4947,10 +5013,19 @@ async function runScan() {
         const ask    = parseFloat(quote.ap || 0);
         const curP   = bid > 0 && ask > 0 ? (bid + ask) / 2 : pos.premium;
         const chg    = (curP - pos.premium) / pos.premium;
-        if (chg < -0.05) { // only close puts that are already losing (5%+)
+        if (chg < -0.05) {
           logEvent("scan", `${pos.ticker} SPY macro reversal +${(spyDayMove*100).toFixed(1)}% — closing losing put (${(chg*100).toFixed(0)}%)`);
           await closePosition(pos.ticker, "macro-reversal");
+          reversalCount++;
         }
+      }
+      // Record reversal event for condition-based cooldown
+      if (reversalCount > 0) {
+        state._macroReversalAt    = Date.now();
+        state._macroReversalCount = reversalCount;
+        state._macroReversalSPY   = spyBars[spyBars.length-1].c;
+        logEvent("warn", `[REVERSAL COOLDOWN] ${reversalCount} position(s) closed — put entries gated until conditions confirm bearish`);
+        markDirty();
       }
     }
   }
@@ -5451,7 +5526,12 @@ async function runScan() {
     // Apply macro modifier - boosts or suppresses all entries based on current events
     const macro       = marketContext.macro || { scoreModifier: 0, sectorBearish: [], sectorBullish: [] };
     let macroCallMod  = macro.scoreModifier || 0;
-    let macroPutMod   = -(macro.scoreModifier || 0); // puts benefit from bearish macro
+    // Puts only benefit from genuinely bearish macro — neutral is not a put signal
+    // If macro is neutral (modifier = 0), puts get 0 boost not a bonus
+    // If macro is bullish (modifier > 0), puts get penalized
+    const agentMacroForScoring = (state._agentMacro || {}).signal || "neutral";
+    const isBearishMacro = ["bearish", "strongly bearish", "mild bearish"].includes(agentMacroForScoring);
+    let macroPutMod = isBearishMacro ? Math.abs(macro.scoreModifier || 0) : -(macro.scoreModifier || 0);
 
     // Extra sector-specific adjustment
     if (macro.sectorBearish.includes(stock.sector)) { macroCallMod -= 10; macroPutMod += 10; }
@@ -6409,6 +6489,9 @@ cron.schedule("0 13 * * 1-5", async () => {
   // Prune stale state objects to keep Redis payload lean
   state._agentRescoreHour   = {}; // reset hourly tracker daily
   state._agentRescoreMinute = {}; // reset 30-min tracker daily
+  state._macroReversalAt    = null; // clear reversal cooldown daily
+  state._macroReversalCount = 0;
+  state._macroReversalSPY   = null;
   if (state._oversoldCount) {
     // Only keep tickers still in watchlist — prune closed/removed tickers
     const watchTickers = new Set(WATCHLIST.map(s => s.ticker));
