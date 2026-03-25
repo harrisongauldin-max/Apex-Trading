@@ -186,6 +186,24 @@ input[type=text]:focus{border-color:var(--blue)}
         <div id="agent-reasoning" style="font-size:12px;color:var(--text);font-style:italic">Waiting for first macro scan...</div>
       </div>
     </div>
+
+    <!-- Day Plan Row — populated from _dayPlan -->
+    <div id="day-plan-row" style="display:none;margin-bottom:8px;padding:8px;background:rgba(0,100,200,.08);border-radius:6px;border:1px solid rgba(0,100,200,.2)">
+      <div style="font-size:9px;color:var(--blue);letter-spacing:1px;margin-bottom:6px">📋 DAY PLAN</div>
+      <div style="display:flex;gap:16px;flex-wrap:wrap">
+        <div><div style="font-size:9px;color:var(--muted)">REGIME</div><div id="dp-regime" style="font-size:11px;font-weight:700;color:var(--text)">--</div></div>
+        <div><div style="font-size:9px;color:var(--muted)">ENTRY BIAS</div><div id="dp-bias" style="font-size:11px;font-weight:700;color:var(--text)">--</div></div>
+        <div><div style="font-size:9px;color:var(--muted)">TRADE TYPE</div><div id="dp-tradetype" style="font-size:11px;font-weight:700;color:var(--text)">--</div></div>
+        <div><div style="font-size:9px;color:var(--muted)">RISK LEVEL</div><div id="dp-risk" style="font-size:11px;font-weight:700;color:var(--text)">--</div></div>
+        <div id="dp-suppress-wrap" style="display:none"><div style="font-size:9px;color:var(--muted)">SUPPRESS UNTIL</div><div id="dp-suppress" style="font-size:11px;font-weight:700;color:var(--orange)">--</div></div>
+        <div id="dp-levels-wrap" style="display:none"><div style="font-size:9px;color:var(--muted)">KEY LEVELS</div><div id="dp-levels" style="font-size:11px;font-weight:700;color:var(--text)">--</div></div>
+      </div>
+      <div id="dp-catalysts-row" style="margin-top:6px;display:none">
+        <span style="font-size:9px;color:var(--muted)">CATALYSTS: </span>
+        <span id="dp-catalysts" style="font-size:10px;color:var(--gold)"></span>
+      </div>
+    </div>
+
     <div id="agent-tickers-row" style="display:none">
       <div style="font-size:9px;color:var(--muted);margin-bottom:4px">AFFECTED TICKERS</div>
       <div id="agent-bearish-tickers" style="display:inline"></div>
@@ -949,6 +967,38 @@ function renderAgentPanel() {
 
   // Sync toggle state
   updateAgentToggleUI();
+
+  // ── Day Plan display ───────────────────────────────────────────────────
+  const dp = state.dayPlan;
+  const dpRow = document.getElementById('day-plan-row');
+  if (dp && dpRow) {
+    dpRow.style.display = '';
+    const regimeColors = { trending_bear:'var(--red)', trending_bull:'var(--green)', choppy:'var(--gold)', breakdown:'#ff3333', recovery:'#44ff88', neutral:'var(--muted)' };
+    const biasColors = { puts_on_bounces:'var(--red)', calls_on_dips:'var(--green)', neutral:'var(--muted)', avoid:'var(--orange)' };
+    const riskColors = { high:'var(--red)', medium:'var(--gold)', low:'var(--green)' };
+    const dpRegime = document.getElementById('dp-regime');
+    const dpBias   = document.getElementById('dp-bias');
+    const dpType   = document.getElementById('dp-tradetype');
+    const dpRisk   = document.getElementById('dp-risk');
+    if (dpRegime) { dpRegime.textContent = (dp.regime||'--').toUpperCase(); dpRegime.style.color = regimeColors[dp.regime] || 'var(--muted)'; }
+    if (dpBias)   { dpBias.textContent   = (dp.entryBias||'--').replace(/_/g,' ').toUpperCase(); dpBias.style.color = biasColors[dp.entryBias] || 'var(--muted)'; }
+    if (dpType)   { dpType.textContent   = (dp.tradeType||'--').toUpperCase(); }
+    if (dpRisk)   { dpRisk.textContent   = (dp.riskLevel||'--').toUpperCase(); dpRisk.style.color = riskColors[dp.riskLevel] || 'var(--muted)'; }
+    const supWrap = document.getElementById('dp-suppress-wrap');
+    const supEl   = document.getElementById('dp-suppress');
+    if (supWrap && dp.suppressUntil) { supWrap.style.display = ''; if (supEl) supEl.textContent = dp.suppressUntil + ' ET'; }
+    else if (supWrap) supWrap.style.display = 'none';
+    const lvlWrap = document.getElementById('dp-levels-wrap');
+    const lvlEl   = document.getElementById('dp-levels');
+    if (lvlWrap && dp.keyLevels && (dp.keyLevels.spySupport || dp.keyLevels.spyResistance)) {
+      lvlWrap.style.display = '';
+      if (lvlEl) lvlEl.textContent = `S:$${dp.keyLevels.spySupport||'--'} R:$${dp.keyLevels.spyResistance||'--'}`;
+    } else if (lvlWrap) lvlWrap.style.display = 'none';
+    const catRow = document.getElementById('dp-catalysts-row');
+    const catEl  = document.getElementById('dp-catalysts');
+    if (catRow && (dp.catalysts||[]).length > 0) { catRow.style.display = ''; if (catEl) catEl.textContent = dp.catalysts.join(' · '); }
+    else if (catRow) catRow.style.display = 'none';
+  }
 }
 
 // ── Agent auto-exit toggle ─────────────────────────────────────────────────
@@ -1463,29 +1513,38 @@ function renderPositions() {
   const wrap = document.getElementById('positions-wrap');
   const positions = state.positions || [];
   if (!positions.length) {
-    wrap.innerHTML = '<div class="no-data">No open positions. APEX will enter trades during market hours (Puts 9:45AM / Calls 10AM–3:30PM ET).</div>';
+    wrap.innerHTML = '<div class="no-data">No open positions. APEX will enter trades during market hours (9:30AM–3:45PM ET). SPY/QQQ spreads primary.</div>';
     return;
   }
   wrap.innerHTML = positions.map(p => {
-    const t    = Math.max(1, p.expiryDays || 30) / 365;
-    const chgApprox = 0; // server has real chg
     const score = p.score || 0;
     const scoreColor = score >= 85 ? 'var(--green)' : score >= 70 ? 'var(--blue)' : 'var(--orange)';
+    const isSpread = p.isSpread;
+    const chgPct = p.currentPrice && p.premium ? ((p.currentPrice - p.premium) / p.premium * 100) : 0;
+    const chgDollar = ((p.currentPrice||p.premium) - p.premium) * 100 * (p.contracts||1) * (p.partialClosed?0.5:1);
+    const thesisScore = p.entryThesisScore || 100;
+    const thesisColor = thesisScore >= 70 ? 'var(--green)' : thesisScore >= 40 ? 'var(--gold)' : 'var(--red)';
+
+    // Spread-specific strike display
+    const strikeDisplay = isSpread
+      ? `$${p.buyStrike}/${p.sellStrike} ${p.optionType==='put'?'P-SPRD':'C-SPRD'}`
+      : `$${p.strike}${p.optionType==='put'?'P':'C'}`;
+
     return `
-    <div style="background:#050e1a;border:1px solid var(--border);border-radius:10px;padding:14px;margin-bottom:10px">
+    <div style="background:#050e1a;border:1px solid ${isSpread?'rgba(0,150,255,.3)':'var(--border)'};border-radius:10px;padding:14px;margin-bottom:10px">
       <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;margin-bottom:10px">
-        <div style="display:flex;align-items:center;gap:10px">
+        <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
           <span style="font-size:16px;font-weight:700;color:var(--blue)">${p.ticker}</span>
-          <span style="font-size:11px;color:var(--muted)">$${p.strike}${p.optionType==='put'?'P':'C'} · ${p.expDate}</span>
-          <span style="font-size:9px;padding:2px 6px;border-radius:10px;background:${p.expiryType==='weekly'?'rgba(255,215,0,.15)':p.expiryType==='leaps'?'rgba(148,0,211,.2)':'rgba(100,100,100,.2)'};color:${p.expiryType==='weekly'?'var(--gold)':p.expiryType==='leaps'?'#cc44ff':'var(--muted)'}">${(p.expiryType||'monthly').toUpperCase()}</span>
-          ${p.earningsPlay?'<span style="font-size:9px;padding:2px 6px;border-radius:10px;background:rgba(255,165,0,.2);color:orange">EARNINGS</span>':''}
+          <span style="font-size:11px;color:var(--muted)">${strikeDisplay} · ${p.expDate}</span>
+          ${isSpread ? `<span style="font-size:9px;padding:2px 6px;border-radius:10px;background:rgba(0,150,255,.15);color:var(--blue)">SPREAD $${p.spreadWidth||10}W</span>` : ''}
+          <span style="font-size:9px;padding:2px 6px;border-radius:10px;background:${p.expiryType==='weekly'?'rgba(255,215,0,.15)':p.expiryType==='leaps'?'rgba(148,0,211,.2)':'rgba(100,100,100,.2)'};color:${p.expiryType==='weekly'?'var(--gold)':p.expiryType==='leaps'?'#cc44ff':'var(--muted)'}">${(p.dteLabel||p.expiryType||'monthly').toUpperCase()}</span>
           <span style="font-size:9px;padding:2px 6px;border-radius:10px;background:${p.optionType==='put'?'rgba(255,80,80,.15)':'rgba(0,196,255,.1)'};color:${p.optionType==='put'?'#ff5050':'var(--blue)'}">${p.optionType==='put'?'PUT':'CALL'}</span>
-          <span style="font-size:9px;padding:2px 6px;border-radius:10px;background:rgba(0,196,255,.1);color:var(--blue)">${p.sector}</span>
           ${p.partialClosed ? '<span style="font-size:9px;padding:2px 6px;border-radius:10px;background:rgba(255,215,0,.1);color:var(--gold)">PARTIAL</span>' : ''}
-          ${p.breakevenLocked ? '<span style="font-size:9px;padding:2px 6px;border-radius:10px;background:rgba(0,255,136,.1);color:var(--green)">BE LOCKED</span>' : ''}
+          ${p._morningExitFlag ? '<span style="font-size:9px;padding:2px 6px;border-radius:10px;background:rgba(255,50,50,.2);color:var(--red)">EXIT AT OPEN</span>' : ''}
         </div>
-        <div style="display:flex;align-items:center;gap:8px">
+        <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
           <span style="font-size:11px;font-weight:700;color:${scoreColor}">Entry: ${score}/100</span>
+          ${thesisScore < 100 ? `<span style="font-size:10px;padding:2px 6px;border-radius:4px;background:rgba(0,0,0,.3);color:${thesisColor}">Thesis: ${thesisScore}</span>` : ''}
           ${(function() {
             if (p._liveRescore) {
               var lrCol = p._liveRescore.score >= 75 ? 'var(--green)' : p._liveRescore.score >= 55 ? 'var(--gold)' : 'var(--red)';
@@ -1496,11 +1555,29 @@ function renderPositions() {
           <button class="btn btn-red" style="padding:3px 10px;font-size:10px" onclick="closePos('${p.ticker}')">CLOSE</button>
         </div>
       </div>
+
+      ${isSpread ? `
+      <!-- Spread position grid -->
+      <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-bottom:10px">
+        <div><div style="font-size:9px;color:var(--muted)">NET DEBIT</div><div style="font-weight:700">$${p.premium}</div></div>
+        <div><div style="font-size:9px;color:var(--muted)">CURRENT VALUE</div><div style="font-weight:700;color:${chgPct>=0?'var(--green)':'var(--red)'}">$${(p.currentPrice||p.premium).toFixed(2)}</div></div>
+        <div><div style="font-size:9px;color:var(--muted)">UNREALIZED P&L</div><div style="font-weight:700;color:${chgDollar>=0?'var(--green)':'var(--red)'}">${chgDollar>=0?'+':''}$${chgDollar.toFixed(2)}</div></div>
+        <div><div style="font-size:9px;color:var(--muted)">P&L %</div><div style="font-weight:700;color:${chgPct>=0?'var(--green)':'var(--red)'}">${chgPct>=0?'+':''}${chgPct.toFixed(1)}%</div></div>
+        <div><div style="font-size:9px;color:var(--muted)">BUY STRIKE</div><div style="font-weight:700;color:var(--blue)">$${p.buyStrike}</div></div>
+        <div><div style="font-size:9px;color:var(--muted)">SELL STRIKE</div><div style="font-weight:700;color:var(--muted)">$${p.sellStrike}</div></div>
+        <div><div style="font-size:9px;color:var(--muted)">MAX PROFIT</div><div style="font-weight:700;color:var(--green)">$${((p.maxProfit||0)*100).toFixed(0)}</div></div>
+        <div><div style="font-size:9px;color:var(--muted)">MAX LOSS</div><div style="font-weight:700;color:var(--red)">$${((p.maxLoss||0)*100).toFixed(0)}</div></div>
+        <div><div style="font-size:9px;color:var(--muted)">COST</div><div style="font-weight:700">${fmt(p.cost)}</div></div>
+        <div><div style="font-size:9px;color:var(--muted)">DTE</div><div style="font-weight:700">${Math.max(1,Math.round((new Date(p.expDate)-new Date())/86400000))}d</div></div>
+        <div><div style="font-size:9px;color:var(--muted)">CONTRACTS</div><div style="font-weight:700">${p.contracts}x</div></div>
+        <div><div style="font-size:9px;color:var(--muted)">EXP DATE</div><div style="font-weight:700">${p.expDate}</div></div>
+      </div>` : `
+      <!-- Naked option position grid -->
       <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-bottom:10px">
         <div><div style="font-size:9px;color:var(--muted)">ENTRY PRICE</div><div style="font-weight:700">$${p.premium}</div></div>
-        <div><div style="font-size:9px;color:var(--muted)">CURRENT PRICE</div><div style="font-weight:700;color:${(p.currentPrice||p.premium)>=p.premium?'var(--green)':'var(--red)'}">$${(p.currentPrice||p.premium).toFixed(2)}</div></div>
-        <div><div style="font-size:9px;color:var(--muted)">UNREALIZED P&L</div><div style="font-weight:700;color:${((p.currentPrice||p.premium)-p.premium)>=0?'var(--green)':'var(--red)'}">${((p.currentPrice||p.premium)-p.premium)>=0?'+':''}$${(((p.currentPrice||p.premium)-p.premium)*100*(p.contracts||1)*(p.partialClosed?0.5:1)).toFixed(2)}</div></div>
-        <div><div style="font-size:9px;color:var(--muted)">P&L %</div><div style="font-weight:700;color:${((p.currentPrice||p.premium)-p.premium)>=0?'var(--green)':'var(--red)'}">${((p.currentPrice||p.premium)-p.premium)>=0?'+':''}${(((p.currentPrice||p.premium)-p.premium)/p.premium*100).toFixed(1)}%</div></div>
+        <div><div style="font-size:9px;color:var(--muted)">CURRENT PRICE</div><div style="font-weight:700;color:${chgPct>=0?'var(--green)':'var(--red)'}">$${(p.currentPrice||p.premium).toFixed(2)}</div></div>
+        <div><div style="font-size:9px;color:var(--muted)">UNREALIZED P&L</div><div style="font-weight:700;color:${chgDollar>=0?'var(--green)':'var(--red)'}">${chgDollar>=0?'+':''}$${chgDollar.toFixed(2)}</div></div>
+        <div><div style="font-size:9px;color:var(--muted)">P&L %</div><div style="font-weight:700;color:${chgPct>=0?'var(--green)':'var(--red)'}">${chgPct>=0?'+':''}${chgPct.toFixed(1)}%</div></div>
         <div><div style="font-size:9px;color:var(--muted)">${p.ticker} STOCK</div><div style="font-weight:700;color:var(--blue)">$${p.price?p.price.toFixed(2):'--'}</div></div>
         <div><div style="font-size:9px;color:var(--muted)">CONTRACTS</div><div style="font-weight:700">${p.contracts}x</div></div>
         <div><div style="font-size:9px;color:var(--muted)">COST</div><div style="font-weight:700">${fmt(p.cost)}</div></div>
@@ -1508,7 +1585,7 @@ function renderPositions() {
         <div><div style="font-size:9px;color:var(--muted)">TARGET</div><div style="font-weight:700;color:var(--green)">$${p.target}</div></div>
         <div><div style="font-size:9px;color:var(--muted)">STOP</div><div style="font-weight:700;color:var(--red)">$${p.stop}</div></div>
         <div><div style="font-size:9px;color:var(--muted)">BREAKEVEN</div><div style="font-weight:700">$${p.breakeven}</div></div>
-        <div><div style="font-size:9px;color:var(--muted)">IVR</div><div style="font-weight:700">${p.ivr}</div></div>
+        <div><div style="font-size:9px;color:var(--muted)">IVR</div><div style="font-weight:700">${p.ivr||'--'}</div></div>
       </div>
       <div style="display:flex;gap:8px;flex-wrap:wrap">
         <div class="greek-chip"><span class="greek-label">Δ DELTA</span><span class="greek-val" style="color:var(--blue)">${p.greeks?.delta||'--'}</span></div>
@@ -1516,7 +1593,8 @@ function renderPositions() {
         <div class="greek-chip"><span class="greek-label">Γ GAMMA</span><span class="greek-val">${p.greeks?.gamma||'--'}</span></div>
         <div class="greek-chip"><span class="greek-label">V VEGA</span><span class="greek-val">${p.greeks?.vega||'--'}</span></div>
         ${p.trailStop ? `<div class="greek-chip"><span class="greek-label">TRAIL STOP</span><span class="greek-val" style="color:var(--orange)">$${p.trailStop.toFixed(2)}</span></div>` : ''}
-      </div>
+      </div>`}
+
       ${p.estimatedAH ? `
         <div style="margin-top:8px;padding:6px 8px;background:#0a1a10;border:1px solid #1a3a20;border-radius:6px">
           <div style="font-size:9px;color:#44aa66;margin-bottom:4px">⏱ AFTER-HOURS ESTIMATE (${p.estimatedAH.source})</div>
@@ -1533,6 +1611,7 @@ function renderPositions() {
         var updStr = p._liveRescore.updatedAt ? new Date(p._liveRescore.updatedAt).toLocaleTimeString() : '';
         return '<div style="margin-top:6px;padding:5px 8px;background:rgba(0,0,0,.3);border-radius:4px;font-size:10px;display:flex;justify-content:space-between;align-items:center"><span style="color:' + recCol + '">⬤ ' + p._liveRescore.recommendation + '</span><span style="color:var(--muted);font-style:italic;margin-left:8px">' + (p._liveRescore.reasoning||'') + '</span><span style="color:#444;font-size:9px;margin-left:8px">upd: ' + updStr + '</span></div>';
       })()}
+      ${p.thesisHistory && p.thesisHistory.length > 0 ? `<div style="margin-top:4px;font-size:9px;color:${thesisColor}">Thesis: ${thesisScore}/100 · ${(p.thesisHistory[p.thesisHistory.length-1]?.notes||'').slice(0,80)}</div>` : ''}
       <div style="font-size:10px;color:var(--muted);margin-top:8px">Opened: ${new Date(p.openDate).toLocaleString()}</div>
     </div>`;
   }).join('');
