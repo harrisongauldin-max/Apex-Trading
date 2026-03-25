@@ -4864,8 +4864,8 @@ async function runScan() {
         if (chg < -0.05) await closePosition(pos.ticker, "macro-bullish");
       }
     }
-    logEvent("scan", `[5min] Regime:${regime.regime}(${regime.confidence}%) | Kelly:${marketContext.kelly.contracts}x | Global:${marketContext.globalMarket.signal} | Streak:${marketContext.streaks.currentStreak}x${marketContext.streaks.currentType}`);
-    snapshotPortfolioValue(); // record portfolio value every 5 min
+    logEvent("scan", `[5min] Regime:${regime.regime}(${regime.confidence}%) | Kelly:${marketContext.kelly?.contracts||1}x | Streak:${marketContext.streaks?.currentStreak||0}x${marketContext.streaks?.currentType||'--'}`);
+    // snapshotPortfolioValue removed — portfolio snapshots handled by portfolioSnapshots array
     runAgentRescore();        // parallel hourly rescore for overnight positions (non-blocking)
   }
 
