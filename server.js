@@ -2196,7 +2196,7 @@ async function getMarketauxNews() {
 // Replaces keyword matching with genuine language understanding
 // Falls back to keyword system if agent unavailable
 let _agentMacroCache = { result: null, fetchedAt: 0 };
-const AGENT_MACRO_CACHE_MS = 5 * 60 * 1000; // 5 minutes — matches scan tier
+const AGENT_MACRO_CACHE_MS = 3 * 60 * 1000; // 3 minutes — faster macro reaction with only 2 instruments
 
 // ── Agent Day Plan — pre-market strategic assessment ─────────────────────
 // Runs at 6am, 7:30am, 8:30am ET before market opens
@@ -4649,8 +4649,8 @@ async function runAgentRescore() {
   // Rescore ALL open positions — different cadence by age:
   // Same-day positions: every 30 minutes (more volatile, need more attention)
   // Overnight positions: every hour
-  const SAME_DAY_INTERVAL   = 30 * 60 * 1000; // 30 minutes
-  const OVERNIGHT_INTERVAL  = 60 * 60 * 1000; // 60 minutes
+  const SAME_DAY_INTERVAL   = 5 * 60 * 1000;  // 5 minutes — SPY/QQQ moves fast, rescore aggressively
+  const OVERNIGHT_INTERVAL  = 20 * 60 * 1000; // 20 minutes — catch overnight macro shifts faster
 
   const toRescore = (state.positions || []).filter(p => {
     const daysOpen  = (now - new Date(p.openDate).getTime()) / 86400000;
@@ -4674,7 +4674,7 @@ async function runAgentRescore() {
       state._agentRescoreHour[p.ticker]   = currentHour;
     } else {
       // Stagger by 3 minutes per position index so they don't all fire together
-      const stagger = i * 3 * 60 * 1000;
+      const stagger = i * 30 * 1000; // 30s stagger — only 2-3 positions max
       state._agentRescoreMinute[p.ticker] = now - stagger;
     }
   });
@@ -4771,7 +4771,7 @@ async function runScan() {
   logEvent("scan", `Scan | VIX:${state.vix} | cash:${fmt(state.cash)} | positions:${state.positions.length} | breadth:${marketContext.breadth.breadthPct}% | F&G:${marketContext.fearGreed.score}`);
 
   // -- MEDIUM TIER (every 5 minutes) --
-  if (now - lastMedScan > 5 * 60 * 1000) { // 5-minute tier
+  if (now - lastMedScan > 3 * 60 * 1000) { // 3-minute tier — faster with only 2 instruments
     lastMedScan = now;
     const breadth = await getMarketBreadth();
     marketContext.breadth        = breadth;
@@ -4872,7 +4872,7 @@ async function runScan() {
 
 
   // -- SLOW TIER (every 15 minutes) --
-  if (now - lastSlowScan > 15 * 60 * 1000) {
+  if (now - lastSlowScan > 10 * 60 * 1000) { // 10-minute tier (was 15)
     lastSlowScan = now;
     const [fg, dxy, yc] = await Promise.all([getFearAndGreed(), getDXY(), getYieldCurve()]);
     marketContext.fearGreed   = fg;
@@ -6603,7 +6603,7 @@ function buildEmailHTML(type) {
 ${type === "morning" ? `
 <div style="background:rgba(0,255,136,0.05);border:1px solid rgba(0,255,136,0.15);border-radius:8px;padding:14px">
   <h3 style="color:#00ff88;font-size:11px;margin:0 0 6px">TODAY'S OUTLOOK</h3>
-  <p style="font-size:12px;color:#cce8ff;margin:0">ARGO-1 will scan every minute from 10:00 AM - 3:30 PM ET. VIX is currently ${state.vix} - ${state.vix<20?"normal conditions, full sizing":"reduced sizing active"}. ${state.positions.length} position${state.positions.length!==1?"s":""} currently open.</p>
+  <p style="font-size:12px;color:#cce8ff;margin:0">ARGO-1 will scan every 10 seconds from 10:00 AM - 3:30 PM ET. VIX is currently ${state.vix} - ${state.vix<20?"normal conditions, full sizing":"reduced sizing active"}. ${state.positions.length} position${state.positions.length!==1?"s":""} currently open.</p>
 </div>` : `
 <div style="background:rgba(0,196,255,0.05);border:1px solid rgba(0,196,255,0.15);border-radius:8px;padding:14px">
   <h3 style="color:#00c4ff;font-size:11px;margin:0 0 6px">END OF DAY SUMMARY</h3>
@@ -6676,11 +6676,11 @@ STOCK PORTFOLIO
 }
 
 // - Cron Schedules -
-// Every 30 seconds Mon-Fri (market hours checked inside runScan)
+// Every 10 seconds Mon-Fri — 2 stocks with 0.3s prefetch, no reason to wait 30s
 setInterval(() => {
   const day = getETTime().getDay();
   if (day >= 1 && day <= 5) runScan();
-}, 30000);
+}, 10000);
 
 // ── F3: After-hours context update — every 15 min Mon-Fri outside market hours ──
 // Updates macro news, VIX proxy, Fear&Greed overnight
@@ -7777,7 +7777,7 @@ initState().then(() => {
     console.log(`Budget:      $${state.cash} | Floor: $${CAPITAL_FLOOR}`);
     console.log(`Positions:   ${state.positions.length} open`);
     console.log(`Trades:      ${(state.closedTrades||[]).length} closed trades in history`);
-    console.log(`Scan:        every 30 seconds, 9AM-4PM ET Mon-Fri`);
+    console.log(`Scan:        every 10 seconds, 9AM-4PM ET Mon-Fri (SPY/QQQ only)`);
     console.log(`Entry window: 9:30AM-3:45PM ET (SPY/QQQ spreads primary)`);
   });
 });
