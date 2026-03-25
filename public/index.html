@@ -705,14 +705,35 @@ input[type=text]:focus{border-color:var(--blue)}
 
 <!-- ═══════════════ LOG TAB ═══════════════ -->
 <div id="tab-log" class="content">
-  <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px;flex-wrap:wrap;gap:8px">
-    <div>
-      <span>Schedule: <strong style="color:var(--green)">Every 30 seconds · 9AM–4PM ET · Mon–Fri</strong></span>
-      <span style="margin-left:16px">Entry window: <strong style="color:var(--blue)">Puts 9:45AM / Calls 10AM–3:30PM ET</strong></span>
+  <!-- ── Stats bar ── -->
+  <div style="display:flex;align-items:center;gap:10px;margin-bottom:10px;flex-wrap:wrap">
+    <div style="display:flex;align-items:center;gap:6px">
+      <span id="log-dot" style="width:8px;height:8px;border-radius:50%;background:var(--green);display:inline-block"></span>
+      <span id="log-status" style="font-size:11px;color:var(--muted)">live</span>
     </div>
-    <button class="btn" onclick="clearLog()">CLEAR</button>
+    <span style="font-size:11px;color:var(--muted)">cash: <strong id="log-cash" style="color:var(--text)">—</strong></span>
+    <span style="font-size:11px;color:var(--muted)">positions: <strong id="log-positions" style="color:var(--text)">—</strong></span>
+    <span style="font-size:11px;color:var(--muted)">VIX: <strong id="log-vix" style="color:var(--text)">—</strong></span>
+    <span style="font-size:11px;color:var(--muted)">updated: <strong id="log-updated" style="color:var(--text)">—</strong></span>
   </div>
-  <div class="log-box" id="server-log" style="height:500px"></div>
+  <!-- ── Controls ── -->
+  <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px;flex-wrap:wrap">
+    <select id="log-filter" onchange="renderServerLog()" style="background:var(--panel);border:1px solid var(--border);color:var(--text);padding:4px 8px;border-radius:6px;font-family:var(--font);font-size:11px">
+      <option value="">all types</option>
+      <option value="trade,close">trades only</option>
+      <option value="warn,circuit,error">warnings only</option>
+      <option value="trade,close,warn,circuit,error">trades + warnings</option>
+      <option value="filter">filters</option>
+      <option value="scan">scans</option>
+      <option value="macro">macro</option>
+    </select>
+    <input id="log-search" type="text" placeholder="search..." oninput="renderServerLog()" style="background:var(--panel);border:1px solid var(--border);color:var(--text);padding:4px 8px;border-radius:6px;font-family:var(--font);font-size:11px;width:160px" />
+    <button class="btn" id="log-live-btn" onclick="toggleLogLive()" style="font-size:11px">PAUSE</button>
+    <button class="btn" onclick="fetchLogs()" style="font-size:11px">REFRESH</button>
+    <button class="btn" onclick="clearLog()" style="font-size:11px">CLEAR</button>
+  </div>
+  <!-- ── Log box ── -->
+  <div class="log-box" id="server-log" style="height:560px;overflow-y:auto"></div>
 </div>
 
 <!-- SIM TAB -->
@@ -2159,15 +2180,91 @@ function clearLog() {
   document.getElementById('server-log').innerHTML = '';
 }
 
+let _logLive = true;
+let _logTimer = null;
+let _allLogs = [];
+
+async function fetchLogs(silent=false) {
+  try {
+    const r = await fetch('/api/logs?limit=200');
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    const data = await r.json();
+    _allLogs = data.logs || [];
+    const now = new Date().toLocaleTimeString();
+    document.getElementById('log-status').textContent = 'live · ' + now;
+    document.getElementById('log-dot').style.background = 'var(--green)';
+    const cash = data.cash != null ? '$' + Number(data.cash).toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2}) : '—';
+    document.getElementById('log-cash').textContent = cash;
+    document.getElementById('log-positions').textContent = (data.positions ?? '—') + ' open';
+    document.getElementById('log-vix').textContent = data.vix ? Number(data.vix).toFixed(1) : '—';
+    document.getElementById('log-updated').textContent = now;
+    renderServerLog();
+  } catch(e) {
+    if (!silent) {
+      document.getElementById('log-status').textContent = 'error: ' + e.message;
+      document.getElementById('log-dot').style.background = 'var(--red)';
+    }
+  }
+}
+
 function renderServerLog() {
-  const log     = document.getElementById('server-log');
-  const entries = (state.tradeLog || []).slice(0, 200);
-  log.innerHTML = entries.map(e => {
-    const typeClass = `lt-${e.type}`;
-    const time = new Date(e.time).toLocaleString();
-    return `<div class="log-entry"><span class="log-time" style="min-width:140px">${time}</span><span class="log-type ${typeClass}">${e.type}</span><span>${e.message}</span></div>`;
+  const filterVal = (document.getElementById('log-filter')?.value || '').trim();
+  const search    = (document.getElementById('log-search')?.value || '').toLowerCase();
+  const types     = filterVal ? filterVal.split(',') : null;
+
+  let logs = _allLogs.length ? _allLogs : (state.tradeLog || []);
+  if (types) logs = logs.filter(e => types.includes(e.type));
+  if (search) logs = logs.filter(e => (e.message||'').toLowerCase().includes(search) || (e.type||'').includes(search));
+
+  const log = document.getElementById('server-log');
+  if (!logs.length) { log.innerHTML = '<div style="color:var(--muted);padding:12px;font-size:11px">no entries match filter</div>'; return; }
+
+  const TYPE_COLORS = {
+    trade:   {bg:'rgba(0,255,136,.15)',  color:'var(--green)'},
+    close:   {bg:'rgba(255,80,80,.18)',  color:'var(--red)'},
+    warn:    {bg:'rgba(255,153,68,.2)',  color:'var(--orange)'},
+    circuit: {bg:'rgba(255,80,80,.25)',  color:'var(--red)'},
+    filter:  {bg:'rgba(51,102,136,.15)', color:'var(--muted)'},
+    scan:    {bg:'rgba(0,180,255,.1)',   color:'var(--blue)'},
+    macro:   {bg:'rgba(150,100,255,.15)',color:'#b38aff'},
+    risk:    {bg:'rgba(255,100,50,.18)', color:'var(--orange)'},
+    error:   {bg:'rgba(255,50,50,.25)',  color:'var(--red)'},
+    skip:    {bg:'rgba(80,80,80,.15)',   color:'var(--muted)'},
+  };
+
+  log.innerHTML = logs.map(e => {
+    const c = TYPE_COLORS[e.type] || {bg:'rgba(80,80,80,.1)', color:'var(--muted)'};
+    const time = new Date(e.time).toLocaleTimeString();
+    const msg = (e.message||'').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+    return `<div class="log-entry">
+      <span class="log-time" style="min-width:80px;font-size:10px">${time}</span>
+      <span class="log-type" style="min-width:56px;background:${c.bg};color:${c.color};font-size:9px;padding:1px 5px;border-radius:3px;text-align:center;font-weight:700;letter-spacing:.5px;height:fit-content">${e.type}</span>
+      <span style="color:var(--text);font-size:11px;word-break:break-word">${msg}</span>
+    </div>`;
   }).join('');
 }
+
+function toggleLogLive() {
+  _logLive = !_logLive;
+  const btn = document.getElementById('log-live-btn');
+  const dot = document.getElementById('log-dot');
+  if (_logLive) {
+    btn.textContent = 'PAUSE';
+    dot.style.background = 'var(--green)';
+    startLogPolling();
+  } else {
+    btn.textContent = 'RESUME';
+    dot.style.background = 'var(--muted)';
+    clearInterval(_logTimer);
+  }
+}
+
+function startLogPolling() {
+  clearInterval(_logTimer);
+  _logTimer = setInterval(() => { if(_logLive) fetchLogs(true); }, 15000);
+}
+
+startLogPolling();
 
 // ── Theta Tab ─────────────────────────────────────────────────────────────
 async function loadTheta() {
@@ -2345,7 +2442,7 @@ function switchTab(name) {
   document.getElementById(`tab-${name}`).classList.add('active');
   if (name==='analytics')   renderCharts();
   if (name==='report')      loadReport();
-  if (name==='log')         renderServerLog();
+  if (name==='log')         fetchLogs();
   if (name==='theta')       loadTheta();
   if (name==='attribution') loadAttribution();
   if (name==='tax')         loadTaxLog();
