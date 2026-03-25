@@ -1,5 +1,5 @@
 // -
-// APEX v4.0 - Professional Options Trading Agent
+// SPT-1 v1.0 - Professional Options Trading Agent
 // Alpaca Paper Trading Edition
 // -
 const express    = require("express");
@@ -39,7 +39,7 @@ const ANTHROPIC_MODEL   = "claude-sonnet-4-5";  // Best quality/cost for financi
 const STATE_FILE        = path.join(__dirname, "state.json");
 const REDIS_URL         = process.env.UPSTASH_REDIS_REST_URL  || "";
 const REDIS_TOKEN       = process.env.UPSTASH_REDIS_REST_TOKEN || "";
-const REDIS_KEY         = "apex:state";
+const REDIS_KEY         = "spt1:state";
 
 // - Trading Constants -
 const MONTHLY_BUDGET      = 10000;
@@ -124,51 +124,63 @@ const CORRELATION_GROUPS = [
 const SEMIS = ["NVDA", "AMD", "SMCI", "ARM", "AVGO", "MU"];
 
 // - Watchlist (36 high-liquidity stocks) -
+// ── SPT-1 Instrument Configuration ───────────────────────────────────────
+// Phase 1: SPY primary, QQQ secondary — building to $25k
+// At $25k: set INDIVIDUAL_STOCKS_ENABLED = true to unlock full watchlist
+const INDIVIDUAL_STOCKS_ENABLED = false;
+const ACCOUNT_THRESHOLD_25K     = 25000; // PDT-free threshold
+
 const WATCHLIST = [
-  // -- Mega Cap Tech --
-  { ticker:"NVDA",  sector:"Technology",  momentum:"strong",     rsi:58, macd:"bullish crossover",         catalyst:"AI infrastructure demand",  ivr:52, beta:1.8, earningsDate:null },
-  { ticker:"AAPL",  sector:"Technology",  momentum:"steady",     rsi:52, macd:"mild bullish",      catalyst:"Services revenue growth",  ivr:28, beta:1.1, earningsDate:null },
-  { ticker:"MSFT",  sector:"Technology",  momentum:"strong",     rsi:56, macd:"bullish",      catalyst:"Copilot enterprise adoption",  ivr:30, beta:1.2, earningsDate:null },
-  { ticker:"AMZN",  sector:"Technology",  momentum:"strong",     rsi:61, macd:"bullish",         catalyst:"AWS acceleration",  ivr:35, beta:1.3, earningsDate:null },
-  { ticker:"META",  sector:"Technology",  momentum:"strong",     rsi:63, macd:"bullish",        catalyst:"AI ad revenue momentum",  ivr:40, beta:1.4, earningsDate:null },
-  { ticker:"GOOGL", sector:"Technology",  momentum:"steady",     rsi:54, macd:"mild bullish",         catalyst:"Search + cloud strength",  ivr:32, beta:1.2, earningsDate:null },
-  // -- Semiconductors --
-  { ticker:"AMD",   sector:"Technology",  momentum:"recovering", rsi:47, macd:"forming base",          catalyst:"MI300X server demand",  ivr:55, beta:1.7, earningsDate:null },
-  { ticker:"ARM",   sector:"Technology",  momentum:"strong",     rsi:62, macd:"bullish crossover",        catalyst:"AI chip architecture demand",  ivr:58, beta:1.9, earningsDate:null },
-  { ticker:"AVGO",  sector:"Technology",  momentum:"strong",     rsi:57, macd:"bullish",         catalyst:"AI networking chips",  ivr:38, beta:1.4, earningsDate:null },
-  { ticker:"MU",    sector:"Technology",  momentum:"recovering", rsi:48, macd:"neutral",          catalyst:"HBM memory for AI",  ivr:52, beta:1.6, earningsDate:null },
-  { ticker:"SMCI",  sector:"Technology",  momentum:"recovering", rsi:45, macd:"neutral",       catalyst:"AI server infrastructure",  ivr:60, beta:2.1, earningsDate:null },
-  // -- Cloud & Enterprise Software --
-  { ticker:"CRM",   sector:"Technology",  momentum:"steady",     rsi:51, macd:"mild bullish",         catalyst:"AI CRM integration",  ivr:33, beta:1.3, earningsDate:null },
-  { ticker:"NOW",   sector:"Technology",  momentum:"strong",     rsi:58, macd:"bullish",      catalyst:"AI workflow automation",  ivr:35, beta:1.3, earningsDate:null },
-  { ticker:"SNOW",  sector:"Technology",  momentum:"steady",     rsi:50, macd:"neutral",          catalyst:"Data cloud growth",  ivr:55, beta:1.5, earningsDate:null },
-  // -- Cybersecurity --
-  { ticker:"CRWD",  sector:"Technology",  momentum:"strong",     rsi:60, macd:"bullish",        catalyst:"Cybersecurity spending surge",  ivr:48, beta:1.6, earningsDate:null },
-  { ticker:"PANW",  sector:"Technology",  momentum:"strong",     rsi:57, macd:"bullish",         catalyst:"Platform consolidation wins",  ivr:40, beta:1.4, earningsDate:null },
-  { ticker:"NET",   sector:"Technology",  momentum:"steady",     rsi:52, macd:"mild bullish",         catalyst:"Zero trust adoption",  ivr:50, beta:1.5, earningsDate:null },
-  // -- Financials --
-  { ticker:"JPM",   sector:"Financial",   momentum:"strong",     rsi:57, macd:"bullish",      catalyst:"Net interest income strength",  ivr:28, beta:1.1, earningsDate:null },
-  { ticker:"BAC",   sector:"Financial",   momentum:"recovering", rsi:48, macd:"neutral",          catalyst:"Net interest income + rate play",  ivr:30, beta:1.3, earningsDate:null },
-  { ticker:"C",     sector:"Financial",   momentum:"recovering", rsi:47, macd:"neutral",          catalyst:"Restructuring + rate sensitivity",  ivr:32, beta:1.5, earningsDate:null },
-  { ticker:"MS",    sector:"Financial",   momentum:"steady",     rsi:52, macd:"mild bullish",         catalyst:"Investment banking cycle",  ivr:28, beta:1.4, earningsDate:null },
-  { ticker:"COIN",  sector:"Financial",   momentum:"recovering", rsi:48, macd:"forming base",          catalyst:"Crypto market recovery",  ivr:65, beta:2.2, earningsDate:null },
-  { ticker:"HOOD",  sector:"Financial",   momentum:"recovering", rsi:46, macd:"neutral",          catalyst:"Retail trading volume recovery",  ivr:68, beta:2.0, earningsDate:null },
-  { ticker:"MSTR",  sector:"Financial",   momentum:"recovering", rsi:48, macd:"forming base",          catalyst:"Bitcoin treasury strategy",  ivr:80, beta:3.0, earningsDate:null },
-  // SQ removed — Alpaca data feed stale (620000+ minutes old), no live quotes available
-  // -- Consumer & E-commerce --
-  { ticker:"TSLA",  sector:"Consumer",    momentum:"recovering", rsi:44, macd:"neutral",      catalyst:"Q1 delivery data",  ivr:61, beta:2.0, earningsDate:null },
-  { ticker:"NFLX",  sector:"Consumer",    momentum:"strong",     rsi:60, macd:"bullish",        catalyst:"Ad-supported tier growth",  ivr:38, beta:1.4, earningsDate:null },
-  { ticker:"UBER",  sector:"Consumer",    momentum:"strong",     rsi:58, macd:"bullish",      catalyst:"Profitability milestone",  ivr:35, beta:1.5, earningsDate:null },
-  { ticker:"SHOP",  sector:"Consumer",    momentum:"steady",     rsi:52, macd:"mild bullish",         catalyst:"E-commerce market share gains",  ivr:52, beta:1.6, earningsDate:null },
-  { ticker:"DKNG",  sector:"Consumer",    momentum:"steady",     rsi:50, macd:"neutral",          catalyst:"Sports betting expansion",  ivr:58, beta:1.7, earningsDate:null },
-  { ticker:"NKE",   sector:"Consumer",    momentum:"recovering", rsi:46, macd:"neutral",          catalyst:"China recovery + DTC growth",  ivr:32, beta:1.2, earningsDate:null },
-  { ticker:"ROKU",  sector:"Consumer",    momentum:"recovering", rsi:47, macd:"neutral",          catalyst:"Streaming ad platform growth",  ivr:58, beta:1.8, earningsDate:null },
-  // -- High Momentum / Speculative --
-  { ticker:"PLTR",  sector:"Technology",  momentum:"strong",     rsi:65, macd:"bullish crossover",        catalyst:"Government AI contracts",  ivr:62, beta:2.0, earningsDate:null },
-  { ticker:"WFC",   sector:"Financial",   momentum:"steady",     rsi:51, macd:"neutral",          catalyst:"Net interest income + expense cuts", ivr:28, beta:1.2, earningsDate:null },
-  { ticker:"BABA",  sector:"Global",      momentum:"recovering", rsi:49, macd:"neutral",          catalyst:"China stimulus + AI investment",  ivr:45, beta:1.6, earningsDate:null },
-  // -- Ad Tech --
-  { ticker:"TTD",   sector:"Technology",  momentum:"steady",     rsi:53, macd:"mild bullish",         catalyst:"Programmatic ad recovery",  ivr:55, beta:1.7, earningsDate:null },
+  // ── PRIMARY: SPY — macro regime trading ──────────────────────────────
+  {
+    ticker:    "SPY",
+    sector:    "Index",
+    momentum:  "steady",
+    rsi:       50,
+    macd:      "neutral",
+    catalyst:  "Macro regime",
+    ivr:       30,
+    beta:      1.0,
+    earningsDate: null,
+    isIndex:   true,
+    isPrimary: true,
+  },
+  // ── SECONDARY: QQQ — tech-heavy, use when tech thesis is clear ────────
+  {
+    ticker:    "QQQ",
+    sector:    "Index",
+    momentum:  "steady",
+    rsi:       50,
+    macd:      "neutral",
+    catalyst:  "Tech macro regime",
+    ivr:       32,
+    beta:      1.2,
+    earningsDate: null,
+    isIndex:   true,
+    isPrimary: false,
+  },
+];
+
+// ── Individual stocks — unlocked at $25k ─────────────────────────────────
+// Full watchlist preserved here, activated when INDIVIDUAL_STOCKS_ENABLED = true
+const INDIVIDUAL_STOCK_WATCHLIST = [
+  { ticker:"NVDA",  sector:"Technology",  momentum:"strong",     rsi:58, macd:"bullish crossover",  catalyst:"AI infrastructure demand",      ivr:52, beta:1.8, earningsDate:null },
+  { ticker:"AAPL",  sector:"Technology",  momentum:"steady",     rsi:52, macd:"mild bullish",       catalyst:"Services revenue growth",       ivr:28, beta:1.1, earningsDate:null },
+  { ticker:"MSFT",  sector:"Technology",  momentum:"strong",     rsi:56, macd:"bullish",            catalyst:"Copilot enterprise adoption",   ivr:30, beta:1.2, earningsDate:null },
+  { ticker:"AMZN",  sector:"Technology",  momentum:"strong",     rsi:61, macd:"bullish",            catalyst:"AWS acceleration",              ivr:35, beta:1.3, earningsDate:null },
+  { ticker:"META",  sector:"Technology",  momentum:"strong",     rsi:63, macd:"bullish",            catalyst:"AI ad revenue momentum",        ivr:40, beta:1.4, earningsDate:null },
+  { ticker:"GOOGL", sector:"Technology",  momentum:"steady",     rsi:54, macd:"mild bullish",       catalyst:"Search + cloud strength",       ivr:32, beta:1.2, earningsDate:null },
+  { ticker:"AMD",   sector:"Technology",  momentum:"recovering", rsi:47, macd:"forming base",       catalyst:"MI300X server demand",          ivr:55, beta:1.7, earningsDate:null },
+  { ticker:"ARM",   sector:"Technology",  momentum:"strong",     rsi:62, macd:"bullish crossover",  catalyst:"AI chip architecture demand",   ivr:58, beta:1.9, earningsDate:null },
+  { ticker:"AVGO",  sector:"Technology",  momentum:"strong",     rsi:57, macd:"bullish",            catalyst:"AI networking chips",           ivr:38, beta:1.4, earningsDate:null },
+  { ticker:"TSLA",  sector:"Consumer",    momentum:"recovering", rsi:44, macd:"neutral",            catalyst:"Q1 delivery data",              ivr:61, beta:2.0, earningsDate:null },
+  { ticker:"PLTR",  sector:"Technology",  momentum:"strong",     rsi:65, macd:"bullish crossover",  catalyst:"Government AI contracts",       ivr:62, beta:2.0, earningsDate:null },
+  { ticker:"SHOP",  sector:"Consumer",    momentum:"steady",     rsi:52, macd:"mild bullish",       catalyst:"E-commerce market share gains", ivr:52, beta:1.6, earningsDate:null },
+  { ticker:"CRWD",  sector:"Technology",  momentum:"strong",     rsi:60, macd:"bullish",            catalyst:"Cybersecurity spending surge",  ivr:48, beta:1.6, earningsDate:null },
+  { ticker:"PANW",  sector:"Technology",  momentum:"strong",     rsi:57, macd:"bullish",            catalyst:"Platform consolidation wins",   ivr:40, beta:1.4, earningsDate:null },
+  { ticker:"JPM",   sector:"Financial",   momentum:"strong",     rsi:57, macd:"bullish",            catalyst:"Net interest income strength",  ivr:28, beta:1.1, earningsDate:null },
+  { ticker:"MS",    sector:"Financial",   momentum:"steady",     rsi:52, macd:"mild bullish",       catalyst:"Investment banking cycle",      ivr:28, beta:1.4, earningsDate:null },
+  { ticker:"NFLX",  sector:"Consumer",    momentum:"strong",     rsi:60, macd:"bullish",            catalyst:"Ad-supported tier growth",      ivr:38, beta:1.4, earningsDate:null },
 ];
 
 // - Default State -
@@ -210,6 +222,8 @@ function defaultState() {
     _macroReversalAt:    null,  // timestamp of last macro-reversal exit batch
     _macroReversalCount: 0,     // how many positions closed in the reversal batch
     _macroReversalSPY:   null,  // SPY price at time of reversal — for comparison
+    _dayPlan:            null,  // agent day plan — set at 6am, updated at 7:30am and 8:30am
+    _dayPlanDate:        null,  // date of last day plan — reset daily
     _recentLosses:       {},    // ticker -> {closedAt, reason, agentSignal, price} for re-entry veto
     _agentHistory:       {},    // ticker -> last 5 rescore results for agent memory
     portfolioSnapshots: [], // time-series portfolio value: [{t, v}] sampled every 5 min
@@ -839,18 +853,19 @@ function getETTime(date) {
   return new Date(str);
 }
 
-function isEntryWindow(optionType = null) {
+function isEntryWindow(optionType = null, isIndex = false) {
   const et  = getETTime();
   const h   = et.getHours(), m = et.getMinutes();
   const day = et.getDay();
   if (day === 0 || day === 6) return false;
 
   const minsSinceMidnight = h * 60 + m;
-  const marketClose       = 15 * 60 + 30; // 3:30 PM
-  const entryStart        = 9 * 60 + 45;  // 9:45 AM — both calls and puts
+  const marketClose       = 15 * 60 + 45; // 3:45 PM — index options stay open later
+  const indexStart        = 9 * 60 + 30;  // 9:30 AM — SPY/QQQ open at bell
+  const stockStart        = 9 * 60 + 45;  // 9:45 AM — individual stocks need price discovery
 
   if (minsSinceMidnight > marketClose) return false;
-  return minsSinceMidnight >= entryStart;
+  return minsSinceMidnight >= (isIndex ? indexStart : stockStart);
 }
 
 function isDST(date) {
@@ -1018,6 +1033,104 @@ function scoreMeanReversionCall(stock, relStrength, adx, bars, vix) {
   else if (adx && adx < 30) { score += 5; reasons.push(`ADX ${adx} - trend weakening (+5)`); }
 
   return { score: Math.min(score, 100), reasons, isMeanReversion: true };
+}
+
+// ── SPY/QQQ Index Scoring ────────────────────────────────────────────────
+// Dedicated scoring for index instruments — macro-driven, not stock-specific
+function scoreIndexSetup(stock, optionType, spyRSI, spyMACD, spyMomentum, breadth, vix, agentMacro) {
+  let score = 0;
+  const reasons = [];
+  const signal     = (agentMacro || {}).signal     || "neutral";
+  const confidence = (agentMacro || {}).confidence || "low";
+  const regime     = (agentMacro || {}).regime     || "neutral";
+  const entryBias  = (agentMacro || {}).entryBias  || "neutral";
+  const tradeType  = (agentMacro || {}).tradeType  || "spread";
+  const vixOutlook = (agentMacro || {}).vixOutlook || "unknown";
+
+  if (optionType === "put") {
+    // ── Agent macro signal — primary gate ──────────────────────────────
+    if (["strongly bearish","bearish"].includes(signal) && confidence === "high") { score += 35; reasons.push(`Agent ${signal} high confidence (+35)`); }
+    else if (["strongly bearish","bearish"].includes(signal))                     { score += 25; reasons.push(`Agent ${signal} (+25)`); }
+    else if (signal === "mild bearish")                                            { score += 15; reasons.push(`Agent mild bearish (+15)`); }
+    else if (signal === "neutral")                                                 { score += 0;  reasons.push("Agent neutral (+0)"); }
+    else { score -= 20; reasons.push(`Agent ${signal} — wrong direction for puts (-20)`); }
+
+    // ── Regime confirmation ─────────────────────────────────────────────
+    if (["trending_bear","breakdown"].includes(regime))                           { score += 20; reasons.push(`Regime: ${regime} (+20)`); }
+    else if (regime === "choppy")                                                  { score -= 10; reasons.push("Choppy regime — puts risky (-10)"); }
+    else if (["trending_bull","recovery"].includes(regime))                       { score -= 25; reasons.push(`Regime: ${regime} — wrong for puts (-25)`); }
+
+    // ── SPY technicals ──────────────────────────────────────────────────
+    if (spyRSI >= 70)                                                             { score += 20; reasons.push(`SPY RSI ${spyRSI} overbought (+20)`); }
+    else if (spyRSI >= 60)                                                        { score += 10; reasons.push(`SPY RSI ${spyRSI} elevated (+10)`); }
+    else if (spyRSI <= 35)                                                        { score = 0;   reasons.push(`SPY RSI ${spyRSI} oversold — no put (+0 HARD BLOCK)`); return { score: 0, reasons, tradeType }; }
+    else if (spyRSI <= 45)                                                        { score -= 15; reasons.push(`SPY RSI ${spyRSI} oversold for puts (-15)`); }
+
+    if (spyMACD && spyMACD.includes("bearish crossover"))                        { score += 15; reasons.push("SPY MACD bearish crossover (+15)"); }
+    else if (spyMACD && spyMACD.includes("bearish"))                             { score += 10; reasons.push("SPY MACD bearish (+10)"); }
+    else if (spyMACD && spyMACD.includes("bullish crossover"))                   { score -= 15; reasons.push("SPY MACD bullish crossover (-15)"); }
+    else if (spyMACD && spyMACD.includes("bullish"))                             { score -= 8;  reasons.push("SPY MACD bullish (-8)"); }
+
+    // ── Breadth confirmation ────────────────────────────────────────────
+    if (breadth <= 30)       { score += 15; reasons.push(`Breadth ${breadth}% — severe weakness (+15)`); }
+    else if (breadth <= 45)  { score += 8;  reasons.push(`Breadth ${breadth}% — weak (+8)`); }
+    else if (breadth >= 70)  { score -= 15; reasons.push(`Breadth ${breadth}% — strong, wrong for puts (-15)`); }
+
+    // ── VIX context ─────────────────────────────────────────────────────
+    if (vixOutlook === "spiking")          { score += 10; reasons.push("VIX spiking — put premium expanding (+10)"); }
+    else if (vixOutlook === "elevated_stable") { score += 5; reasons.push("VIX elevated stable (+5)"); }
+    else if (vixOutlook === "falling")     { score -= 10; reasons.push("VIX falling — puts losing value (-10)"); }
+    if (vix >= 25)                         { score += 5;  reasons.push(`VIX ${vix.toFixed(1)} elevated (+5)`); }
+
+    // ── Entry bias alignment ────────────────────────────────────────────
+    if (entryBias === "puts_on_bounces" && spyMomentum === "steady") { score += 8; reasons.push("Entry bias: puts on bounces — good timing (+8)"); }
+    if (entryBias === "avoid")           { score = Math.min(score, 50); reasons.push("Agent says avoid — capping at 50"); }
+
+    // ── QQQ secondary — only when tech thesis clear ─────────────────────
+    if (stock.ticker === "QQQ") {
+      const techBearish = (agentMacro || {}).bearishTickers && (agentMacro.bearishTickers.some(t => ["NVDA","MSFT","AAPL","META","GOOGL"].includes(t)));
+      if (!techBearish) { score -= 15; reasons.push("QQQ: no clear tech bearish thesis (-15)"); }
+      else { reasons.push("QQQ: tech names in agent bearish list (+0)"); }
+    }
+
+  } else {
+    // ── CALL scoring ────────────────────────────────────────────────────
+    if (["strongly bullish","bullish"].includes(signal) && confidence === "high") { score += 35; reasons.push(`Agent ${signal} high confidence (+35)`); }
+    else if (["strongly bullish","bullish"].includes(signal))                     { score += 25; reasons.push(`Agent ${signal} (+25)`); }
+    else if (signal === "mild bullish")                                            { score += 15; reasons.push("Agent mild bullish (+15)"); }
+    else if (signal === "neutral" && spyRSI <= 35)                                { score += 20; reasons.push("Mean reversion call — SPY oversold on neutral macro (+20)"); }
+    else if (signal === "neutral")                                                 { score += 0;  reasons.push("Agent neutral (+0)"); }
+    else { score -= 20; reasons.push(`Agent ${signal} — wrong direction for calls (-20)`); }
+
+    if (["trending_bull","recovery"].includes(regime))                            { score += 20; reasons.push(`Regime: ${regime} (+20)`); }
+    else if (regime === "choppy")                                                  { score -= 10; reasons.push("Choppy regime — calls risky (-10)"); }
+    else if (["trending_bear","breakdown"].includes(regime))                      { score -= 25; reasons.push(`Regime: ${regime} — wrong for calls (-25)`); }
+
+    if (spyRSI <= 30)                                                             { score += 20; reasons.push(`SPY RSI ${spyRSI} deeply oversold — mean reversion (+20)`); }
+    else if (spyRSI <= 40)                                                        { score += 12; reasons.push(`SPY RSI ${spyRSI} oversold (+12)`); }
+    else if (spyRSI >= 70)                                                        { score -= 15; reasons.push(`SPY RSI ${spyRSI} overbought for calls (-15)`); }
+
+    if (spyMACD && spyMACD.includes("bullish crossover"))                        { score += 15; reasons.push("SPY MACD bullish crossover (+15)"); }
+    else if (spyMACD && spyMACD.includes("bullish"))                             { score += 8;  reasons.push("SPY MACD bullish (+8)"); }
+    else if (spyMACD && spyMACD.includes("bearish crossover"))                   { score -= 15; reasons.push("SPY MACD bearish crossover (-15)"); }
+
+    if (breadth >= 65)       { score += 10; reasons.push(`Breadth ${breadth}% recovering (+10)`); }
+    else if (breadth <= 30)  { score -= 10; reasons.push(`Breadth ${breadth}% — market still weak (-10)`); }
+
+    if (vixOutlook === "falling")          { score += 10; reasons.push("VIX falling — calls gaining (+10)"); }
+    else if (vixOutlook === "spiking")     { score -= 10; reasons.push("VIX spiking — calls losing (-10)"); }
+
+    if (entryBias === "calls_on_dips" && spyMomentum === "steady") { score += 8; reasons.push("Entry bias: calls on dips — good timing (+8)"); }
+    if (entryBias === "avoid") { score = Math.min(score, 50); reasons.push("Agent says avoid — capping at 50"); }
+
+    if (stock.ticker === "QQQ") {
+      const techBullish = (agentMacro || {}).bullishTickers && (agentMacro.bullishTickers.some(t => ["NVDA","MSFT","AAPL","META","GOOGL"].includes(t)));
+      if (!techBullish) { score -= 15; reasons.push("QQQ: no clear tech bullish thesis (-15)"); }
+    }
+  }
+
+  score = Math.max(0, Math.min(95, score));
+  return { score, reasons, tradeType: tradeType || "spread" };
 }
 
 // - Put Setup Scoring -
@@ -2199,17 +2312,123 @@ async function getMarketauxNews() {
 let _agentMacroCache = { result: null, fetchedAt: 0 };
 const AGENT_MACRO_CACHE_MS = 5 * 60 * 1000; // 5 minutes — matches scan tier
 
+// ── Agent Day Plan — pre-market strategic assessment ─────────────────────
+// Runs at 6am, 7:30am, 8:30am ET before market opens
+// Gives APEX a full strategic picture before first scan fires at 9:30am
+// Returns structured dayPlan object used to gate entries all session
+async function getAgentDayPlan(scanType = "morning") {
+  if (!ANTHROPIC_API_KEY) return null;
+
+  const systemPrompt = `You are the head macro strategist for SPT-1, a systematic SPY/QQQ options spread trading system. Return ONLY valid JSON — no markdown, no preamble.
+
+{"regime":"trending_bear"|"trending_bull"|"choppy"|"breakdown"|"recovery"|"neutral","signal":"strongly bearish"|"bearish"|"mild bearish"|"neutral"|"mild bullish"|"bullish"|"strongly bullish","confidence":"high"|"medium"|"low","entryBias":"puts_on_bounces"|"calls_on_dips"|"neutral"|"avoid","tradeType":"spread"|"naked"|"none","suppressUntil":null|"HH:MM","riskLevel":"low"|"medium"|"high","vixOutlook":"spiking"|"elevated_stable"|"mean_reverting"|"falling","keyLevels":{"spySupport":null,"spyResistance":null},"catalysts":[],"reasoning":"2 sentences max","weeklyBias":"bullish"|"bearish"|"neutral","overnightMove":"string describing futures direction"}
+
+Rules:
+- suppressUntil: set to "HH:MM" ET if high-impact event today (CPI 08:30, FOMC 14:00, NFP 08:30) — APEX will not enter before this time
+- riskLevel high = FOMC day, CPI day, major geopolitical event — reduce position size
+- entryBias puts_on_bounces = bearish trend, wait for intraday relief before entering puts
+- entryBias calls_on_dips = bullish trend, wait for intraday weakness before entering calls
+- tradeType naked = sharp mean-reversion expected (quick move), spread = grinding trend
+- Focus on 3-10 day outlook, not just today`;
+
+  // Fetch overnight context
+  const [headlines, mktStatus] = await Promise.all([
+    getMacroNews().catch(() => ({ headlines: [] })),
+    agentTool_getMarketStatus().catch(() => ({})),
+  ]);
+  const headlineList = (headlines.headlines || headlines.topStories || []).slice(0, 15);
+
+  const userPrompt = `Pre-market ${scanType} assessment — ${new Date().toLocaleString('en-US', {timeZone:'America/New_York'})} ET
+
+Market snapshot:
+- VIX: ${mktStatus.vix || state.vix || '--'} | SPY: ${mktStatus.spy?.price || '--'} (${mktStatus.spy?.dayChangePct || '--'}% today)
+- Breadth: ${mktStatus.breadth ? (mktStatus.breadth*100).toFixed(0)+'%' : '--'} | F&G: ${mktStatus.fearGreed || '--'}
+- Open positions: ${(state.positions||[]).map(p => `${p.ticker}(${p.optionType==='put'?'P':'C'}${p.isSpread?'-SPRD':''})`).join(', ') || 'none'}
+
+${headlineList.length > 0 ? 'Key headlines:\n' + headlineList.map((h,i) => `${i+1}. ${h}`).join('\n') : 'No headlines available'}
+
+What is your strategic assessment for today's trading session?`;
+
+  try {
+    const raw = await callClaudeAgent(systemPrompt, userPrompt, 800, false);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    if (!parsed.signal || !parsed.regime) return null;
+    parsed.generatedAt = new Date().toISOString();
+    parsed.scanType = scanType;
+    state._dayPlan = parsed;
+    state._dayPlanDate = new Date().toLocaleDateString('en-US', {timeZone:'America/New_York'});
+    logEvent("macro", `[DAY PLAN] ${scanType.toUpperCase()} | ${parsed.regime} | ${parsed.signal} (${parsed.confidence}) | bias: ${parsed.entryBias} | risk: ${parsed.riskLevel}${parsed.suppressUntil ? ' | suppress until ' + parsed.suppressUntil : ''} | ${parsed.reasoning?.slice(0,80)}`);
+    await saveStateNow();
+    return parsed;
+  } catch(e) {
+    logEvent("warn", `[DAY PLAN] ${scanType} failed: ${e.message}`);
+    return null;
+  }
+}
+
+// ── Agent Post-Market Assessment ──────────────────────────────────────────
+// Runs at 4:15pm and 6pm ET — reviews session, sets overnight risk flags
+async function getAgentPostMarketAssessment(scanType = "post-market") {
+  if (!ANTHROPIC_API_KEY) return null;
+
+  const systemPrompt = `Post-market analyst for SPT-1. Return ONLY valid JSON — no markdown.
+{"overnightRisk":"low"|"medium"|"high","holdRecommendations":{},"tomorrowBias":"bullish"|"bearish"|"neutral","catalystsTomorrow":[],"reasoning":"1-2 sentences"}
+holdRecommendations: {ticker: "HOLD"|"MONITOR"|"EXIT_AT_OPEN"} for each open position.`;
+
+  const positions = (state.positions || []).map(p => ({
+    ticker: p.ticker, type: p.optionType, isSpread: p.isSpread,
+    pnlPct: p.currentPrice && p.premium ? ((p.currentPrice - p.premium)/p.premium*100).toFixed(1) : '0',
+    daysOpen: ((Date.now() - new Date(p.openDate).getTime())/86400000).toFixed(1),
+    expDate: p.expDate,
+  }));
+
+  const [headlines, mktStatus] = await Promise.all([
+    getMacroNews().catch(() => ({ headlines: [] })),
+    agentTool_getMarketStatus().catch(() => ({})),
+  ]);
+
+  const userPrompt = `${scanType} assessment — ${new Date().toLocaleString('en-US', {timeZone:'America/New_York'})} ET
+VIX: ${mktStatus.vix || state.vix} | SPY close: ${mktStatus.spy?.price || '--'}
+Open positions: ${JSON.stringify(positions)}
+Recent headlines: ${(headlines.headlines || []).slice(0,5).join(' | ')}
+What is the overnight risk and tomorrow's bias?`;
+
+  try {
+    const raw = await callClaudeAgent(systemPrompt, userPrompt, 500, false);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    parsed.generatedAt = new Date().toISOString();
+    logEvent("macro", `[POST-MARKET] overnight risk: ${parsed.overnightRisk} | tomorrow: ${parsed.tomorrowBias} | ${parsed.reasoning?.slice(0,80)}`);
+
+    // Flag positions for exit at open if agent says so
+    for (const pos of (state.positions || [])) {
+      const rec = parsed.holdRecommendations?.[pos.ticker];
+      if (rec === "EXIT_AT_OPEN") {
+        pos._morningExitFlag = true;
+        pos._morningExitReason = `Post-market agent: overnight risk ${parsed.overnightRisk}`;
+        logEvent("warn", `[POST-MARKET] ${pos.ticker} flagged for exit at open — ${parsed.reasoning}`);
+      }
+    }
+    await saveStateNow();
+    return parsed;
+  } catch(e) {
+    logEvent("warn", `[POST-MARKET] ${scanType} failed: ${e.message}`);
+    return null;
+  }
+}
+
 async function getAgentMacroAnalysis(headlines) {
   if (!ANTHROPIC_API_KEY || !headlines || headlines.length === 0) return null;
   // Return cached result if fresh
   if (_agentMacroCache.result && Date.now() - _agentMacroCache.fetchedAt < AGENT_MACRO_CACHE_MS) {
     return _agentMacroCache.result;
   }
-  const systemPrompt = `Options trading macro analyst. Read headlines, return JSON only — no other text.
+  const systemPrompt = `You are the head macro strategist for SPT-1, a systematic SPY/QQQ options trading system. Return ONLY valid JSON — no markdown, no preamble.
 
-{"signal":"strongly bearish"|"bearish"|"mild bearish"|"neutral"|"mild bullish"|"bullish"|"strongly bullish","confidence":"high"|"medium"|"low","modifier":-20to15,"mode":"defensive"|"cautious"|"normal"|"aggressive","reasoning":"1 sentence","affectedTickers":[],"bearishTickers":[],"bullishTickers":[],"keyThemes":[],"topStories":[{"headline":"","source":"","direction":"bearish"|"bullish"|"neutral","importance":"high"|"medium"|"low"}]}
+{"signal":"strongly bearish"|"bearish"|"mild bearish"|"neutral"|"mild bullish"|"bullish"|"strongly bullish","modifier":-20to20,"confidence":"high"|"medium"|"low","mode":"defensive"|"cautious"|"normal"|"aggressive","reasoning":"1 sentence","regime":"trending_bear"|"trending_bull"|"choppy"|"breakdown"|"recovery"|"neutral","regimeDuration":"intraday"|"1-3 days"|"3-7 days"|"1-2 weeks"|"multi-week","entryBias":"puts_on_bounces"|"calls_on_dips"|"neutral"|"avoid","tradeType":"spread"|"naked"|"none","vixOutlook":"spiking"|"elevated_stable"|"mean_reverting"|"falling"|"unknown","keyLevels":{"spySupport":null,"spyResistance":null},"catalysts":[],"bearishTickers":[],"bullishTickers":[],"themes":[]}
 
-Rules: modifier -20=crash risk, +15=major rally. defensive=puts only. Focus on next 4 hours. Stale headlines(>6h)=neutral/low. Use tools only for data not in the prompt.`;
+Rules: regime=what SPY does next 3-10 days. entryBias: puts_on_bounces=bearish trend wait for relief; calls_on_dips=bullish wait for weakness. tradeType: spread=grinding trend, naked=sharp mean-reversion, none=unclear. vixOutlook: spiking=buy puts aggressively, falling=puts losing value. Focus on 3-10 day outlook not just today.`;
 
   // Pre-fetch market status so agent doesn't need to tool-call for it
   const mktStatus = await agentTool_getMarketStatus().catch(() => ({}));
@@ -2293,7 +2512,7 @@ RSI: ${stock.rsi} | MACD: ${stock.macd} | Momentum: ${stock.momentum}
 Score: ${score}/100 | Top reasons: ${reasons.slice(0,4).join('; ')}
 Macro: ${(state._agentMacro||{}).signal||'neutral'} (${(state._agentMacro||{}).confidence||'unknown'})
 VIX: ${state.vix}
-Should APEX enter this ${optionType} position?`;
+Should SPT-1 enter this ${optionType} position?`;
 
   const raw = await callClaudeAgent(systemPrompt, userPrompt, 200, false);
   if (!raw) return { approved: true, reason: "agent unavailable — allowing" };
@@ -3707,6 +3926,156 @@ function buildCard(stock, price, contracts, iv, optionType = "call", score = 75,
 }
 
 // - Execute Trade -
+// ── Execute Spread Trade ─────────────────────────────────────────────────
+// Submits a debit spread (buy near-ATM leg, sell $10 OTM leg)
+// Returns { success, position } or null
+async function executeSpreadTrade(stock, price, score, scoreReasons, vix, optionType, buyContract, sellContract) {
+  if (!buyContract || !sellContract) return null;
+  const contracts = 1;
+  const netDebit  = parseFloat((buyContract.premium - sellContract.premium).toFixed(2));
+  const maxProfit = parseFloat((10 - netDebit).toFixed(2)); // $10 wide spread
+  const maxLoss   = netDebit;
+  const finalCost = parseFloat((netDebit * 100 * contracts).toFixed(2));
+
+  if (finalCost > state.cash * 0.15) {
+    logEvent("filter", `${stock.ticker} spread cost $${finalCost} exceeds 15% position limit`);
+    return null;
+  }
+  if (state.cash - finalCost < CAPITAL_FLOOR) {
+    logEvent("filter", `${stock.ticker} spread would breach capital floor`);
+    return null;
+  }
+
+  let buyOrderId  = null;
+  let sellOrderId = null;
+
+  if (buyContract.symbol && sellContract.symbol && !dryRunMode) {
+    try {
+      // Submit buy leg
+      const buyResp = await alpacaPost("/orders", {
+        symbol: buyContract.symbol, qty: contracts,
+        side: "buy", type: "limit", time_in_force: "day",
+        limit_price: parseFloat(buyContract.ask.toFixed(2)),
+      });
+      if (buyResp && buyResp.id) {
+        buyOrderId = buyResp.id;
+        logEvent("trade", `[SPREAD] Buy leg: ${buyResp.id} | ${buyContract.symbol} | ${contracts}x @ $${buyContract.ask.toFixed(2)}`);
+        // Poll for fill
+        let filled = false;
+        const start = Date.now();
+        while (!filled && Date.now() - start < 10000) {
+          await new Promise(r => setTimeout(r, 1000));
+          const poll = await alpacaGet(`/orders/${buyOrderId}`);
+          if (poll && poll.status === "filled") { filled = true; }
+          else if (poll && ["canceled","expired","rejected"].includes(poll.status)) break;
+        }
+        if (!filled) {
+          await alpacaPost(`/orders/${buyOrderId}/cancel`, {}).catch(() => {});
+          logEvent("warn", `[SPREAD] Buy leg unfilled — cancelling spread`);
+          return null;
+        }
+      }
+
+      // Submit sell leg
+      const sellResp = await alpacaPost("/orders", {
+        symbol: sellContract.symbol, qty: contracts,
+        side: "sell", type: "limit", time_in_force: "day",
+        limit_price: parseFloat(sellContract.bid.toFixed(2)),
+      });
+      if (sellResp && sellResp.id) {
+        sellOrderId = sellResp.id;
+        logEvent("trade", `[SPREAD] Sell leg: ${sellResp.id} | ${sellContract.symbol} | ${contracts}x @ $${sellContract.bid.toFixed(2)}`);
+        let filled = false;
+        const start = Date.now();
+        while (!filled && Date.now() - start < 10000) {
+          await new Promise(r => setTimeout(r, 1000));
+          const poll = await alpacaGet(`/orders/${sellOrderId}`);
+          if (poll && poll.status === "filled") { filled = true; }
+          else if (poll && ["canceled","expired","rejected"].includes(poll.status)) break;
+        }
+        if (!filled) {
+          await alpacaPost(`/orders/${sellOrderId}/cancel`, {}).catch(() => {});
+          logEvent("warn", `[SPREAD] Sell leg unfilled — spread incomplete, unwinding buy leg`);
+          // Try to close buy leg at market
+          await alpacaPost("/orders", { symbol: buyContract.symbol, qty: contracts, side: "sell", type: "market", time_in_force: "day" }).catch(() => {});
+          return null;
+        }
+      }
+    } catch(e) {
+      logEvent("error", `[SPREAD] Order error: ${e.message}`);
+      return null;
+    }
+  }
+
+  // Record spread position
+  state.cash -= finalCost;
+  const position = {
+    ticker:           stock.ticker,
+    optionType,
+    isSpread:         true,
+    buyStrike:        buyContract.strike,
+    sellStrike:       sellContract.strike,
+    spreadWidth:      10,
+    buySymbol:        buyContract.symbol,
+    sellSymbol:       sellContract.symbol,
+    premium:          netDebit,        // net debit paid
+    maxProfit,
+    maxLoss,
+    contracts,
+    expDate:          buyContract.expDate,
+    expDays:          buyContract.expDays,
+    cost:             finalCost,
+    score,
+    reasons:          scoreReasons,
+    openDate:         new Date().toISOString(),
+    currentPrice:     netDebit,
+    peakPremium:      netDebit,
+    entryRSI:         stock.rsi || 50,
+    entryMACD:        stock.macd || "neutral",
+    entryMomentum:    stock.momentum || "steady",
+    entryMacro:       (state._agentMacro || {}).signal || "neutral",
+    entryThesisScore: 100,
+    thesisHistory:    [],
+    agentHistory:     [],
+    buyOrderId,
+    sellOrderId,
+    realData:         !!(buyContract.symbol && sellContract.symbol),
+    vix,
+    entryVIX:         vix,
+    expiryType:       "monthly",
+    dteLabel:         "SPREAD-MONTHLY",
+    partialClosed:    false,
+    isMeanReversion:  false,
+    trailStop:        null,
+    breakevenLocked:  false,
+    halfPosition:     false,
+    target:           parseFloat((netDebit * 1.50).toFixed(2)),  // 50% gain target
+    stop:             parseFloat((netDebit * 0.50).toFixed(2)),   // 50% loss stop
+    takeProfitPct:    0.50,
+    fastStopPct:      0.50,
+  };
+
+  state.positions.push(position);
+
+  logEvent("trade",
+    `[SPREAD] BUY ${stock.ticker} $${buyContract.strike}/${sellContract.strike} ${optionType.toUpperCase()} exp ${buyContract.expDate} | ` +
+    `net debit $${netDebit} | max profit $${maxProfit} | max loss $${maxLoss} | cost $${finalCost} | score ${score}/100 | cash $${state.cash.toFixed(2)}`
+  );
+  logEvent("trade", `Live fill confirmed — real trade count: ${(state.closedTrades||[]).length + (state.positions||[]).length}/30 before Kelly activates`);
+
+  state.tradeJournal.unshift({
+    time: new Date().toISOString(), ticker: stock.ticker,
+    action: "OPEN", optionType, isSpread: true,
+    buyStrike: buyContract.strike, sellStrike: sellContract.strike,
+    premium: netDebit, cost: finalCost, score, scoreReasons,
+    reasoning: `[SPREAD] Score ${score}/100. Net debit $${netDebit}. Max profit $${maxProfit}. ${scoreReasons.slice(0,2).join(". ")}.`,
+  });
+  if (state.tradeJournal.length > 100) state.tradeJournal = state.tradeJournal.slice(0, 100);
+
+  await saveStateNow();
+  return position;
+}
+
 async function executeTrade(stock, price, score, scoreReasons, vix, optionType = "call", isMeanReversion = false) {
   // Quick cash pre-check before expensive API calls
   // Use conservative estimate: assume at least $200 premium * 1 contract = $200 min cost
@@ -4092,6 +4461,30 @@ async function closePosition(ticker, reason, exitPremium = null) {
     const idx = state.positions.findIndex(p => p.ticker === ticker);
     if (idx === -1) return;
     const pos  = state.positions[idx];
+
+    // ── Spread close — close both legs ─────────────────────────────────
+    if (pos.isSpread && !dryRunMode) {
+      try {
+        // Close buy leg (sell it)
+        if (pos.buySymbol) {
+          await alpacaPost("/orders", {
+            symbol: pos.buySymbol, qty: pos.contracts,
+            side: "sell", type: "market", time_in_force: "day",
+          });
+          logEvent("trade", `[SPREAD CLOSE] Buy leg closed: ${pos.buySymbol}`);
+        }
+        // Close sell leg (buy it back)
+        if (pos.sellSymbol) {
+          await alpacaPost("/orders", {
+            symbol: pos.sellSymbol, qty: pos.contracts,
+            side: "buy", type: "market", time_in_force: "day",
+          });
+          logEvent("trade", `[SPREAD CLOSE] Sell leg closed: ${pos.sellSymbol}`);
+        }
+      } catch(e) {
+        logEvent("error", `[SPREAD CLOSE] Error closing legs: ${e.message}`);
+      }
+    }
   const mult = pos.partialClosed ? 0.5 : 1.0;
 
   // Use real exit price in order of priority:
@@ -5161,10 +5554,30 @@ async function runScan() {
   // spyAlreadyDown: removed — agent scores this into individual stock signals already
   const spyAlreadyDown = false; // disabled — agent macro signal replaces this
 
-  // ── FINAL HOUR BLOCK — no new entries after 3pm (PDT protection) ─────
+  // ── FINAL HOUR BLOCK — no new entries after 3:45pm ──────────────────
   const etHourEntry    = scanET.getHours() + scanET.getMinutes() / 60;
-  const finalHourBlock = etHourEntry >= 15.0 && !dryRunMode;
-  if (finalHourBlock) logEvent("filter", `Final hour block — no new entries after 3pm (PDT protection)`);
+  const finalHourBlock = etHourEntry >= 15.75 && !dryRunMode; // 3:45pm
+  if (finalHourBlock) logEvent("filter", `Final hour block — no new entries after 3:45pm`);
+
+  // ── DAY PLAN: suppressUntil gate ─────────────────────────────────────
+  // Agent sets suppressUntil on high-impact event days (CPI, FOMC, NFP)
+  // Blocks all entries until after the event reaction settles
+  const dayPlan = state._dayPlan;
+  let suppressBlock = false;
+  if (dayPlan && dayPlan.suppressUntil && !dryRunMode) {
+    const [supH, supM] = dayPlan.suppressUntil.split(":").map(Number);
+    const suppressMins = supH * 60 + supM;
+    const currentMins  = scanET.getHours() * 60 + scanET.getMinutes();
+    if (currentMins < suppressMins) {
+      suppressBlock = true;
+      logEvent("filter", `[DAY PLAN] Entries suppressed until ${dayPlan.suppressUntil} ET — high impact event`);
+    }
+  }
+
+  // ── DAY PLAN: riskLevel sizing modifier ──────────────────────────────
+  // High risk days (FOMC, CPI) get 50% size reduction on top of drawdown protocol
+  const dayPlanRiskMult = (dayPlan && dayPlan.riskLevel === "high" && !dryRunMode) ? 0.50 : 1.0;
+  if (dayPlanRiskMult < 1.0) logEvent("filter", `[DAY PLAN] High risk day — position sizing reduced 50%`);
 
   const macroBullish  = (marketContext.macro?.mode === "aggressive");
   const pdtCount      = countRecentDayTrades();
@@ -5240,8 +5653,9 @@ async function runScan() {
   const agentHasRun       = !!state._agentMacro;
   const macroClearForPuts = !agentHasRun || putsMacroAllowed;
 
-  const callsAllowed = (isEntryWindow("call") && !finalHourBlock && !pdtBlocked) || dryRunMode;
-  const putsAllowed  = (isEntryWindow("put") && !vixFallingPause && !spyGapUp && !postReversalBlock && !finalHourBlock && !macroBullish && !pdtBlocked) || dryRunMode;
+  const isIndexScan  = true; // scan loop handles both index and stocks
+  const callsAllowed = (isEntryWindow("call", true) && !finalHourBlock && !suppressBlock && !pdtBlocked) || dryRunMode;
+  const putsAllowed  = (isEntryWindow("put",  true) && !vixFallingPause && !spyGapUp && !postReversalBlock && !finalHourBlock && !suppressBlock && !macroBullish && !pdtBlocked) || dryRunMode;
   if (macroBullish && !dryRunMode) logEvent("filter", `Macro bullish (${marketContext.macro?.signal}) — puts blocked`);
   if (vixFallingPause && !dryRunMode) logEvent("filter", "VIX falling — put entries paused this scan");
 
@@ -5592,8 +6006,29 @@ async function runScan() {
     const weeklyTrend = stock._weeklyTrend || { trend: 'neutral', above10wk: null };
 
     // Score both call and put setups using live signals
-    const callSetup = scoreSetup(liveStock, relStrength, signals.adx, todayVol, avgVol);
-    const putSetup  = scorePutSetup(liveStock, relStrength, signals.adx, todayVol, avgVol, state.vix);
+    // Index instruments (SPY/QQQ) use dedicated macro-driven scoring
+    let callSetup, putSetup;
+    if (stock.isIndex) {
+      const agentMacro  = state._agentMacro || {};
+      const spyRSI      = liveStock.rsi || 50;
+      const spyMACD     = liveStock.macd || "neutral";
+      const spyMomentum = liveStock.momentum || "steady";
+      const breadthVal  = typeof marketContext?.breadth === "number"
+        ? marketContext.breadth * 100
+        : parseFloat((marketContext?.breadth || "50").toString()) || 50;
+      const putResult  = scoreIndexSetup(liveStock, "put",  spyRSI, spyMACD, spyMomentum, breadthVal, state.vix, agentMacro);
+      const callResult = scoreIndexSetup(liveStock, "call", spyRSI, spyMACD, spyMomentum, breadthVal, state.vix, agentMacro);
+      putSetup  = { score: putResult.score,  reasons: putResult.reasons,  tradeType: putResult.tradeType  || "spread", isMeanReversion: false };
+      callSetup = { score: callResult.score, reasons: callResult.reasons, tradeType: callResult.tradeType || "spread", isMeanReversion: false };
+      // QQQ: only enter if no SPY position in same direction already
+      if (stock.ticker === "QQQ") {
+        if (state.positions.some(p => p.ticker === "SPY" && p.optionType === "put"))  putSetup.score  = Math.min(putSetup.score,  30);
+        if (state.positions.some(p => p.ticker === "SPY" && p.optionType === "call")) callSetup.score = Math.min(callSetup.score, 30);
+      }
+    } else {
+      callSetup = scoreSetup(liveStock, relStrength, signals.adx, todayVol, avgVol);
+      putSetup  = scorePutSetup(liveStock, relStrength, signals.adx, todayVol, avgVol, state.vix);
+    }
 
     // Weekly trend adjustment — fighting a bullish weekly trend on puts needs higher conviction
     if (weeklyTrend.above10wk === true) {
@@ -5958,8 +6393,6 @@ async function runScan() {
       }
     }
     // ── AGENT PRE-ENTRY CHECK ────────────────────────────────────────────
-    // Final agent gate before order submits
-    // Blocks re-entries after losses and borderline/contradicting setups
     if (!dryRunMode) {
       const preCheck = await getAgentPreEntryCheck(stock, bestScore, bestReasons, optionType);
       if (!preCheck.approved && preCheck.confidence === "high") {
@@ -5967,7 +6400,39 @@ async function runScan() {
         continue;
       }
     }
-    const entered = await executeTrade(stock, price, score, reasons, state.vix, optionType, isMeanReversion);
+
+    // ── SPREAD vs NAKED DECISION ──────────────────────────────────────────
+    // Agent tradeType determines execution method
+    // Index instruments: spread by default, naked only for mean-reversion
+    // Individual stocks: always naked (legacy behavior)
+    const agentTradeType = (state._agentMacro || {}).tradeType || "spread";
+    const useSpread      = stock.isIndex && agentTradeType !== "naked" && !isMeanReversion;
+
+    let entered = false;
+    if (useSpread) {
+      // Get both legs — buy near-ATM, sell $10 OTM
+      const buyContract  = await getRealOptionsContract(stock.ticker, price, optionType, score, state.vix, stock.earningsDate, false);
+      if (!buyContract) { logEvent("filter", `${stock.ticker} spread: no buy leg found`); continue; }
+
+      // Sell strike exactly $10 OTM from buy strike
+      // Put spread: sell the $10 lower strike (limits downside, reduces cost)
+      // Call spread: sell the $10 higher strike (limits upside, reduces cost)
+      const sellStrikeTarget = optionType === "put"
+        ? buyContract.strike - 10   // exactly $10 below buy strike
+        : buyContract.strike + 10;  // exactly $10 above buy strike
+      const sellContract = await getRealOptionsContract(stock.ticker, sellStrikeTarget, optionType, Math.max(score - 15, 50), state.vix, stock.earningsDate, false);
+
+      if (sellContract && buyContract.strike !== sellContract.strike) {
+        logEvent("filter", `${stock.ticker} spread: buy $${buyContract.strike} / sell $${sellContract.strike} | net $${(buyContract.premium - sellContract.premium).toFixed(2)}`);
+        const spreadPos = await executeSpreadTrade(stock, price, score, reasons, state.vix, optionType, buyContract, sellContract);
+        entered = !!spreadPos;
+      } else {
+        logEvent("warn", `${stock.ticker} spread: sell leg not found or same strike — falling back to naked`);
+        entered = await executeTrade(stock, price, score, reasons, state.vix, optionType, isMeanReversion);
+      }
+    } else {
+      entered = await executeTrade(stock, price, score, reasons, state.vix, optionType, isMeanReversion);
+    }
     if (entered) await new Promise(r=>setTimeout(r,500));
   }
 
@@ -5983,7 +6448,7 @@ async function runScan() {
     state._scanFailures = (state._scanFailures || 0) + 1;
     if (state._scanFailures >= 3 && RESEND_API_KEY && GMAIL_USER && isMarketHours()) {
       await sendResendEmail(
-        `APEX ALERT — Scanner failing (${state._scanFailures} errors)`,
+        `SPT-1 ALERT — Scanner failing (${state._scanFailures} errors)`,
         `<div style="font-family:monospace;background:#07101f;color:#ff5555;padding:20px">
           <h2>⚠ APEX Scanner Error</h2>
           <p>Consecutive scan failures: <strong>${state._scanFailures}</strong></p>
@@ -6059,7 +6524,7 @@ async function sendMorningBriefing() {
     // ── Header ───────────────────────────────────────────────────────────
     const header = `
       <div style="text-align:center;border-bottom:3px double #333;padding-bottom:12px;margin-bottom:12px">
-        <div style="font-family:Georgia,serif;font-size:22px;font-weight:bold;color:#111;letter-spacing:1px">APEX TRADING DESK</div>
+        <div style="font-family:Georgia,serif;font-size:22px;font-weight:bold;color:#111;letter-spacing:1px">SPT-1 TRADING DESK</div>
         <div style="font-size:10px;color:#555;margin-top:4px;letter-spacing:1px">${dateStr.toUpperCase()}</div>
       </div>
       <div style="display:flex;gap:0;border:1px solid #ccc;margin-bottom:4px">
@@ -6232,7 +6697,7 @@ async function sendMorningBriefing() {
     // ── Footer ────────────────────────────────────────────────────────
     const footer = `
       <div style="border-top:3px double #333;margin-top:16px;padding-top:8px;text-align:center;font-size:9px;color:#999;letter-spacing:1px">
-        APEX v4.0 · Entry window 9:45am–3pm ET · No entries first 15min or last hour
+        SPT-1 v1.0 · Entry window 9:30am–3:45pm ET · SPY/QQQ primary · Monthly options
       </div>`;
 
     // ── Assemble ──────────────────────────────────────────────────────
@@ -6251,7 +6716,7 @@ async function sendMorningBriefing() {
       </div>`;
 
     await sendResendEmail(
-      `APEX Trading Desk — ${dateStr} | VIX ${state.vix} | ${positions.length} positions`,
+      `SPT-1 Desk — ${dateStr} | VIX ${state.vix} | ${positions.length} positions`,
       html
     );
     logEvent("scan", "Morning briefing email sent");
@@ -6274,7 +6739,7 @@ async function sendResendEmail(subject, html) {
         "Content-Type":  "application/json",
       },
       body: JSON.stringify({
-        from:    "APEX Trading <onboarding@resend.dev>",
+        from:    "SPT-1 <onboarding@resend.dev>",
         to:      [GMAIL_USER],
         subject,
         html,
@@ -6315,7 +6780,7 @@ function buildEmailHTML(type) {
   return `
 <!DOCTYPE html><html><body style="font-family:monospace;background:#07101f;color:#cce8ff;padding:20px;max-width:600px">
 <div style="background:#0a1628;border:1px solid #0d3050;border-radius:12px;padding:20px;margin-bottom:16px">
-  <h2 style="color:#00ff88;margin:0 0 4px">- APEX ${type === "morning" ? "Morning Briefing" : "End of Day Report"}</h2>
+  <h2 style="color:#00ff88;margin:0 0 4px">- SPT-1 ${type === "morning" ? "Morning Briefing" : "End of Day Report"}</h2>
   <p style="color:#336688;margin:0;font-size:12px">${new Date().toLocaleDateString("en-US",{weekday:"long",month:"long",day:"numeric"})}</p>
 </div>
 
@@ -6369,22 +6834,22 @@ function buildEmailHTML(type) {
 ${type === "morning" ? `
 <div style="background:rgba(0,255,136,0.05);border:1px solid rgba(0,255,136,0.15);border-radius:8px;padding:14px">
   <h3 style="color:#00ff88;font-size:11px;margin:0 0 6px">TODAY'S OUTLOOK</h3>
-  <p style="font-size:12px;color:#cce8ff;margin:0">APEX will scan every minute from 10:00 AM - 3:30 PM ET. VIX is currently ${state.vix} - ${state.vix<20?"normal conditions, full sizing":"reduced sizing active"}. ${state.positions.length} position${state.positions.length!==1?"s":""} currently open.</p>
+  <p style="font-size:12px;color:#cce8ff;margin:0">SPT-1 will scan every minute from 10:00 AM - 3:30 PM ET. VIX is currently ${state.vix} - ${state.vix<20?"normal conditions, full sizing":"reduced sizing active"}. ${state.positions.length} position${state.positions.length!==1?"s":""} currently open.</p>
 </div>` : `
 <div style="background:rgba(0,196,255,0.05);border:1px solid rgba(0,196,255,0.15);border-radius:8px;padding:14px">
   <h3 style="color:#00c4ff;font-size:11px;margin:0 0 6px">END OF DAY SUMMARY</h3>
-  <p style="font-size:12px;color:#cce8ff;margin:0">Market closed. ${state.todayTrades} trade${state.todayTrades!==1?"s":""} executed today. Daily P&L: ${parseFloat(daily)>=0?"+":""}$${daily}. APEX resumes scanning tomorrow at 10:00 AM ET.</p>
+  <p style="font-size:12px;color:#cce8ff;margin:0">Market closed. ${state.todayTrades} trade${state.todayTrades!==1?"s":""} executed today. Daily P&L: ${parseFloat(daily)>=0?"+":""}$${daily}. SPT-1 resumes scanning tomorrow at 10:00 AM ET.</p>
 </div>`}
 
-<p style="font-size:10px;color:#336688;text-align:center;margin-top:16px">APEX Professional Options Agent - Paper Trading - Not financial advice</p>
+<p style="font-size:10px;color:#336688;text-align:center;margin-top:16px">SPT-1 SPY Spread Trader - Paper Trading - Not financial advice</p>
 </body></html>`;
 }
 
 async function sendEmail(type) {
   if (!RESEND_API_KEY || !GMAIL_USER) { logEvent("warn", "Email not configured"); return; }
   const subject = type === "morning"
-    ? `APEX Morning Briefing - ${new Date().toLocaleDateString()}`
-    : `APEX EOD Report - P&L ${(state.cash-state.dayStartCash)>=0?"+":""}$${(state.cash-state.dayStartCash).toFixed(2)}`;
+    ? `SPT-1 Morning Briefing - ${new Date().toLocaleDateString()}`
+    : `SPT-1 EOD Report - P&L ${(state.cash-state.dayStartCash)>=0?"+":""}$${(state.cash-state.dayStartCash).toFixed(2)}`;
   try {
     await sendResendEmail(subject, buildEmailHTML(type));
     logEvent("email", `${type} email sent to ${GMAIL_USER}`);
@@ -6703,7 +7168,7 @@ async function premarketAssessment() {
       await sendResendEmail(subject, `
         <div style="font-family:Georgia,serif;background:#fff;color:#111;padding:24px;max-width:700px;border:1px solid #ccc">
           <div style="text-align:center;border-bottom:3px double #333;padding-bottom:12px;margin-bottom:16px">
-            <div style="font-size:20px;font-weight:bold;letter-spacing:1px">APEX PRE-MARKET ASSESSMENT</div>
+            <div style="font-size:20px;font-weight:bold;letter-spacing:1px">SPT-1 PRE-MARKET ASSESSMENT</div>
             <div style="font-size:10px;color:#555;margin-top:4px;letter-spacing:1px">${new Date().toLocaleDateString('en-US',{weekday:'long',month:'long',day:'numeric'}).toUpperCase()} · 8:45AM ET</div>
           </div>
           <div style="display:flex;gap:0;border:1px solid #ccc;margin-bottom:16px">
@@ -6744,7 +7209,7 @@ async function premarketAssessment() {
             <em>These are recommendations only. APEX will manage exits automatically at open.</em>
           </div>
           <div style="border-top:3px double #333;margin-top:12px;padding-top:8px;text-align:center;font-size:9px;color:#999;letter-spacing:1px">
-            APEX v4.0 · Market opens in ~45 minutes · Entry window 9:45am ET
+            SPT-1 v1.0 · Market opens in ~45 minutes · Entry window 9:45am ET
           </div>
         </div>`
       );
@@ -6753,8 +7218,50 @@ async function premarketAssessment() {
   } catch(e) { console.error("[PREMARKET] Assessment error:", e.message); }
 }
 
-// Morning reset + email 13:00 UTC = 9:00 AM EDT (UTC-4, DST in effect Mar-Nov)
-// Note: becomes 14:00 UTC = 9:00 AM EST in winter (Nov-Mar)
+// ── EXPANDED AGENT SCHEDULE ──────────────────────────────────────────────
+// Gives APEX strategic context 3.5 hours before first trade fires
+
+// 6:00am ET — deep scan: overnight futures, calendar, initial regime
+// EDT: 10:00 UTC | EST: 11:00 UTC
+cron.schedule("0 10 * * 1-5", async () => {
+  logEvent("macro", "[DAY PLAN] 6:00am deep scan starting...");
+  await getAgentDayPlan("6am-deep");
+});
+cron.schedule("0 11 * * 1-5", async () => {
+  logEvent("macro", "[DAY PLAN] 6:00am deep scan starting (EST fallback)...");
+  await getAgentDayPlan("6am-deep");
+});
+
+// 7:30am ET — pre-market brief: overnight news digested, regime update
+// EDT: 11:30 UTC | EST: 12:30 UTC
+cron.schedule("30 11 * * 1-5", async () => {
+  logEvent("macro", "[DAY PLAN] 7:30am brief starting...");
+  await getAgentDayPlan("7:30am-brief");
+});
+cron.schedule("30 12 * * 1-5", async () => {
+  logEvent("macro", "[DAY PLAN] 7:30am brief starting (EST fallback)...");
+  await getAgentDayPlan("7:30am-brief");
+});
+
+// 8:30am ET — final pre-market: economic data just dropped, final regime
+// EDT: 12:30 UTC | EST: 13:30 UTC
+cron.schedule("30 12 * * 1-5", async () => {
+  const et = getETTime();
+  if (et.getHours() === 8) { // only fire at 8:30am EDT
+    logEvent("macro", "[DAY PLAN] 8:30am final assessment starting...");
+    await getAgentDayPlan("8:30am-final");
+  }
+});
+cron.schedule("30 13 * * 1-5", async () => {
+  const et = getETTime();
+  if (et.getHours() === 8) { // only fire at 8:30am EST
+    logEvent("macro", "[DAY PLAN] 8:30am final assessment starting (EST fallback)...");
+    await getAgentDayPlan("8:30am-final");
+  }
+});
+
+// Morning reset + email 9:00 AM ET
+// EDT: 13:00 UTC | EST: 14:00 UTC
 // Pre-market assessment 8:45 AM ET (12:45 UTC EDT / 13:45 UTC EST)
 cron.schedule("45 12 * * 1-5", async () => {
   await premarketAssessment();
@@ -6775,6 +7282,14 @@ cron.schedule("0 13 * * 1-5", async () => {
   state._macroReversalAt    = null; // clear reversal cooldown daily
   state._macroReversalCount = 0;
   state._macroReversalSPY   = null;
+  // dayPlan is NOT cleared at market open — 6am/7:30am/8:30am scans set it fresh
+  // Only clear if it's from a previous day
+  const todayStr = new Date().toLocaleDateString('en-US', {timeZone:'America/New_York'});
+  if (state._dayPlanDate && state._dayPlanDate !== todayStr) {
+    state._dayPlan     = null;
+    state._dayPlanDate = null;
+    logEvent("scan", "[DAY PLAN] Cleared stale day plan from previous session");
+  }
   if (state._oversoldCount) {
     // Only keep tickers still in watchlist — prune closed/removed tickers
     const watchTickers = new Set(WATCHLIST.map(s => s.ticker));
@@ -6814,6 +7329,48 @@ cron.schedule("0 13 * * 1-5", async () => {
 // EOD email 20:05 UTC = 4:05 PM EDT (UTC-4)
 cron.schedule("5 20 * * 1-5", () => { sendEmail("eod"); });
 
+// 4:15pm ET — post-market assessment: AH moves, overnight risk
+// EDT: 20:15 UTC | EST: 21:15 UTC
+cron.schedule("15 20 * * 1-5", async () => {
+  logEvent("macro", "[POST-MARKET] 4:15pm assessment starting...");
+  await getAgentPostMarketAssessment("4:15pm");
+});
+cron.schedule("15 21 * * 1-5", async () => {
+  const et = getETTime();
+  if (et.getHours() === 16) {
+    logEvent("macro", "[POST-MARKET] 4:15pm assessment starting (EST fallback)...");
+    await getAgentPostMarketAssessment("4:15pm");
+  }
+});
+
+// 6:00pm ET — evening scan: overnight risk, next day prep
+// EDT: 22:00 UTC | EST: 23:00 UTC
+cron.schedule("0 22 * * 1-5", async () => {
+  logEvent("macro", "[EVENING] 6:00pm scan starting...");
+  await getAgentPostMarketAssessment("6pm-evening");
+});
+cron.schedule("0 23 * * 1-5", async () => {
+  const et = getETTime();
+  if (et.getHours() === 18) {
+    logEvent("macro", "[EVENING] 6:00pm scan starting (EST fallback)...");
+    await getAgentPostMarketAssessment("6pm-evening");
+  }
+});
+
+// Saturday 8:00am ET — weekly regime assessment
+// EDT: 12:00 UTC | EST: 13:00 UTC
+cron.schedule("0 12 * * 6", async () => {
+  logEvent("macro", "[WEEKLY] Saturday 8am regime assessment starting...");
+  await getAgentDayPlan("saturday-weekly");
+});
+cron.schedule("0 13 * * 6", async () => {
+  const et = getETTime();
+  if (et.getDay() === 6) {
+    logEvent("macro", "[WEEKLY] Saturday 8am regime assessment (EST fallback)...");
+    await getAgentDayPlan("saturday-weekly");
+  }
+});
+
 // Health check every 15 minutes during market hours
 cron.schedule("*/15 13-20 * * 1-5", async () => {
   if (!isMarketHours()) return;
@@ -6822,7 +7379,7 @@ cron.schedule("*/15 13-20 * * 1-5", async () => {
   if (minsSinceLastScan > 15 && minsSinceLastScan < 999 && RESEND_API_KEY && GMAIL_USER) {
     logEvent("warn", `Health check: no scan in ${minsSinceLastScan.toFixed(0)} minutes - sending alert`);
     sendResendEmail(
-      "APEX ALERT - Scanner may be down",
+      "SPT-1 ALERT - Scanner may be down",
       `<p>APEX has not scanned in ${minsSinceLastScan.toFixed(0)} minutes during market hours.</p>
              <p>Last scan: ${state.lastScan || "unknown"}</p>
              <p>Check Railway logs immediately.</p>`
@@ -6850,7 +7407,7 @@ cron.schedule("0 13 * * 1", async () => {
   await saveStateNow();
   if (RESEND_API_KEY && GMAIL_USER) {
     sendResendEmail(
-      `APEX Monthly Report - ${et.toLocaleDateString("en-US",{month:"long",year:"numeric"})}`,
+      `SPT-1 Monthly Report - ${et.toLocaleDateString("en-US",{month:"long",year:"numeric"})}`,
       `<pre style="font-family:monospace;background:#07101f;color:#cce8ff;padding:20px">${report}</pre>`
     );
   }
@@ -6888,6 +7445,7 @@ app.get("/api/state", async (req, res) => {
     pdtBlocked:         countRecentDayTrades() >= PDT_LIMIT,
     exitStats:          state.exitStats || {},
     agentMacro:         state._agentMacro || null,
+    dayPlan:            state._dayPlan || null,
     agentAutoExitEnabled: state.agentAutoExitEnabled || false,
     portfolioSnapshots: state.portfolioSnapshots || [],
     reconcileStatus:    state.reconcileStatus || "unknown",
@@ -8291,7 +8849,7 @@ process.on("unhandledRejection", (reason, promise) => {
 // Boot sequence - load state from Redis then start server
 initState().then(() => {
   app.listen(PORT, () => {
-    console.log(`APEX v4.0 running on port ${PORT}`);
+    console.log(`SPT-1 v1.0 running on port ${PORT}`);
     console.log(`Alpaca key:  ${ALPACA_KEY?"SET":"NOT SET"}`);
     console.log(`Gmail:       ${GMAIL_USER||"NOT SET"}`);
     console.log(`Resend:      ${RESEND_API_KEY?"SET ✅":"NOT SET — email disabled"}`);
