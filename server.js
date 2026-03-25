@@ -210,6 +210,8 @@ function defaultState() {
     _macroReversalAt:    null,  // timestamp of last macro-reversal exit batch
     _macroReversalCount: 0,     // how many positions closed in the reversal batch
     _macroReversalSPY:   null,  // SPY price at time of reversal — for comparison
+    _recentLosses:       {},    // ticker -> {closedAt, reason, agentSignal, price} for re-entry veto
+    _agentHistory:       {},    // ticker -> last 5 rescore results for agent memory
     portfolioSnapshots: [], // time-series portfolio value: [{t, v}] sampled every 5 min
   };
 }
@@ -2241,6 +2243,67 @@ Analyze and return your JSON. Use tools only if you need data not shown above.`;
 // ── Live rescore agent ────────────────────────────────────────────────────
 // Rescores an open position against current conditions
 // Returns { score, label, reasoning, recommendation }
+// ── Agent Pre-Entry Check ────────────────────────────────────────────────
+// Called before any order submits — lightweight yes/no from agent
+// Only fires on stocks that pass scoring threshold (saves API calls)
+async function getAgentPreEntryCheck(stock, score, reasons, optionType) {
+  if (!ANTHROPIC_API_KEY) return { approved: true, reason: "no API key" };
+
+  // Check re-entry veto first (no API call needed)
+  const recentLoss = (state._recentLosses || {})[stock.ticker];
+  if (recentLoss) {
+    const hrsSinceLoss = (Date.now() - recentLoss.closedAt) / 3600000;
+    if (hrsSinceLoss < 24) {
+      // Needs agent confirmation — build compact prompt
+      const systemPrompt = `Options pre-entry analyst. Return JSON only: {"approved":true|false,"confidence":"high"|"medium"|"low","reason":"one sentence"}`;
+      const userPrompt = `Re-entry check: ${stock.ticker} ${optionType.toUpperCase()}
+Closed at a loss ${hrsSinceLoss.toFixed(1)}h ago (reason: ${recentLoss.reason}, P&L: ${recentLoss.pnlPct}%)
+Current: RSI ${stock.rsi} | MACD ${stock.macd} | Momentum ${stock.momentum}
+Entry macro was: ${recentLoss.agentSignal} | Current macro: ${(state._agentMacro||{}).signal||'neutral'}
+Score now: ${score}/100 | Top reasons: ${reasons.slice(0,3).join('; ')}
+Has the thesis genuinely changed since the loss? Approve re-entry?`;
+      const raw = await callClaudeAgent(systemPrompt, userPrompt, 200, false);
+      if (raw) {
+        try {
+          const parsed = JSON.parse(raw);
+          logEvent("filter", `[PRE-ENTRY] ${stock.ticker} re-entry check: ${parsed.approved ? 'APPROVED' : 'BLOCKED'} (${parsed.confidence}) — ${parsed.reason}`);
+          return parsed;
+        } catch(e) { return { approved: true, reason: "parse error — allowing" }; }
+      }
+      return { approved: true, reason: "agent unavailable — allowing" };
+    }
+  }
+
+  // Hard RSI block — agent shouldn't even see this but double-check
+  if (optionType === "put" && stock.rsi <= 35) {
+    logEvent("filter", `[PRE-ENTRY] ${stock.ticker} hard blocked — RSI ${stock.rsi} ≤ 35`);
+    return { approved: false, confidence: "high", reason: `RSI ${stock.rsi} — stock already crashed` };
+  }
+
+  // Only call agent for borderline scores (70-79) or contradicting signals
+  const hasBullishMACD = (stock.macd || "").includes("bullish");
+  const borderline = score < 80;
+  if (!borderline && !hasBullishMACD) {
+    return { approved: true, reason: "high-confidence setup — skipping pre-entry check" };
+  }
+
+  const systemPrompt = `Options pre-entry analyst. Return JSON only: {"approved":true|false,"confidence":"high"|"medium"|"low","reason":"one sentence"}`;
+  const userPrompt = `Pre-entry check: ${stock.ticker} ${optionType.toUpperCase()}
+RSI: ${stock.rsi} | MACD: ${stock.macd} | Momentum: ${stock.momentum}
+Score: ${score}/100 | Top reasons: ${reasons.slice(0,4).join('; ')}
+Macro: ${(state._agentMacro||{}).signal||'neutral'} (${(state._agentMacro||{}).confidence||'unknown'})
+VIX: ${state.vix}
+Should APEX enter this ${optionType} position?`;
+
+  const raw = await callClaudeAgent(systemPrompt, userPrompt, 200, false);
+  if (!raw) return { approved: true, reason: "agent unavailable — allowing" };
+  try {
+    const parsed = JSON.parse(raw);
+    logEvent("filter", `[PRE-ENTRY] ${stock.ticker} ${optionType}: ${parsed.approved ? 'APPROVED' : 'BLOCKED'} (${parsed.confidence}) — ${parsed.reason}`);
+    return parsed;
+  } catch(e) { return { approved: true, reason: "parse error — allowing" }; }
+}
+
 async function getAgentRescore(pos) {
   if (!ANTHROPIC_API_KEY) return null;
 
@@ -2263,13 +2326,26 @@ Critical rules:
 - Score: 85+=intact, 70-84=mostly valid, 50-69=weakening, <50=broken
 - Use getLiveSignals to check current RSI/momentum before deciding`;
 
+  // Build agent history context — last 2 rescores for trend awareness
+  const agentHistoryLines = (pos.agentHistory || []).slice(-2).map((h,i) =>
+    `  ${i===0?'2 rescores ago':'Last rescore'}: ${h.label} (${h.score}/95) — ${h.reasoning}`
+  ).join('\n');
+
+  // Thesis integrity for context
+  const thesisScore = pos.entryThesisScore || 100;
+  const thesisTrend = pos.thesisHistory && pos.thesisHistory.length >= 2
+    ? (pos.thesisHistory[pos.thesisHistory.length-1].score - pos.thesisHistory[pos.thesisHistory.length-2].score)
+    : 0;
+
   const userPrompt = `Position to rescore:
 - ${pos.ticker} ${pos.optionType.toUpperCase()} $${pos.strike} exp ${pos.expDate}
 - Entry: $${pos.premium} | Current: $${pos.currentPrice || pos.premium} | P&L: ${chgPct}% ${isProfit ? '(PROFITABLE — do not recommend EXIT)' : ''}
 - Opened: ${daysOpen} days ago | DTE: ${Math.max(0, Math.round((new Date(pos.expDate)-new Date())/86400000))}d
 - Entry score: ${pos.score}/100 | Entry reasons: ${(pos.reasons||[]).slice(0,4).join('; ')}
-- Stock: $${pos.price || '--'} | Entry RSI: ${pos.entryRSI || '--'}
+- Stock: $${pos.price || '--'} | Entry RSI: ${pos.entryRSI || '--'} | Entry MACD: ${pos.entryMACD || '--'}
+- Thesis integrity: ${thesisScore}/100 ${thesisTrend < 0 ? '(degrading ' + thesisTrend + ')' : thesisTrend > 0 ? '(improving +' + thesisTrend + ')' : '(stable)'}
 - VIX: ${state.vix} | Macro: ${(state._agentMacro || {}).signal || 'neutral'}
+${agentHistoryLines ? '- Recent history:\n' + agentHistoryLines : ''}
 ${pdtProtected ? '- PDT PROTECTED: opened today, account <$25k — max recommendation is WATCH' : ''}
 ${pdtLeft <= 1 && !pdtProtected ? '- PDT WARNING: only ' + pdtLeft + ' day trade(s) remaining — avoid EXIT unless thesis clearly broken' : ''}
 
@@ -2287,6 +2363,20 @@ Does the thesis still hold? Score and recommend.`;
     if (pdtProtected && parsed.recommendation === "EXIT") {
       parsed.recommendation = "WATCH";
       parsed.reasoning = "(Auto-adjusted: PDT protected same-day position) " + (parsed.reasoning || '');
+    }
+    // Store in position agentHistory for future context
+    const posRef = (state.positions || []).find(p => p.ticker === pos.ticker);
+    if (posRef && parsed) {
+      if (!posRef.agentHistory) posRef.agentHistory = [];
+      posRef.agentHistory.push({
+        time:           new Date().toISOString(),
+        score:          parsed.score,
+        label:          parsed.label,
+        confidence:     parsed.confidence,
+        reasoning:      parsed.reasoning,
+        recommendation: parsed.recommendation,
+      });
+      if (posRef.agentHistory.length > 5) posRef.agentHistory = posRef.agentHistory.slice(-5);
     }
     return parsed;
   } catch(e) { return null; }
@@ -3825,6 +3915,13 @@ async function executeTrade(stock, price, score, scoreReasons, vix, optionType =
     realData:        !!contract.symbol,
     entryRSI:        stock.rsi || 52,        // capture entry signal for decay detection
     entryMomentum:   stock.momentum || "steady",
+    entryMACD:       stock.macd || "neutral",
+    entryMacro:      (state._agentMacro || {}).signal || "neutral",
+    entryRelStr:     stock._relStrength || 1.0,
+    entryADX:        stock._adx || 0,
+    entryThesisScore: 100, // starts at 100, degrades over time
+    thesisHistory:   [], // [{time, score, notes}] — tracks degradation
+    agentHistory:    [], // last 5 rescore results
   };
 
   state.positions.push(position);
@@ -3888,6 +3985,81 @@ async function executeTrade(stock, price, score, scoreReasons, vix, optionType =
     `OI:${contract.oi} spread:${(contract.spread*100).toFixed(1)}% | cash ${fmt(state.cash)} | heat ${(heatPct()*100).toFixed(0)}%`
   );
   return true;
+}
+
+// ── Thesis Integrity Calculator ──────────────────────────────────────────
+// Compares current stock conditions to entry conditions
+// Returns { score: 0-100, reasons: [], recommendation: "HOLD"|"WATCH"|"EXIT" }
+function calcThesisIntegrity(pos, currentRSI, currentMACD, currentMomentum, currentMacro) {
+  let score = 100;
+  const reasons = [];
+
+  const entryRSI      = pos.entryRSI      || 52;
+  const entryMACD     = pos.entryMACD     || "neutral";
+  const entryMomentum = pos.entryMomentum || "steady";
+  const entryMacro    = pos.entryMacro    || "neutral";
+  const daysOpen      = ((Date.now() - new Date(pos.openDate).getTime()) / 86400000);
+
+  if (pos.optionType === "put") {
+    // RSI drifted from overbought toward neutral/oversold
+    if (entryRSI >= 65 && currentRSI < 55)      { score -= 30; reasons.push(`RSI drifted ${entryRSI}→${currentRSI} (-30)`); }
+    else if (entryRSI >= 65 && currentRSI < 65) { score -= 15; reasons.push(`RSI softened ${entryRSI}→${currentRSI} (-15)`); }
+
+    // MACD flipped bullish — direct contradiction
+    if (entryMACD.includes("bearish") && currentMACD.includes("bullish crossover")) { score -= 40; reasons.push("MACD flipped bullish crossover (-40)"); }
+    else if (entryMACD.includes("bearish") && currentMACD.includes("bullish"))      { score -= 25; reasons.push("MACD turned bullish (-25)"); }
+
+    // Momentum recovered
+    if (entryMomentum === "recovering" && currentMomentum === "strong") { score -= 25; reasons.push("Momentum recovered to strong (-25)"); }
+    else if (entryMomentum === "recovering" && currentMomentum === "steady") { score -= 10; reasons.push("Momentum stabilized (-10)"); }
+
+    // Macro shifted against puts
+    if (entryMacro.includes("bearish") && currentMacro === "neutral")            { score -= 15; reasons.push("Macro shifted neutral (-15)"); }
+    if (entryMacro.includes("bearish") && currentMacro.includes("bullish"))      { score -= 30; reasons.push("Macro turned bullish (-30)"); }
+    if (currentMacro === "aggressive")                                             { score -= 40; reasons.push("Macro strongly bullish (-40)"); }
+
+  } else {
+    // Call thesis
+    if (entryRSI <= 35 && currentRSI > 45)       { score -= 30; reasons.push(`RSI recovered ${entryRSI}→${currentRSI} (-30)`); }
+    if (entryMACD.includes("bullish") && currentMACD.includes("bearish crossover")) { score -= 40; reasons.push("MACD flipped bearish crossover (-40)"); }
+    if (entryMacro.includes("bullish") && currentMacro.includes("bearish"))         { score -= 30; reasons.push("Macro turned bearish (-30)"); }
+  }
+
+  // Time decay pressure — flat positions lose conviction points over time
+  if (daysOpen >= 6 && Math.abs((pos.currentPrice||pos.premium) - pos.premium) / pos.premium < 0.05) {
+    score -= 20; reasons.push(`${daysOpen.toFixed(0)}d held flat (-20)`);
+  } else if (daysOpen >= 3 && Math.abs((pos.currentPrice||pos.premium) - pos.premium) / pos.premium < 0.05) {
+    score -= 10; reasons.push(`${daysOpen.toFixed(0)}d held flat (-10)`);
+  }
+
+  score = Math.max(0, Math.min(100, score));
+  const recommendation = score >= 70 ? "HOLD" : score >= 40 ? "WATCH" : "EXIT";
+  return { score, reasons, recommendation, daysOpen: parseFloat(daysOpen.toFixed(1)) };
+}
+
+// ── Time-decay adjusted stop loss ─────────────────────────────────────────
+// As a position ages, the loss tolerance tightens
+// Flat positions especially — theta is working against you
+function getTimeAdjustedStop(pos) {
+  const daysOpen   = (Date.now() - new Date(pos.openDate).getTime()) / 86400000;
+  const chgPct     = pos.currentPrice && pos.premium
+    ? (pos.currentPrice - pos.premium) / pos.premium : 0;
+  const isFlat     = Math.abs(chgPct) < 0.05; // within 5% of entry
+
+  // Base stop loss
+  let stopPct = STOP_LOSS_PCT; // -35%
+
+  // Tighten progressively for aging positions
+  if (daysOpen >= 8)      stopPct = 0.15; // -15% — very old, exit faster
+  else if (daysOpen >= 6) stopPct = 0.20; // -20%
+  else if (daysOpen >= 4) stopPct = 0.25; // -25%
+  else if (daysOpen >= 2) stopPct = 0.30; // -30%
+
+  // Extra tightening for flat old positions — theta is killing them
+  if (isFlat && daysOpen >= 4) stopPct = Math.min(stopPct, 0.20);
+  if (isFlat && daysOpen >= 6) stopPct = Math.min(stopPct, 0.12);
+
+  return stopPct;
 }
 
 // - Close Position -
@@ -4007,6 +4179,19 @@ async function closePosition(ticker, reason, exitPremium = null) {
   // Update consecutive losses
   if (pnl < 0) state.consecutiveLosses++;
   else state.consecutiveLosses = 0;
+
+  // Record recent losses for re-entry veto (24hr agent confirmation required)
+  if (pnl < 0) {
+    state._recentLosses = state._recentLosses || {};
+    state._recentLosses[ticker] = {
+      closedAt:    Date.now(),
+      reason,
+      agentSignal: (state._agentMacro || {}).signal || "neutral",
+      price:       ep,
+      pnlPct:      parseFloat(pct),
+    };
+    logEvent("warn", `[THESIS] ${ticker} loss recorded — re-entry requires agent confirmation for 24h`);
+  }
 
   // Peak cash tracking for drawdown
   if (state.cash > state.peakCash) state.peakCash = state.cash;
@@ -4724,6 +4909,43 @@ async function runScan() {
     const activePartialPct    = currentExitParams.partialPct || (activeTakeProfitPct * 0.60);
     const activeRidePct       = currentExitParams.ridePct    || (activeTakeProfitPct * 1.30);
 
+    // ── THESIS INTEGRITY CHECK — proactive exit on thesis degradation ────
+    // Runs on every scan for positions open 2+ days
+    // Compares current conditions to entry conditions
+    if (daysOpen >= 2 && pos.optionType) {
+      const stockSnap   = WATCHLIST.find(s => s.ticker === pos.ticker) || {};
+      const curRSI      = stockSnap.rsi      || pos.entryRSI    || 52;
+      const curMACD     = stockSnap.macd     || pos.entryMACD   || "neutral";
+      const curMomentum = stockSnap.momentum || pos.entryMomentum || "steady";
+      const curMacro    = (state._agentMacro || {}).signal || "neutral";
+      const integrity   = calcThesisIntegrity(pos, curRSI, curMACD, curMomentum, curMacro);
+
+      // Update thesis score on position for dashboard display
+      pos.entryThesisScore = integrity.score;
+      if (!pos.thesisHistory) pos.thesisHistory = [];
+      if (pos.thesisHistory.length === 0 || pos.thesisHistory[pos.thesisHistory.length-1]?.score !== integrity.score) {
+        pos.thesisHistory.push({ time: new Date().toISOString(), score: integrity.score, notes: integrity.reasons.join("; ") });
+        if (pos.thesisHistory.length > 10) pos.thesisHistory = pos.thesisHistory.slice(-10);
+      }
+
+      // Hard exit: thesis completely collapsed and not PDT protected
+      if (integrity.score < 20 && !pdtProtected) {
+        logEvent("warn", `[THESIS] ${pos.ticker} integrity collapsed ${integrity.score}/100 — ${integrity.reasons.slice(0,2).join(", ")} — closing`);
+        await closePosition(pos.ticker, "thesis-collapsed");
+        continue;
+      } else if (integrity.score < 40) {
+        logEvent("warn", `[THESIS] ${pos.ticker} integrity degraded ${integrity.score}/100 — ${integrity.reasons.slice(0,2).join(", ")}`);
+      }
+
+      // Time-adjusted stop — tightens as position ages
+      const adjStop = getTimeAdjustedStop(pos);
+      if (adjStop < STOP_LOSS_PCT && chg < -adjStop && !pdtProtected) {
+        logEvent("warn", `[THESIS] ${pos.ticker} time-adjusted stop ${(adjStop*100).toFixed(0)}% hit after ${daysOpen.toFixed(1)} days`);
+        await closePosition(pos.ticker, "time-stop");
+        continue;
+      }
+    }
+
     // 1. FAST STOP — -20% in first 48 hours but NOT in first 2 hours
     const fastStopEligible = hoursOpen >= 2 && hoursOpen <= FAST_STOP_HOURS;
     if (fastStopEligible && chg <= -(pos.fastStopPct || FAST_STOP_PCT)) {
@@ -5034,6 +5256,18 @@ async function runScan() {
 
   // [opening/final hour blocks moved above callsAllowed]
   if (state.circuitOpen === false || state.weeklyCircuitOpen === false) return;
+
+  // ── ACT ON MORNING EXIT FLAGS ─────────────────────────────────────────
+  // Positions flagged by morning review get closed at open
+  for (const pos of [...(state.positions || [])]) {
+    if (pos._morningExitFlag) {
+      logEvent("warn", `[MORNING REVIEW] Closing ${pos.ticker} flagged overnight — ${pos._morningExitReason}`);
+      await closePosition(pos.ticker, "morning-review");
+      delete pos._morningExitFlag;
+      delete pos._morningExitReason;
+    }
+  }
+
   // consecutive loss gate removed — agent macro and score quality gates entries
   if (state.cash <= CAPITAL_FLOOR) return;
 
@@ -5567,14 +5801,23 @@ async function runScan() {
     }
     const bestReasons = optionType === "put" ? putSetup.reasons : callSetup.reasons;
 
-    // Effective min score — agent macro and scoring system handle quality
-    // Removed: afternoonMinScore (was raising bar to 85 after 1pm)
-    // Removed: benchmarkMinScore (was raising bar when SPY already down)
-    // Both were preventing good entries at exactly the wrong times
+    // Effective min score — agent confidence directly influences entry bar
+    // High confidence bearish → lower bar (65) — agent is sure, trust it
+    // Low confidence or stale macro → raise bar (80) — be more selective
+    // No agent run yet → normal bar (70)
     const etHourNow = scanET.getHours() + scanET.getMinutes() / 60;
     const regimeProfile    = getRegimeProfile(marketContext.regime?.regime || "neutral");
     const regimeMinScore   = regimeProfile.minScore;
-    const effectiveMinScore = Math.max(ddProtocol.minScore || MIN_SCORE, regimeMinScore);
+    const agentConf        = (state._agentMacro || {}).confidence || "low";
+    const agentSig         = (state._agentMacro || {}).signal || "neutral";
+    const agentLastRun     = (state._agentMacro || {}).timestamp || 0;
+    const agentStaleMins   = (Date.now() - new Date(agentLastRun).getTime()) / 60000;
+    const agentStale       = agentStaleMins > 10;
+    const isBearishHigh    = ["bearish","strongly bearish"].includes(agentSig) && agentConf === "high" && !agentStale;
+    const isLowConfidence  = agentConf === "low" || agentStale;
+    const agentMinScore    = isBearishHigh ? 65 : isLowConfidence ? 80 : MIN_SCORE;
+    const effectiveMinScore = Math.max(ddProtocol.minScore || MIN_SCORE, regimeMinScore, agentMinScore);
+    if (agentStale && !dryRunMode) logEvent("filter", `Agent macro stale (${agentStaleMins.toFixed(0)}min) — raising min score to 80`);
 
     // Position limit removed — rely on heat % and correlation blocks
     if (bestScore < effectiveMinScore) {
@@ -5682,6 +5925,16 @@ async function runScan() {
       // MR-specific tighter gate: MR trades need better liquidity
       if (isMeanReversion && execOI > 0 && execOI < 50 && execSpread > 0.20) {
         logEvent("filter", `${stock.ticker} MEAN REVERSION blocked — OI:${execOI} spread:${(execSpread*100).toFixed(0)}% too illiquid for MR`);
+        continue;
+      }
+    }
+    // ── AGENT PRE-ENTRY CHECK ────────────────────────────────────────────
+    // Final agent gate before order submits
+    // Blocks re-entries after losses and borderline/contradicting setups
+    if (!dryRunMode) {
+      const preCheck = await getAgentPreEntryCheck(stock, bestScore, bestReasons, optionType);
+      if (!preCheck.approved && preCheck.confidence === "high") {
+        logEvent("filter", `${stock.ticker} blocked by pre-entry agent check — ${preCheck.reason}`);
         continue;
       }
     }
@@ -6504,6 +6757,27 @@ cron.schedule("0 13 * * 1-5", async () => {
     state.portfolioSnapshots = state.portfolioSnapshots.filter(s => new Date(s.t).getTime() > cutoff);
   }
   await saveStateNow();
+  // ── Proactive morning thesis review ──────────────────────────────────
+  // Before first scan, agent reviews all overnight positions
+  // Flags thesis-broken positions for immediate exit at open
+  if (state.positions && state.positions.length > 0) {
+    logEvent("scan", `[MORNING REVIEW] Reviewing ${state.positions.length} overnight position(s) before open...`);
+    for (const pos of state.positions) {
+      try {
+        const rescore = await getAgentRescore(pos);
+        if (rescore && rescore.recommendation === "EXIT" && rescore.confidence === "high") {
+          pos._morningExitFlag = true;
+          pos._morningExitReason = rescore.reasoning;
+          logEvent("warn", `[MORNING REVIEW] ${pos.ticker} flagged for immediate exit at open — ${rescore.reasoning}`);
+        } else if (rescore) {
+          logEvent("scan", `[MORNING REVIEW] ${pos.ticker}: ${rescore.label} (${rescore.score}/95) — ${rescore.reasoning}`);
+        }
+      } catch(e) {
+        logEvent("warn", `[MORNING REVIEW] ${pos.ticker} rescore failed: ${e.message}`);
+      }
+    }
+    await saveStateNow();
+  }
   await sendMorningBriefing();
   sendEmail("morning");
 });
@@ -6610,6 +6884,88 @@ app.get("/api/state", async (req, res) => {
     autocorrelation:    calcAutocorrelation(),
     riskOfRuin:         calcRiskOfRuin(),
   });
+});
+
+// ── TEST ENDPOINT: Thesis integrity simulator ─────────────────────────
+// POST /api/test-thesis { ticker, mockRSI, mockMACD, mockMomentum, mockMacro, mockDays }
+app.post("/api/test-thesis", (req, res) => {
+  const { ticker, mockRSI=52, mockMACD="neutral", mockMomentum="steady", mockMacro="neutral", mockDays=1 } = req.body || {};
+  const pos = (state.positions || []).find(p => p.ticker === ticker);
+  if (!pos && !ticker) return res.json({ error: "provide ticker" });
+
+  // Use real position if exists, otherwise build a mock
+  const testPos = pos || {
+    ticker: ticker || "TEST",
+    optionType: "put",
+    entryRSI: 72,
+    entryMACD: "bearish",
+    entryMomentum: "recovering",
+    entryMacro: "bearish",
+    premium: 5.00,
+    currentPrice: 5.00,
+    openDate: new Date(Date.now() - mockDays * 86400000).toISOString(),
+    entryThesisScore: 100,
+    thesisHistory: [],
+  };
+
+  const integrity = calcThesisIntegrity(testPos, mockRSI, mockMACD, mockMomentum, mockMacro);
+  const adjStop   = getTimeAdjustedStop({ ...testPos, currentPrice: testPos.premium * 0.8 });
+
+  res.json({
+    ticker: testPos.ticker,
+    optionType: testPos.optionType,
+    daysOpen: mockDays,
+    entryConditions: {
+      rsi: testPos.entryRSI, macd: testPos.entryMACD,
+      momentum: testPos.entryMomentum, macro: testPos.entryMacro,
+    },
+    currentConditions: { rsi: mockRSI, macd: mockMACD, momentum: mockMomentum, macro: mockMacro },
+    thesisIntegrity: integrity,
+    timeAdjustedStop: `${(adjStop*100).toFixed(0)}%`,
+    wouldClose: integrity.score < 20 ? "YES — thesis-collapsed" : adjStop < STOP_LOSS_PCT ? `YES — time-stop at ${(adjStop*100).toFixed(0)}%` : "NO",
+  });
+});
+
+// ── TEST ENDPOINT: Pre-entry agent check simulator ────────────────────
+// POST /api/test-pre-entry { ticker, mockRSI, mockMACD, mockMomentum, mockScore, optionType }
+app.post("/api/test-pre-entry", async (req, res) => {
+  const { ticker="TEST", mockRSI=70, mockMACD="bearish", mockMomentum="recovering", mockScore=85, optionType="put" } = req.body || {};
+  const mockStock = {
+    ticker, rsi: mockRSI, macd: mockMACD, momentum: mockMomentum,
+  };
+  const mockReasons = [`RSI ${mockRSI}`, `MACD ${mockMACD}`, `Momentum ${mockMomentum}`];
+  try {
+    const result = await getAgentPreEntryCheck(mockStock, mockScore, mockReasons, optionType);
+    res.json({ ticker, mockScore, optionType, preEntryResult: result });
+  } catch(e) {
+    res.json({ error: e.message });
+  }
+});
+
+// ── TEST ENDPOINT: Morning review simulator ───────────────────────────
+// POST /api/test-morning-review — runs morning review without closing positions
+app.post("/api/test-morning-review", async (req, res) => {
+  if (!state.positions || state.positions.length === 0) {
+    return res.json({ message: "no open positions to review" });
+  }
+  const results = [];
+  for (const pos of state.positions) {
+    try {
+      const rescore = await getAgentRescore(pos);
+      results.push({
+        ticker:         pos.ticker,
+        optionType:     pos.optionType,
+        daysOpen:       ((Date.now() - new Date(pos.openDate).getTime()) / 86400000).toFixed(1),
+        pnlPct:         pos.currentPrice && pos.premium ? ((pos.currentPrice - pos.premium) / pos.premium * 100).toFixed(1) + '%' : 'unknown',
+        thesisScore:    pos.entryThesisScore || 100,
+        agentRescore:   rescore || { error: "no response" },
+        wouldFlag:      rescore?.recommendation === "EXIT" && rescore?.confidence === "high",
+      });
+    } catch(e) {
+      results.push({ ticker: pos.ticker, error: e.message });
+    }
+  }
+  res.json({ reviewed: results.length, results });
 });
 
 app.get("/api/logs", (req, res) => {
