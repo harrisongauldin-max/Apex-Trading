@@ -1024,8 +1024,9 @@ function scorePutSetup(stock, relStrength, adx, volume, avgVolume, vix = 20) {
   const reasons = [];
 
   // Momentum - weak is good for puts (20pts)
+  // Steady momentum = no directional signal = 0 points (not a put catalyst)
   if (stock.momentum === "recovering")       { score += 20; reasons.push("Weak momentum - bearish (+20)"); }
-  else if (stock.momentum === "steady")      { score += 10; reasons.push("Neutral momentum (+10)"); }
+  else if (stock.momentum === "steady")      { score += 0;  reasons.push("Momentum steady - neutral for put (+0)"); }
   else                                       { score += 0;  reasons.push("Strong momentum - bad for put (+0)"); }
 
   // RSI — RAISED to 20pts (more reliable signal, especially in trending markets)
@@ -1091,9 +1092,9 @@ function scorePutSetup(stock, relStrength, adx, volume, avgVolume, vix = 20) {
   // ── F6: Signal consensus gate ──────────────────────────────────────────
   // 90+ score requires at least 3 independent bullish signals
   // Prevents weak setups from hitting 100 on environmental factors alone
-  // Hard block: RSI ≤ 35 means stock already crashed — no put entry regardless of other signals
+  // Hard block: RSI ≤ 35 means stock already crashed — force score to 0, never enters
   if (stock.rsi <= 35) {
-    return { score: Math.max(0, score), reasons }; // score will be very low due to -30 above
+    return { score: 0, reasons }; // hard zero — RSI crashed stocks never get put entries
   }
 
   const bullishSignals = [
@@ -6608,6 +6609,27 @@ app.get("/api/state", async (req, res) => {
     drawdownDuration:   calcDrawdownDuration(),
     autocorrelation:    calcAutocorrelation(),
     riskOfRuin:         calcRiskOfRuin(),
+  });
+});
+
+app.get("/api/logs", (req, res) => {
+  const limit  = Math.min(parseInt(req.query.limit || 100), 200);
+  const filter = req.query.filter || null; // e.g. ?filter=trade,warn,circuit
+  const since  = req.query.since  || null; // ISO timestamp — only return newer
+  const types  = filter ? filter.split(",").map(t => t.trim().toLowerCase()) : null;
+  let logs = state.tradeLog || [];
+  if (since) {
+    const sinceMs = new Date(since).getTime();
+    logs = logs.filter(e => new Date(e.time).getTime() > sinceMs);
+  }
+  if (types) logs = logs.filter(e => types.includes(e.type));
+  res.json({
+    logs:      logs.slice(0, limit),
+    total:     (state.tradeLog || []).length,
+    generated: new Date().toISOString(),
+    cash:      state.cash,
+    positions: (state.positions || []).length,
+    vix:       state.vix,
   });
 });
 
