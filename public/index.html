@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8"/>
 <meta name="viewport" content="width=device-width,initial-scale=1"/>
-<title>APEX v4.0 — Professional Options Agent</title>
+<title>ARGO-1 v4.0 — Professional Options Agent</title>
 <style>
 :root{
   --bg:#07101f;--panel:#0a1628;--border:#0d3050;--text:#cce8ff;--muted:#336688;
@@ -110,9 +110,9 @@ input[type=text]:focus{border-color:var(--blue)}
 
 <div class="header">
   <div class="logo">
-    <div class="logo-icon">▲</div>
+    <div class="logo-icon">⚓</div>
     <div class="logo-text">
-      <h1>APEX</h1>
+      <h1>ARGO-1</h1>
       <p>PROFESSIONAL OPTIONS AGENT v4.0 · ALPACA PAPER</p>
     </div>
   </div>
@@ -134,8 +134,6 @@ input[type=text]:focus{border-color:var(--blue)}
   <div class="tab" onclick="switchTab('stocks')">STOCKS</div>
   <div class="tab" onclick="switchTab('report')">REPORT</div>
   <div class="tab" onclick="switchTab('log')">SERVER LOG</div>
-  <div class="tab" onclick="switchTab('backtest')">BACKTEST</div>
-  <div class="tab" onclick="switchTab('sim')">SIM</div>
 </div>
 
 <!-- ═══════════════ TRADING TAB ═══════════════ -->
@@ -453,7 +451,7 @@ input[type=text]:focus{border-color:var(--blue)}
 
   <div class="section-title">Open Positions</div>
   <div id="positions-wrap">
-    <div class="no-data">No open positions. APEX will enter trades during market hours (Puts 9:45AM / Calls 10AM–3:30PM ET).</div>
+    <div class="no-data">No open positions. ARGO-1 will enter trades during market hours (Puts 9:45AM / Calls 10AM–3:30PM ET).</div>
   </div>
 
   <div class="section-title">Portfolio Greeks</div>
@@ -673,7 +671,7 @@ input[type=text]:focus{border-color:var(--blue)}
 <div id="tab-journal" class="content">
   <div class="section-title" style="margin-top:0">Trade Journal — Entry Reasoning</div>
   <div id="journal-wrap">
-    <div class="no-data">No journal entries yet. APEX logs detailed reasoning for every trade.</div>
+    <div class="no-data">No journal entries yet. ARGO-1 logs detailed reasoning for every trade.</div>
   </div>
 </div>
 
@@ -698,7 +696,7 @@ input[type=text]:focus{border-color:var(--blue)}
   </div>
 
   <div class="alert alert-orange" style="margin-bottom:12px">
-    APEX auto-buys stocks when monthly options profit exceeds $1,000. 20% of profits above threshold are allocated to high-scoring stocks (85+). Stop loss: -15% from entry.
+    ARGO-1 auto-buys stocks when monthly options profit exceeds $1,000. 20% of profits above threshold are allocated to high-scoring stocks (85+). Stop loss: -15% from entry.
   </div>
 
   <div class="section-title">Stock Holdings</div>
@@ -754,96 +752,6 @@ input[type=text]:focus{border-color:var(--blue)}
   <div class="log-box" id="server-log" style="height:560px;overflow-y:auto"></div>
 </div>
 
-<!-- SIM TAB -->
-<div id="tab-sim" class="content">
-  <div style="display:flex;align-items:center;gap:12px;margin-bottom:16px;flex-wrap:wrap">
-    <div>
-      <label style="font-size:11px;color:var(--muted)">SCENARIO:</label>
-      <select id="sim-scenario" style="background:var(--panel);border:1px solid var(--border);color:var(--text);padding:6px 10px;border-radius:6px;font-family:var(--font);font-size:11px;margin-left:6px">
-        <option value="normal">Normal Market</option>
-        <option value="bull_run">Bull Run</option>
-        <option value="bear_crash">Bear Crash</option>
-        <option value="choppy">Choppy / Sideways</option>
-        <option value="recovery">Recovery Rally</option>
-        <option value="black_swan">Black Swan Event</option>
-      </select>
-    </div>
-    <div>
-      <label style="font-size:11px;color:var(--muted)">SPEED:</label>
-      <select id="sim-speed" style="background:var(--panel);border:1px solid var(--border);color:var(--text);padding:6px 10px;border-radius:6px;font-family:var(--font);font-size:11px;margin-left:6px">
-        <option value="fast">Fast (15s)</option>
-        <option value="normal" selected>Normal (30s)</option>
-        <option value="slow">Slow (80s)</option>
-      </select>
-    </div>
-    <button class="btn btn-green" id="sim-start-btn" onclick="startSim()">&#9654; START SIM</button>
-    <button class="btn btn-red" id="sim-stop-btn" onclick="stopSim()" style="display:none">&#9632; STOP</button>
-  </div>
-
-  <!-- Sim Metrics -->
-  <div class="grid4" style="margin-bottom:12px" id="sim-metrics" style="display:none">
-    <div class="card">
-      <div class="card-title">Sim Cash</div>
-      <div class="metric-sm" id="sim-cash">$--</div>
-      <div class="sub" id="sim-pnl">P&L: --</div>
-    </div>
-    <div class="card">
-      <div class="card-title">Sim Trades</div>
-      <div class="metric-sm" id="sim-trades">0</div>
-      <div class="sub" id="sim-wr">Win rate: --%</div>
-    </div>
-    <div class="card">
-      <div class="card-title">Sim VIX</div>
-      <div class="metric-sm" id="sim-vix">--</div>
-      <div class="sub" id="sim-circuit">Circuit: OPEN</div>
-    </div>
-    <div class="card">
-      <div class="card-title">Sim Positions</div>
-      <div class="metric-sm" id="sim-positions">0</div>
-      <div class="sub">open options</div>
-    </div>
-  </div>
-
-  <!-- Sim Positions -->
-  <div id="sim-pos-wrap" style="margin-bottom:12px"></div>
-
-  <!-- Sim Log -->
-  <div class="section-title">Simulation Log</div>
-  <div class="log-box" id="sim-log" style="max-height:400px"></div>
-</div>
-
-<!-- BACKTEST TAB -->
-<div id="tab-backtest" class="content">
-  <div style="display:flex;align-items:center;gap:12px;margin-bottom:16px;flex-wrap:wrap">
-    <div>
-      <label style="font-size:11px;color:var(--muted)">MONTHS:</label>
-      <select id="bt-months" style="background:var(--panel);border:1px solid var(--border);color:var(--text);padding:6px 10px;border-radius:6px;font-family:var(--font);font-size:11px;margin-left:6px">
-        <option value="3">3 months</option>
-        <option value="6" selected>6 months</option>
-        <option value="12">12 months</option>
-      </select>
-    </div>
-    <button class="btn btn-green" id="bt-run-btn" onclick="runBacktest()">&#9654; RUN BACKTEST</button>
-    <span id="bt-status" style="font-size:11px;color:var(--muted)">Results will appear below</span>
-  </div>
-
-  <div id="bt-results" style="display:none">
-    <!-- Summary Cards -->
-    <div class="grid4" style="margin-bottom:12px" id="bt-summary-cards"></div>
-
-    <!-- Monthly P&L -->
-    <div class="section-title">Monthly P&L</div>
-    <div id="bt-monthly" style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:16px"></div>
-
-    <!-- By Ticker -->
-    <div class="section-title">Performance by Stock</div>
-    <div id="bt-by-ticker" style="margin-bottom:16px"></div>
-
-    <!-- Trade Log -->
-    <div class="section-title">Trade Log (<span id="bt-trade-count">0</span> trades)</div>
-    <div class="log-box" id="bt-trade-log" style="max-height:300px"></div>
-  </div>
-</div>
 
 <script>
 // ── State ──────────────────────────────────────────────────────────────────
@@ -1171,7 +1079,7 @@ function renderMetrics() {
     document.getElementById('alpaca-cash').textContent = fmt(state.alpacaCash);
     const customBudget = state.customBudget && state.customBudget > 0 ? state.customBudget : null;
     document.getElementById('alpaca-cash-sub').textContent = customBudget
-      ? `APEX using ${fmt(customBudget)} of this`
+      ? `ARGO-1 using ${fmt(customBudget)} of this`
       : 'paper balance · synced on boot';
   }
   document.getElementById('heat').style.color = heat > 50 ? 'var(--red)' : heat > 35 ? 'var(--orange)' : 'var(--green)';
@@ -1279,7 +1187,7 @@ function renderMetrics() {
   if (alphaEl && bm) {
     alphaEl.textContent = (bm.alpha >= 0 ? "+" : "") + bm.alpha + "%";
     alphaEl.style.color = bm.alpha >= 0 ? "var(--green)" : "var(--red)";
-    document.getElementById("benchmark-sub").textContent = `APEX:${bm.apexReturn >= 0 ? "+" : ""}${bm.apexReturn}% SPY:${bm.spyReturn >= 0 ? "+" : ""}${bm.spyReturn}%`;
+    document.getElementById("benchmark-sub").textContent = `ARGO-1:${bm.apexReturn >= 0 ? "+" : ""}${bm.apexReturn}% SPY:${bm.spyReturn >= 0 ? "+" : ""}${bm.spyReturn}%`;
   }
 
   // Drawdown protocol
@@ -1513,7 +1421,7 @@ function renderPositions() {
   const wrap = document.getElementById('positions-wrap');
   const positions = state.positions || [];
   if (!positions.length) {
-    wrap.innerHTML = '<div class="no-data">No open positions. APEX will enter trades during market hours (9:30AM–3:45PM ET). SPY/QQQ spreads primary.</div>';
+    wrap.innerHTML = '<div class="no-data">No open positions. ARGO-1 will enter trades during market hours (9:30AM–3:45PM ET). SPY/QQQ spreads primary.</div>';
     return;
   }
   wrap.innerHTML = positions.map(p => {
@@ -1927,7 +1835,7 @@ async function triggerDryRun() {
     const resp = await fetch('/api/dry-run-scan', {method:'POST'});
     const data = await resp.json();
     await fetchState();
-    alert('Dry run complete! Check the Server Log tab — look for [DRYRUN] entries showing what APEX would trade.');
+    alert('Dry run complete! Check the Server Log tab — look for [DRYRUN] entries showing what ARGO-1 would trade.');
   } catch(e) {
     alert('Dry run error: ' + e.message);
   } finally {
@@ -1942,10 +1850,10 @@ async function closePos(ticker) {
 }
 
 async function resetCircuit() {
-  if (!confirm('Reset circuit breaker? APEX will resume scanning and entering new trades.')) return;
+  if (!confirm('Reset circuit breaker? ARGO-1 will resume scanning and entering new trades.')) return;
   const resp = await fetch('/api/reset-circuit', {method:'POST'});
   const data = await resp.json();
-  alert('Circuit breaker reset. APEX is scanning again.');
+  alert('Circuit breaker reset. ARGO-1 is scanning again.');
   await fetchState();
 }
 
@@ -1954,7 +1862,7 @@ async function fullReset() {
   if (!confirm('This cannot be undone. Confirm full reset?')) return;
   const resp = await fetch('/api/full-reset', {method:'POST'});
   const data = await resp.json();
-  alert('Full reset complete. APEX restarted with $10,000.');
+  alert('Full reset complete. ARGO-1 restarted with $10,000.');
   location.reload();
 }
 
@@ -2057,13 +1965,13 @@ async function downloadDayReport() {
     const url  = URL.createObjectURL(blob);
     const a    = document.createElement('a');
     a.href     = url;
-    a.download = `APEX_DayReport_${today}.json`;
+    a.download = `ARGO-1_DayReport_${today}.json`;
     a.click();
     URL.revokeObjectURL(url);
 
     // ── Also show quick summary in alert ─────────────────────────────────
     alert(
-      `APEX Day Report — ${today}\n\n` +
+      `ARGO-1 Day Report — ${today}\n\n` +
       `Trades: ${trades.length} | Win Rate: ${winRate}%\n` +
       `Total P&L: $${totalPnL.toFixed(2)}\n` +
       `Best: $${bigWin} | Worst: $${bigLoss}\n` +
@@ -2071,7 +1979,7 @@ async function downloadDayReport() {
       `Exit Reasons:\n` +
       Object.entries(byReason).map(([r,v]) => `  ${r}: ${v.count}x ($${v.pnl.toFixed(2)})`).join('\n') +
       `\n\nOpen Positions: ${openPos.length}\n` +
-      `Report saved as APEX_DayReport_${today}.json`
+      `Report saved as ARGO-1_DayReport_${today}.json`
     );
   } catch(e) {
     alert('Error generating report: ' + e.message);
@@ -2079,441 +1987,6 @@ async function downloadDayReport() {
 }
 let simPollInterval = null;
 
-async function startSim() {
-  const scenario = document.getElementById('sim-scenario').value;
-  const speed    = document.getElementById('sim-speed').value;
-  document.getElementById('sim-start-btn').style.display = 'none';
-  document.getElementById('sim-stop-btn').style.display  = 'inline-block';
-  document.getElementById('sim-metrics').style.display   = 'grid';
-
-  await fetch('/api/sim/start', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ scenario, speed }) });
-
-  // Poll for updates
-  simPollInterval = setInterval(async () => {
-    try {
-      const res  = await fetch('/api/sim/status');
-      const data = await res.json();
-      updateSimDisplay(data);
-      if (!data.running) {
-        clearInterval(simPollInterval);
-        document.getElementById('sim-start-btn').style.display = 'inline-block';
-        document.getElementById('sim-stop-btn').style.display  = 'none';
-      }
-    } catch(e) { console.error('Sim poll error:', e); }
-  }, 500);
-}
-
-async function stopSim() {
-  await fetch('/api/sim/stop', { method: 'POST' });
-  clearInterval(simPollInterval);
-  document.getElementById('sim-start-btn').style.display = 'inline-block';
-  document.getElementById('sim-stop-btn').style.display  = 'none';
-}
-
-function updateSimDisplay(data) {
-  const pnl = data.totalPnL || 0;
-  const el  = id => document.getElementById(id);
-  if (el('sim-cash'))    { el('sim-cash').textContent = '$' + (data.cash||0).toFixed(2); el('sim-cash').style.color = pnl >= 0 ? 'var(--green)' : 'var(--red)'; }
-  if (el('sim-pnl'))     { el('sim-pnl').textContent  = 'P&L: ' + (pnl >= 0 ? '+' : '') + '$' + pnl.toFixed(2); el('sim-pnl').style.color = pnl >= 0 ? 'var(--green)' : 'var(--red)'; }
-  if (el('sim-trades'))  { el('sim-trades').textContent = data.trades || 0; }
-  if (el('sim-wr'))      { el('sim-wr').textContent = 'Win rate: ' + (data.winRate || 0) + '%'; el('sim-wr').style.color = (data.winRate||0) >= 55 ? 'var(--green)' : 'var(--red)'; }
-  if (el('sim-vix'))     { el('sim-vix').textContent = data.vix || '--'; el('sim-vix').style.color = (data.vix||0) > 30 ? 'var(--red)' : 'var(--green)'; }
-  if (el('sim-circuit')) { el('sim-circuit').textContent = 'Circuit: ' + (data.circuitOpen ? 'OPEN' : 'TRIPPED'); el('sim-circuit').style.color = data.circuitOpen ? 'var(--green)' : 'var(--red)'; }
-  if (el('sim-positions')){ el('sim-positions').textContent = (data.positions||[]).length; }
-
-  // Render sim positions
-  const posWrap = el('sim-pos-wrap');
-  if (posWrap && (data.positions||[]).length > 0) {
-    posWrap.innerHTML = '<div class="section-title">Open Positions</div>' +
-      data.positions.map(p => {
-        const chg = p.currentPrice && p.premium ? ((p.currentPrice - p.premium) / p.premium * 100).toFixed(1) : 0;
-        return `<div class="card" style="margin-bottom:8px;border-left:3px solid ${parseFloat(chg)>=0?'var(--green)':'var(--red)'}">
-          <div style="display:flex;justify-content:space-between">
-            <span style="font-weight:700;color:var(--blue)">${p.ticker}</span>
-            <span style="color:${p.optionType==='put'?'var(--red)':'var(--green)'}">${p.optionType?.toUpperCase()}</span>
-            <span style="color:${parseFloat(chg)>=0?'var(--green)':'var(--red)'}">${parseFloat(chg)>=0?'+':''}${chg}%</span>
-          </div>
-          <div style="font-size:10px;color:var(--muted)">Entry $${p.premium} | Current $${(p.currentPrice||p.premium).toFixed(2)} | ${p.contracts}x | Score ${p.score}</div>
-        </div>`;
-      }).join('');
-  } else if (posWrap) {
-    posWrap.innerHTML = '';
-  }
-
-  // Render log
-  const logEl = el('sim-log');
-  if (logEl && data.log) {
-    logEl.innerHTML = data.log.map(e => {
-      const color = e.type === 'trade' ? 'var(--green)' : e.type === 'circuit' ? 'var(--red)' : e.type === 'warn' ? 'var(--orange)' : 'var(--muted)';
-      return `<div class="log-entry"><span class="log-time">${new Date(e.time).toLocaleTimeString()}</span> <span style="color:${color}">[${e.type.toUpperCase()}]</span> ${e.message}</div>`;
-    }).join('');
-  }
-}
-
-async function runBacktest() {
-  const months  = document.getElementById('bt-months').value;
-  const btn     = document.getElementById('bt-run-btn');
-  const status  = document.getElementById('bt-status');
-  btn.disabled  = true;
-  btn.textContent = '⏳ Running...';
-  status.textContent = `Fetching ${months} months of historical data... this takes 30-60 seconds`;
-
-  try {
-    const res    = await fetch(`/api/backtest?months=${months}`);
-    const data   = await res.json();
-
-    if (data.error) { status.textContent = 'Error: ' + data.error; btn.disabled = false; btn.textContent = '▶ RUN BACKTEST'; return; }
-
-    const s = data.summary;
-    document.getElementById('bt-results').style.display = 'block';
-    status.textContent = `Backtest complete: ${s.startDate} → ${s.endDate}`;
-
-    // Summary cards
-    document.getElementById('bt-summary-cards').innerHTML = `
-      <div class="card"><div class="card-title">Total Return</div><div class="metric-sm" style="color:${s.totalReturn>=0?'var(--green)':'var(--red)'}">${s.totalReturn>=0?'+':''}${s.totalReturn}%</div><div class="sub">${s.totalPnL>=0?'+':''}$${s.totalPnL.toFixed(2)}</div></div>
-      <div class="card"><div class="card-title">Win Rate</div><div class="metric-sm" style="color:${s.winRate>=55?'var(--green)':'var(--red)'}">${s.winRate}%</div><div class="sub">${s.wins}W / ${s.losses}L of ${s.totalTrades}</div></div>
-      <div class="card"><div class="card-title">Profit Factor</div><div class="metric-sm" style="color:${s.profitFactor>=2?'var(--green)':s.profitFactor>=1?'var(--gold)':'var(--red)'}">${s.profitFactor}x</div><div class="sub">Avg win $${s.avgWin} / loss $${s.avgLoss}</div></div>
-      <div class="card"><div class="card-title">Max Drawdown</div><div class="metric-sm" style="color:var(--red)">${s.maxDrawdown}%</div><div class="sub">${s.callTrades} calls / ${s.putTrades} puts</div></div>
-    `;
-
-    // Monthly P&L
-    const monthly = data.monthlyPnL || {};
-    document.getElementById('bt-monthly').innerHTML = Object.entries(monthly).sort().map(([m, pnl]) =>
-      `<div class="card" style="min-width:120px"><div class="card-title">${m}</div><div style="font-weight:700;color:${pnl>=0?'var(--green)':'var(--red)'}">${pnl>=0?'+':''}$${pnl.toFixed(2)}</div></div>`
-    ).join('');
-
-    // By ticker
-    const byTicker = data.byTicker || {};
-    const sorted   = Object.entries(byTicker).sort((a, b) => b[1].pnl - a[1].pnl);
-    document.getElementById('bt-by-ticker').innerHTML = `
-      <table style="width:100%;border-collapse:collapse;font-size:12px">
-        <thead><tr style="color:var(--muted);font-size:10px;text-align:left">
-          <th style="padding:6px">TICKER</th><th>TRADES</th><th>WIN RATE</th><th>P&L</th>
-        </tr></thead>
-        <tbody>${sorted.map(([t, d]) => `
-          <tr style="border-top:1px solid var(--border)">
-            <td style="padding:6px;font-weight:700;color:var(--blue)">${t}</td>
-            <td>${d.trades}</td>
-            <td style="color:${d.wins/d.trades>=0.55?'var(--green)':'var(--red)'}">${d.trades?Math.round(d.wins/d.trades*100):0}%</td>
-            <td style="color:${d.pnl>=0?'var(--green)':'var(--red)'};font-weight:700">${d.pnl>=0?'+':''}$${d.pnl.toFixed(2)}</td>
-          </tr>`).join('')}
-        </tbody>
-      </table>`;
-
-    // Trade log
-    document.getElementById('bt-trade-count').textContent = data.trades.length;
-    document.getElementById('bt-trade-log').innerHTML = data.trades.slice(0, 100).map(t =>
-      `<div class="log-entry"><span class="log-time">${t.date}</span> <span style="color:${t.optionType==='put'?'var(--red)':'var(--blue)'}">${t.ticker} ${t.optionType.toUpperCase()}</span> | entry $${t.entry} exit $${t.exit} | <span style="color:${t.pnl>=0?'var(--green)':'var(--red)'}">${t.pnl>=0?'+':''}$${t.pnl.toFixed(2)} (${t.pct}%)</span> | ${t.reason} | ${t.daysHeld}d</div>`
-    ).join('');
-
-  } catch(e) {
-    status.textContent = 'Error: ' + e.message;
-  }
-  btn.disabled = false;
-  btn.textContent = '▶ RUN BACKTEST';
-}
-
-async function resetMonth() {
-  if (!confirm("Reset month? This resets cash to $5,000 and clears today's trade count.")) return;
-  await fetch('/api/reset-month', {method:'POST'});
-  await fetchState();
-}
-
-// F14: Blacklist ticker
-async function blacklistTicker() {
-  const input  = document.getElementById('blacklist-input');
-  const ticker = (input.value || '').toUpperCase().trim();
-  if (!ticker) return;
-  await fetch('/api/blacklist/' + ticker, { method: 'POST' });
-  input.value = '';
-  fetchState();
-}
-async function unblacklistTicker(ticker) {
-  await fetch('/api/blacklist/' + ticker, { method: 'DELETE' });
-  fetchState();
-}
-
-async function setBudget() {
-  const input = document.getElementById('budget-input');
-  const amount = parseFloat(input.value);
-  if (!amount || amount < 100) { alert('Please enter a valid budget (minimum $100)'); return; }
-  if (!confirm(`Set budget to ${fmt(amount)}? This updates your available cash immediately.`)) return;
-  const res = await fetch('/api/set-budget', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({budget:amount})});
-  const data = await res.json();
-  if (data.ok) { input.value = ''; await fetchState(); }
-  else alert('Error: ' + (data.error || 'Unknown error'));
-}
-
-async function loadReport() {
-  const box = document.getElementById('report-box');
-  if (!box) return;
-  box.textContent = 'Loading...';
-  try {
-    const res  = await fetch('/api/report');
-    const data = await res.json();
-    box.textContent = data.report;
-  } catch(e) { box.textContent = 'Error loading report.'; }
-}
-
-function clearLog() {
-  document.getElementById('server-log').innerHTML = '';
-}
-
-let _logLive = true;
-let _logTimer = null;
-let _allLogs = [];
-
-async function fetchLogs(silent=false) {
-  try {
-    const r = await fetch('/api/logs?limit=200');
-    if (!r.ok) throw new Error('HTTP ' + r.status);
-    const data = await r.json();
-    _allLogs = data.logs || [];
-    const now = new Date().toLocaleTimeString();
-    document.getElementById('log-status').textContent = 'live · ' + now;
-    document.getElementById('log-dot').style.background = 'var(--green)';
-    const cash = data.cash != null ? '$' + Number(data.cash).toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2}) : '—';
-    document.getElementById('log-cash').textContent = cash;
-    document.getElementById('log-positions').textContent = (data.positions ?? '—') + ' open';
-    document.getElementById('log-vix').textContent = data.vix ? Number(data.vix).toFixed(1) : '—';
-    document.getElementById('log-updated').textContent = now;
-    renderServerLog();
-  } catch(e) {
-    if (!silent) {
-      document.getElementById('log-status').textContent = 'error: ' + e.message;
-      document.getElementById('log-dot').style.background = 'var(--red)';
-    }
-  }
-}
-
-function renderServerLog() {
-  const filterVal = (document.getElementById('log-filter')?.value || '').trim();
-  const search    = (document.getElementById('log-search')?.value || '').toLowerCase();
-  const types     = filterVal ? filterVal.split(',') : null;
-
-  let logs = _allLogs.length ? _allLogs : (state.tradeLog || []);
-  if (types) logs = logs.filter(e => types.includes(e.type));
-  if (search) logs = logs.filter(e => (e.message||'').toLowerCase().includes(search) || (e.type||'').includes(search));
-
-  const log = document.getElementById('server-log');
-  if (!logs.length) { log.innerHTML = '<div style="color:var(--muted);padding:12px;font-size:11px">no entries match filter</div>'; return; }
-
-  const TYPE_COLORS = {
-    trade:   {bg:'rgba(0,255,136,.15)',  color:'var(--green)'},
-    close:   {bg:'rgba(255,80,80,.18)',  color:'var(--red)'},
-    warn:    {bg:'rgba(255,153,68,.2)',  color:'var(--orange)'},
-    circuit: {bg:'rgba(255,80,80,.25)',  color:'var(--red)'},
-    filter:  {bg:'rgba(51,102,136,.15)', color:'var(--muted)'},
-    scan:    {bg:'rgba(0,180,255,.1)',   color:'var(--blue)'},
-    macro:   {bg:'rgba(150,100,255,.15)',color:'#b38aff'},
-    risk:    {bg:'rgba(255,100,50,.18)', color:'var(--orange)'},
-    error:   {bg:'rgba(255,50,50,.25)',  color:'var(--red)'},
-    skip:    {bg:'rgba(80,80,80,.15)',   color:'var(--muted)'},
-  };
-
-  log.innerHTML = logs.map(e => {
-    const c = TYPE_COLORS[e.type] || {bg:'rgba(80,80,80,.1)', color:'var(--muted)'};
-    const time = new Date(e.time).toLocaleTimeString();
-    const msg = (e.message||'').replace(/</g,'&lt;').replace(/>/g,'&gt;');
-    return `<div class="log-entry">
-      <span class="log-time" style="min-width:80px;font-size:10px">${time}</span>
-      <span class="log-type" style="min-width:56px;background:${c.bg};color:${c.color};font-size:9px;padding:1px 5px;border-radius:3px;text-align:center;font-weight:700;letter-spacing:.5px;height:fit-content">${e.type}</span>
-      <span style="color:var(--text);font-size:11px;word-break:break-word">${msg}</span>
-    </div>`;
-  }).join('');
-}
-
-function toggleLogLive() {
-  _logLive = !_logLive;
-  const btn = document.getElementById('log-live-btn');
-  const dot = document.getElementById('log-dot');
-  if (_logLive) {
-    btn.textContent = 'PAUSE';
-    dot.style.background = 'var(--green)';
-    startLogPolling();
-  } else {
-    btn.textContent = 'RESUME';
-    dot.style.background = 'var(--muted)';
-    clearInterval(_logTimer);
-  }
-}
-
-function startLogPolling() {
-  clearInterval(_logTimer);
-  _logTimer = setInterval(() => { if(_logLive) fetchLogs(true); }, 15000);
-}
-
-startLogPolling();
-
-// ── Theta Tab ─────────────────────────────────────────────────────────────
-async function loadTheta() {
-  try {
-    const [tRes, dRes, cRes] = await Promise.all([
-      fetch('/api/theta').then(r=>r.json()),
-      fetch('/api/drawdown').then(r=>r.json()),
-      fetch('/api/correlation').then(r=>r.json()),
-    ]);
-
-    // Theta total
-    document.getElementById('theta-total').textContent = '$' + tRes.totalDailyBurn.toFixed(2);
-
-    // Theta table
-    const wrap = document.getElementById('theta-table-wrap');
-    if (!tRes.positions.length) {
-      wrap.innerHTML = '<div class="no-data">No open positions.</div>';
-    } else {
-      wrap.innerHTML = `<table style="width:100%;border-collapse:collapse;font-size:13px">
-        <thead><tr style="color:var(--muted);font-size:11px;text-align:left">
-          <th style="padding:6px 8px">TICKER</th><th style="padding:6px 8px">THETA/DAY</th>
-          <th style="padding:6px 8px">DTE</th><th style="padding:6px 8px">DAILY BURN</th>
-          <th style="padding:6px 8px">7-DAY BURN</th>
-        </tr></thead><tbody>
-        ${tRes.positions.map(p=>`<tr style="border-top:1px solid var(--border)">
-          <td style="padding:8px;font-weight:700">${p.ticker}</td>
-          <td style="padding:8px;color:var(--red)">${p.theta.toFixed(4)}</td>
-          <td style="padding:8px">${p.dte}d</td>
-          <td style="padding:8px;color:var(--red)">-$${p.dailyBurn.toFixed(2)}</td>
-          <td style="padding:8px;color:var(--red)">-$${(p.dailyBurn*7).toFixed(2)}</td>
-        </tr>`).join('')}
-        </tbody></table>`;
-    }
-
-    // Drawdown
-    const ddColor = dRes.drawdownPct < -10 ? 'var(--red)' : dRes.drawdownPct < -5 ? 'var(--orange)' : 'var(--green)';
-    document.getElementById('dd-pct').textContent = dRes.drawdownPct.toFixed(2) + '%';
-    document.getElementById('dd-pct').style.color = ddColor;
-    document.getElementById('dd-mode').textContent = dRes.recoveryMode ? '⚠️ Recovery Mode — sizing -25%' : 'Normal sizing';
-    document.getElementById('dd-peak').textContent = '$' + dRes.peakCash.toFixed(2);
-    document.getElementById('dd-current').textContent = '$' + dRes.currentValue.toFixed(2);
-    document.getElementById('dd-reduction').textContent = dRes.sizingReduction;
-
-    // Correlation groups
-    const corrWrap = document.getElementById('corr-wrap');
-    if (!cRes.groups.length) {
-      corrWrap.innerHTML = '<div class="no-data">No correlated positions currently held.</div>';
-    } else {
-      corrWrap.innerHTML = cRes.groups.map(g=>`
-        <div class="card" style="margin-bottom:8px;font-size:13px">
-          <div style="font-weight:700;margin-bottom:6px;color:var(--orange)">⚠️ Held: ${g.held.join(', ')}</div>
-          <div style="color:var(--muted)">Group: ${g.group.join(' · ')}</div>
-          <div style="font-size:11px;margin-top:4px;color:var(--muted)">Max 1 position per correlated group. No new entries from this group.</div>
-        </div>`).join('');
-    }
-  } catch(e) { console.error('Theta load error:', e); }
-}
-
-// ── Attribution Tab ────────────────────────────────────────────────────────
-async function loadAttribution() {
-  try {
-    const data = await fetch('/api/attribution').then(r=>r.json());
-    const pct  = (n,d) => d ? ((n/Math.abs(d))*100).toFixed(1)+'%' : '--';
-    const pnlColor = n => n >= 0 ? 'var(--green)' : 'var(--red)';
-    const fmt = n => (n>=0?'+':'')+n.toFixed(2);
-
-    // By ticker
-    const tickerWrap = document.getElementById('attr-ticker-wrap');
-    const tickers = Object.entries(data.byTicker).sort((a,b)=>b[1].pnl-a[1].pnl);
-    if (!tickers.length) {
-      tickerWrap.innerHTML = '<div class="no-data">No closed trades yet.</div>';
-    } else {
-      tickerWrap.innerHTML = `<table style="width:100%;border-collapse:collapse;font-size:13px">
-        <thead><tr style="color:var(--muted);font-size:11px;text-align:left">
-          <th style="padding:6px 8px">STOCK</th><th style="padding:6px 8px">TRADES</th>
-          <th style="padding:6px 8px">WINS</th><th style="padding:6px 8px">WIN RATE</th>
-          <th style="padding:6px 8px">NET P&L</th>
-        </tr></thead><tbody>
-        ${tickers.map(([t,v])=>`<tr style="border-top:1px solid var(--border)">
-          <td style="padding:8px;font-weight:700">${t}</td>
-          <td style="padding:8px">${v.trades}</td>
-          <td style="padding:8px;color:var(--green)">${v.wins}</td>
-          <td style="padding:8px">${pct(v.wins,v.trades)}</td>
-          <td style="padding:8px;font-weight:700;color:${pnlColor(v.pnl)}">$${fmt(v.pnl)}</td>
-        </tr>`).join('')}
-        </tbody></table>`;
-    }
-
-    // By sector
-    const sectorWrap = document.getElementById('attr-sector-wrap');
-    const sectors = Object.entries(data.bySector).sort((a,b)=>b[1].pnl-a[1].pnl);
-    if (!sectors.length) {
-      sectorWrap.innerHTML = '<div class="no-data">No closed trades yet.</div>';
-    } else {
-      sectorWrap.innerHTML = `<table style="width:100%;border-collapse:collapse;font-size:13px">
-        <thead><tr style="color:var(--muted);font-size:11px;text-align:left">
-          <th style="padding:6px 8px">SECTOR</th><th style="padding:6px 8px">TRADES</th><th style="padding:6px 8px">NET P&L</th>
-        </tr></thead><tbody>
-        ${sectors.map(([s,v])=>`<tr style="border-top:1px solid var(--border)">
-          <td style="padding:8px;font-weight:700">${s}</td>
-          <td style="padding:8px">${v.trades}</td>
-          <td style="padding:8px;font-weight:700;color:${pnlColor(v.pnl)}">$${fmt(v.pnl)}</td>
-        </tr>`).join('')}
-        </tbody></table>`;
-    }
-
-    // By score range
-    const scoreWrap = document.getElementById('attr-score-wrap');
-    const scores = Object.entries(data.byScoreRange);
-    scoreWrap.innerHTML = `<table style="width:100%;border-collapse:collapse;font-size:13px">
-      <thead><tr style="color:var(--muted);font-size:11px;text-align:left">
-        <th style="padding:6px 8px">SCORE RANGE</th><th style="padding:6px 8px">TRADES</th><th style="padding:6px 8px">NET P&L</th>
-      </tr></thead><tbody>
-      ${scores.map(([r,v])=>`<tr style="border-top:1px solid var(--border)">
-        <td style="padding:8px;font-weight:700">${r}</td>
-        <td style="padding:8px">${v.trades}</td>
-        <td style="padding:8px;font-weight:700;color:${pnlColor(v.pnl)}">$${v.trades?fmt(v.pnl):'--'}</td>
-      </tr>`).join('')}
-      </tbody></table>`;
-  } catch(e) { console.error('Attribution error:', e); }
-}
-
-// ── Tax Log Tab ────────────────────────────────────────────────────────────
-async function loadTaxLog() {
-  try {
-    const data = await fetch('/api/taxlog').then(r=>r.json());
-    const wrap = document.getElementById('tax-table-wrap');
-    if (!data.length) {
-      wrap.innerHTML = '<div class="no-data">No closed trades yet.</div>';
-      return;
-    }
-    const totalPnl = data.reduce((s,t)=>s+t.pnl,0);
-    const pnlColor = n => n >= 0 ? 'var(--green)' : 'var(--red)';
-    wrap.innerHTML = `
-      <div style="display:flex;gap:16px;margin-bottom:12px;flex-wrap:wrap">
-        <div class="card" style="flex:1;min-width:140px">
-          <div style="font-size:11px;color:var(--muted)">TOTAL TRADES</div>
-          <div style="font-size:22px;font-weight:700">${data.length}</div>
-        </div>
-        <div class="card" style="flex:1;min-width:140px">
-          <div style="font-size:11px;color:var(--muted)">NET P&L (ALL TRADES)</div>
-          <div style="font-size:22px;font-weight:700;color:${pnlColor(totalPnl)}">$${totalPnl>=0?'+':''}${totalPnl.toFixed(2)}</div>
-        </div>
-        <div class="card" style="flex:1;min-width:140px">
-          <div style="font-size:11px;color:var(--muted)">TAX TREATMENT</div>
-          <div style="font-size:18px;font-weight:700;color:var(--orange)">All Short-Term</div>
-        </div>
-      </div>
-      <table style="width:100%;border-collapse:collapse;font-size:12px">
-        <thead><tr style="color:var(--muted);font-size:11px;text-align:left">
-          <th style="padding:5px 6px">#</th><th style="padding:5px 6px">TICKER</th>
-          <th style="padding:5px 6px">OPENED</th><th style="padding:5px 6px">CLOSED</th>
-          <th style="padding:5px 6px">COST BASIS</th><th style="padding:5px 6px">PROCEEDS</th>
-          <th style="padding:5px 6px">NET P&L</th><th style="padding:5px 6px">EXIT</th>
-        </tr></thead><tbody>
-        ${data.map(t=>`<tr style="border-top:1px solid var(--border)">
-          <td style="padding:6px">${t.id}</td>
-          <td style="padding:6px;font-weight:700">${t.ticker}</td>
-          <td style="padding:6px;color:var(--muted)">${t.openDate}</td>
-          <td style="padding:6px;color:var(--muted)">${t.closeDate}</td>
-          <td style="padding:6px">$${t.costBasis.toFixed(2)}</td>
-          <td style="padding:6px">$${t.proceeds.toFixed(2)}</td>
-          <td style="padding:6px;font-weight:700;color:${pnlColor(t.pnl)}">$${t.pnl>=0?'+':''}${t.pnl.toFixed(2)}</td>
-          <td style="padding:6px;font-size:11px;color:var(--muted)">${t.reason||'--'}</td>
-        </tr>`).join('')}
-        </tbody></table>`;
-  } catch(e) { console.error('Tax log error:', e); }
-}
-
-// ── Tab switching with full render hooks ─────────────────────────────────
 function switchTab(name) {
   document.querySelectorAll('.tab').forEach(t=>t.classList.remove('active'));
   document.querySelectorAll('.content').forEach(c=>c.classList.remove('active'));
