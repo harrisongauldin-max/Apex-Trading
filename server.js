@@ -4825,7 +4825,7 @@ async function runScan() {
     // marketContext.monteCarlo removed — SPY/QQQ strategy doesn't use Monte Carlo
     marketContext.kelly            = calcKellySize(20);
     marketContext.relativeValue    = getRelativeValueScreening();
-    marketContext.streaks          = getStreakAnalysis();
+    marketContext.streaks          = getStreakAnalysis(); // now a stub
 
     if (marketContext.concentration.alerts.length > 0) {
       marketContext.concentration.alerts.forEach(a => logEvent("risk", a));
@@ -7637,6 +7637,72 @@ const EARNINGS_PLAY_MIN_DTE  = 14;  // enter at least 14 days before earnings
 const EARNINGS_PLAY_MAX_DTE  = 21;  // enter no more than 21 days before earnings
 const EARNINGS_PLAY_MAX_IVR  = 45;  // only when options are still cheap
 const EARNINGS_PLAY_EXIT_DTE = 2;   // exit 2 days before earnings
+
+// ── Analytics stubs — simplified for SPY/QQQ strategy ───────────────────
+function calcCalmarRatio() {
+  const trades = state.closedTrades || [];
+  if (!trades.length) return null;
+  const totalPnL = trades.reduce((s,t) => s + (t.pnl||0), 0);
+  const annualized = totalPnL * (252 / Math.max(trades.length, 1));
+  const maxDD = Math.min(...trades.map((_,i) => trades.slice(0,i+1).reduce((s,t)=>s+(t.pnl||0),0)));
+  return maxDD < 0 ? parseFloat((annualized / Math.abs(maxDD)).toFixed(2)) : null;
+}
+function calcInformationRatio() {
+  const trades = state.closedTrades || [];
+  if (trades.length < 5) return null;
+  const returns = trades.map(t => (t.pnl||0) / Math.max(t.cost||100, 1));
+  const avg = returns.reduce((s,r)=>s+r,0) / returns.length;
+  const std = Math.sqrt(returns.reduce((s,r)=>s+(r-avg)**2,0) / returns.length);
+  return std > 0 ? parseFloat((avg / std * Math.sqrt(252)).toFixed(2)) : null;
+}
+function calcDrawdownDuration() {
+  const trades = state.closedTrades || [];
+  if (!trades.length) return 0;
+  let maxDuration = 0, currentDuration = 0, inDD = false;
+  let peak = 0, running = 0;
+  trades.forEach(t => {
+    running += (t.pnl||0);
+    if (running > peak) { peak = running; inDD = false; currentDuration = 0; }
+    else { inDD = true; currentDuration++; maxDuration = Math.max(maxDuration, currentDuration); }
+  });
+  return maxDuration;
+}
+function calcAutocorrelation() {
+  const trades = state.closedTrades || [];
+  if (trades.length < 10) return null;
+  const returns = trades.slice(0,20).map(t => (t.pnl||0));
+  const n = returns.length - 1;
+  const mean = returns.reduce((s,r)=>s+r,0) / returns.length;
+  let num = 0, den = 0;
+  for (let i = 0; i < n; i++) num += (returns[i]-mean)*(returns[i+1]-mean);
+  for (let i = 0; i < returns.length; i++) den += (returns[i]-mean)**2;
+  return den > 0 ? parseFloat((num/den).toFixed(3)) : null;
+}
+function calcRiskOfRuin() {
+  const trades = state.closedTrades || [];
+  if (trades.length < 5) return null;
+  const wins  = trades.filter(t=>(t.pnl||0)>0).length;
+  const wr    = wins / trades.length;
+  const avgW  = trades.filter(t=>(t.pnl||0)>0).reduce((s,t)=>s+(t.pnl||0),0) / Math.max(wins,1);
+  const avgL  = Math.abs(trades.filter(t=>(t.pnl||0)<0).reduce((s,t)=>s+(t.pnl||0),0)) / Math.max(trades.length-wins,1);
+  const edge  = wr * avgW - (1-wr) * avgL;
+  return edge > 0 ? parseFloat((Math.pow((1-wr)/wr, 10) * 100).toFixed(1)) : 99.9;
+}
+function getStreakAnalysis() {
+  const trades = state.closedTrades || [];
+  if (!trades.length) return { currentStreak: 0, maxWinStreak: 0, maxLossStreak: 0 };
+  let cur = 0, maxW = 0, maxL = 0, prev = null;
+  trades.forEach(t => {
+    const w = (t.pnl||0) > 0;
+    if (prev === null || w === prev) cur++;
+    else cur = 1;
+    prev = w;
+    if (w) maxW = Math.max(maxW, cur);
+    else   maxL = Math.max(maxL, cur);
+  });
+  return { currentStreak: cur, maxWinStreak: maxW, maxLossStreak: maxL };
+}
+
 
 async function gracefulShutdown(signal) {
   if (isShuttingDown) return;
