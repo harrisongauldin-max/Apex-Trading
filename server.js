@@ -5533,6 +5533,19 @@ async function runScan() {
     const results = await Promise.all(
       batch.map(async stock => {
         try {
+          if (stock.isIndex) {
+            // SPY/QQQ: skip individual stock calls (sector ETF, analyst, earnings quality)
+            // Only fetch what matters for macro regime trading
+            const [price, bars, intradayBars, preMarket, newsArticles] = await Promise.all([
+              getStockQuote(stock.ticker),
+              getStockBars(stock.ticker, 60),
+              getIntradayBars(stock.ticker),
+              getPreMarketData(stock.ticker),
+              getNewsForTicker(stock.ticker),
+            ]);
+            return { stock, price, bars, intradayBars, sectorResult: { pass:true, putBoost:0 }, preMarket, newsArticles, analystData:{ modifier:0, signal:"neutral", upgrades:[], downgrades:[] }, eqScore:{ signal:"neutral" } };
+          }
+          // Individual stocks: full prefetch (used when INDIVIDUAL_STOCKS_ENABLED = true at $25k)
           const [price, bars, intradayBars, sectorResult, preMarket, newsArticles, analystData, eqScore, liveBeta, weeklyTrend] = await Promise.all([
             getStockQuote(stock.ticker),
             getStockBars(stock.ticker, 60),
@@ -5549,7 +5562,6 @@ async function runScan() {
             })(),
             getWeeklyTrend(stock.ticker),
           ]);
-          // Store live beta on stock object for liveStock construction
           if (liveBeta && liveBeta > 0) {
             stock._liveBeta = liveBeta;
             setCache('beta:' + stock.ticker, liveBeta);
@@ -5686,9 +5698,8 @@ async function runScan() {
       }
     }
 
-    // Anomaly detection — skip if unusual price movement detected
-    const anomaly = detectPriceAnomaly(bars);
-    if (anomaly.anomaly) { logEvent("filter", `${stock.ticker} price anomaly: ${anomaly.reason} - skip`); continue; }
+    // Anomaly detection — skip if price is zero or clearly bad data
+    if (!price || price <= 0 || price > 100000) { logEvent("filter", `${stock.ticker} price anomaly: invalid price $${price} - skip`); continue; }
 
     // Dynamic signals - calculated live from real price bars
     if (bars.length < 10) {
@@ -6967,7 +6978,7 @@ async function premarketAssessment() {
             <em>These are recommendations only. ARGO-1 will manage exits automatically at open.</em>
           </div>
           <div style="border-top:3px double #333;margin-top:12px;padding-top:8px;text-align:center;font-size:9px;color:#999;letter-spacing:1px">
-            ARGO 1.0 · Market opens in ~45 minutes · Entry window 9:45am ET
+            ARGO 1.0 · Market opens in ~45 minutes · Entry window 9:30am ET
           </div>
         </div>`
       );
@@ -7767,6 +7778,6 @@ initState().then(() => {
     console.log(`Positions:   ${state.positions.length} open`);
     console.log(`Trades:      ${(state.closedTrades||[]).length} closed trades in history`);
     console.log(`Scan:        every 30 seconds, 9AM-4PM ET Mon-Fri`);
-    console.log(`Entry window: 9:45AM-3PM ET`);
+    console.log(`Entry window: 9:30AM-3:45PM ET (SPY/QQQ spreads primary)`);
   });
 });
