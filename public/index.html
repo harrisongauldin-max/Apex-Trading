@@ -1985,7 +1985,104 @@ async function downloadDayReport() {
     alert('Error generating report: ' + e.message);
   }
 }
-let simPollInterval = null;
+// ── Server Log Tab ────────────────────────────────────────────────────────
+let _logLive  = true;
+let _logTimer = null;
+let _allLogs  = [];
+
+async function fetchLogs(silent=false) {
+  try {
+    const r = await fetch('/api/logs?limit=200');
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    const data = await r.json();
+    _allLogs = data.logs || [];
+    const t = new Date().toLocaleTimeString();
+    const cashEl = document.getElementById('log-cash');
+    const posEl  = document.getElementById('log-positions');
+    const vixEl  = document.getElementById('log-vix');
+    const updEl  = document.getElementById('log-updated');
+    const statEl = document.getElementById('log-status');
+    const dotEl  = document.getElementById('log-dot');
+    if (cashEl) cashEl.textContent = data.cash != null ? '$' + Number(data.cash).toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2}) : '—';
+    if (posEl)  posEl.textContent  = (data.positions ?? '—') + ' open';
+    if (vixEl)  vixEl.textContent  = data.vix ? Number(data.vix).toFixed(1) : '—';
+    if (updEl)  updEl.textContent  = t;
+    if (statEl) statEl.textContent = 'connected';
+    if (dotEl)  dotEl.style.background = 'var(--green)';
+    renderServerLog();
+  } catch(e) {
+    const statEl = document.getElementById('log-status');
+    const dotEl  = document.getElementById('log-dot');
+    if (statEl) statEl.textContent = 'error: ' + e.message;
+    if (dotEl)  dotEl.style.background = 'var(--red)';
+    if (!silent) {
+      const log = document.getElementById('server-log');
+      if (log) log.innerHTML = '<div style="color:var(--muted);padding:12px">connection failed: ' + e.message + '</div>';
+    }
+  }
+}
+
+function renderServerLog() {
+  const filterVal = (document.getElementById('log-filter')?.value || '').trim();
+  const search    = (document.getElementById('log-search')?.value || '').toLowerCase();
+  const types     = filterVal ? filterVal.split(',') : null;
+  let logs = _allLogs.length ? _allLogs : (state.tradeLog || []);
+  if (types)  logs = logs.filter(e => types.includes(e.type));
+  if (search) logs = logs.filter(e => (e.message||'').toLowerCase().includes(search) || (e.type||'').includes(search));
+  const log = document.getElementById('server-log');
+  if (!log) return;
+  if (!logs.length) { log.innerHTML = '<div style="color:var(--muted);padding:12px;font-size:11px">no entries match filter</div>'; return; }
+  const TYPE_COLORS = {
+    trade:   {bg:'rgba(0,255,136,.15)',  color:'var(--green)'},
+    close:   {bg:'rgba(255,80,80,.18)',  color:'var(--red)'},
+    warn:    {bg:'rgba(255,153,68,.2)',  color:'var(--orange)'},
+    circuit: {bg:'rgba(255,80,80,.25)',  color:'var(--red)'},
+    filter:  {bg:'rgba(51,102,136,.15)', color:'var(--muted)'},
+    scan:    {bg:'rgba(0,180,255,.1)',   color:'var(--blue)'},
+    macro:   {bg:'rgba(150,100,255,.15)',color:'#b38aff'},
+    risk:    {bg:'rgba(255,100,50,.18)', color:'var(--orange)'},
+    error:   {bg:'rgba(255,50,50,.25)',  color:'var(--red)'},
+    skip:    {bg:'rgba(80,80,80,.15)',   color:'var(--muted)'},
+    dryrun:  {bg:'rgba(0,255,200,.12)',  color:'#00ffcc'},
+  };
+  log.innerHTML = logs.map(e => {
+    const c = TYPE_COLORS[e.type] || {bg:'rgba(80,80,80,.1)', color:'var(--muted)'};
+    const t = new Date(e.time).toLocaleTimeString();
+    const msg = (e.message||'').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+    return `<div class="log-entry">
+      <span class="log-time" style="min-width:80px;font-size:10px">${t}</span>
+      <span class="log-type" style="min-width:56px;background:${c.bg};color:${c.color};font-size:9px;padding:1px 5px;border-radius:3px;text-align:center;font-weight:700;letter-spacing:.5px;height:fit-content">${e.type}</span>
+      <span style="color:var(--text);font-size:11px;word-break:break-word">${msg}</span>
+    </div>`;
+  }).join('');
+}
+
+function clearLog() {
+  _allLogs = [];
+  const log = document.getElementById('server-log');
+  if (log) log.innerHTML = '<div style="color:var(--muted);padding:12px;font-size:11px">cleared</div>';
+}
+
+function toggleLogLive() {
+  _logLive = !_logLive;
+  const btn = document.getElementById('log-live-btn');
+  const dot = document.getElementById('log-dot');
+  if (_logLive) {
+    if (btn) btn.textContent = 'PAUSE';
+    if (dot) dot.style.background = 'var(--green)';
+    startLogPolling();
+  } else {
+    if (btn) btn.textContent = 'RESUME';
+    if (dot) dot.style.background = 'var(--muted)';
+    clearInterval(_logTimer);
+  }
+}
+
+function startLogPolling() {
+  clearInterval(_logTimer);
+  _logTimer = setInterval(() => { if (_logLive) fetchLogs(true); }, 15000);
+}
+startLogPolling();
 
 function switchTab(name) {
   document.querySelectorAll('.tab').forEach(t=>t.classList.remove('active'));
