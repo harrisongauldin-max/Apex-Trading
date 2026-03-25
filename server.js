@@ -2662,7 +2662,7 @@ async function getMacroNews() {
         const agentResult = await getAgentMacroAnalysis(headlines);
         if (agentResult) {
           // Store for rescore use
-          state._agentMacro = agentResult;
+          state._agentMacro = { ...agentResult, timestamp: new Date().toISOString() };
           // Map agent result to expected format
           const agentModeMap = {
             "strongly bearish": { modifier: -20, mode: "defensive" },
@@ -2837,7 +2837,7 @@ async function getSectorRotation() {
   } catch(e) { return { leading: "Technology", lagging: "Energy", performance: {} }; }
 }
 
-async function getRealOptionsContract(ticker, price, optionType, score, vix, earningsDate) {
+async function getRealOptionsContract(ticker, price, optionType, score, vix, earningsDate, isMeanReversion = false) {
   try {
     // Determine target expiry window
     const { expDate: targetExpDate, expDays: targetExpDays, expiryType } = selectExpiry(score, vix, optionType, earningsDate, ticker, isMeanReversion);
@@ -3717,7 +3717,7 @@ async function executeTrade(stock, price, score, scoreReasons, vix, optionType =
   }
 
   // Use cached contract from parallel prefetch if available, else fetch now
-  let contract = stock._cachedContract || await getRealOptionsContract(stock.ticker, price, optionType, score, vix, stock.earningsDate);
+  let contract = stock._cachedContract || await getRealOptionsContract(stock.ticker, price, optionType, score, vix, stock.earningsDate, isMeanReversion);
   delete stock._cachedContract; // clean up cache after use
 
   // Fallback to estimated contract if real data unavailable
@@ -5838,9 +5838,9 @@ async function runScan() {
     const regimeMinScore   = regimeProfile.minScore;
     const agentConf        = (state._agentMacro || {}).confidence || "low";
     const agentSig         = (state._agentMacro || {}).signal || "neutral";
-    const agentLastRun     = (state._agentMacro || {}).timestamp || 0;
-    const agentStaleMins   = (Date.now() - new Date(agentLastRun).getTime()) / 60000;
-    const agentStale       = agentStaleMins > 10;
+    const agentLastRun     = (state._agentMacro || {}).timestamp || null;
+    const agentStaleMins   = agentLastRun ? (Date.now() - new Date(agentLastRun).getTime()) / 60000 : 999;
+    const agentStale       = !agentLastRun || agentStaleMins > 10;
     const isBearishHigh    = ["bearish","strongly bearish"].includes(agentSig) && agentConf === "high" && !agentStale;
     const isLowConfidence  = agentConf === "low" || agentStale;
     const agentMinScore    = isBearishHigh ? 65 : isLowConfidence ? 80 : MIN_SCORE;
@@ -5898,7 +5898,8 @@ async function runScan() {
       const batch = scored.slice(i, i + BATCH_SIZE);
       await Promise.all(batch.map(async ({ stock, price, optionType, score }) => {
         try {
-          const contract = await getRealOptionsContract(stock.ticker, price, optionType, score, state.vix, stock.earningsDate);
+          const isMR = optionType === "call" && stock._isMeanReversion;
+        const contract = await getRealOptionsContract(stock.ticker, price, optionType, score, state.vix, stock.earningsDate, isMR);
           if (contract) {
             stock._cachedContract = contract;
             // Store real IV from options market for use in scoring
