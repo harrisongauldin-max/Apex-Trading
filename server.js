@@ -2840,7 +2840,7 @@ async function getSectorRotation() {
 async function getRealOptionsContract(ticker, price, optionType, score, vix, earningsDate) {
   try {
     // Determine target expiry window
-    const { expDate: targetExpDate, expDays: targetExpDays, expiryType } = selectExpiry(score, vix, optionType, earningsDate, ticker);
+    const { expDate: targetExpDate, expDays: targetExpDays, expiryType } = selectExpiry(score, vix, optionType, earningsDate, ticker, isMeanReversion);
   // LEAPS use deeper ITM delta (0.70-0.80) for better intrinsic value retention
   const isLeaps      = expiryType === "leaps";
   const isPut        = optionType === "put";
@@ -3354,62 +3354,70 @@ function getDTEExitParams(dte, daysOpen = 0) {
   const pdtLocked    = pdtRemaining === 0;
 
   // ── Overnight tier adjustment ─────────────────────────────────────────
-  // Theta burns overnight — take profits sooner on held positions
+  // Monthly options: softer overnight penalty — theta decays slowly, thesis needs time
+  // Weekly options: tighter — theta is racing, exit fast
   // Partials: sell half at partialPct, close remainder at takeProfitPct
-  // 1-contract positions: partialPct escalates to full close (handled in partialClose)
   let overnightMult = 1.0;
   let overnightLabel = "";
-  if (daysOpen >= 2) {
-    overnightMult  = 0.60; // 2+ days old — 15% target on monthly (was 25%)
-    overnightLabel = "(2D+)";
-  } else if (daysOpen >= 1) {
-    overnightMult  = 0.75; // opened yesterday — 20% target on monthly (was 26.7%)
-    overnightLabel = "(OVERNIGHT)";
+  if (dte <= 21) {
+    // Weekly: overnight hurts more — tighten target
+    if (daysOpen >= 2) { overnightMult = 0.65; overnightLabel = "(2D+)"; }
+    else if (daysOpen >= 1) { overnightMult = 0.80; overnightLabel = "(OVERNIGHT)"; }
+  } else {
+    // Monthly 30-45 DTE: much gentler overnight adjustment — holding is the plan
+    if (daysOpen >= 7)  { overnightMult = 0.75; overnightLabel = "(7D+)"; }
+    else if (daysOpen >= 3) { overnightMult = 0.85; overnightLabel = "(3D+)"; }
+    else if (daysOpen >= 1) { overnightMult = 0.92; overnightLabel = "(OVERNIGHT)"; }
   }
 
   if (dte <= 21) {
+    // Weekly / short-DTE — tighter targets, faster exits
+    // These should be rare in PDT accounts — mean reversion calls mainly
     const base = pdtLocked ? 0.12 : pdtTight ? 0.15 : 0.20;
     const tp   = parseFloat((base * overnightMult).toFixed(3));
-    const part = parseFloat((tp * 0.60).toFixed(3)); // partial at 60% of target
-    const ride = parseFloat((tp * 1.30).toFixed(3)); // remainder rides to 130% of target
+    const part = parseFloat((tp * 0.60).toFixed(3));
+    const ride = parseFloat((tp * 1.30).toFixed(3));
     return {
       takeProfitPct:  tp,
       partialPct:     part,
       ridePct:        ride,
-      stopLossPct:    0.35,
+      stopLossPct:    0.30, // tighter stop on weeklies — theta risk is real
       fastStopPct:    0.15,
       trailActivate:  pdtLocked ? 0.08 : pdtTight ? 0.10 : 0.12,
       trailStop:      pdtLocked ? 0.05 : 0.07,
       label:          (pdtLocked ? "SHORT-DTE(PDT-LOCKED)" : pdtTight ? "SHORT-DTE(PDT-TIGHT)" : "SHORT-DTE") + overnightLabel,
     };
   } else if (dte <= 45) {
-    const base = pdtLocked ? 0.18 : pdtTight ? 0.22 : 0.30;
+    // Monthly 30-45 DTE — primary strategy for PDT-constrained accounts
+    // Target 30-50% — give the thesis room to play out over 5-10 days
+    const base = pdtLocked ? 0.25 : pdtTight ? 0.30 : 0.40;
     const tp   = parseFloat((base * overnightMult).toFixed(3));
-    const part = parseFloat((tp * 0.60).toFixed(3));
-    const ride = parseFloat((tp * 1.30).toFixed(3));
+    const part = parseFloat((tp * 0.55).toFixed(3));
+    const ride = parseFloat((tp * 1.40).toFixed(3)); // ride winners longer on monthlies
     return {
       takeProfitPct:  tp,
       partialPct:     part,
       ridePct:        ride,
       stopLossPct:    0.35,
       fastStopPct:    0.20,
-      trailActivate:  pdtLocked ? 0.12 : pdtTight ? 0.15 : 0.18,
-      trailStop:      pdtLocked ? 0.07 : pdtTight ? 0.08 : 0.10,
+      trailActivate:  pdtLocked ? 0.15 : pdtTight ? 0.18 : 0.22,
+      trailStop:      pdtLocked ? 0.08 : pdtTight ? 0.10 : 0.12,
       label:          (pdtLocked ? "MONTHLY(PDT-LOCKED)" : pdtTight ? "MONTHLY(PDT-TIGHT)" : "MONTHLY") + overnightLabel,
     };
   } else {
-    const base = pdtLocked ? 0.30 : pdtTight ? 0.40 : 0.50;
+    // LEAPS 60+ DTE — high conviction, ride for bigger moves
+    const base = pdtLocked ? 0.35 : pdtTight ? 0.45 : 0.55;
     const tp   = parseFloat((base * overnightMult).toFixed(3));
-    const part = parseFloat((tp * 0.60).toFixed(3));
-    const ride = parseFloat((tp * 1.30).toFixed(3));
+    const part = parseFloat((tp * 0.55).toFixed(3));
+    const ride = parseFloat((tp * 1.50).toFixed(3));
     return {
       takeProfitPct:  tp,
       partialPct:     part,
       ridePct:        ride,
       stopLossPct:    0.35,
       fastStopPct:    0.20,
-      trailActivate:  pdtLocked ? 0.18 : pdtTight ? 0.20 : 0.25,
-      trailStop:      pdtLocked ? 0.09 : pdtTight ? 0.10 : 0.12,
+      trailActivate:  pdtLocked ? 0.20 : pdtTight ? 0.25 : 0.30,
+      trailStop:      pdtLocked ? 0.10 : pdtTight ? 0.12 : 0.15,
       label:          (pdtLocked ? "LEAPS(PDT-LOCKED)" : pdtTight ? "LEAPS(PDT-TIGHT)" : "LEAPS") + overnightLabel,
     };
   }
@@ -3573,46 +3581,62 @@ function selectExpiry(score, vix, optionType, earningsDate, ticker = null) {
   let targetDays;
   let expiryType;
 
-  // ── PUT tiers — directional selloff captures ──────────────────────────
+  // ── MEAN REVERSION CALLS — stay weekly (quick bounce play) ───────────
+  // Only exception to the monthly-default rule
+  // isMeanReversion is passed through from executeTrade
+  if (isMeanReversion && optionType === "call") {
+    targetDays = 14;
+    expiryType = "weekly";
+    const targetDate = new Date(now + targetDays * MS_PER_DAY);
+    let expiry = getNextExpiryFriday(targetDate);
+    const minDate = new Date(now + 7 * MS_PER_DAY);
+    if (expiry < minDate) expiry = getNextExpiryFriday(new Date(expiry.getTime() + 7 * MS_PER_DAY));
+    const expDays = Math.round((expiry - new Date(now)) / MS_PER_DAY);
+    const expDate = expiry.toLocaleDateString("en-US", { month: "short", day: "2-digit", year: "numeric" });
+    return { expDate, expDays: Math.max(expDays, 7), expiryType: "weekly" };
+  }
+
+  // ── PUT tiers — PDT-aware monthly targeting ──────────────────────────
+  // Sub-$25k accounts cannot day trade — weekly options are a trap:
+  // fast theta decay + PDT hold = losing time value while waiting for thesis to play out
+  // Default to 30-45 DTE so we have time to be right without theta grinding us down
+  // Weeklies only for mean-reversion setups where a 2-3 day bounce is the explicit thesis
   if (optionType === "put") {
-    if (score >= 92 && vix >= 28 && vix <= 45) {
-      // Extreme conviction + active selloff window — capture fast before VIX reverts
-      targetDays = 14;
-      expiryType = "weekly";
-    } else if (score >= 85 && vix >= 25 && vix <= 40) {
-      // High conviction + elevated VIX — short window, confirmed breakdown
-      targetDays = 21;
-      expiryType = "weekly";
-    } else if (score >= 75 && vix >= 20 && vix <= 30) {
-      // Moderate conviction — give it room but don't overpay for time
+    if (score >= 90 && vix >= 30) {
+      // High conviction in active selloff — 30 DTE gives thesis time, slower theta burn
       targetDays = 30;
       expiryType = "monthly";
+    } else if (score >= 75) {
+      // Standard put entry — 45 DTE, well away from the theta cliff
+      targetDays = 45;
+      expiryType = "monthly";
     } else {
-      // Default — high VIX extremes (>40) or low conviction = need more time
+      // Lower conviction — go further out, less theta risk while thesis develops
       targetDays = 45;
       expiryType = "monthly";
     }
 
   // ── CALL tiers ─────────────────────────────────────────────────────────
+  // Mean reversion calls (isMeanReversion flag) stay weekly — quick bounce play
+  // All other calls go monthly — PDT accounts need holding time
   } else if (score >= 90 && vix < 20 && ticker && LEAPS_ELIGIBLE.includes(ticker)) {
     // LEAPS — high conviction + calm market + liquid ticker
     targetDays = 210;
     expiryType = "leaps";
   } else if (score >= 85 && vix < 25) {
-    // High score, low VIX, call = weekly for max leverage
-    targetDays = 14;
-    expiryType = "weekly";
+    // High conviction call in calm market — 30 DTE standard
+    targetDays = 30;
+    expiryType = "monthly";
   } else if (score >= 70 && vix < 30) {
-    // Normal call setup
+    // Normal call setup — monthly gives thesis time
     targetDays = 30;
     expiryType = "monthly";
   } else if (vix >= 25) {
-    // Mean reversion call — high VIX = buy discounted calls on beaten-down quality names
-    // 90 days gives time for VIX reversion + stock recovery
-    targetDays = 90;
+    // Mean reversion call in high VIX — 45 DTE, wait for VIX reversion
+    targetDays = 45;
     expiryType = "monthly";
   } else {
-    // Default — elevated VIX calls need more time
+    // Default
     targetDays = 45;
     expiryType = "monthly";
   }
@@ -4946,10 +4970,14 @@ async function runScan() {
       }
     }
 
-    // 1. FAST STOP — -20% in first 48 hours but NOT in first 2 hours
-    const fastStopEligible = hoursOpen >= 2 && hoursOpen <= FAST_STOP_HOURS;
+    // 1. FAST STOP — tighter window for weeklies, wider for monthlies
+    // Weeklies: 2-48hrs (theta racing, exit fast on loss)
+    // Monthlies: 2-120hrs (5 days — thesis needs time to play out)
+    const isWeeklyPos    = (pos.expiryType === "weekly" || (pos.expDays || 30) <= 21);
+    const fastStopWindow = isWeeklyPos ? FAST_STOP_HOURS : 120;
+    const fastStopEligible = hoursOpen >= 2 && hoursOpen <= fastStopWindow;
     if (fastStopEligible && chg <= -(pos.fastStopPct || FAST_STOP_PCT)) {
-      logEvent("scan", `${pos.ticker} fast-stop ${(chg*100).toFixed(0)}% in ${hoursOpen.toFixed(1)}hrs`);
+      logEvent("scan", `${pos.ticker} fast-stop ${(chg*100).toFixed(0)}% in ${hoursOpen.toFixed(1)}hrs (${isWeeklyPos ? 'weekly' : 'monthly'})`);
       await closePosition(pos.ticker, "fast-stop"); continue;
     }
 
