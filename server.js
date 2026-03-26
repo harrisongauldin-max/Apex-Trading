@@ -6102,7 +6102,7 @@ async function runScan() {
       const batch = scored.slice(i, i + BATCH_SIZE);
       await Promise.all(batch.map(async ({ stock, price, optionType, score }) => {
         try {
-          const isMR = optionType === "call" && stock._isMeanReversion;
+          const isMR = optionType === "call" && (stock._isMeanReversion || false);
         const contract = await getRealOptionsContract(stock.ticker, price, optionType, score, state.vix, stock.earningsDate, isMR);
           if (contract) {
             stock._cachedContract = contract;
@@ -6163,7 +6163,7 @@ async function runScan() {
     }
     // ── AGENT PRE-ENTRY CHECK ────────────────────────────────────────────
     if (!dryRunMode) {
-      const preCheck = await getAgentPreEntryCheck(stock, bestScore, bestReasons, optionType);
+      const preCheck = await getAgentPreEntryCheck(stock, score, reasons, optionType);
       if (!preCheck.approved && preCheck.confidence === "high") {
         logEvent("filter", `${stock.ticker} blocked by pre-entry agent check — ${preCheck.reason}`);
         continue;
@@ -6991,56 +6991,49 @@ async function premarketAssessment() {
 // ── EXPANDED AGENT SCHEDULE ──────────────────────────────────────────────
 // Gives APEX strategic context 3.5 hours before first trade fires
 
-// 6:00am ET — deep scan: overnight futures, calendar, initial regime
-// EDT: 10:00 UTC | EST: 11:00 UTC
-cron.schedule("0 10 * * 1-5", async () => {
-  logEvent("macro", "[DAY PLAN] 6:00am deep scan starting...");
-  await getAgentDayPlan("6am-deep");
-});
-cron.schedule("0 11 * * 1-5", async () => {
-  logEvent("macro", "[DAY PLAN] 6:00am deep scan starting (EST fallback)...");
-  await getAgentDayPlan("6am-deep");
-});
+// ── All crons use ET hour check to handle EDT/EST automatically ──────────
+// Runs every 30 min UTC 10:00-15:00 on weekdays — checks ET hour inside
+// This avoids duplicate firing from EDT+EST fallback pairs
 
-// 7:30am ET — pre-market brief: overnight news digested, regime update
-// EDT: 11:30 UTC | EST: 12:30 UTC
-cron.schedule("30 11 * * 1-5", async () => {
-  logEvent("macro", "[DAY PLAN] 7:30am brief starting...");
-  await getAgentDayPlan("7:30am-brief");
-});
-cron.schedule("30 12 * * 1-5", async () => {
-  logEvent("macro", "[DAY PLAN] 7:30am brief starting (EST fallback)...");
-  await getAgentDayPlan("7:30am-brief");
-});
-
-// 8:30am ET — final pre-market: economic data just dropped, final regime
-// EDT: 12:30 UTC | EST: 13:30 UTC
-cron.schedule("30 12 * * 1-5", async () => {
+// 6:00am ET deep scan (fires at :00 past the hour, checks ET hour = 6)
+cron.schedule("0 10,11 * * 1-5", async () => {
   const et = getETTime();
-  if (et.getHours() === 8) { // only fire at 8:30am EDT
-    logEvent("macro", "[DAY PLAN] 8:30am final assessment starting...");
-    await getAgentDayPlan("8:30am-final");
+  if (et.getHours() === 6 && et.getMinutes() === 0) {
+    logEvent("macro", "[DAY PLAN] 6:00am ET deep scan starting...");
+    await getAgentDayPlan("6am-deep");
   }
 });
-cron.schedule("30 13 * * 1-5", async () => {
+
+// 7:30am ET brief (fires at :30 past the hour, checks ET hour = 7)
+cron.schedule("30 11,12 * * 1-5", async () => {
   const et = getETTime();
-  if (et.getHours() === 8) { // only fire at 8:30am EST
-    logEvent("macro", "[DAY PLAN] 8:30am final assessment starting (EST fallback)...");
+  if (et.getHours() === 7 && et.getMinutes() === 30) {
+    logEvent("macro", "[DAY PLAN] 7:30am ET brief starting...");
+    await getAgentDayPlan("7:30am-brief");
+  }
+});
+
+// 8:30am ET final assessment (fires at :30 past the hour, checks ET hour = 8)
+cron.schedule("30 12,13 * * 1-5", async () => {
+  const et = getETTime();
+  if (et.getHours() === 8 && et.getMinutes() === 30) {
+    logEvent("macro", "[DAY PLAN] 8:30am ET final assessment starting...");
     await getAgentDayPlan("8:30am-final");
   }
 });
 
-// Morning reset + email 9:00 AM ET
-// EDT: 13:00 UTC | EST: 14:00 UTC
-// Pre-market assessment 8:45 AM ET (12:45 UTC EDT / 13:45 UTC EST)
-cron.schedule("45 12 * * 1-5", async () => {
-  await premarketAssessment();
-});
-cron.schedule("45 13 * * 1-5", async () => {
-  await premarketAssessment(); // winter fallback
+// 8:45am ET pre-market assessment email (fires at :45, checks ET hour = 8)
+cron.schedule("45 12,13 * * 1-5", async () => {
+  const et = getETTime();
+  if (et.getHours() === 8 && et.getMinutes() === 45) {
+    await premarketAssessment();
+  }
 });
 
-cron.schedule("0 13 * * 1-5", async () => {
+// 9:00am ET morning reset + briefing (fires at :00, checks ET hour = 9)
+cron.schedule("0 13,14 * * 1-5", async () => {
+  const et = getETTime();
+  if (et.getHours() !== 9 || et.getMinutes() !== 0) return;
   state.dayStartCash      = state.cash;
   state.todayTrades       = 0;
   state.consecutiveLosses = 0;
@@ -7096,53 +7089,41 @@ cron.schedule("0 13 * * 1-5", async () => {
   sendEmail("morning");
 });
 
-// EOD email 20:05 UTC = 4:05 PM EDT (UTC-4)
-cron.schedule("5 20 * * 1-5", () => { sendEmail("eod"); });
-
-// 4:15pm ET — post-market assessment: AH moves, overnight risk
-// EDT: 20:15 UTC | EST: 21:15 UTC
-cron.schedule("15 20 * * 1-5", async () => {
-  logEvent("macro", "[POST-MARKET] 4:15pm assessment starting...");
-  await getAgentPostMarketAssessment("4:15pm");
-});
-cron.schedule("15 21 * * 1-5", async () => {
+// EOD email 4:05pm ET — hour-aware to handle EDT/EST
+cron.schedule("5 20,21 * * 1-5", () => {
   const et = getETTime();
-  if (et.getHours() === 16) {
-    logEvent("macro", "[POST-MARKET] 4:15pm assessment starting (EST fallback)...");
+  if (et.getHours() === 16 && et.getMinutes() === 5) sendEmail("eod");
+});
+
+// 4:15pm ET post-market assessment — ET-hour aware
+cron.schedule("15 20,21 * * 1-5", async () => {
+  const et = getETTime();
+  if (et.getHours() === 16 && et.getMinutes() === 15) {
+    logEvent("macro", "[POST-MARKET] 4:15pm ET assessment starting...");
     await getAgentPostMarketAssessment("4:15pm");
   }
 });
 
-// 6:00pm ET — evening scan: overnight risk, next day prep
-// EDT: 22:00 UTC | EST: 23:00 UTC
-cron.schedule("0 22 * * 1-5", async () => {
-  logEvent("macro", "[EVENING] 6:00pm scan starting...");
-  await getAgentPostMarketAssessment("6pm-evening");
-});
-cron.schedule("0 23 * * 1-5", async () => {
+// 6:00pm ET evening scan — ET-hour aware
+cron.schedule("0 22,23 * * 1-5", async () => {
   const et = getETTime();
-  if (et.getHours() === 18) {
-    logEvent("macro", "[EVENING] 6:00pm scan starting (EST fallback)...");
+  if (et.getHours() === 18 && et.getMinutes() === 0) {
+    logEvent("macro", "[EVENING] 6:00pm ET scan starting...");
     await getAgentPostMarketAssessment("6pm-evening");
   }
 });
 
-// Saturday 8:00am ET — weekly regime assessment
-// EDT: 12:00 UTC | EST: 13:00 UTC
-cron.schedule("0 12 * * 6", async () => {
-  logEvent("macro", "[WEEKLY] Saturday 8am regime assessment starting...");
-  await getAgentDayPlan("saturday-weekly");
-});
-cron.schedule("0 13 * * 6", async () => {
+// Saturday 8:00am ET weekly assessment — ET-hour aware
+cron.schedule("0 12,13 * * 6", async () => {
   const et = getETTime();
-  if (et.getDay() === 6) {
-    logEvent("macro", "[WEEKLY] Saturday 8am regime assessment (EST fallback)...");
+  if (et.getHours() === 8 && et.getMinutes() === 0) {
+    logEvent("macro", "[WEEKLY] Saturday 8:00am ET regime assessment starting...");
     await getAgentDayPlan("saturday-weekly");
   }
 });
 
-// Health check every 15 minutes during market hours
-cron.schedule("*/15 13-20 * * 1-5", async () => {
+// Health check every 15 minutes during market hours (UTC 12-21 covers both EDT and EST market hours)
+cron.schedule("*/15 12-21 * * 1-5", async () => {
   if (!isMarketHours()) return;
   const lastScan    = state.lastScan ? new Date(state.lastScan) : null;
   const minsSinceLastScan = lastScan ? (Date.now() - lastScan.getTime()) / 60000 : 999;
@@ -7157,17 +7138,20 @@ cron.schedule("*/15 13-20 * * 1-5", async () => {
   }
 });
 
-// Weekly reset Monday morning
-cron.schedule("0 13 * * 1", async () => {
+// Weekly reset Monday 9am ET — ET-hour aware
+cron.schedule("0 13,14 * * 1", async () => {
+  const et = getETTime();
+  if (et.getHours() !== 9 || et.getMinutes() !== 0) return;
   state.weekStartCash     = state.cash;
   state.weeklyCircuitOpen = true;
   await saveStateNow();
   logEvent("reset", "Weekly circuit breaker reset");
 });
 
-// Monthly report - runs every Monday, checks inside if it is the first Monday of the month
-cron.schedule("0 13 * * 1", async () => {
-  const et  = getETTime();
+// Monthly report - first Monday of month, 9am ET
+cron.schedule("0 13,14 * * 1", async () => {
+  const et = getETTime();
+  if (et.getHours() !== 9 || et.getMinutes() !== 0) return;
   const day = et.getDate();
   if (day > 7) return; // only first Monday of month
   const report = buildMonthlyReport();
