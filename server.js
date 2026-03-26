@@ -3055,9 +3055,10 @@ async function getRealOptionsContract(ticker, price, optionType, score, vix, ear
       if (mid <= 0) { skipped++; continue; }
       // Only hard filter on delta — everything else is a scoring factor not a gate
       if (delta < deltaMin || delta > deltaMax) { skipped++; continue; }
-      // Hard DTE floor — for monthly puts/calls, don't allow contracts under 14 DTE
-      // MR calls can use 7+ DTE (weekly), spreads need time for thesis to play out
-      const minDTE = isMeanReversion ? 7 : 14;
+      // Hard DTE floor — prevent truly short-dated contracts from being selected
+      // selectExpiry handles real DTE targeting (30-45 DTE for monthly)
+      // This is just a safety net against 0-6 DTE junk
+      const minDTE = isMeanReversion ? 3 : 7;
       if (contractDTE < minDTE) { skipped++; continue; }
 
       // ── CONTRACT SCORING — higher = better ──────────────────────────────
@@ -3777,6 +3778,102 @@ function selectExpiry(score, vix, optionType, earningsDate, ticker = null, isMea
 
   return { expDate, expDays: Math.max(expDays, 7), expiryType };
 }
+
+// ── Spread Sell Leg Lookup ────────────────────────────────────────────────
+// Finds the sell leg for a spread by looking for the contract closest to
+// targetStrike on the SAME expiry as the buy leg. Does not use delta scoring.
+// This ensures $10-wide spreads actually work as intended.
+async function getSpreadSellLeg(ticker, optionType, buyContract) {
+  try {
+    const targetStrike = optionType === "put"
+      ? buyContract.strike - 10
+      : buyContract.strike + 10;
+
+    // Use same expiry date as buy leg
+    const today     = getETTime();
+    const expDate   = new Date(buyContract.expDate);
+    const expStr    = expDate.toISOString().split("T")[0];
+
+    const url = `/options/contracts?underlying_symbol=${ticker}` +
+      `&expiration_date_gte=${expStr}&expiration_date_lte=${expStr}` +
+      `&type=${optionType}&limit=200`;
+
+    let contracts = [];
+    let nextPage  = url;
+    while (nextPage) {
+      const page = await alpacaGet(nextPage, ALPACA_OPTIONS);
+      if (!page || !page.option_contracts) break;
+      contracts = contracts.concat(page.option_contracts);
+      nextPage = page.next_page_token
+        ? url + '&page_token=' + page.next_page_token
+        : null;
+      if (contracts.length >= 500) break;
+    }
+
+    if (!contracts.length) return null;
+
+    // Find contract closest to target strike
+    let best = null;
+    let bestDist = 999;
+    for (const c of contracts) {
+      const strike = parseFloat(c.strike_price);
+      const dist   = Math.abs(strike - targetStrike);
+      if (dist < bestDist) {
+        bestDist = dist;
+        best     = c;
+      }
+    }
+
+    if (!best || bestDist > 3) {
+      // No contract within $3 of target — spread not available
+      logEvent("warn", `${ticker} spread: no sell leg found within $3 of target $${targetStrike}`);
+      return null;
+    }
+
+    // Fetch snapshot for price/greeks
+    const snap = await alpacaGet(
+      `/options/snapshots?symbols=${best.symbol}&feed=indicative`,
+      ALPACA_OPT_SNAP
+    );
+    const snapData = snap?.snapshots?.[best.symbol];
+    if (!snapData) return null;
+
+    const quote  = snapData.latestQuote || {};
+    const greeks = snapData.greeks || {};
+    const bid    = parseFloat(quote.bp || 0);
+    const ask    = parseFloat(quote.ap || 0);
+    const mid    = bid > 0 && ask > 0 ? (bid + ask) / 2 : 0;
+    if (mid <= 0) return null;
+
+    const strike = parseFloat(best.strike_price);
+    const actualWidth = Math.abs(buyContract.strike - strike);
+
+    logEvent("filter", `${ticker} sell leg: $${strike} | mid $${mid.toFixed(2)} | width $${actualWidth} from buy $${buyContract.strike}`);
+
+    return {
+      symbol:    best.symbol,
+      strike,
+      expDate:   buyContract.expDate,
+      expDays:   buyContract.expDays,
+      expiryType:buyContract.expiryType,
+      premium:   parseFloat(mid.toFixed(2)),
+      bid, ask,
+      spread:    ask > 0 ? (ask - bid) / ask : 1,
+      greeks: {
+        delta: parseFloat(greeks.delta || 0).toFixed(3),
+        theta: parseFloat(greeks.theta || 0).toFixed(3),
+        gamma: parseFloat(greeks.gamma || 0).toFixed(4),
+        vega:  parseFloat(greeks.vega  || 0).toFixed(3),
+      },
+      oi:      parseInt(snapData.openInterest || 0),
+      iv:      parseFloat(snapData.impliedVolatility || 0.3),
+    };
+  } catch(e) {
+    logEvent("error", `getSpreadSellLeg(${ticker}): ${e.message}`);
+    return null;
+  }
+}
+
 
 async function executeSpreadTrade(stock, price, score, scoreReasons, vix, optionType, buyContract, sellContract) {
   if (!buyContract || !sellContract) return null;
@@ -6219,29 +6316,16 @@ async function runScan() {
       const buyContract  = await getRealOptionsContract(stock.ticker, price, optionType, score, state.vix, stock.earningsDate, false);
       if (!buyContract) { logEvent("filter", `${stock.ticker} spread: no buy leg found`); continue; }
 
-      // Sell strike exactly $10 OTM from buy strike
-      // Put spread: sell the $10 lower strike (limits downside, reduces cost)
-      // Call spread: sell the $10 higher strike (limits upside, reduces cost)
-      const sellStrikeTarget = optionType === "put"
-        ? buyContract.strike - 10   // exactly $10 below buy strike
-        : buyContract.strike + 10;  // exactly $10 above buy strike
-      const sellContract = await getRealOptionsContract(stock.ticker, sellStrikeTarget, optionType, Math.max(score - 15, 50), state.vix, stock.earningsDate, false);
-
-      // Verify sell strike is actually close to target ($10 away) — not just the nearest available
-      const strikeDistance = sellContract ? Math.abs(sellContract.strike - sellStrikeTarget) : 999;
+      // Use dedicated sell leg lookup — finds closest strike to $10 OTM on SAME expiry
+      const sellContract = await getSpreadSellLeg(stock.ticker, optionType, buyContract);
       const spreadActualWidth = sellContract ? Math.abs(buyContract.strike - sellContract.strike) : 0;
 
-      if (sellContract && buyContract.strike !== sellContract.strike && strikeDistance <= 2 && spreadActualWidth >= 8) {
+      if (sellContract && spreadActualWidth >= 8) {
         logEvent("filter", `${stock.ticker} spread: buy $${buyContract.strike} / sell $${sellContract.strike} | net $${(buyContract.premium - sellContract.premium).toFixed(2)} | width $${spreadActualWidth}`);
         const spreadPos = await executeSpreadTrade(stock, price, score, reasons, state.vix, optionType, buyContract, sellContract);
         entered = !!spreadPos;
       } else {
-        if (sellContract) {
-          logEvent("warn", `${stock.ticker} spread: sell leg $${sellContract?.strike} too close to buy $${buyContract.strike} (width $${spreadActualWidth}) — skipping, no fallback to naked`);
-        } else {
-          logEvent("warn", `${stock.ticker} spread: sell leg not found for target strike $${sellStrikeTarget} — skipping`);
-        }
-        // No naked fallback for index spreads — spreads only
+        logEvent("warn", `${stock.ticker} spread: sell leg not found or too narrow (width $${spreadActualWidth}) — skipping`);
       }
     } else {
       entered = await executeTrade(stock, price, score, reasons, state.vix, optionType, isMeanReversion);
