@@ -482,16 +482,70 @@ async function initState() {
           if (!/^[A-Z]+\d{6}[CP]\d{8}$/.test(alpPos.symbol)) continue;
           const known = state.positions.find(p => p.contractSymbol === alpPos.symbol);
           if (!known) {
-            console.log(`[RECONCILE] Orphan position detected: ${alpPos.symbol} — exists in Alpaca but not in APEX state`);
+            console.log(`[RECONCILE] Orphan position detected: ${alpPos.symbol} — reconstructing from Alpaca data`);
             orphans++;
-            // Log but don't auto-add — would need full position metadata
-            // Dashboard will show this as a warning
+            // Reconstruct basic position so ARGO can track and exit it
+            const sym       = alpPos.symbol;
+            const isCall    = sym.includes('C') && !sym.includes('P');
+            const optType   = isCall ? 'call' : 'put';
+            // Parse strike from symbol: e.g. SPY260406P00644000 → 644.00
+            const strikeRaw = sym.match(/[CP](\d{8})$/);
+            const strike    = strikeRaw ? parseFloat(strikeRaw[1]) / 1000 : 0;
+            // Parse expiry: e.g. SPY260406 → Apr 06, 2026
+            const expRaw    = sym.match(/(\d{6})[CP]/);
+            const expDate   = expRaw ? `${expRaw[1].slice(4,6)}/${expRaw[1].slice(2,4)}/20${expRaw[1].slice(0,2)}` : '';
+            const qty       = parseInt(alpPos.qty || 1);
+            const avgEntry  = parseFloat(alpPos.avg_entry_price || 0);
+            const mktVal    = parseFloat(alpPos.market_value || 0);
+            const ticker    = sym.match(/^([A-Z]+)\d/)?.[1] || 'SPY';
+            // Determine if this is a spread leg — check if there's a paired position
+            // For now reconstruct as individual leg; spread detection happens next pass
+            const reconstructed = {
+              ticker, optionType: optType,
+              isSpread:         false, // will update if paired leg found
+              strike,
+              contractSymbol:   sym,
+              buySymbol:        qty > 0 ? sym : null,
+              premium:          avgEntry,
+              currentPrice:     mktVal > 0 ? mktVal / (Math.abs(qty) * 100) : avgEntry,
+              contracts:        Math.abs(qty),
+              expDate:          expDate,
+              expDays:          Math.max(1, Math.round((new Date(expDate) - new Date()) / 86400000)),
+              cost:             Math.abs(mktVal),
+              score:            75, // unknown entry score
+              reasons:          ['Reconstructed from Alpaca reconciliation'],
+              openDate:         new Date().toISOString(),
+              peakPremium:      avgEntry,
+              entryRSI:         50,
+              entryMACD:        'neutral',
+              entryMomentum:    'steady',
+              entryMacro:       'neutral',
+              entryThesisScore: 100,
+              thesisHistory:    [],
+              agentHistory:     [],
+              realData:         true,
+              vix:              state.vix || 20,
+              entryVIX:         state.vix || 20,
+              expiryType:       'monthly',
+              dteLabel:         'RECONCILED',
+              partialClosed:    false,
+              isMeanReversion:  false,
+              trailStop:        null,
+              breakevenLocked:  false,
+              halfPosition:     false,
+              target:           parseFloat((avgEntry * 1.5).toFixed(2)),
+              stop:             parseFloat((avgEntry * 0.65).toFixed(2)),
+              takeProfitPct:    0.50,
+              fastStopPct:      0.35,
+            };
+            state.positions.push(reconstructed);
+            console.log(`[RECONCILE] Reconstructed: ${ticker} ${optType.toUpperCase()} $${strike} exp ${expDate} | ${Math.abs(qty)}x @ $${avgEntry}`);
           }
         }
 
         if (ghosts > 0 || orphans > 0) {
-          console.log(`[RECONCILE] Complete: ${ghosts} ghost(s) removed, ${orphans} orphan(s) detected`);
-          if (orphans > 0) console.log("[RECONCILE] WARNING: Orphan positions exist in Alpaca — check dashboard");
+          console.log(`[RECONCILE] Complete: ${ghosts} ghost(s) removed, ${orphans} orphan(s) reconstructed`);
+          if (orphans > 0) console.log(`[RECONCILE] Added ${orphans} position(s) from Alpaca to ARGO state`);
           await redisSave(state); // save reconciled state immediately
         } else {
           console.log("[RECONCILE] OK — APEX state matches Alpaca positions");
@@ -1912,12 +1966,13 @@ async function checkScaleIns() {
       if (pos.contractSymbol && pos.ask > 0 && !dryRunMode) {
         try {
           const scaleBody = {
-            symbol:        pos.contractSymbol,
-            qty:           addContracts,
-            side:          "buy",
-            type:          "limit",
-            time_in_force: "day",
-            limit_price:   parseFloat(pos.ask.toFixed(2)),
+            symbol:           pos.contractSymbol,
+            qty:              addContracts,
+            side:             "buy",
+            type:             "limit",
+            time_in_force:    "day",
+            limit_price:      parseFloat(pos.ask.toFixed(2)),
+            position_intent:  "buy_to_open",
           };
           const scaleResp = await alpacaPost("/orders", scaleBody);
           if (scaleResp && scaleResp.id) {
@@ -3921,6 +3976,7 @@ async function executeSpreadTrade(stock, price, score, scoreReasons, vix, option
         symbol: buyContract.symbol, qty: contracts,
         side: "buy", type: "limit", time_in_force: "day",
         limit_price: parseFloat(buyContract.ask.toFixed(2)),
+        position_intent: "buy_to_open",
       });
       if (buyResp && buyResp.id) {
         buyOrderId = buyResp.id;
@@ -3946,6 +4002,7 @@ async function executeSpreadTrade(stock, price, score, scoreReasons, vix, option
         symbol: sellContract.symbol, qty: contracts,
         side: "sell", type: "limit", time_in_force: "day",
         limit_price: parseFloat(sellContract.bid.toFixed(2)),
+        position_intent: "sell_to_open",
       });
       if (sellResp && sellResp.id) {
         sellOrderId = sellResp.id;
@@ -4435,6 +4492,7 @@ async function closePosition(ticker, reason, exitPremium = null) {
           await alpacaPost("/orders", {
             symbol: pos.buySymbol, qty: pos.contracts,
             side: "sell", type: "market", time_in_force: "day",
+            position_intent: "sell_to_close",
           });
           logEvent("trade", `[SPREAD CLOSE] Buy leg closed: ${pos.buySymbol}`);
         }
@@ -4443,6 +4501,7 @@ async function closePosition(ticker, reason, exitPremium = null) {
           await alpacaPost("/orders", {
             symbol: pos.sellSymbol, qty: pos.contracts,
             side: "buy", type: "market", time_in_force: "day",
+            position_intent: "buy_to_close",
           });
           logEvent("trade", `[SPREAD CLOSE] Sell leg closed: ${pos.sellSymbol}`);
         }
@@ -4512,12 +4571,13 @@ async function closePosition(ticker, reason, exitPremium = null) {
       // Real bid from position tracking is more reliable than derived estimate
       const bidPrice = parseFloat((pos.bid > 0 ? pos.bid : ep * 0.98).toFixed(2));
       const closeBody = {
-        symbol:        pos.contractSymbol,
-        qty:           closeQty,           // number not string
-        side:          "sell",
-        type:          "limit",
-        time_in_force: "day",
-        limit_price:   bidPrice,
+        symbol:           pos.contractSymbol,
+        qty:              closeQty,
+        side:             "sell",
+        type:             "limit",
+        time_in_force:    "day",
+        limit_price:      bidPrice,
+        position_intent:  "sell_to_close",
       };
       const closeResp = await alpacaPost("/orders", closeBody);
       if (closeResp && closeResp.id) {
@@ -4666,12 +4726,13 @@ async function partialClose(ticker) {
     try {
       const bidPrice = parseFloat((pos.bid > 0 ? pos.bid : ep * 0.98).toFixed(2));
       const partialBody = {
-        symbol:        pos.contractSymbol,
-        qty:           half,
-        side:          "sell",
-        type:          "limit",
-        time_in_force: "day",
-        limit_price:   bidPrice,
+        symbol:           pos.contractSymbol,
+        qty:              half,
+        side:             "sell",
+        type:             "limit",
+        time_in_force:    "day",
+        limit_price:      bidPrice,
+        position_intent:  "sell_to_close",
       };
       const partialResp = await alpacaPost("/orders", partialBody);
       if (partialResp && partialResp.id) {
@@ -5054,10 +5115,11 @@ async function runScan() {
   }
 
   // Fetch all position data in parallel — stock quotes + options snapshots simultaneously
-  const posSymbols = state.positions
-    .filter(p => p.contractSymbol)
-    .map(p => p.contractSymbol)
-    .join(",");
+  // Include spread leg symbols for P&L tracking
+  const posSymbols = [...new Set(state.positions.flatMap(p => {
+    if (p.isSpread) return [p.buySymbol, p.sellSymbol].filter(Boolean);
+    return p.contractSymbol ? [p.contractSymbol] : [];
+  }))].join(",");
 
   const [posSnapData, ...posQuotes] = await Promise.all([
     posSymbols ? alpacaGet(`/options/snapshots?symbols=${posSymbols}&feed=indicative`, ALPACA_OPT_SNAP) : Promise.resolve(null),
@@ -5074,7 +5136,33 @@ async function runScan() {
     const dte      = Math.max(1, Math.round((new Date(pos.expDate)-new Date())/MS_PER_DAY));
     const t        = dte / 365;
     let curP;
-    if (pos.contractSymbol && posSnapshots[pos.contractSymbol]) {
+    if (pos.isSpread && pos.buySymbol && pos.sellSymbol) {
+      // Spread P&L: net value = buy leg mid - sell leg mid
+      const buySnap  = posSnapshots[pos.buySymbol];
+      const sellSnap = posSnapshots[pos.sellSymbol];
+      if (buySnap && sellSnap) {
+        const buyQ  = buySnap?.latestQuote  || {};
+        const sellQ = sellSnap?.latestQuote || {};
+        const buyMid  = parseFloat(buyQ.bp || 0) > 0 && parseFloat(buyQ.ap || 0) > 0
+          ? (parseFloat(buyQ.bp) + parseFloat(buyQ.ap)) / 2 : 0;
+        const sellMid = parseFloat(sellQ.bp || 0) > 0 && parseFloat(sellQ.ap || 0) > 0
+          ? (parseFloat(sellQ.bp) + parseFloat(sellQ.ap)) / 2 : 0;
+        if (buyMid > 0 && sellMid > 0) {
+          curP = parseFloat((buyMid - sellMid).toFixed(2));
+          pos.currentPrice = curP;
+          pos.realData = true;
+          // Update greeks from buy leg
+          const buyGreeks = buySnap?.greeks || {};
+          if (buyGreeks.delta) pos.greeks = {
+            delta: parseFloat(buyGreeks.delta || 0).toFixed(3),
+            theta: parseFloat(buyGreeks.theta || 0).toFixed(3),
+            gamma: parseFloat(buyGreeks.gamma || 0).toFixed(4),
+            vega:  parseFloat(buyGreeks.vega  || 0).toFixed(3),
+          };
+        }
+      }
+      if (!curP) curP = pos.currentPrice || pos.premium;
+    } else if (pos.contractSymbol && posSnapshots[pos.contractSymbol]) {
       const snap   = posSnapshots[pos.contractSymbol];
       const quote  = snap?.latestQuote || {};
       const greeks = snap?.greeks || {};
@@ -7541,11 +7629,11 @@ app.post("/api/full-reset", async (req, res) => {
       const qty = Math.max(1, pos.contracts);
       if (pos.isSpread) {
         // Close both spread legs
-        if (pos.buySymbol) await alpacaPost("/orders", { symbol: pos.buySymbol, qty, side:"sell", type:"market", time_in_force:"day" }).catch(()=>{});
-        if (pos.sellSymbol) await alpacaPost("/orders", { symbol: pos.sellSymbol, qty, side:"buy", type:"market", time_in_force:"day" }).catch(()=>{});
+        if (pos.buySymbol) await alpacaPost("/orders", { symbol: pos.buySymbol, qty, side:"sell", type:"market", time_in_force:"day", position_intent:"sell_to_close" }).catch(()=>{});
+        if (pos.sellSymbol) await alpacaPost("/orders", { symbol: pos.sellSymbol, qty, side:"buy", type:"market", time_in_force:"day", position_intent:"buy_to_close" }).catch(()=>{});
       } else if (pos.contractSymbol) {
         const bidPrice = parseFloat((pos.bid > 0 ? pos.bid : pos.premium * 0.98).toFixed(2));
-        await alpacaPost("/orders", { symbol: pos.contractSymbol, qty, side:"sell", type:"limit", time_in_force:"day", limit_price: bidPrice }).catch(()=>{});
+        await alpacaPost("/orders", { symbol: pos.contractSymbol, qty, side:"sell", type:"limit", time_in_force:"day", limit_price: bidPrice, position_intent:"sell_to_close" }).catch(()=>{});
       }
     } catch(e) { /* best effort */ }
   }
