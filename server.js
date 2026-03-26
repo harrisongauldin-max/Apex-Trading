@@ -3343,7 +3343,10 @@ async function checkAllFilters(stock, price) {
 
   // 6. Same-ticker limit — allow up to 2 positions per ticker (entry + roll)
   const existingPositions = state.positions.filter(p => p.ticker === stock.ticker);
-  if (existingPositions.length >= 2) return { pass:false, reason:`Already have 2 positions in ${stock.ticker}` };
+  // Index instruments: allow up to 3 positions (staggered entries on same thesis)
+  // Individual stocks: max 2 (less liquid, more company-specific risk)
+  const maxPerTicker = stock.isIndex ? 3 : 2;
+  if (existingPositions.length >= maxPerTicker) return { pass:false, reason:`Already have ${maxPerTicker} positions in ${stock.ticker}` };
 
   // 7. Portfolio heat
   if (heatPct() >= MAX_HEAT) return { pass:false, reason:`Portfolio heat at ${(heatPct()*100).toFixed(0)}% max` };
@@ -3567,7 +3570,7 @@ function recordDayTrade(pos, reason) {
   const count = countRecentDayTrades();
   logEvent("warn", `PDT: Day trade recorded for ${pos.ticker} — ${count}/${PDT_LIMIT} in rolling 5-day window`);
   if (count >= PDT_LIMIT) {
-    logEvent("warn", `PDT LIMIT REACHED (${count}/${PDT_LIMIT}) — no new entries until window resets`);
+    logEvent("warn", `PDT LIMIT REACHED (${count}/${PDT_LIMIT}) — no new same-day CLOSES until window resets. New entries still allowed.`);
     state.pdtWarned = true;
   }
 }
@@ -3777,14 +3780,27 @@ function selectExpiry(score, vix, optionType, earningsDate, ticker = null, isMea
 
 async function executeSpreadTrade(stock, price, score, scoreReasons, vix, optionType, buyContract, sellContract) {
   if (!buyContract || !sellContract) return null;
-  const contracts = 1;
+
+  // ── Score-based contract sizing ──────────────────────────────────────
+  // Before 30 fills (Kelly pre-activation): scale by conviction
+  // Hard cap: never more than 15% of cash per position
   const netDebit  = parseFloat((buyContract.premium - sellContract.premium).toFixed(2));
+  const costPer1  = parseFloat((netDebit * 100).toFixed(2));
+  const cashCap   = Math.floor((state.cash * 0.25) / costPer1); // max contracts at 25% cash
+  let baseContracts;
+  if (score >= 90)      baseContracts = 3;
+  else if (score >= 80) baseContracts = 2;
+  else                  baseContracts = 1;
+  // High risk day: halve sizing
+  const riskMult    = (state._dayPlan?.riskLevel === "high") ? 0.5 : 1.0;
+  const contracts   = Math.max(1, Math.min(cashCap, Math.floor(baseContracts * riskMult)));
+
   const maxProfit = parseFloat((10 - netDebit).toFixed(2)); // $10 wide spread
   const maxLoss   = netDebit;
   const finalCost = parseFloat((netDebit * 100 * contracts).toFixed(2));
 
-  if (finalCost > state.cash * 0.15) {
-    logEvent("filter", `${stock.ticker} spread cost $${finalCost} exceeds 15% position limit`);
+  if (finalCost > state.cash * 0.25) {
+    logEvent("filter", `${stock.ticker} spread cost $${finalCost} exceeds 25% position limit`);
     return null;
   }
   if (state.cash - finalCost < CAPITAL_FLOOR) {
@@ -5426,8 +5442,8 @@ async function runScan() {
   const macroClearForPuts = !agentHasRun || putsMacroAllowed;
 
   const isIndexScan  = true; // scan loop handles both index and stocks
-  const callsAllowed = (isEntryWindow("call", true) && !finalHourBlock && !suppressBlock && !pdtBlocked) || dryRunMode;
-  const putsAllowed  = (isEntryWindow("put",  true) && !vixFallingPause && !spyGapUp && !postReversalBlock && !finalHourBlock && !suppressBlock && !macroBullish && !pdtBlocked) || dryRunMode;
+  const callsAllowed = (isEntryWindow("call", true) && !finalHourBlock && !suppressBlock) || dryRunMode;
+  const putsAllowed  = (isEntryWindow("put",  true) && !vixFallingPause && !spyGapUp && !postReversalBlock && !finalHourBlock && !suppressBlock && !macroBullish) || dryRunMode;
   if (macroBullish && !dryRunMode) logEvent("filter", `Macro bullish (${marketContext.macro?.signal}) — puts blocked`);
   if (vixFallingPause && !dryRunMode) logEvent("filter", "VIX falling — put entries paused this scan");
 
@@ -6067,13 +6083,17 @@ async function runScan() {
     const effectiveMinScore = Math.max(ddProtocol.minScore || MIN_SCORE, regimeMinScore, agentMinScore);
     if (agentStale && !dryRunMode) logEvent("filter", `Agent macro stale (${agentStaleMins.toFixed(0)}min) — raising min score to 80`);
 
-    // Position limit removed — rely on heat % and correlation blocks
-    if (bestScore < effectiveMinScore) {
-      logEvent("filter", `${stock.ticker} call:${callSetup.score} put:${putSetup.score} - below ${effectiveMinScore} (${etHourNow >= 13 ? "afternoon" : ddProtocol.level} protocol) - skip`);
+    // Staggered entry scoring — require higher conviction for 2nd/3rd position in same ticker
+    const sameTickerSameDir = state.positions.filter(p => p.ticker === stock.ticker && p.optionType === optionType);
+    const staggeredMinScore = sameTickerSameDir.length === 1 ? 85 : sameTickerSameDir.length >= 2 ? 90 : effectiveMinScore;
+    const finalMinScore     = Math.max(effectiveMinScore, staggeredMinScore);
+    if (bestScore < finalMinScore) {
+      const reason = sameTickerSameDir.length > 0 ? `staggered entry (${sameTickerSameDir.length+1}x)` : (etHourNow >= 13 ? "afternoon" : ddProtocol.level) + " protocol";
+      logEvent("filter", `${stock.ticker} call:${callSetup.score} put:${putSetup.score} - below ${finalMinScore} (${reason}) - skip`);
       continue;
     }
 
-    // Block same ticker opposite direction only (not same sector — relative value trades are valid)
+    // Block opposite direction on same ticker — directional strategy only
     const sameTickerOpposite = state.positions.find(p =>
       p.ticker === stock.ticker &&
       p.optionType !== optionType
