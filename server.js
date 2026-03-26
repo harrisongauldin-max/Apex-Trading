@@ -3319,10 +3319,9 @@ async function getWeeklyTrend(ticker) {
 async function checkAllFilters(stock, price) {
   const fails = [];
 
-  // 1. Entry window — allow if EITHER call or put window is open
-  // Puts open at 9:45AM when VIX>=25, calls at 10:00AM
-  // Since optionType is not known yet at filter time, pass if either window is open
-  const eitherWindowOpen = isEntryWindow("call") || isEntryWindow("put");
+  // 1. Entry window — SPY/QQQ open at 9:30am, individual stocks at 9:45am
+  const isIndexStock     = stock.isIndex || false;
+  const eitherWindowOpen = isEntryWindow("call", isIndexStock) || isEntryWindow("put", isIndexStock);
   if (!eitherWindowOpen && !dryRunMode) return { pass:false, reason:"Outside entry window" };
 
   // 2. Circuit breakers
@@ -6819,7 +6818,7 @@ setInterval(async () => {
 // Checks overnight positions against pre-market conditions
 // Flags positions likely to need immediate action at open
 async function premarketAssessment() {
-  if (!state.positions.length) return;
+  // Always run — even with no positions, show macro outlook and day plan
   try {
     const macro = await getMacroNews();
     marketContext.macro = macro;
@@ -6913,12 +6912,14 @@ async function premarketAssessment() {
       );
     }
 
-    // Always send email — show full picture even on quiet mornings
+    // Always send email — show macro outlook even with no positions
     if (RESEND_API_KEY && GMAIL_USER) {
       const closes = assessments.filter(a => a.recommendation === "CLOSE");
       const watches = assessments.filter(a => a.recommendation === "WATCH");
       const holds  = assessments.filter(a => a.recommendation === "HOLD");
-      const subject = closes.length
+      const subject = assessments.length === 0
+        ? `ARGO-1 Pre-Market — No Positions | ${macro.signal.toUpperCase()} | ${new Date().toLocaleDateString()}`
+        : closes.length
         ? `ARGO-1 Pre-Market — ${closes.length} CLOSE, ${watches.length} WATCH | ${new Date().toLocaleDateString()}`
         : `ARGO-1 Pre-Market — All Clear | ${new Date().toLocaleDateString()}`;
 
