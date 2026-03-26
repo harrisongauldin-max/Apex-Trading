@@ -6098,9 +6098,9 @@ async function runScan() {
       // Real OI/spread check happens at execution time via _cachedContract after prefetch
       const mrBeta    = stock.beta || 1.0;
       const mrSector  = stock.sector || "";
-      // Financial stocks typically have lower options liquidity for MR plays
-      // Low beta stocks don't move enough for MR to be profitable after spread
-      const mrLiquid  = mrBeta >= 1.2 && mrSector !== "Financial";
+      // Index instruments (SPY/QQQ) are always liquid — most active options market in the world
+      // For individual stocks: require beta >= 1.2 and non-Financial sector
+      const mrLiquid  = stock.isIndex || (mrBeta >= 1.2 && mrSector !== "Financial");
       if (mrLiquid) {
         callSetup.score   = mrSetup.score;
         callSetup.reasons = mrSetup.reasons;
