@@ -3525,9 +3525,13 @@ async function checkAllFilters(stock, price) {
   // 12. Stock price
   if (price < MIN_STOCK_PRICE) return { pass:false, reason:`Price $${price} below $${MIN_STOCK_PRICE} minimum` };
 
-  // 13. VIX check
+  // 13. VIX check — nuanced by trade type
   const vix = state.vix || 15;
-  if (vix >= VIX_PAUSE) return { pass:false, reason:`VIX ${vix} above pause threshold (${VIX_PAUSE})` };
+  // Index instruments: no hard VIX block — credit spreads thrive in high VIX
+  // Individual stocks: pause above 35 (wide spreads, unreliable fills)
+  if (!stock.isIndex && vix >= VIX_PAUSE) return { pass:false, reason:`VIX ${vix} above pause threshold (${VIX_PAUSE}) for individual stocks` };
+  // Extreme VIX (50+): pause everything — market is in crisis, fills impossible
+  if (vix >= 50) return { pass:false, reason:`VIX ${vix} extreme — all entries paused above 50` };
 
   // 14. Correlation group - max 1 position per correlated group
   const corrGroup = getCorrelatedGroup(stock.ticker);
