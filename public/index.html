@@ -259,7 +259,7 @@ input[type=text]:focus{border-color:var(--blue)}
       <div class="card-title">Portfolio Heat</div>
       <div class="metric-sm" id="heat">--%</div>
       <div class="heat-bar"><div class="heat-fill" id="heat-fill" style="width:0%;background:var(--green)"></div></div>
-      <div class="sub">max 60%</div>
+      <div class="sub">max 60% | <span id="put-heat" style="color:var(--red)">P:--%</span> <span id="call-heat" style="color:var(--blue)">C:--%</span></div>
     </div>
     <div class="card">
       <div class="card-title">Monthly Revenue</div>
@@ -1091,6 +1091,16 @@ function renderMetrics() {
   fill.style.width = Math.min((heat / MAX_HEAT_PCT) * 100, 100) + '%';
   fill.style.background = heat > 50 ? 'var(--red)' : heat > 35 ? 'var(--orange)' : 'var(--green)';
 
+  // Directional heat breakdown
+  const positions = state.positions || [];
+  const totalCapVal = (state.cash||0) + positions.reduce((s,p) => s + (p.cost||0), 0);
+  const putCostVal  = positions.filter(p=>p.optionType==='put').reduce((s,p)=>s+(p.cost||0),0);
+  const callCostVal = positions.filter(p=>p.optionType==='call').reduce((s,p)=>s+(p.cost||0),0);
+  const putHeatEl   = document.getElementById('put-heat');
+  const callHeatEl  = document.getElementById('call-heat');
+  if (putHeatEl)  putHeatEl.textContent  = 'P:' + (totalCapVal > 0 ? (putCostVal/totalCapVal*100).toFixed(0) : '0') + '%';
+  if (callHeatEl) callHeatEl.textContent = 'C:' + (totalCapVal > 0 ? (callCostVal/totalCapVal*100).toFixed(0) : '0') + '%';
+
   const rev = state.totalRevenue || 0;
   document.getElementById('revenue').textContent = fmt(rev);
   document.getElementById('revenue').style.color = rev >= 2000 ? 'var(--gold)' : rev >= 1000 ? 'var(--green)' : 'var(--text)';
@@ -1444,8 +1454,8 @@ function renderPositions() {
         <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
           <span style="font-size:16px;font-weight:700;color:var(--blue)">${p.ticker}</span>
           <span style="font-size:11px;color:var(--muted)">${strikeDisplay} · ${p.expDate}</span>
-          ${isSpread ? `<span style="font-size:9px;padding:2px 6px;border-radius:10px;background:rgba(0,150,255,.15);color:var(--blue)">SPREAD $${p.spreadWidth||10}W</span>` : ''}
-          <span style="font-size:9px;padding:2px 6px;border-radius:10px;background:${p.expiryType==='weekly'?'rgba(255,215,0,.15)':p.expiryType==='leaps'?'rgba(148,0,211,.2)':'rgba(100,100,100,.2)'};color:${p.expiryType==='weekly'?'var(--gold)':p.expiryType==='leaps'?'#cc44ff':'var(--muted)'}">${(p.dteLabel||p.expiryType||'monthly').toUpperCase()}</span>
+          ${p.isCreditSpread ? `<span style="font-size:9px;padding:2px 6px;border-radius:10px;background:rgba(0,255,136,.15);color:var(--green)">CREDIT $${p.spreadWidth||10}W</span>` : isSpread ? `<span style="font-size:9px;padding:2px 6px;border-radius:10px;background:rgba(0,150,255,.15);color:var(--blue)">DEBIT $${p.spreadWidth||10}W</span>` : ''}
+          <span style="font-size:9px;padding:2px 6px;border-radius:10px;background:${p.dteLabel==='CREDIT-SPREAD'?'rgba(0,255,136,.12)':p.dteLabel&&p.dteLabel.includes('RECONCIL')?'rgba(255,165,0,.15)':p.expiryType==='weekly'?'rgba(255,215,0,.15)':p.expiryType==='leaps'?'rgba(148,0,211,.2)':'rgba(100,100,100,.2)'};color:${p.dteLabel==='CREDIT-SPREAD'?'var(--green)':p.dteLabel&&p.dteLabel.includes('RECONCIL')?'var(--orange)':p.expiryType==='weekly'?'var(--gold)':p.expiryType==='leaps'?'#cc44ff':'var(--muted)'}">${(p.dteLabel||p.expiryType||'monthly').toUpperCase()}</span>
           <span style="font-size:9px;padding:2px 6px;border-radius:10px;background:${p.optionType==='put'?'rgba(255,80,80,.15)':'rgba(0,196,255,.1)'};color:${p.optionType==='put'?'#ff5050':'var(--blue)'}">${p.optionType==='put'?'PUT':'CALL'}</span>
           ${p.partialClosed ? '<span style="font-size:9px;padding:2px 6px;border-radius:10px;background:rgba(255,215,0,.1);color:var(--gold)">PARTIAL</span>' : ''}
           ${p._morningExitFlag ? '<span style="font-size:9px;padding:2px 6px;border-radius:10px;background:rgba(255,50,50,.2);color:var(--red)">EXIT AT OPEN</span>' : ''}
@@ -1467,15 +1477,15 @@ function renderPositions() {
       ${isSpread ? `
       <!-- Spread position grid -->
       <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-bottom:10px">
-        <div><div style="font-size:9px;color:var(--muted)">NET DEBIT</div><div style="font-weight:700">$${p.premium}</div></div>
-        <div><div style="font-size:9px;color:var(--muted)">CURRENT VALUE</div><div style="font-weight:700;color:${chgPct>=0?'var(--green)':'var(--red)'}">$${(p.currentPrice||p.premium).toFixed(2)}</div></div>
-        <div><div style="font-size:9px;color:var(--muted)">UNREALIZED P&L</div><div style="font-weight:700;color:${chgDollar>=0?'var(--green)':'var(--red)'}">${chgDollar>=0?'+':''}$${chgDollar.toFixed(2)}</div></div>
-        <div><div style="font-size:9px;color:var(--muted)">P&L %</div><div style="font-weight:700;color:${chgPct>=0?'var(--green)':'var(--red)'}">${chgPct>=0?'+':''}${chgPct.toFixed(1)}%</div></div>
-        <div><div style="font-size:9px;color:var(--muted)">BUY STRIKE</div><div style="font-weight:700;color:var(--blue)">$${p.buyStrike}</div></div>
-        <div><div style="font-size:9px;color:var(--muted)">SELL STRIKE</div><div style="font-weight:700;color:var(--muted)">$${p.sellStrike}</div></div>
+        <div><div style="font-size:9px;color:var(--muted)">${p.isCreditSpread?'NET CREDIT':'NET DEBIT'}</div><div style="font-weight:700">$${p.premium}</div></div>
+        <div><div style="font-size:9px;color:var(--muted)">CURRENT VALUE</div><div style="font-weight:700;color:${p.isCreditSpread?(chgPct<=0?'var(--green)':'var(--red)'):(chgPct>=0?'var(--green)':'var(--red)')}">$${(p.currentPrice||p.premium).toFixed(2)}</div></div>
+        <div><div style="font-size:9px;color:var(--muted)">UNREALIZED P&L</div><div style="font-weight:700;color:${p.isCreditSpread?(chgDollar<=0?'var(--green)':'var(--red)'):(chgDollar>=0?'var(--green)':'var(--red)')}">${p.isCreditSpread?(chgDollar<=0?'+':'')+(-chgDollar).toFixed(2):(chgDollar>=0?'+':'')+chgDollar.toFixed(2)}</div></div>
+        <div><div style="font-size:9px;color:var(--muted)">P&L %</div><div style="font-weight:700;color:${p.isCreditSpread?(chgPct<=0?'var(--green)':'var(--red)'):(chgPct>=0?'var(--green)':'var(--red)')}">${p.isCreditSpread?(chgPct<=0?'+':'')+(-chgPct).toFixed(1)+'%':(chgPct>=0?'+':'')+chgPct.toFixed(1)+'%'}</div></div>
+        <div><div style="font-size:9px;color:var(--muted)">${p.isCreditSpread?'SHORT STRIKE':'BUY STRIKE'}</div><div style="font-weight:700;color:${p.isCreditSpread?'var(--orange)':'var(--blue)'}">$${p.isCreditSpread?(p.shortStrike||p.sellStrike):p.buyStrike}</div></div>
+        <div><div style="font-size:9px;color:var(--muted)">${p.isCreditSpread?'LONG STRIKE':'SELL STRIKE'}</div><div style="font-weight:700;color:var(--muted)">$${p.isCreditSpread?(p.longStrike||p.buyStrike):p.sellStrike}</div></div>
         <div><div style="font-size:9px;color:var(--muted)">MAX PROFIT</div><div style="font-weight:700;color:var(--green)">$${((p.maxProfit||0)*100).toFixed(0)}</div></div>
-        <div><div style="font-size:9px;color:var(--muted)">MAX LOSS</div><div style="font-weight:700;color:var(--red)">$${((p.maxLoss||0)*100).toFixed(0)}</div></div>
-        <div><div style="font-size:9px;color:var(--muted)">COST</div><div style="font-weight:700">${fmt(p.cost)}</div></div>
+        <div><div style="font-size:9px;color:var(--muted)">MAX LOSS</div><div style="font-weight:700;color:var(--red)">$${p.isCreditSpread?((p.maxLoss||0)*100).toFixed(0):((p.maxLoss||0)*100).toFixed(0)}</div></div>
+        <div><div style="font-size:9px;color:var(--muted)">${p.isCreditSpread?'MARGIN':'COST'}</div><div style="font-weight:700">${fmt(p.cost)}</div></div>
         <div><div style="font-size:9px;color:var(--muted)">DTE</div><div style="font-weight:700">${Math.max(1,Math.round((new Date(p.expDate)-new Date())/86400000))}d</div></div>
         <div><div style="font-size:9px;color:var(--muted)">CONTRACTS</div><div style="font-weight:700">${p.contracts}x</div></div>
         <div><div style="font-size:9px;color:var(--muted)">EXP DATE</div><div style="font-weight:700">${p.expDate}</div></div>
@@ -1576,7 +1586,8 @@ function renderJournal() {
         <div style="display:flex;align-items:center;gap:10px">
           <span class="journal-ticker">${e.ticker}</span>
           <span style="font-size:10px;padding:2px 8px;border-radius:10px;background:${isOpen?'rgba(0,255,136,.1)':'rgba(0,196,255,.1)'};color:${color}">${e.action}</span>
-          ${isOpen ? `<span style="font-size:10px;color:var(--muted)">$${e.strike}${e.optionType==='put'?'P':'C'} · ${e.expDate}</span>` : ''}
+          ${isOpen ? `<span style="font-size:10px;color:var(--muted)">${e.isSpread ? '$'+e.buyStrike+'/'+'$'+e.sellStrike : '$'+(e.strike||'?')}${e.optionType==='put'?'P':'C'} · ${e.expDate||'?'}</span>` : ''}
+          ${e.isCreditSpread ? '<span style="font-size:9px;padding:2px 6px;border-radius:10px;background:rgba(0,255,136,.15);color:var(--green)">CREDIT</span>' : e.isSpread ? '<span style="font-size:9px;padding:2px 6px;border-radius:10px;background:rgba(0,150,255,.15);color:var(--blue)">DEBIT</span>' : ''}
         </div>
         <div style="display:flex;align-items:center;gap:8px">
           ${score ? `<span class="journal-score" style="background:rgba(0,196,255,.1);color:${scoreColor}">${score}/100</span>` : ''}
@@ -1592,7 +1603,7 @@ function renderJournal() {
       }).join('') + '</div>') : ''}
       <div class="journal-meta">
         <span>${new Date(e.time).toLocaleString()}</span>
-        ${isOpen ? `<span>δ ${e.delta}</span><span>IV ${e.iv}%</span><span>VIX ${e.vix}</span>` : `<span>Reason: ${e.reason}</span>`}
+        ${isOpen ? `<span>δ ${e.delta}</span><span>IV ${e.iv}%</span><span>VIX ${e.vix}</span>` : `<span>Reason: ${e.reason}</span><span style="font-size:9px;padding:1px 5px;border-radius:8px;background:${e.tradeType==='credit_spread'?'rgba(0,255,136,.12)':e.tradeType==='debit_spread'?'rgba(0,150,255,.12)':'rgba(100,100,100,.1)'};color:${e.tradeType==='credit_spread'?'var(--green)':e.tradeType==='debit_spread'?'var(--blue)':'var(--muted)'}">${(e.tradeType||'naked').replace('_',' ').toUpperCase()}</span>`}
         ${e.catalyst ? `<span>Catalyst: ${e.catalyst}</span>` : ''}
       </div>
     </div>`;
