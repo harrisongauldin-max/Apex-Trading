@@ -482,64 +482,133 @@ async function initState() {
           if (!/^[A-Z]+\d{6}[CP]\d{8}$/.test(alpPos.symbol)) continue;
           const known = state.positions.find(p => p.contractSymbol === alpPos.symbol);
           if (!known) {
-            console.log(`[RECONCILE] Orphan position detected: ${alpPos.symbol} — reconstructing from Alpaca data`);
+            console.log(`[RECONCILE] Orphan position detected: ${alpPos.symbol} — queuing for reconstruction`);
             orphans++;
-            // Reconstruct basic position so ARGO can track and exit it
-            const sym       = alpPos.symbol;
-            const isCall    = sym.includes('C') && !sym.includes('P');
-            const optType   = isCall ? 'call' : 'put';
-            // Parse strike from symbol: e.g. SPY260406P00644000 → 644.00
-            const strikeRaw = sym.match(/[CP](\d{8})$/);
-            const strike    = strikeRaw ? parseFloat(strikeRaw[1]) / 1000 : 0;
-            // Parse expiry: e.g. SPY260406 → Apr 06, 2026
-            const expRaw    = sym.match(/(\d{6})[CP]/);
-            const expDate   = expRaw ? `${expRaw[1].slice(4,6)}/${expRaw[1].slice(2,4)}/20${expRaw[1].slice(0,2)}` : '';
-            const qty       = parseInt(alpPos.qty || 1);
-            const avgEntry  = parseFloat(alpPos.avg_entry_price || 0);
-            const mktVal    = parseFloat(alpPos.market_value || 0);
-            const ticker    = sym.match(/^([A-Z]+)\d/)?.[1] || 'SPY';
-            // Determine if this is a spread leg — check if there's a paired position
-            // For now reconstruct as individual leg; spread detection happens next pass
-            const reconstructed = {
-              ticker, optionType: optType,
-              isSpread:         false, // will update if paired leg found
-              strike,
-              contractSymbol:   sym,
-              buySymbol:        qty > 0 ? sym : null,
-              premium:          avgEntry,
-              currentPrice:     mktVal > 0 ? mktVal / (Math.abs(qty) * 100) : avgEntry,
-              contracts:        Math.abs(qty),
-              expDate:          expDate,
-              expDays:          Math.max(1, Math.round((new Date(expDate) - new Date()) / 86400000)),
-              cost:             Math.abs(mktVal),
-              score:            75, // unknown entry score
-              reasons:          ['Reconstructed from Alpaca reconciliation'],
-              openDate:         new Date().toISOString(),
-              peakPremium:      avgEntry,
-              entryRSI:         50,
-              entryMACD:        'neutral',
-              entryMomentum:    'steady',
-              entryMacro:       'neutral',
-              entryThesisScore: 100,
-              thesisHistory:    [],
-              agentHistory:     [],
-              realData:         true,
-              vix:              state.vix || 20,
-              entryVIX:         state.vix || 20,
-              expiryType:       'monthly',
-              dteLabel:         'RECONCILED',
-              partialClosed:    false,
-              isMeanReversion:  false,
-              trailStop:        null,
-              breakevenLocked:  false,
-              halfPosition:     false,
-              target:           parseFloat((avgEntry * 1.5).toFixed(2)),
-              stop:             parseFloat((avgEntry * 0.65).toFixed(2)),
-              takeProfitPct:    0.50,
-              fastStopPct:      0.35,
-            };
-            state.positions.push(reconstructed);
-            console.log(`[RECONCILE] Reconstructed: ${ticker} ${optType.toUpperCase()} $${strike} exp ${expDate} | ${Math.abs(qty)}x @ $${avgEntry}`);
+          }
+        }
+
+        // ── Reconstruct orphaned positions ───────────────────────────────
+        // Parse all orphaned Alpaca options positions and pair spreads
+        const orphanedAlpaca = alpacaPositions.filter(alpPos => {
+          if (!/^[A-Z]+\d{6}[CP]\d{8}$/.test(alpPos.symbol)) return false;
+          return !state.positions.find(p =>
+            p.contractSymbol === alpPos.symbol ||
+            p.buySymbol === alpPos.symbol ||
+            p.sellSymbol === alpPos.symbol
+          );
+        });
+
+        if (orphanedAlpaca.length > 0) {
+          // Parse each orphan
+          const parsed = orphanedAlpaca.map(alpPos => {
+            const sym      = alpPos.symbol;
+            const isCall   = /\d{6}C\d{8}$/.test(sym);
+            const optType  = isCall ? 'call' : 'put';
+            const strikeM  = sym.match(/[CP](\d{8})$/);
+            const strike   = strikeM ? parseFloat(strikeM[1]) / 1000 : 0;
+            // Date: SPY260406 = YYMMDD → 2026-04-06
+            const expM     = sym.match(/(\d{2})(\d{2})(\d{2})[CP]/);
+            const expDate  = expM
+              ? new Date(`20${expM[1]}-${expM[2]}-${expM[3]}`).toLocaleDateString('en-US', {month:'short',day:'2-digit',year:'numeric'})
+              : '';
+            const expDays  = expDate ? Math.max(1, Math.round((new Date(expDate) - new Date()) / 86400000)) : 30;
+            const qty      = parseInt(alpPos.qty || 1);
+            const avgEntry = parseFloat(alpPos.avg_entry_price || 0);
+            const mktVal   = parseFloat(alpPos.market_value || 0);
+            const ticker   = sym.match(/^([A-Z]+)\d/)?.[1] || 'SPY';
+            return { sym, ticker, optType, strike, expDate, expDays, qty, avgEntry, mktVal, alpPos };
+          });
+
+          // Pair spread legs: long (qty>0) + short (qty<0), same ticker+expiry, ~$10 apart
+          const used = new Set();
+          for (let i = 0; i < parsed.length; i++) {
+            if (used.has(i)) continue;
+            const a = parsed[i];
+            // Look for matching leg
+            let paired = false;
+            for (let j = i + 1; j < parsed.length; j++) {
+              if (used.has(j)) continue;
+              const b = parsed[j];
+              const sameTickerExp = a.ticker === b.ticker && a.expDate === b.expDate && a.optType === b.optType;
+              const widthOk = Math.abs(a.strike - b.strike) >= 8 && Math.abs(a.strike - b.strike) <= 12;
+              const oppDir  = (a.qty > 0 && b.qty < 0) || (a.qty < 0 && b.qty > 0);
+              if (sameTickerExp && widthOk && oppDir) {
+                // Found a spread pair — for puts: buy leg has higher strike (more expensive)
+                // For calls: buy leg has lower strike
+                const longLeg  = a.qty > 0 ? a : b;
+                const shortLeg = a.qty > 0 ? b : a;
+                const buyLeg  = a.optType === 'put'
+                  ? (longLeg.strike > shortLeg.strike ? longLeg : shortLeg)
+                  : (longLeg.strike < shortLeg.strike ? longLeg : shortLeg);
+                const sellLeg = buyLeg === longLeg ? shortLeg : longLeg;
+                const netDebit = parseFloat((buyLeg.avgEntry - Math.abs(sellLeg.avgEntry)).toFixed(2));
+                const spreadWidth = Math.abs(buyLeg.strike - sellLeg.strike);
+                const spread = {
+                  ticker:           a.ticker,
+                  optionType:       a.optType,
+                  isSpread:         true,
+                  buyStrike:        buyLeg.strike,
+                  sellStrike:       sellLeg.strike,
+                  spreadWidth,
+                  buySymbol:        buyLeg.sym,
+                  sellSymbol:       sellLeg.sym,
+                  contractSymbol:   buyLeg.sym,
+                  premium:          Math.max(0.01, netDebit),
+                  maxProfit:        parseFloat((spreadWidth - Math.max(0.01, netDebit)).toFixed(2)),
+                  maxLoss:          Math.max(0.01, netDebit),
+                  contracts:        Math.abs(buyLeg.qty),
+                  expDate:          a.expDate,
+                  expDays:          a.expDays,
+                  cost:             parseFloat((Math.max(0.01, netDebit) * 100 * Math.abs(buyLeg.qty)).toFixed(2)),
+                  score:            75,
+                  reasons:          ['Reconstructed spread from Alpaca reconciliation'],
+                  openDate:         new Date().toISOString(),
+                  currentPrice:     Math.max(0.01, netDebit),
+                  peakPremium:      Math.max(0.01, netDebit),
+                  entryRSI: 50, entryMACD: 'neutral', entryMomentum: 'steady', entryMacro: 'neutral',
+                  entryThesisScore: 100, thesisHistory: [], agentHistory: [],
+                  realData: true, vix: state.vix || 20, entryVIX: state.vix || 20,
+                  expiryType: 'monthly', dteLabel: 'RECONCILED-SPREAD',
+                  partialClosed: false, isMeanReversion: false, trailStop: null,
+                  breakevenLocked: false, halfPosition: false,
+                  target: parseFloat((Math.max(0.01, netDebit) * 1.5).toFixed(2)),
+                  stop:   parseFloat((Math.max(0.01, netDebit) * 0.65).toFixed(2)),
+                  takeProfitPct: 0.50, fastStopPct: 0.35,
+                };
+                state.positions.push(spread);
+                used.add(i); used.add(j);
+                paired = true;
+                console.log(`[RECONCILE] Reconstructed SPREAD: ${a.ticker} $${buyLeg.strike}/$${sellLeg.strike} ${a.optType.toUpperCase()} exp ${a.expDate} | net $${netDebit}`);
+                break;
+              }
+            }
+            if (!paired) {
+              // Unpaired leg — add as individual position
+              const p = a;
+              const reconstructed = {
+                ticker: p.ticker, optionType: p.optType, isSpread: false,
+                strike: p.strike, contractSymbol: p.sym,
+                buySymbol: p.qty > 0 ? p.sym : null,
+                sellSymbol: p.qty < 0 ? p.sym : null,
+                premium: p.avgEntry, currentPrice: p.mktVal > 0 ? p.mktVal / (Math.abs(p.qty) * 100) : p.avgEntry,
+                contracts: Math.abs(p.qty), expDate: p.expDate, expDays: p.expDays,
+                cost: Math.abs(p.mktVal), score: 75,
+                reasons: ['Reconstructed individual leg from Alpaca reconciliation'],
+                openDate: new Date().toISOString(), peakPremium: p.avgEntry,
+                entryRSI: 50, entryMACD: 'neutral', entryMomentum: 'steady', entryMacro: 'neutral',
+                entryThesisScore: 100, thesisHistory: [], agentHistory: [],
+                realData: true, vix: state.vix || 20, entryVIX: state.vix || 20,
+                expiryType: 'monthly', dteLabel: 'RECONCILED',
+                partialClosed: false, isMeanReversion: false, trailStop: null,
+                breakevenLocked: false, halfPosition: false,
+                target: parseFloat((p.avgEntry * 1.5).toFixed(2)),
+                stop: parseFloat((p.avgEntry * 0.65).toFixed(2)),
+                takeProfitPct: 0.50, fastStopPct: 0.35,
+              };
+              state.positions.push(reconstructed);
+              used.add(i);
+              console.log(`[RECONCILE] Reconstructed leg: ${p.ticker} ${p.optType.toUpperCase()} $${p.strike} exp ${p.expDate} | ${Math.abs(p.qty)}x @ $${p.avgEntry}`);
+            }
           }
         }
 
@@ -1035,7 +1104,15 @@ function scoreIndexSetup(stock, optionType, spyRSI, spyMACD, spyMomentum, breadt
     // ── SPY technicals ──────────────────────────────────────────────────
     if (spyRSI >= 70)                                                             { score += 20; reasons.push(`SPY RSI ${spyRSI} overbought (+20)`); }
     else if (spyRSI >= 60)                                                        { score += 10; reasons.push(`SPY RSI ${spyRSI} elevated (+10)`); }
-    else if (spyRSI <= 35)                                                        { score = 0;   reasons.push(`SPY RSI ${spyRSI} oversold — no put (+0 HARD BLOCK)`); return { score: 0, reasons, tradeType }; }
+    else if (spyRSI <= 35)                                                        {
+      // Credit spreads: oversold = IDEAL (max fear premium) — bypass hard block
+      // Debit put spreads: oversold = wrong direction — hard zero
+      if (tradeType === "credit") {
+        score += 15; reasons.push(`SPY RSI ${spyRSI} deeply oversold — credit put spread ideal, max premium (+15)`);
+      } else {
+        score = 0; reasons.push(`SPY RSI ${spyRSI} oversold — no put (+0 HARD BLOCK)`); return { score: 0, reasons, tradeType };
+      }
+    }
     else if (spyRSI <= 45)                                                        { score -= 15; reasons.push(`SPY RSI ${spyRSI} oversold for puts (-15)`); }
 
     if (spyMACD && spyMACD.includes("bearish crossover"))                        { score += 15; reasons.push("SPY MACD bearish crossover (+15)"); }
@@ -2265,7 +2342,7 @@ async function getAgentDayPlan(scanType = "morning") {
 
   const systemPrompt = `You are the head macro strategist for ARGO-1, a systematic SPY/QQQ options spread trading system. Return ONLY valid JSON — no markdown, no preamble.
 
-{"regime":"trending_bear"|"trending_bull"|"choppy"|"breakdown"|"recovery"|"neutral","signal":"strongly bearish"|"bearish"|"mild bearish"|"neutral"|"mild bullish"|"bullish"|"strongly bullish","confidence":"high"|"medium"|"low","entryBias":"puts_on_bounces"|"calls_on_dips"|"neutral"|"avoid","tradeType":"spread"|"naked"|"none","suppressUntil":null|"HH:MM","riskLevel":"low"|"medium"|"high","vixOutlook":"spiking"|"elevated_stable"|"mean_reverting"|"falling","keyLevels":{"spySupport":null,"spyResistance":null},"catalysts":[],"reasoning":"2 sentences max","weeklyBias":"bullish"|"bearish"|"neutral","overnightMove":"string describing futures direction"}
+{"regime":"trending_bear"|"trending_bull"|"choppy"|"breakdown"|"recovery"|"neutral","signal":"strongly bearish"|"bearish"|"mild bearish"|"neutral"|"mild bullish"|"bullish"|"strongly bullish","confidence":"high"|"medium"|"low","entryBias":"puts_on_bounces"|"calls_on_dips"|"neutral"|"avoid","tradeType":"spread"|"credit"|"naked"|"none","suppressUntil":null|"HH:MM","riskLevel":"low"|"medium"|"high","vixOutlook":"spiking"|"elevated_stable"|"mean_reverting"|"falling","keyLevels":{"spySupport":null,"spyResistance":null},"catalysts":[],"reasoning":"2 sentences max","weeklyBias":"bullish"|"bearish"|"neutral","overnightMove":"string describing futures direction"}
 
 Rules:
 - suppressUntil: set to "HH:MM" ET if high-impact event today (CPI 08:30, FOMC 14:00, NFP 08:30) — ARGO-1 will not enter before this time
@@ -2370,7 +2447,7 @@ async function getAgentMacroAnalysis(headlines) {
   }
   const systemPrompt = `You are the head macro strategist for ARGO-1, a systematic SPY/QQQ options trading system. Return ONLY valid JSON — no markdown, no preamble.
 
-{"signal":"strongly bearish"|"bearish"|"mild bearish"|"neutral"|"mild bullish"|"bullish"|"strongly bullish","modifier":-20to20,"confidence":"high"|"medium"|"low","mode":"defensive"|"cautious"|"normal"|"aggressive","reasoning":"1 sentence","regime":"trending_bear"|"trending_bull"|"choppy"|"breakdown"|"recovery"|"neutral","regimeDuration":"intraday"|"1-3 days"|"3-7 days"|"1-2 weeks"|"multi-week","entryBias":"puts_on_bounces"|"calls_on_dips"|"neutral"|"avoid","tradeType":"spread"|"naked"|"none","vixOutlook":"spiking"|"elevated_stable"|"mean_reverting"|"falling"|"unknown","keyLevels":{"spySupport":null,"spyResistance":null},"catalysts":[],"bearishTickers":[],"bullishTickers":[],"themes":[]}
+{"signal":"strongly bearish"|"bearish"|"mild bearish"|"neutral"|"mild bullish"|"bullish"|"strongly bullish","modifier":-20to20,"confidence":"high"|"medium"|"low","mode":"defensive"|"cautious"|"normal"|"aggressive","reasoning":"1 sentence","regime":"trending_bear"|"trending_bull"|"choppy"|"breakdown"|"recovery"|"neutral","regimeDuration":"intraday"|"1-3 days"|"3-7 days"|"1-2 weeks"|"multi-week","entryBias":"puts_on_bounces"|"calls_on_dips"|"neutral"|"avoid","tradeType":"spread"|"credit"|"naked"|"none","vixOutlook":"spiking"|"elevated_stable"|"mean_reverting"|"falling"|"unknown","keyLevels":{"spySupport":null,"spyResistance":null},"catalysts":[],"bearishTickers":[],"bullishTickers":[],"themes":[]}
 
 Rules: regime=what SPY does next 3-10 days. entryBias: puts_on_bounces=bearish trend wait for relief; calls_on_dips=bullish wait for weakness. tradeType: spread=grinding trend, naked=sharp mean-reversion, none=unclear. vixOutlook: spiking=buy puts aggressively, falling=puts losing value. Focus on 3-10 day outlook not just today.`;
 
@@ -2503,6 +2580,7 @@ Critical rules:
   const userPrompt = `Position to rescore:
 - ${pos.ticker} ${pos.optionType.toUpperCase()} ${pos.isSpread ? `$${pos.buyStrike}/$${pos.sellStrike} SPREAD` : `$${pos.strike}`} exp ${pos.expDate}
 - Entry: $${pos.premium} | Current: $${pos.currentPrice || pos.premium} | P&L: ${chgPct}% ${isProfit ? '(PROFITABLE — do not recommend EXIT)' : ''}
+${pos.isCreditSpread ? '- CREDIT SPREAD: profit = time decay, spread value DECREASING is GOOD. Only recommend EXIT if underlying moved strongly against short strike.' : ''}
 - Opened: ${daysOpen} days ago | DTE: ${Math.max(0, Math.round((new Date(pos.expDate)-new Date())/86400000))}d
 - Entry score: ${pos.score}/100 | Entry reasons: ${(pos.reasons||[]).slice(0,4).join('; ')}
 - Stock: $${pos.price || '--'} | Entry RSI: ${pos.entryRSI || '--'} | Entry MACD: ${pos.entryMACD || '--'}
@@ -3731,19 +3809,19 @@ function selectExpiry(score, vix, optionType, earningsDate, ticker = null, isMea
   let targetDays;
   let expiryType;
 
-  // ── MEAN REVERSION CALLS — stay weekly (quick bounce play) ───────────
-  // Only exception to the monthly-default rule
-  // isMeanReversion is passed through from executeTrade
+  // ── MEAN REVERSION CALLS — 21 DTE minimum ──────────────────────────
+  // PDT accounts can't close same-day — need buffer for bounce to develop
+  // 21 DTE gives 3 weeks for mean reversion to play out without theta cliff
   if (isMeanReversion && optionType === "call") {
-    targetDays = 14;
+    targetDays = 21;
     expiryType = "weekly";
     const targetDate = new Date(now + targetDays * MS_PER_DAY);
     let expiry = getNextExpiryFriday(targetDate);
-    const minDate = new Date(now + 7 * MS_PER_DAY);
+    const minDate = new Date(now + 14 * MS_PER_DAY);
     if (expiry < minDate) expiry = getNextExpiryFriday(new Date(expiry.getTime() + 7 * MS_PER_DAY));
     const expDays = Math.round((expiry - new Date(now)) / MS_PER_DAY);
     const expDate = expiry.toLocaleDateString("en-US", { month: "short", day: "2-digit", year: "numeric" });
-    return { expDate, expDays: Math.max(expDays, 7), expiryType: "weekly" };
+    return { expDate, expDays: Math.max(expDays, 14), expiryType: "weekly" };
   }
 
   // ── PUT tiers — PDT-aware monthly targeting ──────────────────────────
@@ -3930,7 +4008,204 @@ async function getSpreadSellLeg(ticker, optionType, buyContract) {
 }
 
 
-async function executeSpreadTrade(stock, price, score, scoreReasons, vix, optionType, buyContract, sellContract) {
+// ── Credit Spread Execution ───────────────────────────────────────────────
+// Sell the near strike, buy the far strike as protection
+// Collect net credit upfront — profit if underlying stays away from short strike
+// Used in choppy/high-VIX regimes where theta decay works in our favor
+// Put credit spread: sell higher put, buy lower put (below current price)
+// Call credit spread: sell lower call, buy higher call (above current price)
+async function executeCreditSpread(stock, price, score, scoreReasons, vix, optionType) {
+  try {
+    // For put credit spread: sell ~0.30 delta put (OTM), buy ~0.20 delta put (further OTM)
+    // Target: sell strike ~5% below current price, buy $10 lower
+    // For call credit spread: sell ~0.30 delta call (OTM), buy ~0.20 delta call (further OTM)
+    const spreadWidth = 10;
+    // OTM % scales with VIX — higher fear = go further OTM for more buffer
+    // VIX 20-25: 5% OTM | VIX 25-30: 6% OTM | VIX 30+: 7% OTM
+    const baseOTM    = vix >= 30 ? 0.07 : vix >= 25 ? 0.06 : 0.05;
+    const otmPct     = optionType === "put" ? -baseOTM : baseOTM;
+    logEvent("filter", `${stock.ticker} credit spread: ${(baseOTM*100).toFixed(0)}% OTM target (VIX ${vix.toFixed(1)})`);
+    const shortStrikeTarget = price * (1 + otmPct);
+    const longStrikeTarget  = optionType === "put"
+      ? shortStrikeTarget - spreadWidth
+      : shortStrikeTarget + spreadWidth;
+
+    // Get short leg (near OTM — we sell this)
+    const shortContract = await getRealOptionsContract(stock.ticker, shortStrikeTarget, optionType, score, vix, stock.earningsDate, false);
+    if (!shortContract) { logEvent("filter", `${stock.ticker} credit spread: no short leg found`); return null; }
+
+    // Get long leg (further OTM — we buy this as protection)
+    const longContract = await getSpreadSellLeg(stock.ticker, optionType, {
+      ...shortContract,
+      strike: shortContract.strike,
+    });
+    // getSpreadSellLeg finds $10 away from shortContract.strike
+    if (!longContract) { logEvent("filter", `${stock.ticker} credit spread: no long leg found`); return null; }
+
+    const actualWidth = Math.abs(shortContract.strike - longContract.strike);
+    if (actualWidth < 8) { logEvent("filter", `${stock.ticker} credit spread: width ${actualWidth} too narrow`); return null; }
+
+    const netCredit  = parseFloat((shortContract.premium - longContract.premium).toFixed(2));
+    if (netCredit <= 0) { logEvent("filter", `${stock.ticker} credit spread: no credit available (${netCredit})`); return null; }
+
+    const maxProfit  = netCredit;                              // keep all credit if expires worthless
+    const maxLoss    = parseFloat((actualWidth - netCredit).toFixed(2)); // width - credit = max risk
+    const contracts  = 1; // start conservative on credit spreads
+
+    // Credit received reduces capital requirement — margin = max loss
+    const profitableCount = (state.closedTrades || []).filter(t => t.pnl > 0).length;
+    const creditCapPct    = profitableCount >= 20 ? 0.25 : 0.15;
+    const marginRequired  = parseFloat((maxLoss * 100 * contracts).toFixed(2));
+    if (marginRequired > state.cash * creditCapPct) {
+      logEvent("filter", `${stock.ticker} credit spread margin $${marginRequired} exceeds ${(creditCapPct*100).toFixed(0)}% limit`);
+      return null;
+    }
+    if (state.cash - marginRequired < CAPITAL_FLOOR) {
+      logEvent("filter", `${stock.ticker} credit spread would breach capital floor`);
+      return null;
+    }
+
+    if (dryRunMode) {
+      logEvent("dryrun", `WOULD SELL CREDIT SPREAD ${stock.ticker} $${shortContract.strike}/$${longContract.strike} ${optionType.toUpperCase()} | credit $${netCredit} | max profit $${maxProfit} | max loss $${maxLoss} | margin $${marginRequired} | score ${score}`);
+      return null;
+    }
+
+    let shortOrderId = null, longOrderId = null;
+    try {
+      // Submit short leg first (sell to open — collect credit)
+      const shortResp = await alpacaPost("/orders", {
+        symbol: shortContract.symbol, qty: contracts,
+        side: "sell", type: "limit", time_in_force: "day",
+        limit_price: parseFloat(shortContract.bid.toFixed(2)),
+        position_intent: "sell_to_open",
+      });
+      if (shortResp && shortResp.id) {
+        shortOrderId = shortResp.id;
+        logEvent("trade", `[CREDIT SPREAD] Short leg: ${shortResp.id} | ${shortContract.symbol} | ${contracts}x @ $${shortContract.bid.toFixed(2)}`);
+        let filled = false;
+        const start = Date.now();
+        while (!filled && Date.now() - start < 10000) {
+          await new Promise(r => setTimeout(r, 1000));
+          const poll = await alpacaGet(`/orders/${shortOrderId}`);
+          if (poll && poll.status === "filled") { filled = true; }
+          else if (poll && ["canceled","expired","rejected"].includes(poll.status)) break;
+        }
+        if (!filled) {
+          await alpacaPost(`/orders/${shortOrderId}/cancel`, {}).catch(() => {});
+          logEvent("warn", `[CREDIT SPREAD] Short leg unfilled — cancelling`);
+          return null;
+        }
+      }
+
+      // Submit long leg (buy to open — protection)
+      const longResp = await alpacaPost("/orders", {
+        symbol: longContract.symbol, qty: contracts,
+        side: "buy", type: "limit", time_in_force: "day",
+        limit_price: parseFloat(longContract.ask.toFixed(2)),
+        position_intent: "buy_to_open",
+      });
+      if (longResp && longResp.id) {
+        longOrderId = longResp.id;
+        logEvent("trade", `[CREDIT SPREAD] Long leg: ${longResp.id} | ${longContract.symbol} | ${contracts}x @ $${longContract.ask.toFixed(2)}`);
+        let filled = false;
+        const start = Date.now();
+        while (!filled && Date.now() - start < 10000) {
+          await new Promise(r => setTimeout(r, 1000));
+          const poll = await alpacaGet(`/orders/${longOrderId}`);
+          if (poll && poll.status === "filled") { filled = true; }
+          else if (poll && ["canceled","expired","rejected"].includes(poll.status)) break;
+        }
+        if (!filled) {
+          await alpacaPost(`/orders/${longOrderId}/cancel`, {}).catch(() => {});
+          logEvent("warn", `[CREDIT SPREAD] Long leg unfilled — unwinding short leg`);
+          await alpacaPost("/orders", { symbol: shortContract.symbol, qty: contracts, side: "buy", type: "market", time_in_force: "day", position_intent: "buy_to_close" }).catch(() => {});
+          return null;
+        }
+      }
+    } catch(e) {
+      logEvent("error", `[CREDIT SPREAD] Order error: ${e.message}`);
+      return null;
+    }
+
+    // Record credit spread position
+    // Note: cash INCREASES by netCredit (we received premium), margin is reserved separately
+    state.cash += parseFloat((netCredit * 100 * contracts).toFixed(2));
+
+    const position = {
+      ticker:           stock.ticker,
+      optionType,
+      isSpread:         true,
+      isCreditSpread:   true,
+      shortStrike:      shortContract.strike,  // we sold this
+      longStrike:       longContract.strike,   // we bought this (protection)
+      buyStrike:        longContract.strike,   // long leg = "buy" leg for display
+      sellStrike:       shortContract.strike,  // short leg = "sell" leg for display
+      spreadWidth:      actualWidth,
+      buySymbol:        longContract.symbol,
+      sellSymbol:       shortContract.symbol,
+      contractSymbol:   shortContract.symbol,
+      premium:          netCredit,   // credit received (positive = we collected)
+      maxProfit,
+      maxLoss,
+      marginRequired,
+      contracts,
+      expDate:          shortContract.expDate,
+      expDays:          shortContract.expDays,
+      cost:             marginRequired,        // heat is based on max risk not credit
+      score,
+      reasons:          scoreReasons,
+      openDate:         new Date().toISOString(),
+      currentPrice:     netCredit,
+      peakPremium:      netCredit,
+      entryRSI:         stock.rsi || 50,
+      entryMACD:        stock.macd || "neutral",
+      entryMomentum:    stock.momentum || "steady",
+      entryMacro:       (state._agentMacro || {}).signal || "neutral",
+      entryThesisScore: 100,
+      thesisHistory:    [],
+      agentHistory:     [],
+      shortOrderId,
+      longOrderId,
+      realData:         true,
+      vix,
+      entryVIX:         vix,
+      expiryType:       "monthly",
+      dteLabel:         "CREDIT-SPREAD",
+      partialClosed:    false,
+      isMeanReversion:  false,
+      trailStop:        null,
+      breakevenLocked:  false,
+      halfPosition:     false,
+      // Profit target: 50% of max profit (close when credit decays by half)
+      target:           parseFloat((netCredit * 0.50).toFixed(2)),
+      // Stop: max loss (close if spread widens to full width)
+      stop:             parseFloat((maxLoss * 0.75).toFixed(2)),
+      takeProfitPct:    0.50,
+      fastStopPct:      0.75,
+    };
+
+    state.positions.push(position);
+    logEvent("trade", `[CREDIT SPREAD] SOLD ${stock.ticker} $${shortContract.strike}/$${longContract.strike} ${optionType.toUpperCase()} exp ${shortContract.expDate} | credit $${netCredit} | max profit $${maxProfit} | max loss $${maxLoss} | margin $${marginRequired} | score ${score}/100`);
+
+    state.tradeJournal.unshift({
+      time: new Date().toISOString(), ticker: stock.ticker,
+      action: "OPEN", optionType, isSpread: true, isCreditSpread: true,
+      shortStrike: shortContract.strike, longStrike: longContract.strike,
+      premium: netCredit, cost: marginRequired, score, scoreReasons,
+      reasoning: `[CREDIT SPREAD] Score ${score}/100. Net credit $${netCredit}. Max profit $${maxProfit}. Max loss $${maxLoss}.`,
+    });
+    if (state.tradeJournal.length > 100) state.tradeJournal = state.tradeJournal.slice(0, 100);
+
+    await saveStateNow();
+    return position;
+  } catch(e) {
+    logEvent("error", `executeCreditSpread(${stock.ticker}): ${e.message}`);
+    return null;
+  }
+}
+
+
+async function executeSpreadTrade(stock, price, score, scoreReasons, vix, optionType, buyContract, sellContract, isChoppyEntry = false) {
   if (!buyContract || !sellContract) return null;
 
   // ── Score-based contract sizing ──────────────────────────────────────
@@ -3938,7 +4213,13 @@ async function executeSpreadTrade(stock, price, score, scoreReasons, vix, option
   // Hard cap: never more than 15% of cash per position
   const netDebit  = parseFloat((buyContract.premium - sellContract.premium).toFixed(2));
   const costPer1  = parseFloat((netDebit * 100).toFixed(2));
-  const cashCap   = Math.floor((state.cash * 0.25) / costPer1); // max contracts at 25% cash
+  // Scale position cap based on validated win count
+  // Under 20 profitable trades: conservative 15% — system unvalidated
+  // 20+ profitable trades: unlock 25% — system has demonstrated edge
+  const profitableTradeCount = (state.closedTrades || []).filter(t => t.pnl > 0).length;
+  const posCapPct = profitableTradeCount >= 20 ? 0.25 : 0.15;
+  if (profitableTradeCount < 20) logEvent("filter", `Position cap at 15% (${profitableTradeCount}/20 profitable trades — unlocks at 20)`);
+  const cashCap   = Math.floor((state.cash * posCapPct) / costPer1);
   let baseContracts;
   if (score >= 90)      baseContracts = 3;
   else if (score >= 80) baseContracts = 2;
@@ -3951,8 +4232,8 @@ async function executeSpreadTrade(stock, price, score, scoreReasons, vix, option
   const maxLoss   = netDebit;
   const finalCost = parseFloat((netDebit * 100 * contracts).toFixed(2));
 
-  if (finalCost > state.cash * 0.25) {
-    logEvent("filter", `${stock.ticker} spread cost $${finalCost} exceeds 25% position limit`);
+  if (finalCost > state.cash * posCapPct) {
+    logEvent("filter", `${stock.ticker} spread cost $${finalCost} exceeds ${(posCapPct*100).toFixed(0)}% position limit`);
     return null;
   }
   if (state.cash - finalCost < CAPITAL_FLOOR) {
@@ -4071,10 +4352,11 @@ async function executeSpreadTrade(stock, price, score, scoreReasons, vix, option
     trailStop:        null,
     breakevenLocked:  false,
     halfPosition:     false,
-    target:           parseFloat((netDebit * 1.50).toFixed(2)),  // 50% gain target
-    stop:             parseFloat((netDebit * 0.50).toFixed(2)),   // 50% loss stop
+    // Tighter stops in choppy regime — less conviction = faster exit
+    target:           parseFloat((netDebit * 1.50).toFixed(2)),
+    stop:             parseFloat((netDebit * (isChoppyEntry ? 0.20 : 0.50)).toFixed(2)),
     takeProfitPct:    0.50,
-    fastStopPct:      0.50,
+    fastStopPct:      isChoppyEntry ? 0.20 : 0.50,
   };
 
   state.positions.push(position);
@@ -4603,7 +4885,16 @@ async function closePosition(ticker, reason, exitPremium = null) {
   if (isDayTrade(pos)) {
     recordDayTrade(pos, reason);
   }
-  state.closedTrades.push({ ticker, pnl, pct, date:new Date().toLocaleDateString(), reason, score:pos.score||0, closeTime: Date.now() });
+  state.closedTrades.push({
+    ticker, pnl, pct, date: new Date().toLocaleDateString(), reason,
+    score:      pos.score || 0,
+    closeTime:  Date.now(),
+    tradeType:  pos.isCreditSpread ? "credit_spread" : pos.isSpread ? "debit_spread" : "naked",
+    optionType: pos.optionType,
+    expDate:    pos.expDate,
+    entryVIX:   pos.entryVIX || 0,
+    daysHeld:   Math.round((Date.now() - new Date(pos.openDate).getTime()) / 86400000),
+  });
   // Cap closedTrades at 200
   if (state.closedTrades.length > 200) state.closedTrades = state.closedTrades.slice(0, 200);
 
@@ -4758,7 +5049,13 @@ async function partialClose(ticker) {
 
   state.cash = parseFloat((state.cash + ev).toFixed(2));
   state.monthlyProfit = parseFloat((state.monthlyProfit + pnl).toFixed(2));
-  state.closedTrades.push({ ticker, pnl, pct:((pnl/(pos.cost*0.5))*100).toFixed(1), date:new Date().toLocaleDateString(), reason:"partial" });
+  state.closedTrades.push({
+    ticker, pnl, pct: ((pnl/(pos.cost*0.5))*100).toFixed(1),
+    date: new Date().toLocaleDateString(), reason: "partial",
+    tradeType:  pos.isCreditSpread ? "credit_spread" : pos.isSpread ? "debit_spread" : "naked",
+    optionType: pos.optionType,
+    closeTime:  Date.now(),
+  });
   logEvent("partial", `PARTIAL ${ticker} - ${half}/${pos.contracts} @ $${ep} | +${fmt(pnl)} | cash ${fmt(state.cash)}`);
   await saveStateNow();
 }
@@ -5054,7 +5351,12 @@ async function runScan() {
       }
     }
     logEvent("scan", `[5min] Regime:${regime.regime}(${regime.confidence}%) | Kelly:${marketContext.kelly?.contracts||1}x | Streak:${marketContext.streaks?.currentStreak||0}x${marketContext.streaks?.currentType||'--'}`);
-    // snapshotPortfolioValue removed — portfolio snapshots handled by portfolioSnapshots array
+    // Record portfolio value snapshot every 5 minutes during market hours
+    if (!state.portfolioSnapshots) state.portfolioSnapshots = [];
+    const snapValue = state.cash + openRisk();
+    state.portfolioSnapshots.push({ t: new Date().toISOString(), v: parseFloat(snapValue.toFixed(2)) });
+    // Cap at 2500 entries (~8 trading days at 5-min intervals)
+    if (state.portfolioSnapshots.length > 2500) state.portfolioSnapshots = state.portfolioSnapshots.slice(-2500);
     runAgentRescore();        // parallel hourly rescore for overnight positions (non-blocking)
   }
 
@@ -5187,7 +5489,10 @@ async function runScan() {
     } else {
       curP = pos.iv ? parseFloat((price * pos.iv * Math.sqrt(t) * 0.4 + 0.1).toFixed(2)) : pos.currentPrice || pos.premium;
     }
-    const chg = (curP > 0 && pos.premium > 0 && !isNaN(curP)) ? (curP - pos.premium) / pos.premium : 0;
+    // Credit spreads: profit = spread value decreasing (theta decay works for us)
+    // Invert chg so exit logic (positive = good, negative = bad) works consistently
+    const rawChg = (curP > 0 && pos.premium > 0 && !isNaN(curP)) ? (curP - pos.premium) / pos.premium : 0;
+    const chg    = pos.isCreditSpread ? -rawChg : rawChg;
     const hoursOpen= (new Date() - new Date(pos.openDate)) / 3600000;
     const daysOpen = hoursOpen / 24;
 
@@ -5627,8 +5932,20 @@ async function runScan() {
   const macroClearForPuts = !agentHasRun || putsMacroAllowed;
 
   const isIndexScan  = true; // scan loop handles both index and stocks
-  const callsAllowed = (isEntryWindow("call", true) && !finalHourBlock && !suppressBlock) || dryRunMode;
-  const putsAllowed  = (isEntryWindow("put",  true) && !vixFallingPause && !spyGapUp && !postReversalBlock && !finalHourBlock && !suppressBlock && !macroBullish) || dryRunMode;
+
+  // ── REGIME GATE — choppy blocks debit entries, credit still allowed ───
+  const agentRegime       = (state._agentMacro || {}).regime || (state._dayPlan || {}).regime || "neutral";
+  const agentTradeTypeGate = (state._dayPlan || {}).tradeType || (state._agentMacro || {}).tradeType || "spread";
+  const isChoppyRegime    = agentRegime === "choppy" || agentTradeTypeGate === "none";
+  const creditAllowedVIX  = state.vix >= 28; // credit spreads need elevated VIX to be worthwhile
+  // Choppy + high VIX = credit spread opportunity. Choppy + low VIX = sit out entirely.
+  const choppyDebitBlock  = isChoppyRegime && !dryRunMode;
+  const agentSaysCredit   = agentTradeTypeGate === "credit";
+  const creditModeActive  = (isChoppyRegime || agentSaysCredit) && creditAllowedVIX && !dryRunMode;
+  if (choppyDebitBlock) logEvent("filter", `Choppy regime — debit entries blocked${creditModeActive ? ", credit spread mode active" : ", VIX too low for credits"}`);
+
+  const callsAllowed = (isEntryWindow("call", true) && !finalHourBlock && !suppressBlock && !choppyDebitBlock) || dryRunMode;
+  const putsAllowed  = (isEntryWindow("put",  true) && !vixFallingPause && !spyGapUp && !postReversalBlock && !finalHourBlock && !suppressBlock && !macroBullish && !choppyDebitBlock) || dryRunMode;
   if (macroBullish && !dryRunMode) logEvent("filter", `Macro bullish (${marketContext.macro?.signal}) — puts blocked`);
   if (vixFallingPause && !dryRunMode) logEvent("filter", "VIX falling — put entries paused this scan");
 
@@ -6000,8 +6317,12 @@ async function runScan() {
       const breadthVal  = typeof marketContext?.breadth === "number"
         ? marketContext.breadth * 100
         : parseFloat((marketContext?.breadth || "50").toString()) || 50;
-      const putResult  = scoreIndexSetup(liveStock, "put",  spyRSI, spyMACD, spyMomentum, breadthVal, state.vix, agentMacro);
-      const callResult = scoreIndexSetup(liveStock, "call", spyRSI, spyMACD, spyMomentum, breadthVal, state.vix, agentMacro);
+      // Pass credit mode to scoreIndexSetup so RSI block and scoring adjust correctly
+      const scoringMacro = creditModeActive
+        ? { ...agentMacro, tradeType: "credit" }
+        : agentMacro;
+      const putResult  = scoreIndexSetup(liveStock, "put",  spyRSI, spyMACD, spyMomentum, breadthVal, state.vix, scoringMacro);
+      const callResult = scoreIndexSetup(liveStock, "call", spyRSI, spyMACD, spyMomentum, breadthVal, state.vix, scoringMacro);
       putSetup  = { score: putResult.score,  reasons: putResult.reasons,  tradeType: putResult.tradeType  || "spread", isMeanReversion: false };
       callSetup = { score: callResult.score, reasons: callResult.reasons, tradeType: callResult.tradeType || "spread", isMeanReversion: false };
       // QQQ: only enter if no SPY position in same direction already
@@ -6271,10 +6592,33 @@ async function runScan() {
     // Staggered entry scoring — require higher conviction for 2nd/3rd position in same ticker
     const sameTickerSameDir = state.positions.filter(p => p.ticker === stock.ticker && p.optionType === optionType);
     const staggeredMinScore = sameTickerSameDir.length === 1 ? 85 : sameTickerSameDir.length >= 2 ? 90 : effectiveMinScore;
-    const finalMinScore     = Math.max(effectiveMinScore, staggeredMinScore);
+
+    // MACD contradiction gate — if MACD contradicts direction, require higher conviction
+    // Credit spreads are direction-neutral — MACD is irrelevant, bypass gate
+    const macdSignal = liveStock.macd || "neutral";
+    const macdBullish = macdSignal.includes("bullish");
+    const macdBearish = macdSignal.includes("bearish");
+    const isMRCall    = callSetup.isMeanReversion && optionType === "call";
+    const isCreditEntry = creditModeActive; // credit spreads bypass MACD gate
+    const macdContradicts = !isCreditEntry && ((optionType === "put" && macdBullish) || (optionType === "call" && macdBearish && !isMRCall));
+    const macdMinScore = macdContradicts ? 85 : effectiveMinScore;
+    if (macdContradicts) logEvent("filter", `${liveStock.ticker} MACD ${macdSignal} contradicts ${optionType} — raising min score to 85`);
+
+    const finalMinScore = Math.max(effectiveMinScore, staggeredMinScore, macdMinScore);
     if (bestScore < finalMinScore) {
-      const reason = sameTickerSameDir.length > 0 ? `staggered entry (${sameTickerSameDir.length+1}x)` : (etHourNow >= 13 ? "afternoon" : ddProtocol.level) + " protocol";
+      const reason = sameTickerSameDir.length > 0 ? `staggered entry (${sameTickerSameDir.length+1}x)` : macdContradicts ? "MACD contradiction" : (etHourNow >= 13 ? "afternoon" : ddProtocol.level) + " protocol";
       logEvent("filter", `${stock.ticker} call:${callSetup.score} put:${putSetup.score} - below ${finalMinScore} (${reason}) - skip`);
+      continue;
+    }
+
+    // ── Directional heat cap — max 40% in either direction ──────────────
+    const MAX_DIR_HEAT = 0.40;
+    const dirCost = state.positions
+      .filter(p => p.optionType === optionType)
+      .reduce((s,p) => s + p.cost, 0);
+    const dirHeat = dirCost / totalCap();
+    if (dirHeat >= MAX_DIR_HEAT && !dryRunMode) {
+      logEvent("filter", `${stock.ticker} ${optionType} directional heat ${(dirHeat*100).toFixed(0)}% at 40% cap — skip`);
       continue;
     }
 
@@ -6288,6 +6632,19 @@ async function runScan() {
       continue;
     }
 
+    // Fast RSI move gate — rapid RSI moves signal potential reversals for DEBIT entries
+    // Credit spreads: fast RSI crash = ideal (max fear premium) — bypass gate
+    const prevRSI = bars.length >= 2 ? calcRSI(bars.slice(0, -1)) : signals.rsi;
+    const rsiMove = Math.abs(signals.rsi - prevRSI);
+    const fastRSIMove = rsiMove >= 15 && !creditModeActive;
+    if (fastRSIMove) {
+      const fastRSIMin = 85;
+      if (bestScore < fastRSIMin) {
+        logEvent("filter", `${stock.ticker} fast RSI move ${prevRSI.toFixed(0)}→${signals.rsi.toFixed(0)} (+${rsiMove.toFixed(0)}pts) — need score ${fastRSIMin}, have ${bestScore} — skip`);
+        continue;
+      }
+      logEvent("filter", `${stock.ticker} fast RSI move ${rsiMove.toFixed(0)}pts — requiring high conviction (score ${bestScore} ≥ 85 ✓)`);
+    }
     logEvent("filter", `${stock.ticker} best setup: ${optionType.toUpperCase()} score ${bestScore} | RSI:${signals.rsi} MACD:${signals.macd} MOM:${signals.momentum}`);
     // Queue for execution — heat is rechecked live in the execution loop below
     const isMR = optionType === "call" && callSetup.isMeanReversion;
@@ -6313,7 +6670,12 @@ async function runScan() {
   // ── PARALLEL OPTIONS PREFETCH ─────────────────────────────────────────────
   // Fetch options chains for all scored stocks simultaneously before executing
   // This eliminates sequential chain fetching when multiple trades fire at once
-  if (scored.length > 0) {
+  // Skip options prefetch entirely if choppy and credit mode not active (nothing will enter)
+  const skipPrefetch = choppyDebitBlock && !creditModeActive;
+  if (skipPrefetch && !dryRunMode) {
+    logEvent("filter", `Choppy regime + low VIX — skipping options prefetch (no entries possible)`);
+  }
+  if (scored.length > 0 && !skipPrefetch) {
     logEvent("scan", `Prefetching options chains for ${scored.length} candidates in parallel...`);
     const optPrefetchStart = Date.now();
     // Process in batches of 5 to avoid exhausting Railway connection pool
@@ -6392,15 +6754,20 @@ async function runScan() {
     }
 
     // ── SPREAD vs NAKED DECISION ──────────────────────────────────────────
-    // Agent tradeType determines execution method
-    // Index instruments: spread by default, naked only for mean-reversion
-    // Individual stocks: always naked (legacy behavior)
-    const agentTradeType = (state._agentMacro || {}).tradeType || "spread";
-    const useSpread      = stock.isIndex && agentTradeType !== "naked" && !isMeanReversion;
+    // Choppy + high VIX → credit spread (sell premium, theta works for us)
+    // Trending regime → debit spread (buy direction, need move to profit)
+    // Mean reversion → naked option (quick move, full leverage)
+    const agentTradeType  = (state._agentMacro || {}).tradeType || "spread";
+    const useCreditSpread = creditModeActive && stock.isIndex && !isMeanReversion;
+    const useSpread       = stock.isIndex && !useCreditSpread && agentTradeType !== "naked" && !isMeanReversion;
 
     let entered = false;
-    if (useSpread) {
-      // Get both legs — buy near-ATM, sell $10 OTM
+    if (useCreditSpread) {
+      // Choppy + high VIX: sell premium via credit spread
+      const creditPos = await executeCreditSpread(stock, price, score, reasons, state.vix, optionType);
+      entered = !!creditPos;
+    } else if (useSpread) {
+      // Trending regime: buy direction via debit spread
       const buyContract  = await getRealOptionsContract(stock.ticker, price, optionType, score, state.vix, stock.earningsDate, false);
       if (!buyContract) { logEvent("filter", `${stock.ticker} spread: no buy leg found`); continue; }
 
@@ -6410,12 +6777,13 @@ async function runScan() {
 
       if (sellContract && spreadActualWidth >= 8) {
         logEvent("filter", `${stock.ticker} spread: buy $${buyContract.strike} / sell $${sellContract.strike} | net $${(buyContract.premium - sellContract.premium).toFixed(2)} | width $${spreadActualWidth}`);
-        const spreadPos = await executeSpreadTrade(stock, price, score, reasons, state.vix, optionType, buyContract, sellContract);
+        const spreadPos = await executeSpreadTrade(stock, price, score, reasons, state.vix, optionType, buyContract, sellContract, isChoppyRegime);
         entered = !!spreadPos;
       } else {
         logEvent("warn", `${stock.ticker} spread: sell leg not found or too narrow (width $${spreadActualWidth}) — skipping`);
       }
     } else {
+      // Mean reversion: naked option for full leverage on quick move
       entered = await executeTrade(stock, price, score, reasons, state.vix, optionType, isMeanReversion);
     }
     if (entered) await new Promise(r=>setTimeout(r,500));
