@@ -3657,7 +3657,7 @@ function getThirdFriday(year, month) {
 const LEAPS_ELIGIBLE = ["NVDA","AAPL","MSFT","AMZN","META","GOOGL","SPY","QQQ","TSLA","AMD","PLTR","CRWD","AVGO"];
 
 // Returns { expDate: string, expDays: number, expiryType: "weekly"|"monthly"|"leaps" }
-function selectExpiry(score, vix, optionType, earningsDate, ticker = null) {
+function selectExpiry(score, vix, optionType, earningsDate, ticker = null, isMeanReversion = false) {
   const today  = getETTime();
   const now    = today.getTime();
 
