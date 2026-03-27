@@ -562,7 +562,11 @@ async function initState() {
                   cost:             parseFloat((Math.max(0.01, netDebit) * 100 * Math.abs(buyLeg.qty)).toFixed(2)),
                   score:            75,
                   reasons:          ['Reconstructed spread from Alpaca reconciliation'],
-                  openDate:         buyLeg.alpPos.created_at || new Date().toISOString(),
+                  // Use yesterday if we can't determine exact open date
+                  // This prevents false day trade classification on reconciled positions
+                  openDate:         buyLeg.alpPos.created_at || (() => {
+                    const d = new Date(); d.setDate(d.getDate() - 1); return d.toISOString();
+                  })(),
                   currentPrice:     Math.max(0.01, netDebit),
                   peakPremium:      Math.max(0.01, netDebit),
                   entryRSI: 50, entryMACD: 'neutral', entryMomentum: 'steady', entryMacro: 'neutral',
@@ -594,7 +598,10 @@ async function initState() {
                 contracts: Math.abs(p.qty), expDate: p.expDate, expDays: p.expDays,
                 cost: Math.abs(p.mktVal), score: 75,
                 reasons: ['Reconstructed individual leg from Alpaca reconciliation'],
-                openDate: p.alpPos.created_at || new Date().toISOString(), peakPremium: p.avgEntry,
+                // Use yesterday to prevent false day trade classification
+                openDate: p.alpPos.created_at || (() => {
+                  const d = new Date(); d.setDate(d.getDate() - 1); return d.toISOString();
+                })(), peakPremium: p.avgEntry,
                 entryRSI: 50, entryMACD: 'neutral', entryMomentum: 'steady', entryMacro: 'neutral',
                 entryThesisScore: 100, thesisHistory: [], agentHistory: [],
                 realData: true, vix: state.vix || 20, entryVIX: state.vix || 20,
@@ -704,6 +711,21 @@ async function runReconciliation() {
 
     const alpacaSymbols = new Set(alpacaPositions.map(p => p.symbol));
     let ghosts = 0, orphans = 0;
+
+    // ── Update currentPrice on existing positions from Alpaca data ─────
+    for (const pos of state.positions) {
+      const alpPos = alpacaPositions.find(p =>
+        p.symbol === pos.contractSymbol ||
+        p.symbol === pos.buySymbol ||
+        p.symbol === pos.sellSymbol
+      );
+      if (alpPos) {
+        const mktVal  = parseFloat(alpPos.market_value || 0);
+        const qty     = Math.abs(parseInt(alpPos.qty || 1));
+        const curP    = qty > 0 && mktVal > 0 ? parseFloat((mktVal / (qty * 100)).toFixed(2)) : pos.currentPrice;
+        if (curP > 0) pos.currentPrice = curP;
+      }
+    }
 
     // ── Ghost detection — ARGO has position, Alpaca doesn't ──────────────
     for (const pos of [...state.positions]) {
@@ -3870,10 +3892,12 @@ function countRecentDayTrades() {
 }
 
 function isDayTrade(pos) {
-  // A position is a day trade if it was opened today (same calendar date)
+  // A position is a day trade if it was opened today (same ET calendar date)
+  // Use ET timezone to match market conventions — not server UTC
   if (!pos || !pos.openDate) return false;
-  const openDay  = new Date(pos.openDate).toLocaleDateString();
-  const today    = new Date().toLocaleDateString();
+  const etOptions = { timeZone: "America/New_York", year: "numeric", month: "2-digit", day: "2-digit" };
+  const openDay   = new Date(pos.openDate).toLocaleDateString("en-US", etOptions);
+  const today     = new Date().toLocaleDateString("en-US", etOptions);
   return openDay === today;
 }
 
@@ -4259,58 +4283,61 @@ async function executeCreditSpread(stock, price, score, scoreReasons, vix, optio
 
     let shortOrderId = null, longOrderId = null;
     try {
-      // Submit short leg first (sell to open — collect credit)
-      const shortResp = await alpacaPost("/orders", {
-        symbol: shortContract.symbol, qty: contracts,
-        side: "sell", type: "limit", time_in_force: "day",
-        limit_price: parseFloat(shortContract.bid.toFixed(2)),
-        position_intent: "sell_to_open",
-      });
-      if (shortResp && shortResp.id) {
-        shortOrderId = shortResp.id;
-        logEvent("trade", `[CREDIT SPREAD] Short leg: ${shortResp.id} | ${shortContract.symbol} | ${contracts}x @ $${shortContract.bid.toFixed(2)}`);
-        let filled = false;
-        const start = Date.now();
-        while (!filled && Date.now() - start < 10000) {
-          await new Promise(r => setTimeout(r, 1000));
-          const poll = await alpacaGet(`/orders/${shortOrderId}`);
-          if (poll && poll.status === "filled") { filled = true; }
-          else if (poll && ["canceled","expired","rejected"].includes(poll.status)) break;
-        }
-        if (!filled) {
-          await alpacaPost(`/orders/${shortOrderId}/cancel`, {}).catch(() => {});
-          logEvent("warn", `[CREDIT SPREAD] Short leg unfilled — cancelling`);
+      // ── MULTI-LEG ORDER for credit spread ───────────────────────────────
+      // limit_price is NEGATIVE for credit (we receive money)
+      const shortMid = shortContract.bid > 0 && shortContract.ask > 0
+        ? parseFloat(((shortContract.bid + shortContract.ask) / 2).toFixed(2))
+        : parseFloat(shortContract.bid.toFixed(2));
+      const longMid = longContract.bid > 0 && longContract.ask > 0
+        ? parseFloat(((longContract.bid + longContract.ask) / 2).toFixed(2))
+        : parseFloat(longContract.ask.toFixed(2));
+      const netCreditLimit = parseFloat((longMid - shortMid).toFixed(2)); // negative = credit
+
+      const mlegBody = {
+        order_class:   "mleg",
+        type:          "limit",
+        time_in_force: "day",
+        qty:           String(contracts),
+        limit_price:   String(netCreditLimit), // negative = credit received
+        legs: [
+          { symbol: shortContract.symbol, side: "sell", ratio_qty: "1", position_intent: "sell_to_open" },
+          { symbol: longContract.symbol,  side: "buy",  ratio_qty: "1", position_intent: "buy_to_open"  },
+        ],
+      };
+
+      logEvent("trade", `[CREDIT SPREAD] Submitting mleg: sell $${shortContract.strike} / buy $${longContract.strike} | ${contracts}x | net credit $${Math.abs(netCreditLimit)}`);
+      const mlegResp = await alpacaPost("/orders", mlegBody);
+
+      if (!mlegResp || mlegResp.code || !mlegResp.id) {
+        logEvent("warn", `[CREDIT SPREAD] mleg order failed: ${JSON.stringify(mlegResp)?.slice(0,200)}`);
+        return null;
+      }
+
+      shortOrderId = mlegResp.id;
+      longOrderId  = mlegResp.id;
+      logEvent("trade", `[CREDIT SPREAD] mleg submitted: ${mlegResp.id} | status: ${mlegResp.status}`);
+
+      let filled = false;
+      let fillResp = null;
+      const pollStart = Date.now();
+      while (!filled && Date.now() - pollStart < 30000) {
+        await new Promise(r => setTimeout(r, 1500));
+        fillResp = await alpacaGet(`/orders/${mlegResp.id}`);
+        if (fillResp && fillResp.status === "filled") {
+          filled = true;
+        } else if (fillResp && ["canceled","expired","rejected","done_for_day"].includes(fillResp.status)) {
+          logEvent("warn", `[CREDIT SPREAD] mleg ${fillResp.status}`);
           return null;
         }
       }
 
-      // Submit long leg (buy to open — protection)
-      const longResp = await alpacaPost("/orders", {
-        symbol: longContract.symbol, qty: contracts,
-        side: "buy", type: "limit", time_in_force: "day",
-        limit_price: parseFloat(longContract.ask.toFixed(2)),
-        position_intent: "buy_to_open",
-      });
-      if (longResp && longResp.id) {
-        longOrderId = longResp.id;
-        logEvent("trade", `[CREDIT SPREAD] Long leg: ${longResp.id} | ${longContract.symbol} | ${contracts}x @ $${longContract.ask.toFixed(2)}`);
-        let filled = false;
-        const start = Date.now();
-        while (!filled && Date.now() - start < 10000) {
-          await new Promise(r => setTimeout(r, 1000));
-          const poll = await alpacaGet(`/orders/${longOrderId}`);
-          if (poll && poll.status === "filled") { filled = true; }
-          else if (poll && ["canceled","expired","rejected"].includes(poll.status)) break;
-        }
-        if (!filled) {
-          await alpacaPost(`/orders/${longOrderId}/cancel`, {}).catch(() => {});
-          logEvent("warn", `[CREDIT SPREAD] Long leg unfilled — unwinding short leg`);
-          await alpacaPost("/orders", { symbol: shortContract.symbol, qty: contracts, side: "buy", type: "market", time_in_force: "day", position_intent: "buy_to_close" }).catch(() => {});
-          return null;
-        }
+      if (!filled) {
+        await alpacaPost(`/orders/${mlegResp.id}/cancel`, {}).catch(() => {});
+        logEvent("warn", `[CREDIT SPREAD] mleg unfilled after 30s — cancelled`);
+        return null;
       }
     } catch(e) {
-      logEvent("error", `[CREDIT SPREAD] Order error: ${e.message}`);
+      logEvent("error", `[CREDIT SPREAD] mleg error: ${e.message}`);
       return null;
     }
 
@@ -4439,60 +4466,74 @@ async function executeSpreadTrade(stock, price, score, scoreReasons, vix, option
 
   if (buyContract.symbol && sellContract.symbol && !dryRunMode) {
     try {
-      // Submit buy leg
-      const buyResp = await alpacaPost("/orders", {
-        symbol: buyContract.symbol, qty: contracts,
-        side: "buy", type: "limit", time_in_force: "day",
-        limit_price: parseFloat(buyContract.ask.toFixed(2)),
-        position_intent: "buy_to_open",
-      });
-      if (buyResp && buyResp.id) {
-        buyOrderId = buyResp.id;
-        logEvent("trade", `[SPREAD] Buy leg: ${buyResp.id} | ${buyContract.symbol} | ${contracts}x @ $${buyContract.ask.toFixed(2)}`);
-        // Poll for fill
-        let filled = false;
-        const start = Date.now();
-        while (!filled && Date.now() - start < 10000) {
-          await new Promise(r => setTimeout(r, 1000));
-          const poll = await alpacaGet(`/orders/${buyOrderId}`);
-          if (poll && poll.status === "filled") { filled = true; }
-          else if (poll && ["canceled","expired","rejected"].includes(poll.status)) break;
-        }
-        if (!filled) {
-          await alpacaPost(`/orders/${buyOrderId}/cancel`, {}).catch(() => {});
-          logEvent("warn", `[SPREAD] Buy leg unfilled — cancelling spread`);
+      // ── MULTI-LEG ORDER — both legs submit and fill atomically ──────────
+      // Uses Alpaca mleg order class — no partial fill risk, no sequential timing
+      // limit_price = net debit (positive = we pay, negative = we receive)
+      // Use mid price for better fills than ask/bid separately
+      const buyMid  = buyContract.bid > 0 && buyContract.ask > 0
+        ? parseFloat(((buyContract.bid + buyContract.ask) / 2).toFixed(2))
+        : parseFloat(buyContract.ask.toFixed(2));
+      const sellMid = sellContract.bid > 0 && sellContract.ask > 0
+        ? parseFloat(((sellContract.bid + sellContract.ask) / 2).toFixed(2))
+        : parseFloat(sellContract.bid.toFixed(2));
+      const netDebitLimit = parseFloat((buyMid - sellMid).toFixed(2));
+
+      const mlegBody = {
+        order_class:   "mleg",
+        type:          "limit",
+        time_in_force: "day",
+        qty:           String(contracts),
+        limit_price:   String(netDebitLimit), // positive = debit
+        legs: [
+          { symbol: buyContract.symbol,  side: "buy",  ratio_qty: "1", position_intent: "buy_to_open"  },
+          { symbol: sellContract.symbol, side: "sell", ratio_qty: "1", position_intent: "sell_to_open" },
+        ],
+      };
+
+      logEvent("trade", `[SPREAD] Submitting mleg order: buy $${buyContract.strike} / sell $${sellContract.strike} | ${contracts}x | net debit $${netDebitLimit}`);
+      const mlegResp = await alpacaPost("/orders", mlegBody);
+
+      if (!mlegResp || mlegResp.code || !mlegResp.id) {
+        logEvent("warn", `[SPREAD] mleg order failed: ${JSON.stringify(mlegResp)?.slice(0,200)}`);
+        return null;
+      }
+
+      buyOrderId  = mlegResp.id;
+      sellOrderId = mlegResp.id; // same order ID for mleg
+
+      logEvent("trade", `[SPREAD] mleg order submitted: ${mlegResp.id} | status: ${mlegResp.status}`);
+
+      // Poll for fill — mleg fills atomically so just poll the parent order
+      let filled = false;
+      let fillResp = null;
+      const pollStart = Date.now();
+      while (!filled && Date.now() - pollStart < 30000) { // 30s timeout
+        await new Promise(r => setTimeout(r, 1500));
+        fillResp = await alpacaGet(`/orders/${mlegResp.id}`);
+        if (fillResp && fillResp.status === "filled") {
+          filled = true;
+        } else if (fillResp && ["canceled","expired","rejected","done_for_day"].includes(fillResp.status)) {
+          logEvent("warn", `[SPREAD] mleg order ${fillResp.status} — spread not entered`);
           return null;
         }
       }
 
-      // Submit sell leg
-      const sellResp = await alpacaPost("/orders", {
-        symbol: sellContract.symbol, qty: contracts,
-        side: "sell", type: "limit", time_in_force: "day",
-        limit_price: parseFloat(sellContract.bid.toFixed(2)),
-        position_intent: "sell_to_open",
-      });
-      if (sellResp && sellResp.id) {
-        sellOrderId = sellResp.id;
-        logEvent("trade", `[SPREAD] Sell leg: ${sellResp.id} | ${sellContract.symbol} | ${contracts}x @ $${sellContract.bid.toFixed(2)}`);
-        let filled = false;
-        const start = Date.now();
-        while (!filled && Date.now() - start < 10000) {
-          await new Promise(r => setTimeout(r, 1000));
-          const poll = await alpacaGet(`/orders/${sellOrderId}`);
-          if (poll && poll.status === "filled") { filled = true; }
-          else if (poll && ["canceled","expired","rejected"].includes(poll.status)) break;
-        }
-        if (!filled) {
-          await alpacaPost(`/orders/${sellOrderId}/cancel`, {}).catch(() => {});
-          logEvent("warn", `[SPREAD] Sell leg unfilled — spread incomplete, unwinding buy leg`);
-          // Try to close buy leg at market
-          await alpacaPost("/orders", { symbol: buyContract.symbol, qty: contracts, side: "sell", type: "market", time_in_force: "day" }).catch(() => {});
-          return null;
+      if (!filled) {
+        // Cancel unfilled mleg — both legs cancel atomically
+        await alpacaPost(`/orders/${mlegResp.id}/cancel`, {}).catch(() => {});
+        logEvent("warn", `[SPREAD] mleg unfilled after 30s — cancelled. Consider wider limit or market conditions.`);
+        return null;
+      }
+
+      // Get actual fill price from response
+      if (fillResp && fillResp.filled_avg_price) {
+        const actualDebit = parseFloat(fillResp.filled_avg_price);
+        if (actualDebit > 0) {
+          logEvent("trade", `[SPREAD] mleg filled @ net debit $${actualDebit}`);
         }
       }
     } catch(e) {
-      logEvent("error", `[SPREAD] Order error: ${e.message}`);
+      logEvent("error", `[SPREAD] mleg order error: ${e.message}`);
       return null;
     }
   }
@@ -8110,9 +8151,40 @@ app.get("/api/logs", (req, res) => {
 app.post("/api/scan",        async (req,res) => { res.json({ok:true}); runScan(); });
 app.post("/api/close/:tkr",  async (req,res) => {
   const t = req.params.tkr.toUpperCase();
-  if (!state.positions.find(p=>p.ticker===t)) { res.status(404).json({error:"No position"}); return; }
-  await closePosition(t,"manual");
-  res.json({ok:true});
+  // Try to close by ticker first
+  const pos = state.positions.find(p => p.ticker === t);
+  if (pos) {
+    await closePosition(t, "manual");
+    return res.json({ ok: true });
+  }
+  // Position not in state — try to close directly in Alpaca by symbol
+  // This handles orphaned positions that reconciliation hasn't picked up yet
+  try {
+    const alpacaPositions = await alpacaGet("/positions");
+    if (alpacaPositions && Array.isArray(alpacaPositions)) {
+      const matching = alpacaPositions.filter(p =>
+        p.symbol.startsWith(t) || p.symbol === t
+      );
+      if (matching.length === 0) return res.status(404).json({ error: "No position in ARGO or Alpaca" });
+      // Close each matching Alpaca position at market
+      for (const alpPos of matching) {
+        const qty = Math.abs(parseInt(alpPos.qty));
+        const side = parseInt(alpPos.qty) > 0 ? "sell" : "buy";
+        const intent = parseInt(alpPos.qty) > 0 ? "sell_to_close" : "buy_to_close";
+        await alpacaPost("/orders", {
+          symbol: alpPos.symbol, qty, side, type: "market",
+          time_in_force: "day", position_intent: intent,
+        }).catch(e => logEvent("error", `Direct close ${alpPos.symbol}: ${e.message}`));
+        logEvent("trade", `[MANUAL] Direct Alpaca close: ${alpPos.symbol} | ${qty}x ${side}`);
+      }
+      // Force reconciliation to update state
+      await runReconciliation();
+      return res.json({ ok: true, note: "Closed directly in Alpaca — state updated via reconciliation" });
+    }
+  } catch(e) {
+    logEvent("error", `Manual close fallback failed: ${e.message}`);
+  }
+  res.status(404).json({ error: "No position found" });
 });
 // Test email endpoint — sends a test email immediately
 app.post("/api/test-email", async (req, res) => {
