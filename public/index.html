@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8"/>
 <meta name="viewport" content="width=device-width,initial-scale=1"/>
-<title>ARGO-V1.1 v4.0 — Professional Options Agent</title>
+<title>ARGO-V1.5 v4.0 — Professional Options Agent</title>
 <style>
 :root{
   --bg:#07101f;--panel:#0a1628;--border:#0d3050;--text:#cce8ff;--muted:#336688;
@@ -112,7 +112,7 @@ input[type=text]:focus{border-color:var(--blue)}
   <div class="logo">
     <div class="logo-icon">⚓</div>
     <div class="logo-text">
-      <h1>ARGO-V1.1</h1>
+      <h1>ARGO-V1.5</h1>
       <p>PROFESSIONAL OPTIONS AGENT v4.0 · ALPACA PAPER</p>
     </div>
   </div>
@@ -451,7 +451,7 @@ input[type=text]:focus{border-color:var(--blue)}
 
   <div class="section-title">Open Positions</div>
   <div id="positions-wrap">
-    <div class="no-data">No open positions. ARGO-V1.1 will enter trades during market hours (Puts 9:45AM / Calls 10AM–3:30PM ET).</div>
+    <div class="no-data">No open positions. ARGO-V1.5 will enter trades during market hours (Puts 9:45AM / Calls 10AM–3:30PM ET).</div>
   </div>
 
   <div class="section-title">Portfolio Greeks</div>
@@ -470,6 +470,7 @@ input[type=text]:focus{border-color:var(--blue)}
     <button class="btn" onclick="triggerDryRun()" style="background:#1a2a10;border-color:#4a7a20;color:#aadd44">⚡ DRY RUN</button>
     <button class="btn btn-red" onclick="resetMonth()">↺ RESET MONTH</button>
     <button class="btn" style="background:#1a1a40;border:1px solid #4444ff;color:#8888ff" onclick="resetCircuit()">⟳ RESET CIRCUIT</button>
+    <button class="btn" style="background:#1a2a1a;border:1px solid #44ff44;color:#88ff88" onclick="resetPDT()">🔄 RESET PDT</button>
     <button class="btn" style="background:#401010;border:1px solid #ff4444;color:#ff8888" onclick="fullReset()">🗑 FULL RESET</button>
     <button class="btn" style="background:#7b0000;border:1px solid #ff0000" onclick="emergencyClose()">⚠ EMERGENCY CLOSE ALL</button>
     <button class="btn" style="background:#0a1f3a;border:1px solid #00c4ff;color:#00c4ff" onclick="downloadDayReport()">📊 DAY REPORT</button>
@@ -671,7 +672,7 @@ input[type=text]:focus{border-color:var(--blue)}
 <div id="tab-journal" class="content">
   <div class="section-title" style="margin-top:0">Trade Journal — Entry Reasoning</div>
   <div id="journal-wrap">
-    <div class="no-data">No journal entries yet. ARGO-V1.1 logs detailed reasoning for every trade.</div>
+    <div class="no-data">No journal entries yet. ARGO-V1.5 logs detailed reasoning for every trade.</div>
   </div>
 </div>
 
@@ -696,7 +697,7 @@ input[type=text]:focus{border-color:var(--blue)}
   </div>
 
   <div class="alert alert-orange" style="margin-bottom:12px">
-    ARGO-V1.1 auto-buys stocks when monthly options profit exceeds $1,000. 20% of profits above threshold are allocated to high-scoring stocks (85+). Stop loss: -15% from entry.
+    ARGO-V1.5 auto-buys stocks when monthly options profit exceeds $1,000. 20% of profits above threshold are allocated to high-scoring stocks (85+). Stop loss: -15% from entry.
   </div>
 
   <div class="section-title">Stock Holdings</div>
@@ -1079,7 +1080,7 @@ function renderMetrics() {
     document.getElementById('alpaca-cash').textContent = fmt(state.alpacaCash);
     const customBudget = state.customBudget && state.customBudget > 0 ? state.customBudget : null;
     document.getElementById('alpaca-cash-sub').textContent = customBudget
-      ? `ARGO-V1.1 using ${fmt(customBudget)} of this`
+      ? `ARGO-V1.5 using ${fmt(customBudget)} of this`
       : 'paper balance · synced on boot';
   }
   document.getElementById('heat').style.color = heat > 50 ? 'var(--red)' : heat > 35 ? 'var(--orange)' : 'var(--green)';
@@ -1197,7 +1198,7 @@ function renderMetrics() {
   if (alphaEl && bm) {
     alphaEl.textContent = (bm.alpha >= 0 ? "+" : "") + bm.alpha + "%";
     alphaEl.style.color = bm.alpha >= 0 ? "var(--green)" : "var(--red)";
-    document.getElementById("benchmark-sub").textContent = `ARGO-V1.1:${bm.apexReturn >= 0 ? "+" : ""}${bm.apexReturn}% SPY:${bm.spyReturn >= 0 ? "+" : ""}${bm.spyReturn}%`;
+    document.getElementById("benchmark-sub").textContent = `ARGO-V1.5:${bm.apexReturn >= 0 ? "+" : ""}${bm.apexReturn}% SPY:${bm.spyReturn >= 0 ? "+" : ""}${bm.spyReturn}%`;
   }
 
   // Drawdown protocol
@@ -1431,7 +1432,7 @@ function renderPositions() {
   const wrap = document.getElementById('positions-wrap');
   const positions = state.positions || [];
   if (!positions.length) {
-    wrap.innerHTML = '<div class="no-data">No open positions. ARGO-V1.1 will enter trades during market hours (9:30AM–3:45PM ET). SPY/QQQ spreads primary.</div>';
+    wrap.innerHTML = '<div class="no-data">No open positions. ARGO-V1.5 will enter trades during market hours (9:30AM–3:45PM ET). SPY/QQQ spreads primary.</div>';
     return;
   }
   wrap.innerHTML = positions.map(p => {
@@ -1846,7 +1847,7 @@ async function triggerDryRun() {
     const resp = await fetch('/api/dry-run-scan', {method:'POST'});
     const data = await resp.json();
     await fetchState();
-    alert('Dry run complete! Check the Server Log tab — look for [DRYRUN] entries showing what ARGO-V1.1 would trade.');
+    alert('Dry run complete! Check the Server Log tab — look for [DRYRUN] entries showing what ARGO-V1.5 would trade.');
   } catch(e) {
     alert('Dry run error: ' + e.message);
   } finally {
@@ -1860,11 +1861,19 @@ async function closePos(ticker) {
   await fetchState();
 }
 
+async function resetPDT() {
+  if (!confirm('Reset PDT day trade counter? Only use if trades were miscounted.')) return;
+  const resp = await fetch('/api/reset-pdt', {method:'POST'});
+  const data = await resp.json();
+  alert(data.message || 'PDT counter reset. 3/3 day trades now available.');
+  await fetchState();
+}
+
 async function resetCircuit() {
-  if (!confirm('Reset circuit breaker? ARGO-V1.1 will resume scanning and entering new trades.')) return;
+  if (!confirm('Reset circuit breaker? ARGO-V1.5 will resume scanning and entering new trades.')) return;
   const resp = await fetch('/api/reset-circuit', {method:'POST'});
   const data = await resp.json();
-  alert('Circuit breaker reset. ARGO-V1.1 is scanning again.');
+  alert('Circuit breaker reset. ARGO-V1.5 is scanning again.');
   await fetchState();
 }
 
@@ -1873,7 +1882,7 @@ async function fullReset() {
   if (!confirm('This cannot be undone. Confirm full reset?')) return;
   const resp = await fetch('/api/full-reset', {method:'POST'});
   const data = await resp.json();
-  alert('Full reset complete. ARGO-V1.1 restarted with $10,000.');
+  alert('Full reset complete. ARGO-V1.5 restarted with $10,000.');
   location.reload();
 }
 
@@ -1976,13 +1985,13 @@ async function downloadDayReport() {
     const url  = URL.createObjectURL(blob);
     const a    = document.createElement('a');
     a.href     = url;
-    a.download = `ARGO-V1.1_DayReport_${today}.json`;
+    a.download = `ARGO-V1.5_DayReport_${today}.json`;
     a.click();
     URL.revokeObjectURL(url);
 
     // ── Also show quick summary in alert ─────────────────────────────────
     alert(
-      `ARGO-V1.1 Day Report — ${today}\n\n` +
+      `ARGO-V1.5 Day Report — ${today}\n\n` +
       `Trades: ${trades.length} | Win Rate: ${winRate}%\n` +
       `Total P&L: $${totalPnL.toFixed(2)}\n` +
       `Best: $${bigWin} | Worst: $${bigLoss}\n` +
@@ -1990,7 +1999,7 @@ async function downloadDayReport() {
       `Exit Reasons:\n` +
       Object.entries(byReason).map(([r,v]) => `  ${r}: ${v.count}x ($${v.pnl.toFixed(2)})`).join('\n') +
       `\n\nOpen Positions: ${openPos.length}\n` +
-      `Report saved as ARGO-V1.1_DayReport_${today}.json`
+      `Report saved as ARGO-V1.5_DayReport_${today}.json`
     );
   } catch(e) {
     alert('Error generating report: ' + e.message);
