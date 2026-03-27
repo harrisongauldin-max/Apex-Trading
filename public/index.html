@@ -1465,7 +1465,7 @@ function renderPositions() {
             }
             return '<button onclick="rescorePos(\'' + p.ticker + '\')" style="font-size:9px;padding:2px 7px;background:rgba(0,196,255,.1);border:1px solid var(--blue);border-radius:4px;color:var(--blue);cursor:pointer">↻ RESCORE</button>';
           })()}
-          <button class="btn btn-red" style="padding:3px 10px;font-size:10px" onclick="closePos('${p.ticker}')">CLOSE</button>
+          <button class="btn btn-red" style="padding:3px 10px;font-size:10px" onclick="closePos('${p.ticker}','${p.buySymbol||p.contractSymbol||''}')">CLOSE</button>
         </div>
       </div>
 
@@ -1849,9 +1849,14 @@ async function triggerDryRun() {
   }
 }
 
-async function closePos(ticker) {
+async function closePos(ticker, contractSym) {
   if (!confirm(`Close ${ticker} position?`)) return;
-  await fetch(`/api/close/${ticker}`, {method:'POST'});
+  const url = contractSym
+    ? `/api/close/${ticker}?sym=${encodeURIComponent(contractSym)}`
+    : `/api/close/${ticker}`;
+  const resp = await fetch(url, {method:'POST'});
+  const data = await resp.json().catch(()=>({}));
+  if (!resp.ok) alert(data.error || 'Close failed');
   await fetchState();
 }
 
