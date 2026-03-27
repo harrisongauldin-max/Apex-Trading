@@ -156,6 +156,35 @@ const WATCHLIST = [
     isIndex:   true,
     isPrimary: false,
   },
+  // ── TERTIARY: IWM — small caps, lower correlation to SPY/QQQ ────────────
+  {
+    ticker:    "IWM",
+    sector:    "Index",
+    momentum:  "steady",
+    rsi:       50,
+    macd:      "neutral",
+    catalyst:  "Small cap macro regime",
+    ivr:       35,
+    beta:      1.3,
+    earningsDate: null,
+    isIndex:   true,
+    isPrimary: false,
+  },
+  // ── HEDGE: GLD — gold ETF, inverse correlation in risk-off environments ─
+  // Use CALL spreads on GLD when equity panic pushes gold higher
+  {
+    ticker:    "GLD",
+    sector:    "Commodity",
+    momentum:  "steady",
+    rsi:       50,
+    macd:      "neutral",
+    catalyst:  "Risk-off flight to gold",
+    ivr:       20,
+    beta:      -0.1,  // negative beta = hedge against equity drawdown
+    earningsDate: null,
+    isIndex:   true,  // treated as index for liquidity/OI purposes
+    isPrimary: false,
+  },
 ];
 
 // ── Individual stocks — unlocked at $25k ─────────────────────────────────
@@ -3201,7 +3230,7 @@ async function getRealOptionsContract(ticker, price, optionType, score, vix, ear
       // Liquidity (15%) — OI as proxy, unknown OI gets neutral score
       // SPY/QQQ index instruments: always liquid regardless of single-strike OI
       // Monthly expirations have lower OI per strike but the market is deep
-      const isIndexTicker = ["SPY","QQQ","IWM","DIA"].includes(ticker);
+      const isIndexTicker = ["SPY","QQQ","IWM","DIA","GLD"].includes(ticker);
       const liquidScore  = isIndexTicker && contractDTE > 14 ? 0.8  // index monthly = liquid
                          : oi === 0 ? 0.5                    // unknown = neutral
                          : oi < 10  ? 0.02                   // essentially no market
@@ -4232,11 +4261,13 @@ async function executeSpreadTrade(stock, price, score, scoreReasons, vix, option
         return null;
       }
 
-      // Get actual fill price from response
+      // Get actual fill price from mleg response — use real fill not limit price
       if (fillResp && fillResp.filled_avg_price) {
         const actualDebit = parseFloat(fillResp.filled_avg_price);
-        if (actualDebit > 0) {
-          logEvent("trade", `[SPREAD] mleg filled @ net debit $${actualDebit}`);
+        if (actualDebit > 0 && actualDebit !== netDebit) {
+          logEvent("trade", `[SPREAD] Fill improvement: limit $${netDebit} → actual $${actualDebit}`);
+          netDebit = actualDebit; // use real fill price
+          finalCost = parseFloat((netDebit * 100 * contracts).toFixed(2));
         }
       }
     } catch(e) {
@@ -4245,18 +4276,19 @@ async function executeSpreadTrade(stock, price, score, scoreReasons, vix, option
     }
   }
 
-  // Record spread position
+  // Record spread position using ACTUAL fill price not limit price
   state.cash -= finalCost;
+  const actualSpreadWidthDebit = Math.abs(buyContract.strike - sellContract.strike);
   const position = {
     ticker:           stock.ticker,
     optionType,
     isSpread:         true,
     buyStrike:        buyContract.strike,
     sellStrike:       sellContract.strike,
-    spreadWidth:      10,
+    spreadWidth:      actualSpreadWidthDebit,
     buySymbol:        buyContract.symbol,
     sellSymbol:       sellContract.symbol,
-    premium:          netDebit,        // net debit paid
+    premium:          netDebit,        // ACTUAL fill price, not limit
     maxProfit,
     maxLoss,
     contracts,
@@ -4823,16 +4855,48 @@ async function closePosition(ticker, reason, exitPremium = null, contractSym = n
   if (isDayTrade(pos)) {
     recordDayTrade(pos, reason);
   }
-  state.closedTrades.push({
-    ticker, pnl, pct, date: new Date().toLocaleDateString(), reason,
-    score:      pos.score || 0,
-    closeTime:  Date.now(),
-    tradeType:  pos.isCreditSpread ? "credit_spread" : pos.isSpread ? "debit_spread" : "naked",
+  // ── Trade Outcome Tracker — full data for post-30 analysis ─────────────
+  const tradeOutcome = {
+    // Identity
+    ticker, tradeType: pos.isCreditSpread ? "credit_spread" : pos.isSpread ? "debit_spread" : "naked",
     optionType: pos.optionType,
-    expDate:    pos.expDate,
-    entryVIX:   pos.entryVIX || 0,
-    daysHeld:   Math.round((Date.now() - new Date(pos.openDate).getTime()) / 86400000),
-  });
+    // Outcome
+    pnl, pct, reason, date: new Date().toLocaleDateString(), closeTime: Date.now(),
+    won: pnl > 0,
+    // Entry conditions — for validating score/regime predictive power
+    entryScore:    pos.score || 0,
+    entryRSI:      pos.entryRSI || 0,
+    entryMACD:     pos.entryMACD || "neutral",
+    entryMacro:    pos.entryMacro || "neutral",
+    entryVIX:      pos.entryVIX || 0,
+    entryMomentum: pos.entryMomentum || "steady",
+    exitVIX:       state.vix || 0,
+    // Timing
+    daysHeld:    Math.round((Date.now() - new Date(pos.openDate).getTime()) / 86400000),
+    dteAtEntry:  pos.expDays || 0,
+    dteAtExit:   Math.max(0, Math.round((new Date(pos.expDate) - new Date()) / 86400000)),
+    // Spread specifics
+    spreadWidth:  pos.spreadWidth || 0,
+    buyStrike:    pos.buyStrike || pos.strike || 0,
+    sellStrike:   pos.sellStrike || 0,
+    maxProfit:    pos.maxProfit || 0,
+    maxLoss:      pos.maxLoss || pos.premium || 0,
+    pctOfMaxProfit: pos.maxProfit > 0 ? parseFloat(((pnl / (pos.maxProfit * 100 * (pos.contracts||1))) * 100).toFixed(1)) : 0,
+    // Regime context
+    regime:        (state._agentMacro || {}).regime || (state._dayPlan || {}).regime || "unknown",
+    regimeConf:    (state._agentMacro || {}).confidence || 0,
+    agentSignal:   (state._agentMacro || {}).signal || "neutral",
+  };
+  state.closedTrades.push(tradeOutcome);
+
+  // ── Score bracket win rate — updated on every close ──────────────────
+  if (!state.scoreBrackets) state.scoreBrackets = {};
+  const bracket = entryScore >= 90 ? "90-100" : entryScore >= 80 ? "80-89" : entryScore >= 70 ? "70-79" : "below-70";
+  if (!state.scoreBrackets[bracket]) state.scoreBrackets[bracket] = { trades:0, wins:0, totalPnl:0 };
+  state.scoreBrackets[bracket].trades++;
+  if (pnl > 0) state.scoreBrackets[bracket].wins++;
+  state.scoreBrackets[bracket].totalPnl = parseFloat((state.scoreBrackets[bracket].totalPnl + pnl).toFixed(2));
+  state.scoreBrackets[bracket].winRate  = parseFloat(((state.scoreBrackets[bracket].wins / state.scoreBrackets[bracket].trades) * 100).toFixed(1));
   // Cap closedTrades at 200
   if (state.closedTrades.length > 200) state.closedTrades = state.closedTrades.slice(0, 200);
 
@@ -5586,6 +5650,23 @@ async function runScan() {
       continue;
     }
 
+    // ── DELTA-BASED EXIT for spreads ─────────────────────────────────────
+    // Buy leg delta > 0.70 = deep ITM = near max profit — take it
+    // Buy leg delta < 0.05 = far OTM = thesis failed — cut early
+    if (pos.isSpread && pos.greeks && pos.greeks.delta) {
+      const buyLegDelta = Math.abs(pos.greeks.delta);
+      if (buyLegDelta >= 0.70 && chg >= 0.30) {
+        logEvent("scan", `${pos.ticker} delta ${buyLegDelta.toFixed(2)} — spread deep ITM, near max profit — closing`);
+        await closePosition(pos.ticker, "target", null, pos.contractSymbol || pos.buySymbol);
+        continue;
+      }
+      if (buyLegDelta <= 0.05 && chg <= -0.25) {
+        logEvent("scan", `${pos.ticker} delta ${buyLegDelta.toFixed(2)} — spread far OTM, thesis failed — stopping out`);
+        await closePosition(pos.ticker, "stop", null, pos.contractSymbol || pos.buySymbol);
+        continue;
+      }
+    }
+
     // ── EXIT HIERARCHY ────────────────────────────────────────────────────
     // Order matters — earlier checks take priority over later ones
     // Applies to: overnight positions (opened previous day or earlier)
@@ -5593,9 +5674,17 @@ async function runScan() {
 
     // Refresh exit params based on current daysOpen — targets tighten overnight
     const currentExitParams = getDTEExitParams(pos.expDays || 30, daysOpen);
-    const activeTakeProfitPct = currentExitParams.takeProfitPct;
-    const activePartialPct    = currentExitParams.partialPct || (activeTakeProfitPct * 0.60);
-    const activeRidePct       = currentExitParams.ridePct    || (activeTakeProfitPct * 1.30);
+    // DTE-aware exits — as expiry approaches, lower the profit target
+    // Theta accelerates dramatically inside 10 DTE — take profit sooner
+    const dteLeft = Math.max(1, Math.round((new Date(pos.expDate) - new Date()) / 86400000));
+    const dteMult = dteLeft <= 5  ? 0.60  // <5 DTE: take 60% of target (theta burning fast)
+                  : dteLeft <= 10 ? 0.75  // <10 DTE: take 75% of target
+                  : dteLeft <= 14 ? 0.88  // <14 DTE: take 88% of target
+                  : 1.0;                   // >14 DTE: full target
+    const activeTakeProfitPct = parseFloat((currentExitParams.takeProfitPct * dteMult).toFixed(3));
+    const activePartialPct    = parseFloat(((currentExitParams.partialPct || activeTakeProfitPct * 0.60) * dteMult).toFixed(3));
+    const activeRidePct       = currentExitParams.ridePct || (activeTakeProfitPct * 1.30);
+    if (dteMult < 1.0 && pos.isSpread) logEvent("scan", `${pos.ticker} DTE-adjusted target: ${(activeTakeProfitPct*100).toFixed(0)}% (${dteLeft}d remaining)`);
 
     // ── THESIS INTEGRITY CHECK — proactive exit on thesis degradation ────
     // Runs on every scan for positions open 2+ days
@@ -6612,14 +6701,31 @@ async function runScan() {
       continue;
     }
 
-    // ── Directional heat cap — max 40% in either direction ──────────────
+    // ── Correlation-aware directional heat cap ───────────────────────────
+    // SPY/QQQ/IWM are highly correlated — count combined as single direction
+    // GLD has negative beta — call spreads on GLD during equity selloff = hedge
+    // Don't count GLD toward put heat cap (it's an uncorrelated asset)
     const MAX_DIR_HEAT = 0.40;
+    const isGLDHedge = stock.ticker === "GLD" && optionType === "call";
+    const correlatedTickers = ["SPY","QQQ","IWM"]; // high correlation group
     const dirCost = state.positions
-      .filter(p => p.optionType === optionType)
+      .filter(p => {
+        if (p.ticker === "GLD") return false; // GLD is a hedge, exclude from heat
+        return p.optionType === optionType;
+      })
       .reduce((s,p) => s + p.cost, 0);
     const dirHeat = dirCost / totalCap();
-    if (dirHeat >= MAX_DIR_HEAT && !dryRunMode) {
+    // GLD call spreads bypass put heat cap — they're hedges not directional bets
+    if (!isGLDHedge && dirHeat >= MAX_DIR_HEAT && !dryRunMode) {
       logEvent("filter", `${stock.ticker} ${optionType} directional heat ${(dirHeat*100).toFixed(0)}% at 40% cap — skip`);
+      continue;
+    }
+    // Prevent 3 correlated equity index positions simultaneously (too concentrated)
+    const correlatedPositions = state.positions.filter(p =>
+      correlatedTickers.includes(p.ticker) && p.optionType === optionType
+    );
+    if (correlatedPositions.length >= 2 && correlatedTickers.includes(stock.ticker) && !dryRunMode) {
+      logEvent("filter", `${stock.ticker} correlation cap — already have ${correlatedPositions.length} correlated ${optionType} positions`);
       continue;
     }
 
