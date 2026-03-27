@@ -84,9 +84,6 @@ const MAX_STOCK_PCT       = 0.30;   // max 30% of account in stocks
 const STOCK_STOP_PCT      = 0.15;   // -15% stop on stock positions
 
 // Cash ETF parking - floor is split 50/50 between liquid and BIL
-const CASH_ETF             = "BIL";     // 1-3 Month T-Bill ETF
-const CASH_ETF_TARGET      = CAPITAL_FLOOR * 0.50;  // $1,500 in BIL at all times
-const CASH_ETF_MIN         = 100;       // minimum rebalance threshold
 
 // VIX tiers
 const VIX_REDUCE25  = 25;
@@ -205,9 +202,6 @@ function defaultState() {
     weeklyCircuitOpen:true,
     monthlyProfit:    0,
     peakCash:         MONTHLY_BUDGET,
-    cashETFShares:    0,
-    cashETFValue:     0,
-    cashETFPrice:     91,
     lastScan:         null,
     vix:              15,
     dataQuality:      { realTrades: 0, estimatedTrades: 0, totalTrades: 0 },
@@ -606,22 +600,7 @@ async function runReconciliation() {
       }
     }
 
-    // ── BIL sync ─────────────────────────────────────────────────────────
-    const bilPos = alpacaPositions.find(p => p.symbol === CASH_ETF);
-    if (bilPos) {
-      const realShares = parseInt(bilPos.qty);
-      const realValue  = parseFloat(bilPos.market_value);
-      if (realShares !== state.cashETFShares) {
-        logEvent("warn", `[RECONCILE] BIL sync: ${state.cashETFShares} → ${realShares} shares`);
-        state.cashETFShares = realShares;
-        state.cashETFValue  = realValue;
-        state.cashETFPrice  = parseFloat(bilPos.current_price || 91);
-      }
-    } else if (state.cashETFShares > 0) {
-      logEvent("warn", `[RECONCILE] BIL ghost cleared`);
-      state.cashETFShares = 0;
-      state.cashETFValue  = 0;
-    }
+    // BIL ETF removed — cash parked in spreads instead
 
     if (ghosts > 0 || orphans > 0) {
       logEvent("warn", `[RECONCILE] ${ghosts} ghost(s) removed, ${orphans} orphan(s) reconstructed`);
@@ -902,7 +881,7 @@ async function getDynamicSignals(ticker, bars, intradayBars = null, realOptionsI
 
 // - Helpers -
 const fmt         = n  => "$" + parseFloat(n).toFixed(2);
-const totalCap    = () => (state.customBudget || MONTHLY_BUDGET) + (state.extraBudget || 0) + (state.cashETFValue || 0);
+const totalCap    = () => (state.customBudget || MONTHLY_BUDGET) + (state.extraBudget || 0);
 const openRisk    = () => state.positions.reduce((s,p) => s + p.cost * (p.partialClosed ? 0.5 : 1), 0);
 const heatPct     = () => openRisk() / totalCap();
 const realizedPnL = () => state.closedTrades.reduce((s,t) => s + t.pnl, 0);
@@ -1989,7 +1968,7 @@ function checkConcentrationRisk() {
 function getDrawdownProtocol() {
   const trades    = state.closedTrades || [];
   const peak      = state.peakCash || MONTHLY_BUDGET;
-  const current   = state.cash + (state.positions || []).reduce((s, p) => s + p.cost, 0) + (state.cashETFValue || 0);
+  const current   = state.cash + (state.positions || []).reduce((s, p) => s + p.cost, 0) ;
   const drawdown  = (current - peak) / peak * 100;
 
   // Only trigger if we have actual trade history
@@ -2016,7 +1995,7 @@ async function getBenchmarkComparison() {
     const spyBars = await getStockBars("SPY", 30);
     if (spyBars.length < 2) return null;
     const spyReturn   = (spyBars[spyBars.length-1].c - spyBars[0].c) / spyBars[0].c * 100;
-    const apexReturn  = ((state.cash + (state.positions||[]).reduce((s,p)=>s+p.cost,0) + (state.cashETFValue||0)) - MONTHLY_BUDGET) / MONTHLY_BUDGET * 100;
+    const apexReturn  = ((state.cash + (state.positions||[]).reduce((s,p)=>s+p.cost,0)) - MONTHLY_BUDGET) / MONTHLY_BUDGET * 100;
     const alpha       = apexReturn - spyReturn;
     return {
       spyReturn:  parseFloat(spyReturn.toFixed(2)),
@@ -3330,109 +3309,6 @@ function getDeployableCash() {
   return Math.max(0, state.cash - CAPITAL_FLOOR);
 }
 
-async function rebalanceCashETF() {
-  // Never execute during dry run or outside market hours — BIL is a real Alpaca order
-  if (dryRunMode || !isMarketHours()) return;
-
-  const currentETF    = state.cashETFValue || 0;
-  const currentShares = state.cashETFShares || 0;
-  const diff          = CASH_ETF_TARGET - currentETF;
-
-  if (Math.abs(diff) < CASH_ETF_MIN) return; // already balanced
-
-  // Get live BIL price
-  let bilPrice = 91;
-  try {
-    const p = await getStockQuote(CASH_ETF);
-    if (p && p > 50) bilPrice = p;
-  } catch(e) {}
-
-  if (diff > 0 && state.cash > CAPITAL_FLOOR + diff) {
-    // ── BUY BIL — submit real Alpaca order ─────────────────────────────
-    const sharesToBuy = Math.floor(diff / bilPrice);
-    if (sharesToBuy < 1) return;
-    try {
-      const orderResp = await alpacaPost("/orders", {
-        symbol:        CASH_ETF,
-        qty:           sharesToBuy,
-        side:          "buy",
-        type:          "market",      // BIL is highly liquid — market order is fine
-        time_in_force: "day",
-      });
-      if (orderResp && orderResp.id) {
-        const cost = sharesToBuy * bilPrice;
-        state.cash          = parseFloat((state.cash - cost).toFixed(2));
-        state.cashETFShares  = currentShares + sharesToBuy;
-        state.cashETFValue   = parseFloat((state.cashETFShares * bilPrice).toFixed(2));
-        state.cashETFPrice   = bilPrice;
-        logEvent("etf", `BIL bought ${sharesToBuy} shares @ $${bilPrice.toFixed(2)} | order:${orderResp.id} | ETF floor: ${fmt(state.cashETFValue)} | liquid: ${fmt(state.cash)}`);
-        await saveStateNow();
-      } else {
-        logEvent("warn", `BIL buy order failed — response: ${JSON.stringify(orderResp)?.slice(0,120)}`);
-      }
-    } catch(e) {
-      logEvent("error", `BIL buy order error: ${e.message}`);
-    }
-
-  } else if (diff < 0 && currentShares > 0) {
-    // ── SELL BIL — submit real Alpaca order ────────────────────────────
-    const sharesToSell = Math.min(currentShares, Math.ceil(Math.abs(diff) / bilPrice));
-    if (sharesToSell < 1) return;
-    try {
-      const orderResp = await alpacaPost("/orders", {
-        symbol:        CASH_ETF,
-        qty:           sharesToSell,
-        side:          "sell",
-        type:          "market",
-        time_in_force: "day",
-      });
-      if (orderResp && orderResp.id) {
-        const proceeds = parseFloat((sharesToSell * bilPrice).toFixed(2));
-        state.cash          = parseFloat((state.cash + proceeds).toFixed(2));
-        state.cashETFShares  = currentShares - sharesToSell;
-        state.cashETFValue   = parseFloat((state.cashETFShares * bilPrice).toFixed(2));
-        logEvent("etf", `BIL sold ${sharesToSell} shares @ $${bilPrice.toFixed(2)} | order:${orderResp.id} | ETF floor: ${fmt(state.cashETFValue)} | liquid: ${fmt(state.cash)}`);
-        await saveStateNow();
-      } else {
-        logEvent("warn", `BIL sell order failed — response: ${JSON.stringify(orderResp)?.slice(0,120)}`);
-      }
-    } catch(e) {
-      logEvent("error", `BIL sell order error: ${e.message}`);
-    }
-  }
-}
-
-// Liquidate BIL if needed to fund a trade - only touches ETF above the floor target
-async function ensureLiquidCash(needed) {
-  if (dryRunMode || !isMarketHours()) return; // never liquidate BIL in dry run or outside hours
-  if (state.cash >= needed) return;
-  const shortfall    = needed - state.cash;
-  const bilPrice     = state.cashETFPrice || 91;
-  const sharesToSell = Math.min(state.cashETFShares || 0, Math.ceil(shortfall / bilPrice));
-  if (sharesToSell < 1) return;
-  // Submit real Alpaca sell order
-  try {
-    const orderResp = await alpacaPost("/orders", {
-      symbol:        CASH_ETF,
-      qty:           sharesToSell,
-      side:          "sell",
-      type:          "market",
-      time_in_force: "day",
-    });
-    if (orderResp && orderResp.id) {
-      const proceeds = parseFloat((sharesToSell * bilPrice).toFixed(2));
-      state.cash          = parseFloat((state.cash + proceeds).toFixed(2));
-      state.cashETFShares  = (state.cashETFShares || 0) - sharesToSell;
-      state.cashETFValue   = parseFloat((state.cashETFShares * bilPrice).toFixed(2));
-      logEvent("etf", `BIL liquidated ${sharesToSell} shares — ${fmt(proceeds)} freed | order:${orderResp.id} | liquid: ${fmt(state.cash)}`);
-      await saveStateNow();
-    } else {
-      logEvent("warn", `BIL liquidation order failed — ${JSON.stringify(orderResp)?.slice(0,120)}`);
-    }
-  } catch(e) {
-    logEvent("error", `BIL liquidation error: ${e.message}`);
-  }
-}
 
 // - Sector ETF Confirmation -
 async function checkSectorETF(stock) {
@@ -4497,7 +4373,6 @@ async function executeTrade(stock, price, score, scoreReasons, vix, optionType =
     : parseFloat((contract.strike + contract.premium).toFixed(2));
 
   // Ensure liquid cash
-  await ensureLiquidCash(cost + CAPITAL_FLOOR);
 
   if (cost > state.cash - CAPITAL_FLOOR) {
     logEvent("skip", `${stock.ticker} - insufficient cash after floor (need ${fmt(cost)})`);
@@ -4988,11 +4863,11 @@ async function closePosition(ticker, reason, exitPremium = null) {
   }
 
   // Peak cash tracking for drawdown
-  const fullPortfolioValue = state.cash + openRisk() + (state.cashETFValue || 0);
+  const fullPortfolioValue = state.cash + openRisk() ;
   if (fullPortfolioValue > state.peakCash) state.peakCash = fullPortfolioValue;
 
   // Circuit breaker checks -- use total portfolio value (cash + open positions)
-  const portfolioValue = state.cash + openRisk() + (state.cashETFValue || 0);
+  const portfolioValue = state.cash + openRisk() ;
   const dailyPnL  = portfolioValue - state.dayStartCash;
   const weeklyPnL = portfolioValue - state.weekStartCash;
 
@@ -5365,7 +5240,6 @@ async function runScan() {
     marketContext.breadth        = breadth;
     // sectorRotation removed — SPY/QQQ index trading doesn't need sector rotation
     // Rebalance BIL ETF
-    await rebalanceCashETF();
     state.lastRebalance = now;
     // Update macro calendar and beta-weighted delta
     const calMod = getMacroCalendarModifier();
@@ -7220,7 +7094,7 @@ function buildEmailHTML(type) {
   const trades = state.closedTrades;
   const wins   = trades.filter(t=>t.pnl>0);
   const heat   = (heatPct()*100).toFixed(0);
-  const curPortfolio = state.cash + openRisk() + (state.cashETFValue || 0);
+  const curPortfolio = state.cash + openRisk() ;
   const daily  = (curPortfolio - state.dayStartCash).toFixed(2);
   const weekly = (curPortfolio - state.weekStartCash).toFixed(2);
 
