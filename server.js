@@ -1,5 +1,5 @@
 // -
-// ARGO V1.1 - Systematic SPY/QQQ Options Trading Agent
+// ARGO V1.5 - Systematic SPY/QQQ Options Trading Agent
 // Alpaca Paper Trading Edition
 // -
 const express    = require("express");
@@ -124,7 +124,7 @@ const CORRELATION_GROUPS = [
 const SEMIS = ["NVDA", "AMD", "SMCI", "ARM", "AVGO", "MU"];
 
 // - Watchlist (36 high-liquidity stocks) -
-// ── ARGO-V1.1 Instrument Configuration ────────────────────────────────────────
+// ── ARGO-V1.5 Instrument Configuration ────────────────────────────────────────
 // Phase 1: SPY primary, QQQ secondary — building to $25k
 // At $25k: set INDIVIDUAL_STOCKS_ENABLED = true to unlock full watchlist
 const INDIVIDUAL_STOCKS_ENABLED = false;
@@ -193,20 +193,17 @@ function defaultState() {
     positions:        [],
     stockPositions:   [],
     closedTrades:     [],
-    stockTrades:      [],
     tradeLog:         [],
     tradeJournal:     [],
     todayTrades:      0,
     consecutiveLosses:0,
     dayTrades:        [],   // rolling log of day trades [{date, ticker, openTime, closeTime}]
-    pdtWarned:        false,
     monthStart:       new Date().toLocaleDateString(),
     weekStartCash:    MONTHLY_BUDGET,
     dayStartCash:     MONTHLY_BUDGET,
     circuitOpen:      true,
     weeklyCircuitOpen:true,
     monthlyProfit:    0,
-    stockBudget:      0,
     peakCash:         MONTHLY_BUDGET,
     cashETFShares:    0,
     cashETFValue:     0,
@@ -253,7 +250,6 @@ async function redisSave(data) {
     // closedTrades — keep last 200 (was 500)
     closedTrades: (data.closedTrades || []).slice(0, 200),
     // stockTrades — keep last 50
-    stockTrades: (data.stockTrades || []).slice(0, 50),
   };
   // Never persist marketContext — it's recalculated every 5 min
   delete slim._marketContextCache;
@@ -453,250 +449,7 @@ async function initState() {
   // ── POSITION RECONCILIATION — runs on startup and every 5 minutes ────────
   await runReconciliation();
 
-  if (false) { // legacy inline — replaced by runReconciliation()
-    try {
-      const alpacaPositions = await alpacaGet("/positions");
-      if (alpacaPositions && Array.isArray(alpacaPositions)) {
-        const alpacaSymbols = new Set(alpacaPositions.map(p => p.symbol));
-        let ghosts = 0, orphans = 0;
 
-        // Check for ghost positions — APEX has them, Alpaca doesn't
-        for (const pos of [...state.positions]) {
-          if (pos.contractSymbol && !alpacaSymbols.has(pos.contractSymbol)) {
-            // Position exists in APEX but not in Alpaca — was closed externally
-            console.log(`[RECONCILE] Ghost position detected: ${pos.ticker} ${pos.contractSymbol} — removing from state`);
-            const idx = state.positions.indexOf(pos);
-            state.positions.splice(idx, 1);
-            // Record as closed at unknown price (external close)
-            state.closedTrades.push({
-              ticker: pos.ticker, pnl: 0, pct: "0", reason: "reconcile-removed",
-              date: new Date().toLocaleDateString(), score: pos.score || 0, closeTime: Date.now()
-            });
-            ghosts++;
-          }
-        }
-
-        // Check for orphan positions — Alpaca has them, APEX doesn't know about them
-        for (const alpPos of alpacaPositions) {
-          // Only check options (contract symbols have format like AAPL260117C00150000)
-          if (!/^[A-Z]+\d{6}[CP]\d{8}$/.test(alpPos.symbol)) continue;
-          const known = state.positions.find(p => p.contractSymbol === alpPos.symbol);
-          if (!known) {
-            console.log(`[RECONCILE] Orphan position detected: ${alpPos.symbol} — queuing for reconstruction`);
-            orphans++;
-          }
-        }
-
-        // ── Reconstruct orphaned positions ───────────────────────────────
-        // Parse all orphaned Alpaca options positions and pair spreads
-        const orphanedAlpaca = alpacaPositions.filter(alpPos => {
-          if (!/^[A-Z]+\d{6}[CP]\d{8}$/.test(alpPos.symbol)) return false;
-          return !state.positions.find(p =>
-            p.contractSymbol === alpPos.symbol ||
-            p.buySymbol === alpPos.symbol ||
-            p.sellSymbol === alpPos.symbol
-          );
-        });
-
-        if (orphanedAlpaca.length > 0) {
-          // Parse each orphan
-          const parsed = orphanedAlpaca.map(alpPos => {
-            const sym      = alpPos.symbol;
-            const isCall   = /\d{6}C\d{8}$/.test(sym);
-            const optType  = isCall ? 'call' : 'put';
-            const strikeM  = sym.match(/[CP](\d{8})$/);
-            const strike   = strikeM ? parseFloat(strikeM[1]) / 1000 : 0;
-            // Date: SPY260406 = YYMMDD → 2026-04-06
-            const expM     = sym.match(/(\d{2})(\d{2})(\d{2})[CP]/);
-            const expDate  = expM
-              ? new Date(`20${expM[1]}-${expM[2]}-${expM[3]}`).toLocaleDateString('en-US', {month:'short',day:'2-digit',year:'numeric'})
-              : '';
-            const expDays  = expDate ? Math.max(1, Math.round((new Date(expDate) - new Date()) / 86400000)) : 30;
-            const qty      = parseInt(alpPos.qty || 1);
-            const avgEntry = parseFloat(alpPos.avg_entry_price || 0);
-            const mktVal   = parseFloat(alpPos.market_value || 0);
-            const ticker   = sym.match(/^([A-Z]+)\d/)?.[1] || 'SPY';
-            return { sym, ticker, optType, strike, expDate, expDays, qty, avgEntry, mktVal, alpPos };
-          });
-
-          // Pair spread legs: long (qty>0) + short (qty<0), same ticker+expiry, ~$10 apart
-          const used = new Set();
-          for (let i = 0; i < parsed.length; i++) {
-            if (used.has(i)) continue;
-            const a = parsed[i];
-            // Look for matching leg
-            let paired = false;
-            for (let j = i + 1; j < parsed.length; j++) {
-              if (used.has(j)) continue;
-              const b = parsed[j];
-              const sameTickerExp = a.ticker === b.ticker && a.expDate === b.expDate && a.optType === b.optType;
-              const widthOk = Math.abs(a.strike - b.strike) >= 8 && Math.abs(a.strike - b.strike) <= 12;
-              const oppDir  = (a.qty > 0 && b.qty < 0) || (a.qty < 0 && b.qty > 0);
-              if (sameTickerExp && widthOk && oppDir) {
-                // Found a spread pair — for puts: buy leg has higher strike (more expensive)
-                // For calls: buy leg has lower strike
-                const longLeg  = a.qty > 0 ? a : b;
-                const shortLeg = a.qty > 0 ? b : a;
-                const buyLeg  = a.optType === 'put'
-                  ? (longLeg.strike > shortLeg.strike ? longLeg : shortLeg)
-                  : (longLeg.strike < shortLeg.strike ? longLeg : shortLeg);
-                const sellLeg = buyLeg === longLeg ? shortLeg : longLeg;
-                const netDebit = parseFloat((buyLeg.avgEntry - Math.abs(sellLeg.avgEntry)).toFixed(2));
-                const spreadWidth = Math.abs(buyLeg.strike - sellLeg.strike);
-                const spread = {
-                  ticker:           a.ticker,
-                  optionType:       a.optType,
-                  isSpread:         true,
-                  buyStrike:        buyLeg.strike,
-                  sellStrike:       sellLeg.strike,
-                  spreadWidth,
-                  buySymbol:        buyLeg.sym,
-                  sellSymbol:       sellLeg.sym,
-                  contractSymbol:   buyLeg.sym,
-                  premium:          Math.max(0.01, netDebit),
-                  maxProfit:        parseFloat((spreadWidth - Math.max(0.01, netDebit)).toFixed(2)),
-                  maxLoss:          Math.max(0.01, netDebit),
-                  contracts:        Math.abs(buyLeg.qty),
-                  expDate:          a.expDate,
-                  expDays:          a.expDays,
-                  cost:             parseFloat((Math.max(0.01, netDebit) * 100 * Math.abs(buyLeg.qty)).toFixed(2)),
-                  score:            75,
-                  reasons:          ['Reconstructed spread from Alpaca reconciliation'],
-                  // Use yesterday if we can't determine exact open date
-                  // This prevents false day trade classification on reconciled positions
-                  openDate:         buyLeg.alpPos.created_at || (() => {
-                    const d = new Date(); d.setDate(d.getDate() - 1); return d.toISOString();
-                  })(),
-                  currentPrice:     Math.max(0.01, netDebit),
-                  peakPremium:      Math.max(0.01, netDebit),
-                  entryRSI: 50, entryMACD: 'neutral', entryMomentum: 'steady', entryMacro: 'neutral',
-                  entryThesisScore: 100, thesisHistory: [], agentHistory: [],
-                  realData: true, vix: state.vix || 20, entryVIX: state.vix || 20,
-                  expiryType: 'monthly', dteLabel: 'RECONCILED-SPREAD',
-                  partialClosed: false, isMeanReversion: false, trailStop: null,
-                  breakevenLocked: false, halfPosition: false,
-                  target: parseFloat((Math.max(0.01, netDebit) * 1.5).toFixed(2)),
-                  stop:   parseFloat((Math.max(0.01, netDebit) * 0.65).toFixed(2)),
-                  takeProfitPct: 0.50, fastStopPct: 0.35,
-                };
-                state.positions.push(spread);
-                used.add(i); used.add(j);
-                paired = true;
-                console.log(`[RECONCILE] Reconstructed SPREAD: ${a.ticker} $${buyLeg.strike}/$${sellLeg.strike} ${a.optType.toUpperCase()} exp ${a.expDate} | net $${netDebit}`);
-                break;
-              }
-            }
-            if (!paired) {
-              // Unpaired leg — add as individual position
-              const p = a;
-              const reconstructed = {
-                ticker: p.ticker, optionType: p.optType, isSpread: false,
-                strike: p.strike, contractSymbol: p.sym,
-                buySymbol: p.qty > 0 ? p.sym : null,
-                sellSymbol: p.qty < 0 ? p.sym : null,
-                premium: p.avgEntry, currentPrice: p.mktVal > 0 ? p.mktVal / (Math.abs(p.qty) * 100) : p.avgEntry,
-                contracts: Math.abs(p.qty), expDate: p.expDate, expDays: p.expDays,
-                cost: Math.abs(p.mktVal), score: 75,
-                reasons: ['Reconstructed individual leg from Alpaca reconciliation'],
-                // Use yesterday to prevent false day trade classification
-                openDate: p.alpPos.created_at || (() => {
-                  const d = new Date(); d.setDate(d.getDate() - 1); return d.toISOString();
-                })(), peakPremium: p.avgEntry,
-                entryRSI: 50, entryMACD: 'neutral', entryMomentum: 'steady', entryMacro: 'neutral',
-                entryThesisScore: 100, thesisHistory: [], agentHistory: [],
-                realData: true, vix: state.vix || 20, entryVIX: state.vix || 20,
-                expiryType: 'monthly', dteLabel: 'RECONCILED',
-                partialClosed: false, isMeanReversion: false, trailStop: null,
-                breakevenLocked: false, halfPosition: false,
-                target: parseFloat((p.avgEntry * 1.5).toFixed(2)),
-                stop: parseFloat((p.avgEntry * 0.65).toFixed(2)),
-                takeProfitPct: 0.50, fastStopPct: 0.35,
-              };
-              state.positions.push(reconstructed);
-              used.add(i);
-              console.log(`[RECONCILE] Reconstructed leg: ${p.ticker} ${p.optType.toUpperCase()} $${p.strike} exp ${p.expDate} | ${Math.abs(p.qty)}x @ $${p.avgEntry}`);
-            }
-          }
-        }
-
-        if (ghosts > 0 || orphans > 0) {
-          console.log(`[RECONCILE] Complete: ${ghosts} ghost(s) removed, ${orphans} orphan(s) reconstructed`);
-          if (orphans > 0) console.log(`[RECONCILE] Added ${orphans} position(s) from Alpaca to ARGO state`);
-          await redisSave(state); // save reconciled state immediately
-        } else {
-          console.log("[RECONCILE] OK — APEX state matches Alpaca positions");
-        }
-
-        state.lastReconcile = new Date().toISOString();
-        state.reconcileStatus = ghosts === 0 && orphans === 0 ? "ok" : "warning";
-        state.orphanCount = orphans;
-
-        // Sync BIL position from Alpaca — ensures cashETFShares matches real position
-        const bilPos = alpacaPositions.find(p => p.symbol === CASH_ETF);
-        if (bilPos) {
-          const realShares = parseInt(bilPos.qty);
-          const realValue  = parseFloat(bilPos.market_value);
-          if (realShares !== state.cashETFShares) {
-            console.log(`[RECONCILE] BIL sync: APEX had ${state.cashETFShares} shares, Alpaca has ${realShares} — updating`);
-            state.cashETFShares = realShares;
-            state.cashETFValue  = realValue;
-            state.cashETFPrice  = parseFloat(bilPos.current_price || 91);
-          } else {
-            console.log(`[RECONCILE] BIL OK — ${realShares} shares @ $${parseFloat(bilPos.current_price||91).toFixed(2)}`);
-          }
-        } else if (state.cashETFShares > 0) {
-          // APEX thinks we have BIL but Alpaca doesn't — clear it
-          console.log(`[RECONCILE] BIL ghost — APEX had ${state.cashETFShares} shares, Alpaca has none — clearing`);
-          state.cashETFShares = 0;
-          state.cashETFValue  = 0;
-        }
-      }
-    } catch(e) {
-      console.log("[RECONCILE] Failed:", e.message, "— proceeding with saved state");
-    }
-
-    // ── CASH SYNC from Alpaca account ─────────────────────────────────────
-    // state.cash is APEX's internal ledger — can drift from real Alpaca balance
-    // due to fills at different prices, fees, or manual activity outside APEX
-    //
-    // IMPORTANT: If customBudget is set, the user is intentionally trading a
-    // subset of their Alpaca balance (e.g. $10k out of $100k paper account).
-    // In that case, DON'T sync from Alpaca — it would override their budget.
-    // Only sync when no customBudget is set (user wants to trade full balance).
-    try {
-      const acct = await alpacaGet("/account");
-      if (acct && acct.cash) {
-        const alpacaCash = parseFloat(acct.cash);
-        state.alpacaCash = alpacaCash; // always store for dashboard display
-
-        const hasCustomBudget = state.customBudget && state.customBudget > 0 && state.customBudget !== MONTHLY_BUDGET;
-        if (hasCustomBudget) {
-          // User set a custom budget — respect it, don't sync from Alpaca
-          console.log(`[CASH SYNC] Custom budget active ($${state.customBudget}) — skipping Alpaca sync (Alpaca has $${alpacaCash.toFixed(2)})`);
-        } else {
-          // No custom budget — sync APEX cash to actual Alpaca balance
-          const apexCash = state.cash;
-          const drift    = Math.abs(alpacaCash - apexCash);
-          if (drift > 1.00) {
-            console.log(`[CASH SYNC] Alpaca: $${alpacaCash.toFixed(2)} | APEX: $${apexCash.toFixed(2)} | drift: $${drift.toFixed(2)} — syncing`);
-            state.cash = alpacaCash;
-            // Large drift (>$500) = likely account reset — update baseline values
-            if (drift > 500) {
-              console.log(`[CASH SYNC] Large drift detected — resetting dayStartCash, weekStartCash, peakCash to $${alpacaCash.toFixed(2)}`);
-              state.dayStartCash  = alpacaCash;
-              state.weekStartCash = alpacaCash;
-              state.peakCash      = alpacaCash;
-            }
-            await redisSave(state);
-          } else {
-            console.log(`[CASH SYNC] OK — $${alpacaCash.toFixed(2)}`);
-          }
-        }
-      }
-    } catch(e) {
-      console.log("[CASH SYNC] Failed:", e.message, "— using saved cash balance");
-    }
-  }
 }
 
 // ── Standalone reconciliation — runs on startup AND every 5 minutes ─────────
@@ -1332,7 +1085,16 @@ function scoreIndexSetup(stock, optionType, spyRSI, spyMACD, spyMomentum, breadt
     if (vix >= 25)                         { score += 5;  reasons.push(`VIX ${vix.toFixed(1)} elevated (+5)`); }
 
     // ── Entry bias alignment ────────────────────────────────────────────
-    if (entryBias === "puts_on_bounces" && spyMomentum === "steady") { score += 8; reasons.push("Entry bias: puts on bounces — good timing (+8)"); }
+    // Bounce quality scoring — best put entries are on relief bounces not crashes
+    if (entryBias === "puts_on_bounces") {
+      if (spyMomentum === "steady" && spyRSI >= 45 && spyRSI <= 60) {
+        score += 15; reasons.push(`Entry bias: fading bounce RSI ${spyRSI} (+15)`);
+      } else if (spyMomentum === "steady") {
+        score += 8; reasons.push("Entry bias: puts on bounces — good timing (+8)");
+      } else if (spyMomentum === "recovering" && spyRSI >= 40) {
+        score += 5; reasons.push("Entry bias: momentum recovering — wait for better entry (+5)");
+      }
+    }
     if (entryBias === "avoid")           { score = Math.min(score, 50); reasons.push("Agent says avoid — capping at 50"); }
 
     // ── QQQ secondary — only when tech thesis clear ─────────────────────
@@ -1893,25 +1655,6 @@ function getMacroCalendarModifier() {
   return { modifier: 0, events };
 }
 
-// ── Relative Value Screening ─────────────────────────────────────────────
-function getRelativeValueScreening() {
-  const bySector = {};
-  for (const stock of WATCHLIST) {
-    if (!bySector[stock.sector]) bySector[stock.sector] = [];
-    bySector[stock.sector].push({ ticker: stock.ticker, ivr: stock.ivr, beta: stock.beta });
-  }
-  const results = {};
-  for (const [sector, stocks] of Object.entries(bySector)) {
-    const sorted = [...stocks].sort((a, b) => a.ivr - b.ivr);
-    results[sector] = {
-      cheapest:      sorted[0],
-      mostExpensive: sorted[sorted.length - 1],
-      avgIVR:        parseFloat((stocks.reduce((s, st) => s + st.ivr, 0) / stocks.length).toFixed(1)),
-      stocks:        sorted,
-    };
-  }
-  return results;
-}
 
 // ── Earnings Quality Scoring ──────────────────────────────────────────────
 async function getEarningsQualityScore(ticker, bars) {
@@ -1956,8 +1699,11 @@ function calcKellySize(recentTrades = 20) {
   const payoff    = avgLoss > 0 ? avgWin / avgLoss : 1;
   const kelly     = winRate - (1 - winRate) / payoff;
   const halfKelly = Math.max(0, kelly * 0.5);
-  const contracts = Math.min(3, Math.max(1, Math.round(halfKelly * 10)));
-  return { contracts, kelly: parseFloat(kelly.toFixed(3)), halfKelly: parseFloat(halfKelly.toFixed(3)), winRate: parseFloat((winRate*100).toFixed(1)), payoffRatio: parseFloat(payoff.toFixed(2)) };
+  // Hard cap: max 2 contracts until 30 validated trades
+  // Kelly on small samples produces dangerously high sizing
+  const rawContracts = Math.min(3, Math.max(1, Math.round(halfKelly * 10)));
+  const contracts    = trades.length < 30 ? Math.min(2, rawContracts) : rawContracts;
+  return { contracts, kelly: parseFloat(kelly.toFixed(3)), halfKelly: parseFloat(halfKelly.toFixed(3)), winRate: parseFloat((winRate*100).toFixed(1)), payoffRatio: parseFloat(payoff.toFixed(2)), cappedPre30: trades.length < 30 };
 }
 
 // ── Regime Detection ─────────────────────────────────────────────────────
@@ -2196,24 +1942,6 @@ async function getBenchmarkComparison() {
   } catch(e) { return null; }
 }
 
-// ── Tail Risk Hedge ───────────────────────────────────────────────────────
-async function checkTailRiskHedge() {
-  // Auto-buy cheap OTM SPY puts when VIX is low and we have large call exposure
-  const vix       = state.vix || 15;
-  const positions = state.positions || [];
-  const callValue = positions.filter(p => p.optionType === "call").reduce((s, p) => s + p.cost, 0);
-  const hasPutHedge = positions.some(p => p.ticker === "SPY" && p.optionType === "put");
-
-  // Only hedge when VIX is low (cheap puts) and we have significant call exposure
-  if (vix < 18 && callValue > 2000 && !hasPutHedge && isEntryWindow("put")) {
-    logEvent("risk", `Tail risk hedge triggered - VIX:${vix} call exposure:${fmt(callValue)} - adding SPY put hedge`);
-    const spyPrice = await getStockQuote("SPY");
-    if (spyPrice) {
-      const spyStock = { ticker:"SPY", sector:"Index", momentum:"steady", rsi:50, macd:"neutral", ivr:22, beta:1.0, earningsDate:null };
-      await executeTrade(spyStock, spyPrice, 70, ["Tail risk hedge"], vix, "put");
-    }
-  }
-}
 
 // ── Position Scaling ──────────────────────────────────────────────────────
 // Enter half position first, add second half if trade confirms (+5% in 24hrs)
@@ -2540,12 +2268,12 @@ const AGENT_MACRO_CACHE_MS = 3 * 60 * 1000; // 3 minutes — faster macro reacti
 async function getAgentDayPlan(scanType = "morning") {
   if (!ANTHROPIC_API_KEY) return null;
 
-  const systemPrompt = `You are the head macro strategist for ARGO-V1.1, a systematic SPY/QQQ options spread trading system. Return ONLY valid JSON — no markdown, no preamble.
+  const systemPrompt = `You are the head macro strategist for ARGO-V1.5, a systematic SPY/QQQ options spread trading system. Return ONLY valid JSON — no markdown, no preamble.
 
 {"regime":"trending_bear"|"trending_bull"|"choppy"|"breakdown"|"recovery"|"neutral","signal":"strongly bearish"|"bearish"|"mild bearish"|"neutral"|"mild bullish"|"bullish"|"strongly bullish","confidence":"high"|"medium"|"low","entryBias":"puts_on_bounces"|"calls_on_dips"|"neutral"|"avoid","tradeType":"spread"|"credit"|"naked"|"none","suppressUntil":null|"HH:MM","riskLevel":"low"|"medium"|"high","vixOutlook":"spiking"|"elevated_stable"|"mean_reverting"|"falling","keyLevels":{"spySupport":null,"spyResistance":null},"catalysts":[],"reasoning":"2 sentences max","weeklyBias":"bullish"|"bearish"|"neutral","overnightMove":"string describing futures direction"}
 
 Rules:
-- suppressUntil: set to "HH:MM" ET if high-impact event today (CPI 08:30, FOMC 14:00, NFP 08:30) — ARGO-V1.1 will not enter before this time
+- suppressUntil: set to "HH:MM" ET if high-impact event today (CPI 08:30, FOMC 14:00, NFP 08:30) — ARGO-V1.5 will not enter before this time
 - riskLevel high = FOMC day, CPI day, major geopolitical event — reduce position size
 - entryBias puts_on_bounces = bearish trend, wait for intraday relief before entering puts
 - entryBias calls_on_dips = bullish trend, wait for intraday weakness before entering calls
@@ -2593,7 +2321,7 @@ What is your strategic assessment for today's trading session?`;
 async function getAgentPostMarketAssessment(scanType = "post-market") {
   if (!ANTHROPIC_API_KEY) return null;
 
-  const systemPrompt = `Post-market analyst for ARGO-V1.1. Return ONLY valid JSON — no markdown.
+  const systemPrompt = `Post-market analyst for ARGO-V1.5. Return ONLY valid JSON — no markdown.
 {"overnightRisk":"low"|"medium"|"high","holdRecommendations":{},"tomorrowBias":"bullish"|"bearish"|"neutral","catalystsTomorrow":[],"reasoning":"1-2 sentences"}
 holdRecommendations: {ticker: "HOLD"|"MONITOR"|"EXIT_AT_OPEN"} for each open position.`;
 
@@ -2645,7 +2373,7 @@ async function getAgentMacroAnalysis(headlines) {
   if (_agentMacroCache.result && Date.now() - _agentMacroCache.fetchedAt < AGENT_MACRO_CACHE_MS) {
     return _agentMacroCache.result;
   }
-  const systemPrompt = `You are the head macro strategist for ARGO-V1.1, a systematic SPY/QQQ options trading system. Return ONLY valid JSON — no markdown, no preamble.
+  const systemPrompt = `You are the head macro strategist for ARGO-V1.5, a systematic SPY/QQQ options trading system. Return ONLY valid JSON — no markdown, no preamble.
 
 {"signal":"strongly bearish"|"bearish"|"mild bearish"|"neutral"|"mild bullish"|"bullish"|"strongly bullish","modifier":-20to20,"confidence":"high"|"medium"|"low","mode":"defensive"|"cautious"|"normal"|"aggressive","reasoning":"1 sentence","regime":"trending_bear"|"trending_bull"|"choppy"|"breakdown"|"recovery"|"neutral","regimeDuration":"intraday"|"1-3 days"|"3-7 days"|"1-2 weeks"|"multi-week","entryBias":"puts_on_bounces"|"calls_on_dips"|"neutral"|"avoid","tradeType":"spread"|"credit"|"naked"|"none","vixOutlook":"spiking"|"elevated_stable"|"mean_reverting"|"falling"|"unknown","keyLevels":{"spySupport":null,"spyResistance":null},"catalysts":[],"bearishTickers":[],"bullishTickers":[],"themes":[]}
 
@@ -2738,7 +2466,7 @@ RSI: ${stock.rsi} | MACD: ${stock.macd} | Momentum: ${stock.momentum}
 Score: ${score}/100 | Top reasons: ${reasons.slice(0,4).join('; ')}
 Macro: ${(state._agentMacro||{}).signal||'neutral'} (${(state._agentMacro||{}).confidence||'unknown'})
 VIX: ${state.vix}
-Should ARGO-V1.1 enter this ${optionType} position?`;
+Should ARGO-V1.5 enter this ${optionType} position?`;
 
   const raw = await callClaudeAgent(systemPrompt, userPrompt, 200, false);
   if (!raw) return { approved: true, reason: "agent unavailable — allowing" };
@@ -3267,8 +2995,7 @@ async function getRealOptionsContract(ticker, price, optionType, score, vix, ear
   try {
     // Determine target expiry window
     const { expDate: targetExpDate, expDays: targetExpDays, expiryType } = selectExpiry(score, vix, optionType, earningsDate, ticker, isMeanReversion);
-  // LEAPS use deeper ITM delta (0.70-0.80) for better intrinsic value retention
-  const isLeaps      = expiryType === "leaps";
+    const isLeaps      = expiryType === "monthly"
   const isPut        = optionType === "put";
   const isExpensive  = price > 400;  // high-priced stocks need wider delta range
   const isCheap      = price < 100;  // low-priced stocks have fewer strikes, need wider range
@@ -3277,16 +3004,14 @@ async function getRealOptionsContract(ticker, price, optionType, score, vix, ear
   // Cheap (<$100): 0.28-0.50 — fewer strikes, liquid ones are closer to ATM
   // Normal: 0.28-0.42 — standard target
   // Expensive (>$400): 0.20-0.55 — wide range needed to find liquid OTM puts
-  // LEAPS: 0.65-0.85 — deep ITM for intrinsic value retention
-  const deltaMin = isLeaps ? 0.65 : (isPut && isExpensive ? 0.20 : TARGET_DELTA_MIN);
+    const deltaMin = isLeaps ? 0.65 : (isPut && isExpensive ? 0.20 : TARGET_DELTA_MIN);
   const deltaMax = isLeaps ? 0.85 : (isPut && isCheap ? 0.50 : isPut && isExpensive ? 0.55 : TARGET_DELTA_MAX);
   const strikeRange = 0; // unused — delta now selects contracts, not strike range
 
     // Format date for API: YYYY-MM-DD
     const today      = getETTime();
     const minExpiry  = new Date(today.getTime() + 3   * MS_PER_DAY).toISOString().split("T")[0]; // 3 day floor — scoring handles DTE preference
-    // LEAPS need up to 270 days — use 300 day window to cover all expiry types
-    const maxDays    = expiryType === "leaps" ? 300 : 90;
+        const maxDays    = expiryType === "monthly"
     const maxExpiry  = new Date(today.getTime() + maxDays * MS_PER_DAY).toISOString().split("T")[0];
 
     // Fetch ALL contracts with no filters — paginate until we have everything
@@ -3393,10 +3118,10 @@ async function getRealOptionsContract(ticker, price, optionType, score, vix, ear
       if (mid <= 0) { skipped++; continue; }
       // Only hard filter on delta — everything else is a scoring factor not a gate
       if (delta < deltaMin || delta > deltaMax) { skipped++; continue; }
-      // Hard DTE floor — prevent truly short-dated contracts from being selected
-      // selectExpiry handles real DTE targeting (30-45 DTE for monthly)
-      // This is just a safety net against 0-6 DTE junk
-      const minDTE = isMeanReversion ? 3 : 7;
+      // Hard DTE floor — spreads need 21+ DTE for PDT accounts
+      // PDT forces overnight holds — short DTE means theta destroys value before exit
+      // MR calls can use 14 DTE (quick bounce play)
+      const minDTE = isMeanReversion ? 14 : 21;
       if (contractDTE < minDTE) { skipped++; continue; }
 
       // ── CONTRACT SCORING — higher = better ──────────────────────────────
@@ -3410,11 +3135,14 @@ async function getRealOptionsContract(ticker, price, optionType, score, vix, ear
       const expiryScore  = Math.max(0, 1 - dteDistance / 30);
 
       // Liquidity (15%) — OI as proxy, unknown OI gets neutral score
-      // OI < 50 gets heavy penalty — essentially no market in live trading
-      const liquidScore  = oi === 0 ? 0.5                    // unknown = neutral
+      // SPY/QQQ index instruments: always liquid regardless of single-strike OI
+      // Monthly expirations have lower OI per strike but the market is deep
+      const isIndexTicker = ["SPY","QQQ","IWM","DIA"].includes(ticker);
+      const liquidScore  = isIndexTicker && contractDTE > 14 ? 0.8  // index monthly = liquid
+                         : oi === 0 ? 0.5                    // unknown = neutral
                          : oi < 10  ? 0.02                   // essentially no market
-                         : oi < 50  ? 0.10                   // very thin
-                         : oi < 200 ? Math.min(oi / 1000, 0.4)  // thin but tradeable
+                         : oi < 50  ? 0.30                   // thin but index = ok
+                         : oi < 200 ? Math.min(oi / 500, 0.7)   // thin but tradeable
                          : Math.min(oi / 5000, 1.0);         // normal
 
       // Spread quality (15%) — tighter spread = better fill = higher score
@@ -3783,7 +3511,6 @@ async function checkAllFilters(stock, price) {
 // Returns appropriate exit levels based on days to expiry
 // Short DTE = take profits fast, trail tight (theta kills you)
 // Monthly   = moderate targets, standard trail
-// LEAPS     = let winners run, wide trail
 function getDTEExitParams(dte, daysOpen = 0) {
   // PDT-aware target adjustment
   const pdtRemaining = Math.max(0, PDT_LIMIT - countRecentDayTrades());
@@ -3842,8 +3569,7 @@ function getDTEExitParams(dte, daysOpen = 0) {
       label:          (pdtLocked ? "MONTHLY(PDT-LOCKED)" : pdtTight ? "MONTHLY(PDT-TIGHT)" : "MONTHLY") + overnightLabel,
     };
   } else {
-    // LEAPS 60+ DTE — high conviction, ride for bigger moves
-    const base = pdtLocked ? 0.35 : pdtTight ? 0.45 : 0.55;
+        const base = pdtLocked ? 0.35 : pdtTight ? 0.45 : 0.55;
     const tp   = parseFloat((base * overnightMult).toFixed(3));
     const part = parseFloat((tp * 0.55).toFixed(3));
     const ride = parseFloat((tp * 1.50).toFixed(3));
@@ -3916,7 +3642,6 @@ function recordDayTrade(pos, reason) {
   logEvent("warn", `PDT: Day trade recorded for ${pos.ticker} — ${count}/${PDT_LIMIT} in rolling 5-day window`);
   if (count >= PDT_LIMIT) {
     logEvent("warn", `PDT LIMIT REACHED (${count}/${PDT_LIMIT}) — no new same-day CLOSES until window resets. New entries still allowed.`);
-    state.pdtWarned = true;
   }
 }
 
@@ -4008,8 +3733,6 @@ function getThirdFriday(year, month) {
 }
 
 // Smart expiry selection based on score, VIX, and option type
-// LEAPS eligible tickers — most liquid with active LEAPS markets
-const LEAPS_ELIGIBLE = ["NVDA","AAPL","MSFT","AMZN","META","GOOGL","SPY","QQQ","TSLA","AMD","PLTR","CRWD","AVGO"];
 
 // Returns { expDate: string, expDays: number, expiryType: "weekly"|"monthly"|"leaps" }
 function selectExpiry(score, vix, optionType, earningsDate, ticker = null, isMeanReversion = false) {
@@ -4058,10 +3781,6 @@ function selectExpiry(score, vix, optionType, earningsDate, ticker = null, isMea
   // ── CALL tiers ─────────────────────────────────────────────────────────
   // Mean reversion calls (isMeanReversion flag) stay weekly — quick bounce play
   // All other calls go monthly — PDT accounts need holding time
-  } else if (score >= 90 && vix < 20 && ticker && LEAPS_ELIGIBLE.includes(ticker)) {
-    // LEAPS — high conviction + calm market + liquid ticker
-    targetDays = 210;
-    expiryType = "leaps";
   } else if (score >= 85 && vix < 25) {
     // High conviction call in calm market — 30 DTE standard
     targetDays = 30;
@@ -4088,14 +3807,6 @@ function selectExpiry(score, vix, optionType, earningsDate, ticker = null, isMea
     expiry = getNextExpiryFriday(targetDate);
     const minDate = new Date(now + 7 * MS_PER_DAY);
     if (expiry < minDate) expiry = getNextExpiryFriday(new Date(expiry.getTime() + 7 * MS_PER_DAY));
-  } else if (expiryType === "leaps") {
-    // LEAPS use Jan expiry of next year (most liquid LEAPS expiration)
-    const targetYear = targetDate.getFullYear();
-    expiry = getThirdFriday(targetYear, 0); // January expiry
-    // If Jan is too close use next year's Jan
-    if (expiry < new Date(now + 180 * MS_PER_DAY)) {
-      expiry = getThirdFriday(targetYear + 1, 0);
-    }
   } else {
     // Monthly — find third Friday of target month
     expiry = getThirdFriday(targetDate.getFullYear(), targetDate.getMonth());
@@ -4127,11 +3838,11 @@ function selectExpiry(score, vix, optionType, earningsDate, ticker = null, isMea
 // Finds the sell leg for a spread by looking for the contract closest to
 // targetStrike on the SAME expiry as the buy leg. Does not use delta scoring.
 // This ensures $10-wide spreads actually work as intended.
-async function getSpreadSellLeg(ticker, optionType, buyContract) {
+async function getSpreadSellLeg(ticker, optionType, buyContract, targetWidth = 10) {
   try {
     const targetStrike = optionType === "put"
-      ? buyContract.strike - 10
-      : buyContract.strike + 10;
+      ? buyContract.strike - targetWidth
+      : buyContract.strike + targetWidth;
 
     // Use same expiry date as buy leg
     const today     = getETTime();
@@ -4168,9 +3879,9 @@ async function getSpreadSellLeg(ticker, optionType, buyContract) {
       }
     }
 
-    if (!best || bestDist > 3) {
-      // No contract within $3 of target — spread not available
-      logEvent("warn", `${ticker} spread: no sell leg found within $3 of target $${targetStrike}`);
+    const maxDist = Math.max(3, targetWidth * 0.15); // allow 15% of width as tolerance
+    if (!best || bestDist > maxDist) {
+      logEvent("warn", `${ticker} spread: no sell leg within $${maxDist.toFixed(0)} of target $${targetStrike} (width $${targetWidth})`);
       return null;
     }
 
@@ -4225,15 +3936,49 @@ async function getSpreadSellLeg(ticker, optionType, buyContract) {
 // Used in choppy/high-VIX regimes where theta decay works in our favor
 // Put credit spread: sell higher put, buy lower put (below current price)
 // Call credit spread: sell lower call, buy higher call (above current price)
+// ── Alpaca as source of truth for cash ──────────────────────────────────────
+// syncCashFromAlpaca() syncs state.cash from Alpaca account after every trade
+// and every 30 seconds. This eliminates cash drift between ARGO and Alpaca.
+async function syncCashFromAlpaca() {
+  if (!ALPACA_KEY) return;
+  try {
+    const acct = await alpacaGet("/account");
+    if (!acct || !acct.cash) return;
+    const alpacaCash      = parseFloat(acct.cash);
+    const alpacaBuyPower  = parseFloat(acct.buying_power || acct.cash);
+    state.alpacaCash      = alpacaCash;
+    state.alpacaBuyPower  = alpacaBuyPower;
+    const hasCustomBudget = state.customBudget && state.customBudget > 0 && state.customBudget !== MONTHLY_BUDGET;
+    if (!hasCustomBudget) {
+      const drift = Math.abs(alpacaCash - state.cash);
+      if (drift > 1.00) {
+        if (drift > 500) {
+          // Large drift = account reset — update all baselines
+          logEvent("scan", `[CASH SYNC] Large drift $${drift.toFixed(2)} — resetting baselines to $${alpacaCash.toFixed(2)}`);
+          state.dayStartCash  = alpacaCash;
+          state.weekStartCash = alpacaCash;
+          state.peakCash      = Math.max(state.peakCash || 0, alpacaCash);
+        } else {
+          logEvent("scan", `[CASH SYNC] Alpaca: $${alpacaCash.toFixed(2)} | ARGO: $${state.cash.toFixed(2)} | drift: $${drift.toFixed(2)} — syncing`);
+        }
+        state.cash = alpacaCash;
+        markDirty();
+      }
+    }
+  } catch(e) {} // silent
+}
+
+
 async function executeCreditSpread(stock, price, score, scoreReasons, vix, optionType) {
   try {
     // For put credit spread: sell ~0.30 delta put (OTM), buy ~0.20 delta put (further OTM)
     // Target: sell strike ~5% below current price, buy $10 lower
     // For call credit spread: sell ~0.30 delta call (OTM), buy ~0.20 delta call (further OTM)
-    const spreadWidth = 10;
+    // Spread width scales with VIX — wider = more profit potential
+    const spreadWidth = vix >= 35 ? 20 : vix >= 25 ? 15 : 10;
     // OTM % scales with VIX — higher fear = go further OTM for more buffer
-    // VIX 20-25: 5% OTM | VIX 25-30: 6% OTM | VIX 30+: 7% OTM
     const baseOTM    = vix >= 30 ? 0.07 : vix >= 25 ? 0.06 : 0.05;
+    logEvent("filter", `${stock.ticker} credit spread: $${spreadWidth} wide, ${(baseOTM*100).toFixed(0)}% OTM (VIX ${vix.toFixed(1)})`);
     const otmPct     = optionType === "put" ? -baseOTM : baseOTM;
     logEvent("filter", `${stock.ticker} credit spread: ${(baseOTM*100).toFixed(0)}% OTM target (VIX ${vix.toFixed(1)})`);
     const shortStrikeTarget = price * (1 + otmPct);
@@ -4442,7 +4187,8 @@ async function executeSpreadTrade(stock, price, score, scoreReasons, vix, option
   const riskMult    = (state._dayPlan?.riskLevel === "high") ? 0.5 : 1.0;
   const contracts   = Math.max(1, Math.min(cashCap, Math.floor(baseContracts * riskMult)));
 
-  const maxProfit = parseFloat((10 - netDebit).toFixed(2)); // $10 wide spread
+  const actualSpreadWidth = Math.abs(buyContract.strike - sellContract.strike);
+  const maxProfit = parseFloat((actualSpreadWidth - netDebit).toFixed(2));
   const maxLoss   = netDebit;
   const finalCost = parseFloat((netDebit * 100 * contracts).toFixed(2));
 
@@ -4588,6 +4334,7 @@ async function executeSpreadTrade(stock, price, score, scoreReasons, vix, option
   };
 
   state.positions.push(position);
+  await syncCashFromAlpaca(); // sync cash from Alpaca after trade
 
   logEvent("trade",
     `[SPREAD] BUY ${stock.ticker} $${buyContract.strike}/${sellContract.strike} ${optionType.toUpperCase()} exp ${buyContract.expDate} | ` +
@@ -5195,6 +4942,7 @@ async function closePosition(ticker, reason, exitPremium = null) {
     `${reason.toUpperCase()} ${ticker} | exit $${ep} | P&L ${pnl>=0?"+":""}${fmt(pnl)} (${pct}%) | ` +
     `cash ${fmt(state.cash)} | consec losses: ${state.consecutiveLosses}`
   );
+  await syncCashFromAlpaca(); // sync cash from Alpaca after close
   await saveStateNow();
   return true;
   } catch(e) {
@@ -5215,19 +4963,52 @@ async function partialClose(ticker) {
   const pos = state.positions.find(p => p.ticker === ticker);
   if (!pos || pos.partialClosed) return;
 
-  // Spreads can't be partially closed — two legs make partial unwind complex
-  // Route to full close instead (take the profit cleanly)
-  if (pos.isSpread) {
-    logEvent("partial", `${ticker} spread position — escalating partial to full close`);
+  // 1-contract positions can't be split — full close
+  if ((pos.contracts || 1) === 1) {
+    logEvent("partial", `${ticker} 1-contract — escalating to full close`);
     await closePosition(ticker, "target");
     return;
   }
 
-  // 1-contract positions can't be split — treat partial close as full close
-  // Math.floor(1/2) = 0 which would skip the Alpaca order silently
-  if ((pos.contracts || 1) === 1) {
-    logEvent("partial", `${ticker} 1-contract position — escalating partial to full close`);
-    await closePosition(ticker, "target");
+  // Spreads: partial close = close half contracts via separate mleg orders
+  // This is valid — close half the spread position, leave half open
+  if (pos.isSpread && pos.contracts >= 2) {
+    const half = Math.floor(pos.contracts / 2);
+    logEvent("partial", `${ticker} spread partial close — closing ${half}/${pos.contracts} contracts`);
+    if (!dryRunMode && pos.buySymbol && pos.sellSymbol) {
+      try {
+        // Close half via mleg — both legs simultaneously
+        const closeMleg = {
+          order_class: "mleg", type: "market", time_in_force: "day",
+          qty: String(half),
+          legs: [
+            { symbol: pos.buySymbol,  side: "sell", ratio_qty: "1", position_intent: "sell_to_close" },
+            { symbol: pos.sellSymbol, side: "buy",  ratio_qty: "1", position_intent: "buy_to_close"  },
+          ],
+        };
+        const resp = await alpacaPost("/orders", closeMleg);
+        if (resp && resp.id) {
+          logEvent("partial", `[SPREAD PARTIAL] mleg close submitted: ${resp.id} | ${half}x`);
+        }
+      } catch(e) {
+        logEvent("error", `[SPREAD PARTIAL] mleg error: ${e.message}`);
+      }
+    }
+    // Update state — reduce contracts, mark partial
+    const curP  = pos.currentPrice || pos.premium;
+    const pnl   = parseFloat(((curP - pos.premium) * 100 * half).toFixed(2));
+    pos.contracts     -= half;
+    pos.partialClosed  = true;
+    pos.cost           = parseFloat((pos.premium * 100 * pos.contracts).toFixed(2));
+    state.closedTrades.push({
+      ticker, pnl, pct: ((pnl/(pos.premium*100*half))*100).toFixed(1),
+      date: new Date().toLocaleDateString(), reason: "partial",
+      tradeType: "debit_spread", optionType: pos.optionType,
+      closeTime: Date.now(),
+    });
+    await syncCashFromAlpaca();
+    await saveStateNow();
+    logEvent("partial", `PARTIAL SPREAD ${ticker} — ${half}x closed | P&L: ${pnl>=0?"+":""}$${pnl.toFixed(2)} | ${pos.contracts}x remaining`);
     return;
   }
 
@@ -5468,7 +5249,14 @@ async function runScan() {
   if (dryRunMode) logEvent("scan", "⚡ DRY RUN MODE — no orders submitted, no state changes");
 
   const now    = Date.now();
-  const scanET = getETTime(); // single ET time reference for entire scan — avoids 6+ repeated calls
+  const scanET = getETTime(); // single ET time reference for entire scan
+
+  // Scan-cycle cache — expensive fetches reused within same scan window
+  if (!runScan._cache || Date.now() - (runScan._cacheTime||0) > 8000) {
+    runScan._cache = {};
+    runScan._cacheTime = Date.now();
+  }
+  const scanCache = runScan._cache;
 
   // Update VIX and check velocity
   const newVIX  = await getVIX() || state.vix;
@@ -5539,7 +5327,7 @@ async function runScan() {
     marketContext.stressTest       = runStressTest();
     // marketContext.monteCarlo removed — SPY/QQQ strategy doesn't use Monte Carlo
     marketContext.kelly            = calcKellySize(20);
-    marketContext.relativeValue    = getRelativeValueScreening();
+    // relativeValue screening disabled (individual stocks off)
     marketContext.streaks          = getStreakAnalysis(); // now a stub
 
     if (marketContext.concentration.alerts.length > 0) {
@@ -5550,7 +5338,7 @@ async function runScan() {
     }
 
     // These need to run after context is updated
-    await Promise.all([checkTailRiskHedge(), checkScaleIns()]);
+    await checkScaleIns();
 
     // Earnings plays removed — SPY/QQQ don't have earnings dates
 
@@ -6491,7 +6279,7 @@ async function runScan() {
     }
 
     // Short interest — computed from prefetched bars
-    const shortSignal = await getShortInterestSignal(stock.ticker, bars);
+    const shortSignal = { signal: "neutral", modifier: 0 }; // short interest disabled
 
     // News sentiment — already prefetched
     const newsSentiment = analyzeNews(newsArticles);
@@ -7001,11 +6789,12 @@ async function runScan() {
       const buyContract  = await getRealOptionsContract(stock.ticker, price, optionType, score, state.vix, stock.earningsDate, false);
       if (!buyContract) { logEvent("filter", `${stock.ticker} spread: no buy leg found`); continue; }
 
-      // Use dedicated sell leg lookup — finds closest strike to $10 OTM on SAME expiry
-      const sellContract = await getSpreadSellLeg(stock.ticker, optionType, buyContract);
+      // Use dedicated sell leg lookup — VIX-scaled spread width
+      const targetSpreadWidth = state.vix >= 35 ? 20 : state.vix >= 25 ? 15 : 10;
+      const sellContract = await getSpreadSellLeg(stock.ticker, optionType, buyContract, targetSpreadWidth);
       const spreadActualWidth = sellContract ? Math.abs(buyContract.strike - sellContract.strike) : 0;
 
-      if (sellContract && spreadActualWidth >= 8) {
+      if (sellContract && spreadActualWidth >= targetSpreadWidth - 2) {
         logEvent("filter", `${stock.ticker} spread: buy $${buyContract.strike} / sell $${sellContract.strike} | net $${(buyContract.premium - sellContract.premium).toFixed(2)} | width $${spreadActualWidth}`);
         const spreadPos = await executeSpreadTrade(stock, price, score, reasons, state.vix, optionType, buyContract, sellContract, isChoppyRegime);
         entered = !!spreadPos;
@@ -7030,9 +6819,9 @@ async function runScan() {
     state._scanFailures = (state._scanFailures || 0) + 1;
     if (state._scanFailures >= 3 && RESEND_API_KEY && GMAIL_USER && isMarketHours()) {
       await sendResendEmail(
-        `ARGO-V1.1 ALERT — Scanner failing (${state._scanFailures} errors)`,
+        `ARGO-V1.5 ALERT — Scanner failing (${state._scanFailures} errors)`,
         `<div style="font-family:monospace;background:#07101f;color:#ff5555;padding:20px">
-          <h2>⚠ ARGO-V1.1 Scanner Error</h2>
+          <h2>⚠ ARGO-V1.5 Scanner Error</h2>
           <p>Consecutive scan failures: <strong>${state._scanFailures}</strong></p>
           <p>Last error: ${e.message}</p>
           <p>Time: ${new Date().toISOString()}</p>
@@ -7106,7 +6895,7 @@ async function sendMorningBriefing() {
     // ── Header ───────────────────────────────────────────────────────────
     const header = `
       <div style="text-align:center;border-bottom:3px double #333;padding-bottom:12px;margin-bottom:12px">
-        <div style="font-family:Georgia,serif;font-size:22px;font-weight:bold;color:#111;letter-spacing:1px">ARGO-V1.1 TRADING DESK</div>
+        <div style="font-family:Georgia,serif;font-size:22px;font-weight:bold;color:#111;letter-spacing:1px">ARGO-V1.5 TRADING DESK</div>
         <div style="font-size:10px;color:#555;margin-top:4px;letter-spacing:1px">${dateStr.toUpperCase()}</div>
       </div>
       <div style="display:flex;gap:0;border:1px solid #ccc;margin-bottom:4px">
@@ -7279,7 +7068,7 @@ async function sendMorningBriefing() {
     // ── Footer ────────────────────────────────────────────────────────
     const footer = `
       <div style="border-top:3px double #333;margin-top:16px;padding-top:8px;text-align:center;font-size:9px;color:#999;letter-spacing:1px">
-        ARGO V1.1 · Entry window 9:30am–3:45pm ET · SPY/QQQ primary · Monthly options
+        ARGO V1.5 · Entry window 9:30am–3:45pm ET · SPY/QQQ primary · Monthly options
       </div>`;
 
     // ── Assemble ──────────────────────────────────────────────────────
@@ -7287,7 +7076,7 @@ async function sendMorningBriefing() {
       <div style="font-family:Georgia,serif;background:#ffffff;color:#111;padding:24px;max-width:620px;border:1px solid #ccc">
         ${header}
         ${divider}
-        ${agentNarrative ? sectionHead('ANALYST BRIEFING — ARGO-V1.1 INTELLIGENCE') + '<div style="font-family:Georgia,serif;font-size:13px;color:#111;line-height:1.7;white-space:pre-wrap;padding:8px 0">' + agentNarrative + '</div>' + divider : ''}
+        ${agentNarrative ? sectionHead('ANALYST BRIEFING — ARGO-V1.5 INTELLIGENCE') + '<div style="font-family:Georgia,serif;font-size:13px;color:#111;line-height:1.7;white-space:pre-wrap;padding:8px 0">' + agentNarrative + '</div>' + divider : ''}
         ${sectionHead('Open Positions — ' + positions.length + ' active')}
         ${posTable}
         ${triggersHTML}
@@ -7298,7 +7087,7 @@ async function sendMorningBriefing() {
       </div>`;
 
     await sendResendEmail(
-      `ARGO-V1.1 Desk — ${dateStr} | VIX ${state.vix} | ${positions.length} positions`,
+      `ARGO-V1.5 Desk — ${dateStr} | VIX ${state.vix} | ${positions.length} positions`,
       html
     );
     logEvent("scan", "Morning briefing email sent");
@@ -7321,7 +7110,7 @@ async function sendResendEmail(subject, html) {
         "Content-Type":  "application/json",
       },
       body: JSON.stringify({
-        from:    "ARGO-V1.1 <onboarding@resend.dev>",
+        from:    "ARGO-V1.5 <onboarding@resend.dev>",
         to:      [GMAIL_USER],
         subject,
         html,
@@ -7364,7 +7153,7 @@ function buildEmailHTML(type) {
   return `
 <!DOCTYPE html><html><body style="font-family:monospace;background:#07101f;color:#cce8ff;padding:20px;max-width:600px">
 <div style="background:#0a1628;border:1px solid #0d3050;border-radius:12px;padding:20px;margin-bottom:16px">
-  <h2 style="color:#00ff88;margin:0 0 4px">- ARGO-V1.1 ${type === "morning" ? "Morning Briefing" : "End of Day Report"}</h2>
+  <h2 style="color:#00ff88;margin:0 0 4px">- ARGO-V1.5 ${type === "morning" ? "Morning Briefing" : "End of Day Report"}</h2>
   <p style="color:#336688;margin:0;font-size:12px">${new Date().toLocaleDateString("en-US",{weekday:"long",month:"long",day:"numeric"})}</p>
 </div>
 
@@ -7418,22 +7207,22 @@ function buildEmailHTML(type) {
 ${type === "morning" ? `
 <div style="background:rgba(0,255,136,0.05);border:1px solid rgba(0,255,136,0.15);border-radius:8px;padding:14px">
   <h3 style="color:#00ff88;font-size:11px;margin:0 0 6px">TODAY'S OUTLOOK</h3>
-  <p style="font-size:12px;color:#cce8ff;margin:0">ARGO-V1.1 will scan every 10 seconds from 10:00 AM - 3:30 PM ET. VIX is currently ${state.vix} - ${state.vix<20?"normal conditions, full sizing":"reduced sizing active"}. ${state.positions.length} position${state.positions.length!==1?"s":""} currently open.</p>
+  <p style="font-size:12px;color:#cce8ff;margin:0">ARGO-V1.5 will scan every 10 seconds from 10:00 AM - 3:30 PM ET. VIX is currently ${state.vix} - ${state.vix<20?"normal conditions, full sizing":"reduced sizing active"}. ${state.positions.length} position${state.positions.length!==1?"s":""} currently open.</p>
 </div>` : `
 <div style="background:rgba(0,196,255,0.05);border:1px solid rgba(0,196,255,0.15);border-radius:8px;padding:14px">
   <h3 style="color:#00c4ff;font-size:11px;margin:0 0 6px">END OF DAY SUMMARY</h3>
-  <p style="font-size:12px;color:#cce8ff;margin:0">Market closed. ${state.todayTrades} trade${state.todayTrades!==1?"s":""} executed today. Daily P&L: ${parseFloat(daily)>=0?"+":""}$${daily}. ARGO-V1.1 resumes scanning tomorrow at 10:00 AM ET.</p>
+  <p style="font-size:12px;color:#cce8ff;margin:0">Market closed. ${state.todayTrades} trade${state.todayTrades!==1?"s":""} executed today. Daily P&L: ${parseFloat(daily)>=0?"+":""}$${daily}. ARGO-V1.5 resumes scanning tomorrow at 10:00 AM ET.</p>
 </div>`}
 
-<p style="font-size:10px;color:#336688;text-align:center;margin-top:16px">ARGO-V1.1 SPY Spread Trader - Paper Trading - Not financial advice</p>
+<p style="font-size:10px;color:#336688;text-align:center;margin-top:16px">ARGO-V1.5 SPY Spread Trader - Paper Trading - Not financial advice</p>
 </body></html>`;
 }
 
 async function sendEmail(type) {
   if (!RESEND_API_KEY || !GMAIL_USER) { logEvent("warn", "Email not configured"); return; }
   const subject = type === "morning"
-    ? `ARGO-V1.1 Morning Briefing - ${new Date().toLocaleDateString()}`
-    : `ARGO-V1.1 EOD Report - P&L ${(state.cash-state.dayStartCash)>=0?"+":""}$${(state.cash-state.dayStartCash).toFixed(2)}`;
+    ? `ARGO-V1.5 Morning Briefing - ${new Date().toLocaleDateString()}`
+    : `ARGO-V1.5 EOD Report - P&L ${(state.cash-state.dayStartCash)>=0?"+":""}$${(state.cash-state.dayStartCash).toFixed(2)}`;
   try {
     await sendResendEmail(subject, buildEmailHTML(type));
     logEvent("email", `${type} email sent to ${GMAIL_USER}`);
@@ -7459,7 +7248,7 @@ function buildMonthlyReport() {
   const bestTrade  = trades.length ? trades.reduce((b,t)=>t.pnl>b.pnl?t:b) : null;
   const worstTrade = trades.length ? trades.reduce((w,t)=>t.pnl<w.pnl?t:w) : null;
 
-  return `ARGO-V1.1 MONTHLY PERFORMANCE REPORT
+  return `ARGO-V1.5 MONTHLY PERFORMANCE REPORT
 ${"-".repeat(48)}
 Period:           ${state.monthStart} - ${new Date().toLocaleDateString()}
 
@@ -7608,29 +7397,8 @@ setInterval(() => {
 }, 30000);
 
 // ── F4: Alpaca account balance sync every 60 seconds ─────────────────────
-// Syncs both display (alpacaCash) and internal cash ledger (state.cash)
-// Keeps APEX aligned with actual Alpaca fills — prevents P&L drift
-setInterval(async () => {
-  if (!ALPACA_KEY) return;
-  try {
-    const acct = await alpacaGet("/account");
-    if (acct && acct.cash) {
-      const alpacaCash = parseFloat(acct.cash);
-      state.alpacaCash = alpacaCash; // always update display
-
-      // Also sync state.cash if no custom budget and drift > $5
-      const hasCustomBudget = state.customBudget && state.customBudget > 0 && state.customBudget !== MONTHLY_BUDGET;
-      if (!hasCustomBudget) {
-        const drift = Math.abs(alpacaCash - state.cash);
-        if (drift > 5.00) {
-          logEvent("scan", `[CASH SYNC] Alpaca: $${alpacaCash.toFixed(2)} | APEX: $${state.cash.toFixed(2)} | drift: $${drift.toFixed(2)} — syncing`);
-          state.cash = alpacaCash;
-        }
-      }
-      markDirty();
-    }
-  } catch(e) {} // silent — non-critical
-}, 60 * 1000); // every 60 seconds
+// ── Alpaca cash sync interval — calls syncCashFromAlpaca every 30s ─────────
+setInterval(syncCashFromAlpaca, 30 * 1000); // every 30 seconds
 
 // ── F2: Pre-market carry-over assessment (9:00 AM ET) ────────────────────
 // Checks overnight positions against pre-market conditions
@@ -7736,10 +7504,10 @@ async function premarketAssessment() {
       const watches = assessments.filter(a => a.recommendation === "WATCH");
       const holds  = assessments.filter(a => a.recommendation === "HOLD");
       const subject = assessments.length === 0
-        ? `ARGO-V1.1 Pre-Market — No Positions | ${macro.signal.toUpperCase()} | ${new Date().toLocaleDateString()}`
+        ? `ARGO-V1.5 Pre-Market — No Positions | ${macro.signal.toUpperCase()} | ${new Date().toLocaleDateString()}`
         : closes.length
-        ? `ARGO-V1.1 Pre-Market — ${closes.length} CLOSE, ${watches.length} WATCH | ${new Date().toLocaleDateString()}`
-        : `ARGO-V1.1 Pre-Market — All Clear | ${new Date().toLocaleDateString()}`;
+        ? `ARGO-V1.5 Pre-Market — ${closes.length} CLOSE, ${watches.length} WATCH | ${new Date().toLocaleDateString()}`
+        : `ARGO-V1.5 Pre-Market — All Clear | ${new Date().toLocaleDateString()}`;
 
       const rowColor = (rec) => rec === "CLOSE" ? "#cc0000" : rec === "WATCH" ? "#cc6600" : "#006600";
       const rows = assessments.map(a => `
@@ -7756,7 +7524,7 @@ async function premarketAssessment() {
       await sendResendEmail(subject, `
         <div style="font-family:Georgia,serif;background:#fff;color:#111;padding:24px;max-width:700px;border:1px solid #ccc">
           <div style="text-align:center;border-bottom:3px double #333;padding-bottom:12px;margin-bottom:16px">
-            <div style="font-size:20px;font-weight:bold;letter-spacing:1px">ARGO-V1.1 PRE-MARKET ASSESSMENT</div>
+            <div style="font-size:20px;font-weight:bold;letter-spacing:1px">ARGO-V1.5 PRE-MARKET ASSESSMENT</div>
             <div style="font-size:10px;color:#555;margin-top:4px;letter-spacing:1px">${new Date().toLocaleDateString('en-US',{weekday:'long',month:'long',day:'numeric'}).toUpperCase()} · 8:45AM ET</div>
           </div>
           <div style="display:flex;gap:0;border:1px solid #ccc;margin-bottom:16px">
@@ -7794,10 +7562,10 @@ async function premarketAssessment() {
           </table>
           <div style="border-top:1px solid #ccc;margin-top:12px;padding-top:8px;font-size:10px;color:#555">
             ${macro.triggers && macro.triggers.length ? '<strong>Macro signals:</strong> ' + macro.triggers.join(' · ') + '<br>' : ''}
-            <em>These are recommendations only. ARGO-V1.1 will manage exits automatically at open.</em>
+            <em>These are recommendations only. ARGO-V1.5 will manage exits automatically at open.</em>
           </div>
           <div style="border-top:3px double #333;margin-top:12px;padding-top:8px;text-align:center;font-size:9px;color:#999;letter-spacing:1px">
-            ARGO V1.1 · Market opens in ~45 minutes · Entry window 9:30am ET
+            ARGO V1.5 · Market opens in ~45 minutes · Entry window 9:30am ET
           </div>
         </div>`
       );
@@ -7948,8 +7716,8 @@ cron.schedule("*/15 12-21 * * 1-5", async () => {
   if (minsSinceLastScan > 15 && minsSinceLastScan < 999 && RESEND_API_KEY && GMAIL_USER) {
     logEvent("warn", `Health check: no scan in ${minsSinceLastScan.toFixed(0)} minutes - sending alert`);
     sendResendEmail(
-      "ARGO-V1.1 ALERT — Scanner may be down",
-      `<p>ARGO-V1.1 has not scanned in ${minsSinceLastScan.toFixed(0)} minutes during market hours.</p>
+      "ARGO-V1.5 ALERT — Scanner may be down",
+      `<p>ARGO-V1.5 has not scanned in ${minsSinceLastScan.toFixed(0)} minutes during market hours.</p>
              <p>Last scan: ${state.lastScan || "unknown"}</p>
              <p>Check Railway logs immediately.</p>`
     );
@@ -7979,7 +7747,7 @@ cron.schedule("0 13,14 * * 1", async () => {
   await saveStateNow();
   if (RESEND_API_KEY && GMAIL_USER) {
     sendResendEmail(
-      `ARGO-V1.1 Monthly Report - ${et.toLocaleDateString("en-US",{month:"long",year:"numeric"})}`,
+      `ARGO-V1.5 Monthly Report - ${et.toLocaleDateString("en-US",{month:"long",year:"numeric"})}`,
       `<pre style="font-family:monospace;background:#07101f;color:#cce8ff;padding:20px">${report}</pre>`
     );
   }
@@ -8200,9 +7968,9 @@ app.post("/api/test-email", async (req, res) => {
       return res.json({ ok: true, message: `Morning briefing sent to ${GMAIL_USER}` });
     }
     await sendResendEmail(
-      `ARGO-V1.1 Email Test - ${new Date().toLocaleTimeString()}`,
+      `ARGO-V1.5 Email Test - ${new Date().toLocaleTimeString()}`,
       `<div style="font-family:monospace;background:#07101f;color:#00ff88;padding:20px;border-radius:8px">
-        <h2>✅ ARGO-V1.1 Email Working</h2>
+        <h2>✅ ARGO-V1.5 Email Working</h2>
         <p style="color:#cce8ff">If you received this, Resend is configured correctly.</p>
         <p style="color:#336688">Recipient: ${GMAIL_USER}</p>
         <p style="color:#336688">Sent at: ${new Date().toISOString()}</p>
@@ -8241,6 +8009,15 @@ app.post("/api/dry-run-scan", async (req, res) => {
 });
 
 // Reset circuit breaker only — keeps positions and cash
+// Reset PDT day trade counter — use when trades were miscounted
+app.post("/api/reset-pdt", async (req, res) => {
+  const before = (state.dayTrades || []).length;
+  state.dayTrades = [];
+  await redisSave(state);
+  logEvent("warn", `[PDT] Day trade counter manually reset (had ${before} records) — 3/3 trades available`);
+  res.json({ ok: true, message: `PDT counter reset. ${before} records cleared.` });
+});
+
 app.post("/api/reset-circuit", async (req, res) => {
   state.circuitOpen       = true;
   state.weeklyCircuitOpen = true;
@@ -8602,7 +8379,7 @@ process.on("unhandledRejection", (reason, promise) => {
 // Boot sequence - load state from Redis then start server
 initState().then(() => {
   app.listen(PORT, () => {
-    console.log(`ARGO V1.1 running on port ${PORT}`);
+    console.log(`ARGO V1.5 running on port ${PORT}`);
     console.log(`Alpaca key:  ${ALPACA_KEY?"SET":"NOT SET"}`);
     console.log(`Gmail:       ${GMAIL_USER||"NOT SET"}`);
     console.log(`Resend:      ${RESEND_API_KEY?"SET ✅":"NOT SET — email disabled"}`);
