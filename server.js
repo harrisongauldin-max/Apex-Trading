@@ -2363,7 +2363,7 @@ ${headlineList.length > 0 ? 'Key headlines:\n' + headlineList.map((h,i) => `${i+
 What is your strategic assessment for today's trading session?`;
 
   try {
-    const raw = await callClaudeAgent(systemPrompt, userPrompt, 800, false);
+    const raw = await callClaudeAgent(systemPrompt, userPrompt, 500, false);
     if (!raw) return null;
     const parsed = JSON.parse(raw);
     if (!parsed.signal || !parsed.regime) return null;
@@ -2743,7 +2743,7 @@ ${headlines.slice(0,5).join('\n')}
 Use your tools to check current prices and signals for each position, then write the morning briefing.`;
 
   try {
-    const raw = await callClaudeAgent(systemPrompt, userPrompt, 1500, true);
+    const raw = await callClaudeAgent(systemPrompt, userPrompt, 600, true);
     if (!raw) return null;
     // Return as plain text — not JSON
     return raw;
@@ -4695,9 +4695,12 @@ function getTimeAdjustedStop(pos) {
 }
 
 // - Close Position -
-async function closePosition(ticker, reason, exitPremium = null) {
+async function closePosition(ticker, reason, exitPremium = null, contractSym = null) {
   try {
-    const idx = state.positions.findIndex(p => p.ticker === ticker);
+    // If contractSym provided, find exact position — handles multiple same-ticker positions
+    const idx = contractSym
+      ? state.positions.findIndex(p => p.contractSymbol === contractSym || p.buySymbol === contractSym)
+      : state.positions.findIndex(p => p.ticker === ticker);
     if (idx === -1) return;
     const pos  = state.positions[idx];
 
@@ -5105,8 +5108,8 @@ async function runAgentRescore() {
   // Rescore ALL open positions — different cadence by age:
   // Same-day positions: every 30 minutes (more volatile, need more attention)
   // Overnight positions: every hour
-  const SAME_DAY_INTERVAL   = 5 * 60 * 1000;  // 5 minutes — SPY/QQQ moves fast, rescore aggressively
-  const OVERNIGHT_INTERVAL  = 20 * 60 * 1000; // 20 minutes — catch overnight macro shifts faster
+  const SAME_DAY_INTERVAL   = 30 * 60 * 1000; // 30 minutes — reduces API cost significantly
+  const OVERNIGHT_INTERVAL  = 60 * 60 * 1000; // 60 minutes — overnight positions change slowly
 
   const toRescore = (state.positions || []).filter(p => {
     const daysOpen  = (now - new Date(p.openDate).getTime()) / 86400000;
@@ -5120,27 +5123,40 @@ async function runAgentRescore() {
   });
 
   if (!toRescore.length) return;
-  logEvent("scan", `[AGENT] Auto-rescore: ${toRescore.length} position(s)`);
+
+  // Skip positions where P&L hasn't moved enough to warrant a rescore — saves tokens
+  const needRescore = toRescore.filter(pos => {
+    const lastChg = pos._lastRescoreChg ?? null;
+    const curChg  = pos.premium > 0 ? (pos.currentPrice - pos.premium) / pos.premium : 0;
+    if (lastChg !== null && Math.abs(curChg - lastChg) < 0.08 && pos._liveRescore) {
+      logEvent("scan", `[AGENT] ${pos.ticker} rescore skipped — P&L stable at ${(curChg*100).toFixed(0)}%`);
+      return false;
+    }
+    pos._lastRescoreChg = curChg;
+    return true;
+  });
+
+  if (!needRescore.length) return;
+  logEvent("scan", `[AGENT] Auto-rescore: ${needRescore.length} position(s)`);
 
   // Mark as rescored — stagger same-day positions by 3 minutes each
   // Prevents all positions hitting 30-min mark simultaneously next cycle
-  toRescore.forEach((p, i) => {
+  needRescore.forEach((p, i) => {
     const daysOpen = (now - new Date(p.openDate).getTime()) / 86400000;
     if (daysOpen >= 1) {
       state._agentRescoreHour[p.ticker]   = currentHour;
     } else {
-      // Stagger by 3 minutes per position index so they don't all fire together
-      const stagger = i * 30 * 1000; // 30s stagger — only 2-3 positions max
+      const stagger = i * 30 * 1000;
       state._agentRescoreMinute[p.ticker] = now - stagger;
     }
   });
 
-  // Fire all in parallel
-  const results = await Promise.allSettled(toRescore.map(p => getAgentRescore(p)));
+  // Fire rescores in parallel — only positions that actually need it
+  const results = await Promise.allSettled(needRescore.map(p => getAgentRescore(p)));
 
   const toClose = [];
   results.forEach((result, i) => {
-    const pos = toRescore[i];
+    const pos = needRescore[i];
     if (result.status !== 'fulfilled' || !result.value) return;
     const rescore = result.value;
     pos._liveRescore = { ...rescore, updatedAt: new Date().toISOString() };
@@ -5921,8 +5937,11 @@ async function runScan() {
   const creditModeActive  = (isChoppyRegime || agentSaysCredit) && creditAllowedVIX && !dryRunMode;
   if (choppyDebitBlock) logEvent("filter", `Choppy regime — debit entries blocked${creditModeActive ? ", credit spread mode active" : ", VIX too low for credits"}`);
 
-  const callsAllowed = (isEntryWindow("call", true) && !finalHourBlock && !suppressBlock && !choppyDebitBlock) || dryRunMode;
-  const putsAllowed  = (isEntryWindow("put",  true) && !vixFallingPause && !spyGapUp && !postReversalBlock && !finalHourBlock && !suppressBlock && !macroBullish && !choppyDebitBlock) || dryRunMode;
+  const callsAllowed  = (isEntryWindow("call", true) && !finalHourBlock && !suppressBlock && !choppyDebitBlock) || dryRunMode;
+  const putsAllowed   = (isEntryWindow("put",  true) && !vixFallingPause && !spyGapUp && !postReversalBlock && !finalHourBlock && !suppressBlock && !macroBullish && !choppyDebitBlock) || dryRunMode;
+  // Credit spreads allowed even in choppy regime — that's the point of credit mode
+  const creditAllowed = creditModeActive && isEntryWindow("put", true) && !finalHourBlock && !suppressBlock && !vixFallingPause;
+  if (creditAllowed && !putsAllowed) logEvent("filter", `Debit puts blocked but credit spread mode active — will attempt credit entries`);
   if (macroBullish && !dryRunMode) logEvent("filter", `Macro bullish (${marketContext.macro?.signal}) — puts blocked`);
   if (vixFallingPause && !dryRunMode) logEvent("filter", "VIX falling — put entries paused this scan");
 
@@ -5961,7 +5980,7 @@ async function runScan() {
       }
     }
   }
-  if (!callsAllowed && !putsAllowed) return;
+  if (!callsAllowed && !putsAllowed && !creditAllowed) return;
 
   // [opening/final hour blocks moved above callsAllowed]
   if (state.circuitOpen === false || state.weeklyCircuitOpen === false) return;
@@ -6534,7 +6553,12 @@ async function runScan() {
     if (marketGapDirection === "up")   putScore  = 0; // gap up = calls only
     // Apply entry window constraint
     if (!callsAllowed) callScore = 0;
-    if (!putsAllowed)  putScore  = 0;
+    // Credit mode: allow put scoring even when debit puts blocked
+    if (!putsAllowed && !creditAllowed) putScore = 0;
+    else if (!putsAllowed && creditAllowed) {
+      // Only credit spread entries allowed — still score for credit
+      putSetup.tradeType = "credit";
+    }
     // In defensive mode - zero out call scores
     if (macro.mode === "defensive") callScore = 0;
 
@@ -6559,7 +6583,7 @@ async function runScan() {
     const agentSig         = (state._agentMacro || {}).signal || "neutral";
     const agentLastRun     = (state._agentMacro || {}).timestamp || null;
     const agentStaleMins   = agentLastRun ? (Date.now() - new Date(agentLastRun).getTime()) / 60000 : 999;
-    const agentStale       = !agentLastRun || agentStaleMins > 10;
+    const agentStale       = !agentLastRun || agentStaleMins > 30; // cache 30 min
     const isBearishHigh    = ["bearish","strongly bearish"].includes(agentSig) && agentConf === "high" && !agentStale;
     const isLowConfidence  = agentConf === "low" || agentStale;
     const agentMinScore    = isBearishHigh ? 65 : isLowConfidence ? 80 : MIN_SCORE;
@@ -6721,9 +6745,12 @@ async function runScan() {
         continue;
       }
     }
-    // ── AGENT PRE-ENTRY CHECK ────────────────────────────────────────────
-    if (!dryRunMode) {
-      const preCheck = await getAgentPreEntryCheck(stock, score, reasons, optionType, creditModeActive);
+    // ── AGENT PRE-ENTRY CHECK — only for borderline scores ──────────────
+    // Score 85+: high conviction — skip agent call, save tokens
+    // Score 70-84: borderline — agent validates the entry
+    // Credit mode: skip check (direction-neutral, agent not useful)
+    if (!dryRunMode && score < 85 && !creditModeActive) {
+      const preCheck = await getAgentPreEntryCheck(stock, score, reasons, optionType, false);
       if (!preCheck.approved && preCheck.confidence === "high") {
         logEvent("filter", `${stock.ticker} blocked by pre-entry agent check — ${preCheck.reason}`);
         continue;
@@ -7877,11 +7904,16 @@ app.get("/api/logs", (req, res) => {
 
 app.post("/api/scan",        async (req,res) => { res.json({ok:true}); runScan(); });
 app.post("/api/close/:tkr",  async (req,res) => {
-  const t = req.params.tkr.toUpperCase();
-  // Try to close by ticker first
-  const pos = state.positions.find(p => p.ticker === t);
+  const t          = req.params.tkr.toUpperCase();
+  const contractId = req.query.sym || null; // optional contractSymbol for precision
+  // Try to close by ticker (or exact contractSymbol if provided)
+  const pos = contractId
+    ? state.positions.find(p => p.contractSymbol === contractId || p.buySymbol === contractId)
+    : state.positions.find(p => p.ticker === t);
   if (pos) {
-    await closePosition(t, "manual");
+    // Manual close always executes — bypasses PDT scan hold
+    // (PDT hold is scan-loop logic, manual close is user intent)
+    await closePosition(pos.ticker, "manual", null, pos.contractSymbol || pos.buySymbol);
     return res.json({ ok: true });
   }
   // Position not in state — try to close directly in Alpaca by symbol
