@@ -5942,7 +5942,7 @@ async function runScan() {
   const macroBullish  = (marketContext.macro?.mode === "aggressive");
   const pdtCount      = countRecentDayTrades();
   const pdtBlocked    = !dryRunMode && pdtCount >= PDT_LIMIT;
-  if (pdtBlocked) logEvent("filter", `PDT limit reached (${pdtCount}/${PDT_LIMIT} day trades in 5 days) — no new entries`);
+  if (pdtBlocked) logEvent("filter", `PDT limit reached (${pdtCount}/${PDT_LIMIT} day trades in 5 days) — same-day exits blocked, new entries still allowed`);
 
   // Agent macro signal gates puts — replaces blunt SPY recovery detector
   // puts blocked only when agent explicitly says aggressive/bullish AND SPY gap is large
