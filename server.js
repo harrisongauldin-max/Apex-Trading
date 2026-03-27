@@ -673,6 +673,13 @@ async function initState() {
           if (drift > 1.00) {
             console.log(`[CASH SYNC] Alpaca: $${alpacaCash.toFixed(2)} | APEX: $${apexCash.toFixed(2)} | drift: $${drift.toFixed(2)} — syncing`);
             state.cash = alpacaCash;
+            // Large drift (>$500) = likely account reset — update baseline values
+            if (drift > 500) {
+              console.log(`[CASH SYNC] Large drift detected — resetting dayStartCash, weekStartCash, peakCash to $${alpacaCash.toFixed(2)}`);
+              state.dayStartCash  = alpacaCash;
+              state.weekStartCash = alpacaCash;
+              state.peakCash      = alpacaCash;
+            }
             await redisSave(state);
           } else {
             console.log(`[CASH SYNC] OK — $${alpacaCash.toFixed(2)}`);
@@ -864,7 +871,7 @@ async function getDynamicSignals(ticker, bars, intradayBars = null, realOptionsI
 
 // - Helpers -
 const fmt         = n  => "$" + parseFloat(n).toFixed(2);
-const totalCap    = () => (state.customBudget || MONTHLY_BUDGET) + (state.extraBudget || 0);
+const totalCap    = () => (state.customBudget || MONTHLY_BUDGET) + (state.extraBudget || 0) + (state.cashETFValue || 0);
 const openRisk    = () => state.positions.reduce((s,p) => s + p.cost * (p.partialClosed ? 0.5 : 1), 0);
 const heatPct     = () => openRisk() / totalCap();
 const realizedPnL = () => state.closedTrades.reduce((s,t) => s + t.pnl, 0);
@@ -1958,7 +1965,7 @@ function checkConcentrationRisk() {
 function getDrawdownProtocol() {
   const trades    = state.closedTrades || [];
   const peak      = state.peakCash || MONTHLY_BUDGET;
-  const current   = state.cash + (state.positions || []).reduce((s, p) => s + p.cost, 0);
+  const current   = state.cash + (state.positions || []).reduce((s, p) => s + p.cost, 0) + (state.cashETFValue || 0);
   const drawdown  = (current - peak) / peak * 100;
 
   // Only trigger if we have actual trade history
@@ -1985,7 +1992,7 @@ async function getBenchmarkComparison() {
     const spyBars = await getStockBars("SPY", 30);
     if (spyBars.length < 2) return null;
     const spyReturn   = (spyBars[spyBars.length-1].c - spyBars[0].c) / spyBars[0].c * 100;
-    const apexReturn  = ((state.cash + (state.positions||[]).reduce((s,p)=>s+p.cost,0)) - MONTHLY_BUDGET) / MONTHLY_BUDGET * 100;
+    const apexReturn  = ((state.cash + (state.positions||[]).reduce((s,p)=>s+p.cost,0) + (state.cashETFValue||0)) - MONTHLY_BUDGET) / MONTHLY_BUDGET * 100;
     const alpha       = apexReturn - spyReturn;
     return {
       spyReturn:  parseFloat(spyReturn.toFixed(2)),
@@ -4937,10 +4944,11 @@ async function closePosition(ticker, reason, exitPremium = null) {
   }
 
   // Peak cash tracking for drawdown
-  if (state.cash > state.peakCash) state.peakCash = state.cash;
+  const fullPortfolioValue = state.cash + openRisk() + (state.cashETFValue || 0);
+  if (fullPortfolioValue > state.peakCash) state.peakCash = fullPortfolioValue;
 
   // Circuit breaker checks -- use total portfolio value (cash + open positions)
-  const portfolioValue = state.cash + openRisk();
+  const portfolioValue = state.cash + openRisk() + (state.cashETFValue || 0);
   const dailyPnL  = portfolioValue - state.dayStartCash;
   const weeklyPnL = portfolioValue - state.weekStartCash;
 
@@ -7125,8 +7133,9 @@ function buildEmailHTML(type) {
   const trades = state.closedTrades;
   const wins   = trades.filter(t=>t.pnl>0);
   const heat   = (heatPct()*100).toFixed(0);
-  const daily  = (state.cash - state.dayStartCash).toFixed(2);
-  const weekly = (state.cash - state.weekStartCash).toFixed(2);
+  const curPortfolio = state.cash + openRisk() + (state.cashETFValue || 0);
+  const daily  = (curPortfolio - state.dayStartCash).toFixed(2);
+  const weekly = (curPortfolio - state.weekStartCash).toFixed(2);
 
   const posRows = state.positions.map(p => {
     const strikeLabel = p.isSpread ? `$${p.buyStrike}/$${p.sellStrike} ${p.optionType.toUpperCase()} SPRD` : `$${p.strike}${p.optionType === 'put' ? 'P' : 'C'}`;
