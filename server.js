@@ -628,8 +628,93 @@ async function runReconciliation() {
       await redisSave(state);
     }
 
+    // ── Re-pair existing individual legs into spreads ─────────────────
+    // Handles case where legs were previously reconciled individually
+    // but should be tracked as a spread pair
+    let pairsFound = 0;
+    const toRemove = new Set();
+    const toAdd    = [];
+
+    for (let i = 0; i < state.positions.length; i++) {
+      if (toRemove.has(i)) continue;
+      const a = state.positions[i];
+      if (a.isSpread) continue; // already a spread
+      if (!a.contractSymbol) continue;
+
+      for (let j = i + 1; j < state.positions.length; j++) {
+        if (toRemove.has(j)) continue;
+        const b = state.positions[j];
+        if (b.isSpread) continue;
+        if (!b.contractSymbol) continue;
+
+        // Same ticker, same expiry, same option type, ~$10 apart, opposite direction
+        const sameTickerExp = a.ticker === b.ticker && a.expDate === b.expDate && a.optionType === b.optionType;
+        const strikeA = a.strike || 0;
+        const strikeB = b.strike || 0;
+        const width   = Math.abs(strikeA - strikeB);
+        const widthOk = width >= 8 && width <= 22; // allow up to $20 wide
+        // One should be long (no sellSymbol), one short (has sellSymbol or negative cost)
+        const aIsShort = a.sellSymbol && !a.buySymbol;
+        const bIsShort = b.sellSymbol && !b.buySymbol;
+        const oppDir   = aIsShort !== bIsShort;
+
+        if (sameTickerExp && widthOk && oppDir) {
+          const buyLeg  = !aIsShort ? a : b;
+          const sellLeg = aIsShort  ? a : b;
+          const buyIdx  = !aIsShort ? i : j;
+          const sellIdx = aIsShort  ? i : j;
+          const netDebit = parseFloat((buyLeg.premium - sellLeg.premium).toFixed(2));
+          const curNet   = parseFloat(((buyLeg.currentPrice || buyLeg.premium) - (sellLeg.currentPrice || sellLeg.premium)).toFixed(2));
+
+          const merged = {
+            ticker:      a.ticker, optionType: a.optionType,
+            isSpread:    true,
+            buyStrike:   buyLeg.strike, sellStrike: sellLeg.strike,
+            spreadWidth: width,
+            buySymbol:   buyLeg.contractSymbol,
+            sellSymbol:  sellLeg.contractSymbol,
+            contractSymbol: buyLeg.contractSymbol,
+            premium:     Math.max(0.01, netDebit),
+            maxProfit:   parseFloat((width - Math.max(0.01, netDebit)).toFixed(2)),
+            maxLoss:     Math.max(0.01, netDebit),
+            contracts:   Math.max(buyLeg.contracts || 1, sellLeg.contracts || 1),
+            expDate:     a.expDate, expDays: a.expDays,
+            cost:        parseFloat((Math.max(0.01, netDebit) * 100 * Math.max(buyLeg.contracts||1, sellLeg.contracts||1)).toFixed(2)),
+            score:       Math.max(buyLeg.score || 75, sellLeg.score || 75),
+            reasons:     ['Re-paired from individual legs'],
+            openDate:    buyLeg.openDate || new Date().toISOString(),
+            currentPrice: Math.max(0.01, curNet),
+            peakPremium: Math.max(0.01, netDebit),
+            entryRSI: buyLeg.entryRSI || 50, entryMACD: 'neutral',
+            entryMomentum: 'steady', entryMacro: 'neutral',
+            entryThesisScore: 100, thesisHistory: [], agentHistory: [],
+            realData: true, vix: state.vix || 20, entryVIX: state.vix || 20,
+            expiryType: 'monthly', dteLabel: 'RECONCILED-SPREAD',
+            partialClosed: false, isMeanReversion: false, trailStop: null,
+            breakevenLocked: false, halfPosition: false,
+            target: parseFloat((Math.max(0.01, netDebit) * 1.5).toFixed(2)),
+            stop:   parseFloat((Math.max(0.01, netDebit) * 0.65).toFixed(2)),
+            takeProfitPct: 0.50, fastStopPct: 0.35,
+          };
+          toRemove.add(buyIdx);
+          toRemove.add(sellIdx);
+          toAdd.push(merged);
+          pairsFound++;
+          logEvent("warn", `[RECONCILE] Re-paired: ${a.ticker} $${buyLeg.strike}/$${sellLeg.strike} ${a.optionType.toUpperCase()} exp ${a.expDate}`);
+          break;
+        }
+      }
+    }
+
+    if (pairsFound > 0) {
+      state.positions = state.positions.filter((_, idx) => !toRemove.has(idx));
+      state.positions.push(...toAdd);
+      logEvent("warn", `[RECONCILE] Re-paired ${pairsFound} spread(s) from individual legs`);
+      await redisSave(state);
+    }
+
     state.lastReconcile    = new Date().toISOString();
-    state.reconcileStatus  = ghosts === 0 && orphans === 0 ? "ok" : "warning";
+    state.reconcileStatus  = ghosts === 0 && orphans === 0 && pairsFound === 0 ? "ok" : "warning";
     state.orphanCount      = orphans;
 
   } catch(e) {
