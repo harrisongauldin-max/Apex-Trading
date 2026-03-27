@@ -450,10 +450,10 @@ async function initState() {
     }
   }
 
-  // ── POSITION RECONCILIATION ─────────────────────────────────────────────
-  // Cross-reference APEX state with actual Alpaca positions on every startup
-  // Prevents ghost positions (APEX thinks open, Alpaca closed) and missed positions
-  if (ALPACA_KEY) {
+  // ── POSITION RECONCILIATION — runs on startup and every 5 minutes ────────
+  await runReconciliation();
+
+  if (false) { // legacy inline — replaced by runReconciliation()
     try {
       const alpacaPositions = await alpacaGet("/positions");
       if (alpacaPositions && Array.isArray(alpacaPositions)) {
@@ -562,7 +562,7 @@ async function initState() {
                   cost:             parseFloat((Math.max(0.01, netDebit) * 100 * Math.abs(buyLeg.qty)).toFixed(2)),
                   score:            75,
                   reasons:          ['Reconstructed spread from Alpaca reconciliation'],
-                  openDate:         new Date().toISOString(),
+                  openDate:         buyLeg.alpPos.created_at || new Date().toISOString(),
                   currentPrice:     Math.max(0.01, netDebit),
                   peakPremium:      Math.max(0.01, netDebit),
                   entryRSI: 50, entryMACD: 'neutral', entryMomentum: 'steady', entryMacro: 'neutral',
@@ -594,7 +594,7 @@ async function initState() {
                 contracts: Math.abs(p.qty), expDate: p.expDate, expDays: p.expDays,
                 cost: Math.abs(p.mktVal), score: 75,
                 reasons: ['Reconstructed individual leg from Alpaca reconciliation'],
-                openDate: new Date().toISOString(), peakPremium: p.avgEntry,
+                openDate: p.alpPos.created_at || new Date().toISOString(), peakPremium: p.avgEntry,
                 entryRSI: 50, entryMACD: 'neutral', entryMomentum: 'steady', entryMacro: 'neutral',
                 entryThesisScore: 100, thesisHistory: [], agentHistory: [],
                 realData: true, vix: state.vix || 20, entryVIX: state.vix || 20,
@@ -691,6 +691,177 @@ async function initState() {
     }
   }
 }
+
+// ── Standalone reconciliation — runs on startup AND every 5 minutes ─────────
+// Detects ghost positions (ARGO has them, Alpaca doesn't) and orphans (Alpaca
+// has them, ARGO doesn't). Reconstructs orphaned positions so ARGO can track
+// and exit them properly. Also syncs BIL ETF shares.
+async function runReconciliation() {
+  if (!ALPACA_KEY) return;
+  try {
+    const alpacaPositions = await alpacaGet("/positions");
+    if (!alpacaPositions || !Array.isArray(alpacaPositions)) return;
+
+    const alpacaSymbols = new Set(alpacaPositions.map(p => p.symbol));
+    let ghosts = 0, orphans = 0;
+
+    // ── Ghost detection — ARGO has position, Alpaca doesn't ──────────────
+    for (const pos of [...state.positions]) {
+      const symbols = [pos.contractSymbol, pos.buySymbol, pos.sellSymbol].filter(Boolean);
+      // A spread is a ghost only if BOTH legs are missing from Alpaca
+      const allMissing = symbols.length > 0 && symbols.every(s => !alpacaSymbols.has(s));
+      if (allMissing) {
+        logEvent("warn", `[RECONCILE] Ghost: ${pos.ticker} ${pos.contractSymbol||pos.buySymbol} — closed externally`);
+        const idx = state.positions.indexOf(pos);
+        state.positions.splice(idx, 1);
+        state.closedTrades.push({
+          ticker: pos.ticker, pnl: 0, pct: "0", reason: "reconcile-removed",
+          date: new Date().toLocaleDateString(), score: pos.score || 0, closeTime: Date.now(),
+          tradeType: pos.isCreditSpread ? "credit_spread" : pos.isSpread ? "debit_spread" : "naked",
+        });
+        ghosts++;
+      }
+    }
+
+    // ── Orphan detection — Alpaca has position, ARGO doesn't ─────────────
+    const orphanedAlpaca = alpacaPositions.filter(alpPos => {
+      if (!/^[A-Z]+\d{6}[CP]\d{8}$/.test(alpPos.symbol)) return false;
+      return !state.positions.find(p =>
+        p.contractSymbol === alpPos.symbol ||
+        p.buySymbol      === alpPos.symbol ||
+        p.sellSymbol     === alpPos.symbol
+      );
+    });
+
+    if (orphanedAlpaca.length > 0) {
+      orphans = orphanedAlpaca.length;
+      // Parse each orphan
+      const parsed = orphanedAlpaca.map(alpPos => {
+        const sym      = alpPos.symbol;
+        const isCall   = /\d{6}C\d{8}$/.test(sym);
+        const optType  = isCall ? 'call' : 'put';
+        const strikeM  = sym.match(/[CP](\d{8})$/);
+        const strike   = strikeM ? parseFloat(strikeM[1]) / 1000 : 0;
+        const expM     = sym.match(/(\d{2})(\d{2})(\d{2})[CP]/);
+        const expDate  = expM
+          ? new Date(`20${expM[1]}-${expM[2]}-${expM[3]}`).toLocaleDateString('en-US', {month:'short',day:'2-digit',year:'numeric'})
+          : '';
+        const expDays  = expDate ? Math.max(1, Math.round((new Date(expDate) - new Date()) / 86400000)) : 30;
+        const qty      = parseInt(alpPos.qty || 1);
+        const avgEntry = parseFloat(alpPos.avg_entry_price || 0);
+        const mktVal   = parseFloat(alpPos.market_value || 0);
+        const ticker   = sym.match(/^([A-Z]+)\d/)?.[1] || 'SPY';
+        return { sym, ticker, optType, strike, expDate, expDays, qty, avgEntry, mktVal, alpPos };
+      });
+
+      // Pair spread legs: long + short, same ticker+expiry, ~$10 apart
+      const used = new Set();
+      for (let i = 0; i < parsed.length; i++) {
+        if (used.has(i)) continue;
+        const a = parsed[i];
+        let paired = false;
+        for (let j = i + 1; j < parsed.length; j++) {
+          if (used.has(j)) continue;
+          const b = parsed[j];
+          const sameTickerExp = a.ticker === b.ticker && a.expDate === b.expDate && a.optType === b.optType;
+          const widthOk = Math.abs(a.strike - b.strike) >= 8 && Math.abs(a.strike - b.strike) <= 12;
+          const oppDir  = (a.qty > 0 && b.qty < 0) || (a.qty < 0 && b.qty > 0);
+          if (sameTickerExp && widthOk && oppDir) {
+            const longLeg  = a.qty > 0 ? a : b;
+            const shortLeg = a.qty > 0 ? b : a;
+            const buyLeg   = a.optType === 'put'
+              ? (longLeg.strike > shortLeg.strike ? longLeg : shortLeg)
+              : (longLeg.strike < shortLeg.strike ? longLeg : shortLeg);
+            const sellLeg  = buyLeg === longLeg ? shortLeg : longLeg;
+            const netDebit = parseFloat((buyLeg.avgEntry - Math.abs(sellLeg.avgEntry)).toFixed(2));
+            const spreadWidth = Math.abs(buyLeg.strike - sellLeg.strike);
+            state.positions.push({
+              ticker: a.ticker, optionType: a.optType,
+              isSpread: true, buyStrike: buyLeg.strike, sellStrike: sellLeg.strike,
+              spreadWidth, buySymbol: buyLeg.sym, sellSymbol: sellLeg.sym,
+              contractSymbol: buyLeg.sym,
+              premium: Math.max(0.01, netDebit), maxProfit: parseFloat((spreadWidth - Math.max(0.01, netDebit)).toFixed(2)),
+              maxLoss: Math.max(0.01, netDebit), contracts: Math.abs(buyLeg.qty),
+              expDate: a.expDate, expDays: a.expDays,
+              cost: parseFloat((Math.max(0.01, netDebit) * 100 * Math.abs(buyLeg.qty)).toFixed(2)),
+              score: 75, reasons: ['Reconstructed spread from Alpaca reconciliation'],
+              openDate: buyLeg.alpPos.created_at || new Date().toISOString(),
+              currentPrice: Math.max(0.01, netDebit), peakPremium: Math.max(0.01, netDebit),
+              entryRSI: 50, entryMACD: 'neutral', entryMomentum: 'steady', entryMacro: 'neutral',
+              entryThesisScore: 100, thesisHistory: [], agentHistory: [],
+              realData: true, vix: state.vix || 20, entryVIX: state.vix || 20,
+              expiryType: 'monthly', dteLabel: 'RECONCILED-SPREAD',
+              partialClosed: false, isMeanReversion: false, trailStop: null,
+              breakevenLocked: false, halfPosition: false,
+              target: parseFloat((Math.max(0.01, netDebit) * 1.5).toFixed(2)),
+              stop: parseFloat((Math.max(0.01, netDebit) * 0.65).toFixed(2)),
+              takeProfitPct: 0.50, fastStopPct: 0.35,
+            });
+            used.add(i); used.add(j); paired = true;
+            logEvent("warn", `[RECONCILE] Reconstructed SPREAD: ${a.ticker} \$${buyLeg.strike}/\$${sellLeg.strike} ${a.optType.toUpperCase()} exp ${a.expDate}`);
+            break;
+          }
+        }
+        if (!paired) {
+          const p = a;
+          const curP = p.mktVal > 0 ? p.mktVal / (Math.abs(p.qty) * 100) : p.avgEntry;
+          state.positions.push({
+            ticker: p.ticker, optionType: p.optType, isSpread: false,
+            strike: p.strike, contractSymbol: p.sym,
+            buySymbol: p.qty > 0 ? p.sym : null,
+            sellSymbol: p.qty < 0 ? p.sym : null,
+            premium: p.avgEntry, currentPrice: curP,
+            contracts: Math.abs(p.qty), expDate: p.expDate, expDays: p.expDays,
+            cost: Math.abs(p.mktVal) || parseFloat((p.avgEntry * 100 * Math.abs(p.qty)).toFixed(2)),
+            score: 75, reasons: ['Reconstructed from Alpaca reconciliation'],
+            openDate: p.alpPos.created_at || new Date().toISOString(), peakPremium: p.avgEntry,
+            entryRSI: 50, entryMACD: 'neutral', entryMomentum: 'steady', entryMacro: 'neutral',
+            entryThesisScore: 100, thesisHistory: [], agentHistory: [],
+            realData: true, vix: state.vix || 20, entryVIX: state.vix || 20,
+            expiryType: 'monthly', dteLabel: 'RECONCILED',
+            partialClosed: false, isMeanReversion: false, trailStop: null,
+            breakevenLocked: false, halfPosition: false,
+            target: parseFloat((p.avgEntry * 1.5).toFixed(2)),
+            stop: parseFloat((p.avgEntry * 0.65).toFixed(2)),
+            takeProfitPct: 0.50, fastStopPct: 0.35,
+          });
+          used.add(i);
+          logEvent("warn", `[RECONCILE] Reconstructed leg: ${p.ticker} ${p.optType.toUpperCase()} \$${p.strike} exp ${p.expDate} | ${Math.abs(p.qty)}x @ \$${p.avgEntry}`);
+        }
+      }
+    }
+
+    // ── BIL sync ─────────────────────────────────────────────────────────
+    const bilPos = alpacaPositions.find(p => p.symbol === CASH_ETF);
+    if (bilPos) {
+      const realShares = parseInt(bilPos.qty);
+      const realValue  = parseFloat(bilPos.market_value);
+      if (realShares !== state.cashETFShares) {
+        logEvent("warn", `[RECONCILE] BIL sync: ${state.cashETFShares} → ${realShares} shares`);
+        state.cashETFShares = realShares;
+        state.cashETFValue  = realValue;
+        state.cashETFPrice  = parseFloat(bilPos.current_price || 91);
+      }
+    } else if (state.cashETFShares > 0) {
+      logEvent("warn", `[RECONCILE] BIL ghost cleared`);
+      state.cashETFShares = 0;
+      state.cashETFValue  = 0;
+    }
+
+    if (ghosts > 0 || orphans > 0) {
+      logEvent("warn", `[RECONCILE] ${ghosts} ghost(s) removed, ${orphans} orphan(s) reconstructed`);
+      await redisSave(state);
+    }
+
+    state.lastReconcile    = new Date().toISOString();
+    state.reconcileStatus  = ghosts === 0 && orphans === 0 ? "ok" : "warning";
+    state.orphanCount      = orphans;
+
+  } catch(e) {
+    logEvent("error", `[RECONCILE] Failed: ${e.message}`);
+  }
+}
+
 
 function logEvent(type, message) {
   const entry = { time: new Date().toISOString(), type, message };
@@ -5375,6 +5546,7 @@ async function runScan() {
     // Cap at 2500 entries (~8 trading days at 5-min intervals)
     if (state.portfolioSnapshots.length > 2500) state.portfolioSnapshots = state.portfolioSnapshots.slice(-2500);
     runAgentRescore();        // parallel hourly rescore for overnight positions (non-blocking)
+    runReconciliation().catch(e => logEvent("error", `[RECONCILE] 5-min sync failed: ${e.message}`)); // non-blocking
   }
 
 
