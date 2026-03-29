@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8"/>
 <meta name="viewport" content="width=device-width,initial-scale=1"/>
-<title>ARGO-V1.5 v4.0 — Professional Options Agent</title>
+<title>ARGO V2.0 v2.0 — Professional Options Agent</title>
 <style>
 :root{
   --bg:#07101f;--panel:#0a1628;--border:#0d3050;--text:#cce8ff;--muted:#336688;
@@ -14,7 +14,7 @@
 body{background:var(--bg);color:var(--text);font-family:var(--font);font-size:13px;min-height:100vh}
 .header{background:linear-gradient(135deg,#0a1628,#071020);border-bottom:1px solid var(--border);padding:14px 20px;display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px}
 .logo{display:flex;align-items:center;gap:10px}
-.logo-icon{width:36px;height:36px;background:linear-gradient(135deg,var(--green),var(--blue));border-radius:8px;display:flex;align-items:center;justify-content:center;font-weight:900;font-size:14px;color:#000}
+.logo-icon{width:36px;height:36px;background:linear-gradient(135deg,var(--green),var(--blue));border-radius:8px;display:flex;align-items:center;justify-content:center;padding:4px}
 .logo-text h1{font-size:16px;color:var(--green);letter-spacing:3px}
 .logo-text p{font-size:10px;color:var(--muted);letter-spacing:1px}
 .header-right{display:flex;align-items:center;gap:12px;flex-wrap:wrap}
@@ -110,10 +110,25 @@ input[type=text]:focus{border-color:var(--blue)}
 
 <div class="header">
   <div class="logo">
-    <div class="logo-icon">⚓</div>
+    <div class="logo-icon">
+      <svg width="22" height="22" viewBox="0 0 22 22" fill="none" xmlns="http://www.w3.org/2000/svg">
+        <!-- Bridge towers -->
+        <rect x="3" y="6" width="2.5" height="12" fill="#000" rx="0.5"/>
+        <rect x="16.5" y="6" width="2.5" height="12" fill="#000" rx="0.5"/>
+        <!-- Bridge deck (road) -->
+        <rect x="1" y="15" width="20" height="2" fill="#000" rx="0.5"/>
+        <!-- Main cables left arc -->
+        <path d="M4.25 6 Q11 2 17.75 6" stroke="#000" stroke-width="1.5" fill="none" stroke-linecap="round"/>
+        <!-- Vertical suspenders -->
+        <line x1="7"  y1="4.8" x2="7"  y2="15" stroke="#000" stroke-width="1" stroke-linecap="round"/>
+        <line x1="10" y1="3.6" x2="10" y2="15" stroke="#000" stroke-width="1" stroke-linecap="round"/>
+        <line x1="12" y1="3.6" x2="12" y2="15" stroke="#000" stroke-width="1" stroke-linecap="round"/>
+        <line x1="15" y1="4.8" x2="15" y2="15" stroke="#000" stroke-width="1" stroke-linecap="round"/>
+      </svg>
+    </div>
     <div class="logo-text">
-      <h1>ARGO-V1.5</h1>
-      <p>PROFESSIONAL OPTIONS AGENT v4.0 · ALPACA PAPER</p>
+      <h1>ARGO V2.0</h1>
+      <p>PROFESSIONAL OPTIONS AGENT v2.0 · ALPACA PAPER</p>
     </div>
   </div>
   <div class="header-right">
@@ -447,7 +462,7 @@ input[type=text]:focus{border-color:var(--blue)}
 
   <div class="section-title">Open Positions</div>
   <div id="positions-wrap">
-    <div class="no-data">No open positions. ARGO-V1.5 will enter trades during market hours (Puts 9:45AM / Calls 10AM–3:30PM ET).</div>
+    <div class="no-data">No open positions. ARGO V2.0 will enter trades during market hours (Puts 9:45AM / Calls 10AM–3:30PM ET).</div>
   </div>
 
   <div class="section-title">Portfolio Greeks</div>
@@ -668,7 +683,7 @@ input[type=text]:focus{border-color:var(--blue)}
 <div id="tab-journal" class="content">
   <div class="section-title" style="margin-top:0">Trade Journal — Entry Reasoning</div>
   <div id="journal-wrap">
-    <div class="no-data">No journal entries yet. ARGO-V1.5 logs detailed reasoning for every trade.</div>
+    <div class="no-data">No journal entries yet. ARGO V2.0 logs detailed reasoning for every trade.</div>
   </div>
 </div>
 
@@ -693,7 +708,7 @@ input[type=text]:focus{border-color:var(--blue)}
   </div>
 
   <div class="alert alert-orange" style="margin-bottom:12px">
-    ARGO-V1.5 auto-buys stocks when monthly options profit exceeds $1,000. 20% of profits above threshold are allocated to high-scoring stocks (85+). Stop loss: -15% from entry.
+    ARGO V2.0 auto-buys stocks when monthly options profit exceeds $1,000. 20% of profits above threshold are allocated to high-scoring stocks (85+). Stop loss: -15% from entry.
   </div>
 
   <div class="section-title">Stock Holdings</div>
@@ -1074,7 +1089,7 @@ function renderMetrics() {
     document.getElementById('alpaca-cash').textContent = fmt(state.alpacaCash);
     const customBudget = state.customBudget && state.customBudget > 0 ? state.customBudget : null;
     document.getElementById('alpaca-cash-sub').textContent = customBudget
-      ? `ARGO-V1.5 using ${fmt(customBudget)} of this`
+      ? `ARGO V2.0 using ${fmt(customBudget)} of this`
       : 'paper balance · synced on boot';
   }
   document.getElementById('heat').style.color = heat > 50 ? 'var(--red)' : heat > 35 ? 'var(--orange)' : 'var(--green)';
@@ -1192,7 +1207,7 @@ function renderMetrics() {
   if (alphaEl && bm) {
     alphaEl.textContent = (bm.alpha >= 0 ? "+" : "") + bm.alpha + "%";
     alphaEl.style.color = bm.alpha >= 0 ? "var(--green)" : "var(--red)";
-    document.getElementById("benchmark-sub").textContent = `ARGO-V1.5:${bm.apexReturn >= 0 ? "+" : ""}${bm.apexReturn}% SPY:${bm.spyReturn >= 0 ? "+" : ""}${bm.spyReturn}%`;
+    document.getElementById("benchmark-sub").textContent = `ARGO V2.0:${bm.apexReturn >= 0 ? "+" : ""}${bm.apexReturn}% SPY:${bm.spyReturn >= 0 ? "+" : ""}${bm.spyReturn}%`;
   }
 
   // Drawdown protocol
@@ -1235,10 +1250,20 @@ function renderMetrics() {
   const irEl = document.getElementById("info-ratio");
   if (irEl) { irEl.textContent = state.informationRatio || "--"; irEl.style.color = (state.informationRatio||0) > 0.5 ? "var(--green)" : (state.informationRatio||0) > 0 ? "var(--gold)" : "var(--red)"; }
   const rorEl = document.getElementById("ror");
-  const ror   = state.riskOfRuin || { probability: 0, message: "--" };
-  if (rorEl) { rorEl.textContent = ror.probability + "%"; rorEl.style.color = ror.probability < 5 ? "var(--green)" : ror.probability < 20 ? "var(--gold)" : "var(--red)"; }
+  // riskOfRuin is always an object { probability, message }
+  const rorData = (state.riskOfRuin && typeof state.riskOfRuin === 'object')
+    ? state.riskOfRuin
+    : { probability: null, message: "Need 5+ trades" };
+  const rorPct = rorData.probability !== null && !isNaN(rorData.probability)
+    ? rorData.probability + "%"
+    : "--";
+  if (rorEl) {
+    rorEl.textContent = rorPct;
+    const p = rorData.probability || 0;
+    rorEl.style.color = p < 5 ? "var(--green)" : p < 20 ? "var(--gold)" : "var(--red)";
+  }
   const rorMsg = document.getElementById("ror-msg");
-  if (rorMsg) rorMsg.textContent = ror.message || "--";
+  if (rorMsg) rorMsg.textContent = rorData.message || "--";
 
   const gm = state.globalMarket || { signal: "neutral", qqqChg: 0, iwmChg: 0, eemChg: 0 };
   const gmEl = document.getElementById("global-signal");
@@ -1426,7 +1451,7 @@ function renderPositions() {
   const wrap = document.getElementById('positions-wrap');
   const positions = state.positions || [];
   if (!positions.length) {
-    wrap.innerHTML = '<div class="no-data">No open positions. ARGO-V1.5 will enter trades during market hours (9:30AM–3:45PM ET). SPY/QQQ spreads primary.</div>';
+    wrap.innerHTML = '<div class="no-data">No open positions. ARGO V2.0 will enter trades during market hours (9:30AM–3:45PM ET). SPY/QQQ spreads primary.</div>';
     return;
   }
   wrap.innerHTML = positions.map(p => {
@@ -1841,7 +1866,7 @@ async function triggerDryRun() {
     const resp = await fetch('/api/dry-run-scan', {method:'POST'});
     const data = await resp.json();
     await fetchState();
-    alert('Dry run complete! Check the Server Log tab — look for [DRYRUN] entries showing what ARGO-V1.5 would trade.');
+    alert('Dry run complete! Check the Server Log tab — look for [DRYRUN] entries showing what ARGO V2.0 would trade.');
   } catch(e) {
     alert('Dry run error: ' + e.message);
   } finally {
@@ -1869,10 +1894,10 @@ async function resetPDT() {
 }
 
 async function resetCircuit() {
-  if (!confirm('Reset circuit breaker? ARGO-V1.5 will resume scanning and entering new trades.')) return;
+  if (!confirm('Reset circuit breaker? ARGO V2.0 will resume scanning and entering new trades.')) return;
   const resp = await fetch('/api/reset-circuit', {method:'POST'});
   const data = await resp.json();
-  alert('Circuit breaker reset. ARGO-V1.5 is scanning again.');
+  alert('Circuit breaker reset. ARGO V2.0 is scanning again.');
   await fetchState();
 }
 
@@ -1881,7 +1906,7 @@ async function fullReset() {
   if (!confirm('This cannot be undone. Confirm full reset?')) return;
   const resp = await fetch('/api/full-reset', {method:'POST'});
   const data = await resp.json();
-  alert('Full reset complete. ARGO-V1.5 restarted with $10,000.');
+  alert('Full reset complete. ARGO V2.0 restarted with $10,000.');
   location.reload();
 }
 
@@ -1984,13 +2009,13 @@ async function downloadDayReport() {
     const url  = URL.createObjectURL(blob);
     const a    = document.createElement('a');
     a.href     = url;
-    a.download = `ARGO-V1.5_DayReport_${today}.json`;
+    a.download = `ARGO V2.0_DayReport_${today}.json`;
     a.click();
     URL.revokeObjectURL(url);
 
     // ── Also show quick summary in alert ─────────────────────────────────
     alert(
-      `ARGO-V1.5 Day Report — ${today}\n\n` +
+      `ARGO V2.0 Day Report — ${today}\n\n` +
       `Trades: ${trades.length} | Win Rate: ${winRate}%\n` +
       `Total P&L: $${totalPnL.toFixed(2)}\n` +
       `Best: $${bigWin} | Worst: $${bigLoss}\n` +
@@ -1998,7 +2023,7 @@ async function downloadDayReport() {
       `Exit Reasons:\n` +
       Object.entries(byReason).map(([r,v]) => `  ${r}: ${v.count}x ($${v.pnl.toFixed(2)})`).join('\n') +
       `\n\nOpen Positions: ${openPos.length}\n` +
-      `Report saved as ARGO-V1.5_DayReport_${today}.json`
+      `Report saved as ARGO V2.0_DayReport_${today}.json`
     );
   } catch(e) {
     alert('Error generating report: ' + e.message);
