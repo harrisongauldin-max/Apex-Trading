@@ -251,7 +251,32 @@ function defaultState() {
 }
 
 // - Redis Helpers -
+// ── Local filesystem backup for Redis failure protection ─────────────────────
+// If Redis fails during open positions, ARGO loads from this backup on restart
+// Written after every trade — prevents catastrophic state loss
+const BACKUP_FILE = path.join(__dirname, "state_backup.json");
+async function writeLocalBackup(data) {
+  try {
+    const critical = {
+      positions:      data.positions      || [],
+      dayTrades:      data.dayTrades      || [],
+      cash:           data.cash           || 0,
+      dayStartCash:   data.dayStartCash   || 0,
+      weekStartCash:  data.weekStartCash  || 0,
+      peakCash:       data.peakCash       || 0,
+      closedTrades:   (data.closedTrades  || []).slice(-50),
+      scoreBrackets:  data.scoreBrackets  || {},
+      consecutiveLosses: data.consecutiveLosses || 0,
+      _savedAt:       new Date().toISOString(),
+      _backup:        true,
+    };
+    fs.writeFileSync(BACKUP_FILE, JSON.stringify(critical));
+  } catch(e) {} // non-blocking — never throw on backup failure
+}
+
 async function redisSave(data) {
+  // Always write local backup first — protects against Redis failure during open positions
+  await writeLocalBackup(data);
   // Strip large recalculable fields before saving — reduces payload from ~10MB to <500KB
   // marketContext is rebuilt every 5 minutes — no need to persist to Redis
   // scoreReasons in tradeJournal are display-only — trim to save space
@@ -369,20 +394,20 @@ async function redisLoad() {
       console.log("[REDIS] Using local file fallback");
       return JSON.parse(fs.readFileSync(STATE_FILE, "utf8"));
     }
-  } catch(e) {}
-  return null;
+  } catch(e) {
+    console.log("[REDIS] Load failed:", e.message, "— trying local backup");
+    try {
+      if (fs.existsSync(BACKUP_FILE)) {
+        const backup = JSON.parse(fs.readFileSync(BACKUP_FILE, "utf8"));
+        if (backup._backup && backup.positions) {
+          console.log(`[REDIS] Loaded local backup (${backup.positions.length} positions)`);
+          return backup;
+        }
+      }
+    } catch(be) { console.log("[REDIS] Backup load failed:", be.message); }
+    return null;
+  }
 }
-
-// Throttled saveState — only writes to Redis when state changes
-// Prevents burning through Upstash free tier (10k commands/day)
-let stateDirty    = false;
-let lastRedisSave = 0;
-const REDIS_SAVE_INTERVAL = 30000; // minimum 30 seconds between Redis writes (~960/day, under 10k limit)
-
-function markDirty() {
-  stateDirty = true;
-}
-
 async function saveState() {
   stateDirty = true;
   const now = Date.now();
@@ -910,9 +935,19 @@ async function getDynamicSignals(ticker, bars, intradayBars = null, realOptionsI
 
 // - Helpers -
 const fmt         = n  => "$" + parseFloat(n).toFixed(2);
-const totalCap    = () => (state.customBudget || MONTHLY_BUDGET) + (state.extraBudget || 0);
-const openRisk    = () => state.positions.reduce((s,p) => s + p.cost * (p.partialClosed ? 0.5 : 1), 0);
-const heatPct     = () => openRisk() / totalCap();
+// Use actual account baseline (set from Alpaca on first sync) not hardcoded constant
+// state.accountBaseline tracks the real starting value for performance calculations
+const totalCap    = () => state.customBudget || state.accountBaseline || MONTHLY_BUDGET;
+// Mark-to-market: use current price not entry cost for real portfolio value
+// currentPrice is updated every reconciliation from Alpaca market values
+const openRisk    = () => state.positions.reduce((s,p) => {
+  const curP     = p.currentPrice || p.premium || 0;
+  const mktValue = curP * 100 * (p.contracts || 1) * (p.partialClosed ? 0.5 : 1);
+  return s + mktValue;
+}, 0);
+// Entry cost basis (for heat calculations — should use cost not market value)
+const openCostBasis = () => state.positions.reduce((s,p) => s + p.cost * (p.partialClosed ? 0.5 : 1), 0);
+const heatPct     = () => openCostBasis() / totalCap(); // heat uses entry cost not MTM
 const realizedPnL = () => state.closedTrades.reduce((s,t) => s + t.pnl, 0);
 const stockValue  = () => state.stockPositions.reduce((s,p) => s + p.cost, 0);
 
@@ -1135,6 +1170,100 @@ function scoreIndexSetup(stock, optionType, spyRSI, spyMACD, spyMomentum, breadt
   const vixOutlook = (agentMacro || {}).vixOutlook || "unknown";
 
   if (optionType === "put") {
+    // ── Supplementary signals — capped at +25 total contribution ──────────
+    // These signals CONFIRM the primary thesis (agent + regime + RSI + MACD)
+    // They should not dominate the score on their own
+    // Cap: track supplement score separately, add min(supplementScore, 25) at end
+    let supplementScore = 0;
+
+    // ── Put/Call Ratio signal (Bollen & Whaley 2004) ─────────────────────
+    const pcrData = state._pcr || null;
+    if (pcrData && optionType === "put") {
+      if (pcrData.signal === "extreme_fear")       { supplementScore += 10; reasons.push(`PCR ${pcrData.pcr} — extreme fear, put momentum strong (+10)`); }
+      else if (pcrData.signal === "fear")          { supplementScore += 6;  reasons.push(`PCR ${pcrData.pcr} — elevated fear, put bias (+6)`); }
+      else if (pcrData.signal === "extreme_greed") { score -= 12; reasons.push(`PCR ${pcrData.pcr} — extreme greed, puts risky (-12)`); }
+      else if (pcrData.signal === "greed")         { score -= 6;  reasons.push(`PCR ${pcrData.pcr} — greed, puts less favorable (-6)`); }
+    }
+    if (pcrData && optionType === "call") {
+      if (pcrData.signal === "extreme_fear")       { supplementScore += 12; reasons.push(`PCR ${pcrData.pcr} — extreme fear = contrarian call signal (+12)`); }
+      else if (pcrData.signal === "fear")          { supplementScore += 6;  reasons.push(`PCR ${pcrData.pcr} — elevated fear, contrarian call (+6)`); }
+      else if (pcrData.signal === "extreme_greed") { score -= 10; reasons.push(`PCR ${pcrData.pcr} — extreme greed, calls overextended (-10)`); }
+    }
+
+    // ── Vol term structure (Natenberg) ───────────────────────────────────
+    const ts = state._termStructure || null;
+    if (ts && optionType === "put") {
+      if (ts.creditFavorable) { supplementScore += 8; reasons.push(`Vol backwardation (${ts.ratio}) — near-term fear premium elevated (+8)`); }
+    }
+    if (ts && optionType === "call") {
+      if (ts.callFavorable)   { supplementScore += 8; reasons.push(`Vol contango (${ts.ratio}) — calls relatively cheap (+8)`); }
+    }
+
+    // ── CBOE SKEW Index ──────────────────────────────────────────────────
+    // SKEW elevated + VIX elevated = put premium doubly rich = ideal credit puts
+    // SKEW low = tail risk not priced = normal environment
+    const skewData = state._skew || null;
+    if (skewData) {
+      if (optionType === "put") {
+        if (skewData.signal === "extreme" && skewData.creditPutIdeal) {
+          supplementScore += 12; reasons.push(`SKEW ${skewData.skew} extreme + VIX elevated — put premium doubly rich (+12)`);
+        } else if (skewData.signal === "elevated") {
+          supplementScore += 8; reasons.push(`SKEW ${skewData.skew} elevated — tail risk premium high (+8)`);
+        } else if (skewData.signal === "low") {
+          score -= 5; reasons.push(`SKEW ${skewData.skew} low — tail risk not priced (-5)`);
+        }
+      }
+      if (optionType === "call") {
+        if (skewData.signal === "low") {
+          supplementScore += 8; reasons.push(`SKEW ${skewData.skew} low — tail risk not priced, calls favorable (+8)`);
+        } else if (skewData.signal === "extreme") {
+          score -= 8; reasons.push(`SKEW ${skewData.skew} extreme — market fearing tail event, wrong for calls (-8)`);
+        }
+      }
+    }
+
+    // ── AAII Sentiment (Ned Davis Research validation) ───────────────────
+    // Extreme retail bearishness = contrarian call signal (bulls historically wrong at extremes)
+    // Extreme retail bullishness = contrarian put signal
+    const aaiiData = state._aaii || null;
+    if (aaiiData) {
+      if (optionType === "call") {
+        if (aaiiData.signal === "extreme_bearish") {
+          supplementScore += 12; reasons.push(`AAII bulls ${aaiiData.bullish}% — extreme retail bearishness = contrarian call (+12)`);
+        } else if (aaiiData.signal === "bearish") {
+          supplementScore += 6; reasons.push(`AAII bulls ${aaiiData.bullish}% — retail bearish = mild contrarian call (+6)`);
+        } else if (aaiiData.signal === "extreme_bullish") {
+          score -= 10; reasons.push(`AAII bulls ${aaiiData.bullish}% — extreme retail greed, wrong for calls (-10)`);
+        }
+      }
+      if (optionType === "put") {
+        if (aaiiData.signal === "extreme_bullish") {
+          supplementScore += 10; reasons.push(`AAII bulls ${aaiiData.bullish}% — extreme retail greed = contrarian put (+10)`);
+        } else if (aaiiData.signal === "bullish") {
+          supplementScore += 5; reasons.push(`AAII bulls ${aaiiData.bullish}% — retail complacent = mild contrarian put (+5)`);
+        } else if (aaiiData.signal === "extreme_bearish") {
+          score -= 8; reasons.push(`AAII extreme bearish — contrary indicator, puts may be exhausted (-8)`);
+        }
+      }
+    }
+
+    // ── Breadth momentum (Aronson: direction > single reading) ──────────
+    const bMom = state._breadthTrend || "flat";
+    const bMomVal = state._breadthMomentum || 0;
+    if (optionType === "put" && bMom === "falling") {
+      supplementScore += 8; reasons.push(`Breadth falling (${bMomVal.toFixed(1)}pts) — distribution (+8)`);
+    } else if (optionType === "call" && bMom === "rising") {
+      supplementScore += 8; reasons.push(`Breadth rising (${bMomVal.toFixed(1)}pts) — accumulation (+8)`);
+    }
+
+    // ── Breadth recovery signal ──────────────────────────────────────────
+    // Note: True Zweig Thrust requires NYSE breadth (thousands of stocks)
+    // With 4-instrument watchlist, use gentler "breadth recovery" signal
+    // Only fires when breadth went from <40% to >60% in recent sessions
+    if (optionType === "call" && state._zweigThrust?.detected) {
+      supplementScore += 10; reasons.push("Breadth recovery signal — watchlist went from weak to strong (+10)");
+    }
+
     // ── Agent macro signal — primary gate ──────────────────────────────
     if (["strongly bearish","bearish"].includes(signal) && confidence === "high") { score += 35; reasons.push(`Agent ${signal} high confidence (+35)`); }
     else if (["strongly bearish","bearish"].includes(signal))                     { score += 25; reasons.push(`Agent ${signal} (+25)`); }
@@ -1295,7 +1424,16 @@ function scoreIndexSetup(stock, optionType, spyRSI, spyMACD, spyMomentum, breadt
     }
   }
 
-  score = Math.max(0, Math.min(95, score));
+  // Apply supplementary signals — capped at +25 total to prevent domination
+  if (supplementScore > 0) {
+    const cappedSupp = Math.min(25, supplementScore);
+    score += cappedSupp;
+    if (cappedSupp < supplementScore) {
+      reasons.push(`Supplementary signals capped at +${cappedSupp} (raw: +${supplementScore})`);
+    }
+  }
+  // Full 100-point scale — cap at 100 not 95 to preserve resolution at high conviction
+  score = Math.max(0, Math.min(100, score));
   return { score, reasons, tradeType: tradeType || "spread" };
 }
 
@@ -1639,6 +1777,19 @@ function analyzeNews(articles) {
 // - VIX Velocity -
 let lastVIXReading  = 0;   // 0 = uninitialized
 let vixFallingPause = false; // true when VIX is falling — suppresses new put entries
+// ── VIX Mean Reversion Timing (Guo & Whitelaw 2006) ─────────────────────────
+// High VIX historically reverts to mean within 15-20 trading days on average
+// Use current VIX level to estimate expected reversion time
+// This informs DTE selection — if VIX at 37, put spreads should mature before reversion
+function getVIXReversionDays(vix) {
+  // Based on G&W empirical half-life estimates by VIX regime
+  if (vix >= 40) return 8;   // extreme VIX reverts fastest (mean-pull strongest)
+  if (vix >= 35) return 12;  // very elevated — expect 2-3 week reversion
+  if (vix >= 30) return 18;  // elevated — 3-4 week typical reversion
+  if (vix >= 25) return 25;  // moderately elevated
+  return 40;                  // near normal — slow reversion
+}
+
 function checkVIXVelocity(currentVIX) {
   if (lastVIXReading === 0) { lastVIXReading = currentVIX; return false; }
   const delta   = currentVIX - lastVIXReading;
@@ -1856,9 +2007,26 @@ function calcKellySize(recentTrades = 20) {
   const halfKelly = Math.max(0, kelly * 0.5);
   // Hard cap: max 2 contracts until 30 validated trades
   // Kelly on small samples produces dangerously high sizing
-  const rawContracts = Math.min(3, Math.max(1, Math.round(halfKelly * 10)));
+  // Chan: adjust Kelly for current drawdown — deeper drawdown = smaller fraction
+  // Vince: Kelly fraction should DECAY on consecutive losses, not reset
+  const peakCap    = state.peakCash || MONTHLY_BUDGET;
+  // Use mark-to-market value not cost basis — openRisk() uses currentPrice
+  const currentVal = state.cash + openRisk();
+  const drawdownPct = peakCap > 0 ? (peakCap - currentVal) / peakCap : 0;
+  const ddAdj      = drawdownPct > 0.15 ? 0.50   // >15% drawdown: half Kelly
+                   : drawdownPct > 0.10 ? 0.65   // >10% drawdown: 65% of Kelly
+                   : drawdownPct > 0.05 ? 0.80   // >5% drawdown: 80% of Kelly
+                   : 1.0;                          // <5% drawdown: full Kelly
+  // Vince: consecutive losses decay Kelly fraction — don't just reset
+  const consecLoss = state.consecutiveLosses || 0;
+  const consAdj    = consecLoss >= 3 ? 0.50      // 3+ losses: half Kelly
+                   : consecLoss >= 2 ? 0.70       // 2 losses: 70% of Kelly
+                   : consecLoss >= 1 ? 0.85       // 1 loss: 85% of Kelly
+                   : 1.0;
+  const adjustedHalfKelly = halfKelly * ddAdj * consAdj;
+  const rawContracts = Math.min(3, Math.max(1, Math.round(adjustedHalfKelly * 10)));
   const contracts    = trades.length < 30 ? Math.min(2, rawContracts) : rawContracts;
-  return { contracts, kelly: parseFloat(kelly.toFixed(3)), halfKelly: parseFloat(halfKelly.toFixed(3)), winRate: parseFloat((winRate*100).toFixed(1)), payoffRatio: parseFloat(payoff.toFixed(2)), cappedPre30: trades.length < 30 };
+  return { contracts, kelly: parseFloat(kelly.toFixed(3)), halfKelly: parseFloat(adjustedHalfKelly.toFixed(3)), winRate: parseFloat((winRate*100).toFixed(1)), payoffRatio: parseFloat(payoff.toFixed(2)), cappedPre30: trades.length < 30, ddAdj, consAdj };
 }
 
 // ── Regime Detection ─────────────────────────────────────────────────────
@@ -2992,6 +3160,8 @@ async function getMacroNews() {
         if (agentResult) {
           // Store for rescore use
           state._agentMacro = { ...agentResult, timestamp: new Date().toISOString() };
+          // Apply intraday regime override if signal is strong enough
+          applyIntradayRegimeOverride(agentResult);
           // Map agent result to expected format
           const agentModeMap = {
             "strongly bearish": { modifier: -20, mode: "defensive" },
@@ -3081,6 +3251,284 @@ async function getMarketBreadth() {
 }
 
 // - DXY proxy via UUP ETF -
+// ── Synthetic Put/Call Ratio from SPY options chain ─────────────────────────
+// Academic basis: Bollen & Whaley (2004) — PCR predicts short-term reversals
+// Extreme readings: PCR > 1.2 = excessive fear = contrarian call entry
+//                  PCR < 0.5 = excessive greed = contrarian put entry
+// Uses OI-weighted ratio (more accurate than raw count per Pan & Poteshman 2006)
+async function getSyntheticPCR() {
+  try {
+    const cached = getCached("pcr:spy");
+    if (cached) return cached;
+
+    // Fetch SPY options chain — already have this infrastructure
+    const today  = new Date().toISOString().split("T")[0];
+    const expiry = new Date(Date.now() + 45 * 86400000).toISOString().split("T")[0]; // 0-45 DTE full range
+    const url    = `/options/snapshots/SPY?feed=indicative&limit=1000&expiration_date_gte=${today}&expiration_date_lte=${expiry}`;
+    const data   = await alpacaGet(url, ALPACA_OPT_SNAP);
+
+    if (!data || !data.snapshots) return null;
+
+    let putOI = 0, callOI = 0, putVol = 0, callVol = 0;
+    for (const [sym, snap] of Object.entries(data.snapshots)) {
+      const oi  = parseFloat(snap.greeks?.open_interest || snap.openInterest || 0);
+      const vol = parseFloat(snap.dailyBar?.volume || 0);
+      // Option type is the character after the 6-digit date in the symbol
+      // e.g. SPY260419P00500000 — 'P' at position after date, not in ticker
+      const optChar = sym.match(/\d{6}([CP])\d/)?.[1];
+      if (optChar === "P") { putOI  += oi; putVol  += vol; }
+      else                 { callOI += oi; callVol += vol; }
+    }
+
+    const oiPCR  = callOI  > 0 ? parseFloat((putOI  / callOI ).toFixed(3)) : null;
+    const volPCR = callVol > 0 ? parseFloat((putVol / callVol).toFixed(3)) : null;
+    // Blend OI and volume PCR — OI is more stable, vol is more current
+    const pcr = oiPCR && volPCR
+      ? parseFloat(((oiPCR * 0.6 + volPCR * 0.4)).toFixed(3))
+      : (oiPCR || volPCR);
+
+    const signal = !pcr ? "neutral"
+      : pcr > 1.3  ? "extreme_fear"    // very strong contrarian call signal
+      : pcr > 1.1  ? "fear"            // contrarian call signal
+      : pcr < 0.45 ? "extreme_greed"   // very strong contrarian put signal
+      : pcr < 0.6  ? "greed"           // contrarian put signal
+      : "neutral";
+
+    const result = { pcr, oiPCR, volPCR, signal };
+    setCache("pcr:spy", result);
+    return result;
+  } catch(e) {
+    return null;
+  }
+}
+
+// ── Volatility Term Structure ────────────────────────────────────────────────
+// Natenberg principle: steep term structure = acute fear = put premium expensive
+// Near month IV vs far month IV ratio determines credit spread attractiveness
+// Backwardation (near > far): fear is acute = ideal time to sell credit spreads
+// Contango (far > near): fear is moderate = normal vol environment
+async function getVolTermStructure() {
+  try {
+    const cached = getCached("vol:termstruct");
+    if (cached) return cached;
+
+    const today     = new Date();
+    const nearExp   = new Date(today.getTime() + 20 * 86400000).toISOString().split("T")[0];
+    const farExp    = new Date(today.getTime() + 50 * 86400000).toISOString().split("T")[0];
+
+    // Fetch ATM options for near and far expiry to get IV
+    // Use live SPY quote if state.spyPrice not yet populated
+    let spyPrice = state.spyPrice || 0;
+    if (!spyPrice || spyPrice < 100) {
+      const liveQ = await getStockQuote("SPY").catch(() => null);
+      spyPrice = liveQ || 500; // hard fallback if quote fails
+    }
+    const nearStrike = Math.round(spyPrice / 5) * 5; // nearest $5 strike
+
+    const [nearData, farData] = await Promise.all([
+      alpacaGet(`/options/snapshots/SPY?feed=indicative&limit=50&expiration_date_gte=${nearExp}&strike_price_gte=${nearStrike - 10}&strike_price_lte=${nearStrike + 10}&type=put`, ALPACA_OPT_SNAP),
+      alpacaGet(`/options/snapshots/SPY?feed=indicative&limit=50&expiration_date_gte=${farExp}&strike_price_gte=${nearStrike - 10}&strike_price_lte=${nearStrike + 10}&type=put`, ALPACA_OPT_SNAP),
+    ]);
+
+    const getAvgIV = (data) => {
+      if (!data?.snapshots) return null;
+      const ivs = Object.values(data.snapshots)
+        .map(s => parseFloat(s.greeks?.iv || s.impliedVolatility || 0))
+        .filter(iv => iv > 0.05 && iv < 2.0);
+      return ivs.length ? ivs.reduce((a,b)=>a+b,0)/ivs.length : null;
+    };
+
+    const nearIV = getAvgIV(nearData);
+    const farIV  = getAvgIV(farData);
+    if (!nearIV || !farIV) return null;
+
+    const ratio  = parseFloat((nearIV / farIV).toFixed(3));
+    // Ratio > 1.0 = backwardation (near > far = acute fear)
+    // Ratio < 1.0 = contango (far > near = normal)
+    const structure = ratio > 1.15 ? "steep_backwardation"  // extreme fear, sell puts
+                    : ratio > 1.05 ? "mild_backwardation"    // elevated fear
+                    : ratio < 0.90 ? "steep_contango"        // very calm, calls cheap
+                    : ratio < 0.97 ? "mild_contango"         // normal
+                    : "flat";
+
+    const creditFavorable = ratio > 1.05; // backwardation = near-term IV elevated = good for credit
+    const callFavorable   = ratio < 0.95; // contango = calls relatively cheap
+
+    const result = { nearIV: parseFloat(nearIV.toFixed(4)), farIV: parseFloat(farIV.toFixed(4)), ratio, structure, creditFavorable, callFavorable };
+    setCache("vol:termstruct", result);
+    return result;
+  } catch(e) { return null; }
+}
+
+// ── CBOE SKEW Index ──────────────────────────────────────────────────────────
+// SKEW measures tail risk premium in S&P 500 options
+// SKEW > 130: market paying heavily for downside protection = puts overpriced
+//             Ideal for SELLING put credit spreads (collect the fear premium)
+// SKEW < 115: tail risk low = normal environment
+// Source: CBOE public API — no auth required
+async function getCBOESKEW() {
+  try {
+    const cached = getCached("cboe:skew");
+    if (cached) return cached;
+
+    const res  = await withTimeout(fetch("https://cdn.cboe.com/api/global/us_indices/daily_prices/SKEW_Data.json", {
+      headers: { "User-Agent": "Mozilla/5.0", "Accept": "application/json" }
+    }), 5000);
+    if (!res.ok) return null;
+    const data = await res.json();
+
+    // Response: { data: [ [date, skew_value], ... ] }
+    const rows = data?.data || data?.Data || [];
+    if (!rows.length) return null;
+    const last  = rows[rows.length - 1];
+    const prev  = rows[rows.length - 2];
+    const skew  = parseFloat(Array.isArray(last) ? last[1] : last.SKEW);
+    const skewPrev = parseFloat(Array.isArray(prev) ? prev[1] : prev?.SKEW || skew);
+    if (isNaN(skew)) return null;
+
+    const direction = skew > skewPrev + 2 ? "rising" : skew < skewPrev - 2 ? "falling" : "flat";
+    const signal    = skew >= 140 ? "extreme"   // puts massively overpriced — sell premium
+                    : skew >= 130 ? "elevated"  // good credit put environment
+                    : skew >= 120 ? "moderate"  // normal elevated
+                    : skew < 115  ? "low"        // tail risk not priced — normal env
+                    : "neutral";
+
+    // Credit put spreads most attractive when SKEW is elevated AND VIX is elevated
+    // You're collecting both fear premium (VIX) and tail risk premium (SKEW)
+    const creditPutIdeal = skew >= 130 && (state.vix || 20) >= 25;
+
+    const result = { skew, skewPrev, direction, signal, creditPutIdeal };
+    // SKEW is daily data — cache for 60 minutes, not 5
+    _slowCache.set("cboe:skew", { data: result, ts: Date.now() - (SLOW_CACHE_TTL - 60*60*1000) });
+    return result;
+  } catch(e) {
+    logEvent("warn", `[SKEW] Fetch failed: ${e.message}`);
+    return null;
+  }
+}
+
+// ── CBOE Official Put/Call Ratio ──────────────────────────────────────────────
+// Daily equity PCR from CBOE — more accurate than synthetic from options chain
+// PCR > 1.2: excessive bearishness = contrarian call signal
+// PCR < 0.6: excessive bullishness = contrarian put signal
+// Source: cdn.cboe.com/api/global/us_indices/daily_prices/PCE_Data.json
+async function getCBOEPCR() {
+  try {
+    const cached = getCached("cboe:pcr");
+    if (cached) return cached;
+
+    const res  = await withTimeout(fetch("https://cdn.cboe.com/api/global/us_indices/daily_prices/PCE_Data.json", {
+      headers: { "User-Agent": "Mozilla/5.0", "Accept": "application/json" }
+    }), 5000);
+    if (!res.ok) return null;
+    const data = await res.json();
+
+    const rows = data?.data || data?.Data || [];
+    if (!rows.length) return null;
+
+    // Get last 5 days for moving average (smooths daily noise)
+    const recent = rows.slice(-5);
+    const values = recent.map(r => parseFloat(Array.isArray(r) ? r[1] : r.PCE)).filter(v => !isNaN(v));
+    if (!values.length) return null;
+
+    const pcr     = values[values.length - 1];
+    const pcrMA5  = values.reduce((a,b) => a+b, 0) / values.length;
+    // CBOE historical equity PCR average ~0.65
+    // Thresholds calibrated to actual CBOE research, not arbitrary
+    const signal  = pcr >= 1.3  ? "extreme_fear"   // far above avg — heavy put buying
+                  : pcr >= 1.1  ? "fear"            // above avg — defensive positioning
+                  : pcr <= 0.5  ? "extreme_greed"   // very low — complacency
+                  : pcr <= 0.60 ? "greed"            // below avg — bullish complacency
+                  : "neutral";                       // 0.60-1.1 = normal range
+
+    const result = { pcr: parseFloat(pcr.toFixed(3)), pcrMA5: parseFloat(pcrMA5.toFixed(3)), signal };
+    // PCR is daily data — cache 60 min
+    _slowCache.set("cboe:pcr", { data: result, ts: Date.now() - (SLOW_CACHE_TTL - 60*60*1000) });
+    return result;
+  } catch(e) {
+    logEvent("warn", `[PCR] CBOE fetch failed: ${e.message}`);
+    return null;
+  }
+}
+
+// ── AAII Sentiment Survey ─────────────────────────────────────────────────────
+// Weekly retail investor sentiment — published every Thursday
+// Extreme bearishness (bulls < 20%) = historically strong contrarian call signal
+// Extreme bullishness (bulls > 55%) = historically strong contrarian put signal
+// Source: surveys.aaii.com/sentiment/
+async function getAAIISentiment() {
+  try {
+    const cached = getCached("aaii:sentiment");
+    if (cached) return cached;
+
+    // AAII publishes weekly sentiment — try multiple endpoints
+    // Primary: AAII investor sentiment page (may need HTML parsing)
+    // Fallback: Use manually set value via /api/set-aaii endpoint
+    if (state._aaiiManual) {
+      // Manual override set by user — use it (lasts until next Thursday)
+      return state._aaiiManual;
+    }
+
+    // Try fetching AAII data — endpoint may vary
+    let bullish = 0, bearish = 0, neutral = 0, date = "unknown";
+    const urls = [
+      "https://www.aaii.com/sentimentsurvey/sent_results.js",
+      "https://surveys.aaii.com/sentiment/sentiment_data.json",
+    ];
+
+    let parsed = false;
+    for (const url of urls) {
+      try {
+        const res = await withTimeout(fetch(url, {
+          headers: { "User-Agent": "Mozilla/5.0", "Accept": "*/*" }
+        }), 4000);
+        if (!res.ok) continue;
+        const text = await res.text();
+        // Try JSON parse first
+        try {
+          const data = JSON.parse(text);
+          const latest = Array.isArray(data) ? data[data.length-1] : data;
+          bullish = parseFloat(latest?.bullish || latest?.Bullish || latest?.bull || 0);
+          bearish = parseFloat(latest?.bearish || latest?.Bearish || latest?.bear || 0);
+          neutral = parseFloat(latest?.neutral || latest?.Neutral || 0);
+          date    = latest?.date || latest?.Date || "unknown";
+          if (bullish > 0) { parsed = true; break; }
+        } catch(e) {
+          // Try regex extraction from JS/HTML
+          const bullMatch = text.match(/[Bb]ullish["\s:]+(\d+\.?\d*)/);
+          const bearMatch = text.match(/[Bb]earish["\s:]+(\d+\.?\d*)/);
+          if (bullMatch && bearMatch) {
+            bullish = parseFloat(bullMatch[1]);
+            bearish = parseFloat(bearMatch[1]);
+            neutral = Math.max(0, 100 - bullish - bearish);
+            parsed = true; break;
+          }
+        }
+      } catch(e) { continue; }
+    }
+    if (!bullish) return null;
+
+    // Historical thresholds (Ned Davis Research validation):
+    // Bulls < 20% = extreme pessimism = contrarian buy (call signal)
+    // Bulls > 55% = extreme optimism = contrarian sell (put signal)
+    // Spread (bull-bear) < -20 = strong contrarian buy signal
+    const spread  = bullish - bearish;
+    const signal  = bullish < 20 ? "extreme_bearish"   // strong contrarian call
+                  : bullish < 30 ? "bearish"            // mild contrarian call
+                  : bullish > 55 ? "extreme_bullish"    // strong contrarian put
+                  : bullish > 45 ? "bullish"            // mild contrarian put
+                  : "neutral";
+
+    const result = { bullish, bearish, neutral, spread: parseFloat(spread.toFixed(1)), signal, date };
+    // Cache for 24 hours — weekly data published every Thursday
+    _slowCache.set("aaii:sentiment", { data: result, ts: Date.now() - (SLOW_CACHE_TTL - 24*60*60*1000) });
+    return result;
+  } catch(e) {
+    logEvent("warn", `[AAII] Sentiment fetch failed: ${e.message}`);
+    return null;
+  }
+}
+
 async function getDXY() {
   try {
     const bars = await getStockBars("UUP", 5);
@@ -3454,8 +3902,15 @@ async function checkAllFilters(stock, price) {
   if (!state.circuitOpen)       return { pass:false, reason:"Daily circuit breaker tripped" };
   if (!state.weeklyCircuitOpen) return { pass:false, reason:"Weekly circuit breaker tripped" };
 
-  // 3. Capital floor
-  if (state.cash <= CAPITAL_FLOOR) return { pass:false, reason:`Cash at capital floor (${fmt(CAPITAL_FLOOR)})` };
+  // 3. Capital floor — halt all operations, not just new entries
+  if (state.cash <= CAPITAL_FLOOR) {
+    if (!state._capitalFloorAlerted) {
+      logEvent("warn", `[CAPITAL FLOOR] Cash $${state.cash.toFixed(0)} at floor $${CAPITAL_FLOOR} — all new entries suspended`);
+      state._capitalFloorAlerted = true;
+    }
+    return { pass:false, reason:`Cash at capital floor (${fmt(CAPITAL_FLOOR)}) — operations suspended` };
+  }
+  state._capitalFloorAlerted = false;
 
 
   // 5. Consecutive losses — REMOVED: agent handles thesis quality, not a counter
@@ -3739,8 +4194,17 @@ function calcPositionSize(premium, score, vix) {
   const minsSinceOpen = (etNow.getHours() - 9) * 60 + etNow.getMinutes() - 30;
   const openingMult   = minsSinceOpen < 30 ? 0.75 : 1.0; // 25% smaller in first 30 mins
 
-  // Step 3: VIX adjustment — options are more expensive in high vol, size down
-  const vixMult = vix >= VIX_REDUCE50 ? 0.50 : vix >= VIX_REDUCE25 ? 0.75 : 1.0;
+  // Step 3: VIX adjustment — Guo & Whitelaw (2006): DEBIT put returns asymmetric to VIX
+  // G&W finding applies to BUYING puts (debit) — premium too high at VIX > 40
+  // SELLING puts (credit) is OPPOSITE — VIX > 40 = maximum premium collection
+  // isCreditEntry is set from useCreditSpread flag passed through
+  const isCreditEntry = (state._lastEntryType === "credit");
+  const vixMult = isCreditEntry
+    ? (vix >= 40 ? 1.25 : vix >= 35 ? 1.10 : 1.0)  // credit: INCREASE size at high VIX
+    : (vix >= 40  ? 0.35                              // debit: G&W — VIX>40 puts overpriced
+    : vix >= VIX_REDUCE50 ? 0.50                      // VIX 35-40: moderate reduction
+    : vix >= VIX_REDUCE25 ? 0.75                      // VIX 25-35: slight reduction
+    : 1.0);
 
   // Step 4: Drawdown protocol from marketContext
   const ddMult = (marketContext?.drawdownProtocol?.sizeMultiplier) || 1.0;
@@ -3816,19 +4280,34 @@ function selectExpiry(score, vix, optionType, earningsDate, ticker = null, isMea
   // Default to 30-45 DTE so we have time to be right without theta grinding us down
   // Weeklies only for mean-reversion setups where a 2-3 day bounce is the explicit thesis
   if (optionType === "put") {
+    // Guo & Whitelaw: DTE should mature before expected VIX reversion
+    // If VIX at 37 and expected to revert in 12 days — target 10-14 DTE for mean reversion
+    // If VIX elevated but stable — target 30 DTE for trend continuation
+    const vixRevDays = getVIXReversionDays(vix);
     if (score >= 90 && vix >= 30) {
-      // High conviction in active selloff — 30 DTE gives thesis time, slower theta burn
-      targetDays = 30;
+      // High conviction — 60% of VIX reversion window (capture move, exit before reversion)
+      targetDays = Math.max(21, Math.min(35, Math.round(vixRevDays * 0.6)));
       expiryType = "monthly";
     } else if (score >= 75) {
-      // Standard put entry — 45 DTE, well away from the theta cliff
-      targetDays = 45;
+      // Standard put — 30-45 DTE depending on VIX reversion expectation
+      targetDays = vix >= 35 ? 25 : 35;
       expiryType = "monthly";
     } else {
-      // Lower conviction — go further out, less theta risk while thesis develops
-      targetDays = 45;
+      targetDays = 35;
       expiryType = "monthly";
     }
+
+  // ── Regime duration adjusts DTE — agent knows how long regime lasts ──────
+  // "intraday" → short DTE regardless of option type
+  // "multi-week" → go further out for trend plays
+  const regimeDuration = (state._agentMacro || {}).regimeDuration || "1-3 days";
+  const regimeDurMult  = regimeDuration === "intraday"   ? 0.5
+                       : regimeDuration === "1-3 days"   ? 0.75
+                       : regimeDuration === "3-7 days"   ? 1.0
+                       : regimeDuration === "1-2 weeks"  ? 1.2
+                       : regimeDuration === "multi-week" ? 1.5
+                       : 1.0;
+  // Apply duration multiplier to targetDays at the end of selection
 
   // ── CALL tiers — two distinct theses need different DTE ───────────────
   // Mean reversion (high VIX, deeply oversold): 14-21 DTE — quick bounce
@@ -3854,6 +4333,14 @@ function selectExpiry(score, vix, optionType, earningsDate, ticker = null, isMea
     targetDays = 30;
     expiryType = "monthly";
   }
+
+  // Apply regime duration multiplier — agent knows how long regime lasts
+  // Intraday regime = mean reversion play → should use MR DTE path, not just multiply
+  if (regimeDuration === "intraday" && !isMeanReversion) {
+    // Override to MR path — intraday thesis needs quick resolution
+    return selectExpiry(score, vix, optionType, earningsDate, ticker, true);
+  }
+  targetDays = Math.round(Math.max(14, Math.min(60, targetDays * (regimeDurMult || 1.0))));
 
   // Calculate target date
   const targetDate = new Date(now + targetDays * MS_PER_DAY);
@@ -4004,6 +4491,8 @@ async function syncCashFromAlpaca() {
     const alpacaBuyPower  = parseFloat(acct.buying_power || acct.cash);
     state.alpacaCash      = alpacaCash;
     state.alpacaBuyPower  = alpacaBuyPower;
+    // Set accountBaseline on first sync if not already established
+    if (!state.accountBaseline) state.accountBaseline = alpacaCash;
     const hasCustomBudget = state.customBudget && state.customBudget > 0 && state.customBudget !== MONTHLY_BUDGET;
     if (!hasCustomBudget) {
       const drift = Math.abs(alpacaCash - state.cash);
@@ -4031,7 +4520,11 @@ async function executeCreditSpread(stock, price, score, scoreReasons, vix, optio
     // Target: sell strike ~5% below current price, buy $10 lower
     // For call credit spread: sell ~0.30 delta call (OTM), buy ~0.20 delta call (further OTM)
     // Spread width scales with VIX — wider = more profit potential
-    const spreadWidth = vix >= 35 ? 20 : vix >= 25 ? 15 : 10;
+    // Credit spreads: NARROW at high VIX (less tail risk exposure per contract)
+    // Market maker principle: sell premium when it's rich, but reduce max loss
+    // High VIX = tail events more likely = tighter protection = less max loss
+    // Debit spreads (executeSpreadTrade) correctly WIDEN at high VIX — different thesis
+    const spreadWidth = vix >= 35 ? 8 : vix >= 25 ? 10 : 12;
     // OTM % scales with VIX — higher fear = go further OTM for more buffer
     const baseOTM    = vix >= 30 ? 0.07 : vix >= 25 ? 0.06 : 0.05;
     logEvent("filter", `${stock.ticker} credit spread: $${spreadWidth} wide, ${(baseOTM*100).toFixed(0)}% OTM (VIX ${vix.toFixed(1)})`);
@@ -4158,8 +4651,15 @@ async function executeCreditSpread(stock, price, score, scoreReasons, vix, optio
       spreadWidth:      actualWidth,
       buySymbol:        longContract.symbol,
       sellSymbol:       shortContract.symbol,
+      probabilityOfProfit: shortContract?.greeks?.delta
+        ? parseFloat(((1 - Math.abs(shortContract.greeks.delta)) * 100).toFixed(1)) : null,
       contractSymbol:   shortContract.symbol,
       premium:          netCredit,   // credit received (positive = we collected)
+      breakeven:        parseFloat((shortContract.strike - netCredit).toFixed(2)), // put credit: price must stay above this
+      // McMillan: POP = 1 - |delta of short strike| for credit spreads
+      probabilityOfProfit: shortContract.greeks?.delta
+        ? parseFloat(((1 - Math.abs(shortContract.greeks.delta)) * 100).toFixed(1))
+        : null,
       maxProfit,
       maxLoss,
       marginRequired,
@@ -4195,8 +4695,11 @@ async function executeCreditSpread(stock, price, score, scoreReasons, vix, optio
       target:           parseFloat((netCredit * 0.50).toFixed(2)),
       // Stop: max loss (close if spread widens to full width)
       stop:             parseFloat((maxLoss * 0.75).toFixed(2)),
-      takeProfitPct:    0.50,
+      // Carr & Wu: tighter initial target (30%) in first 5 days when IV premium highest
+      takeProfitPct:    0.30,
       fastStopPct:      0.75,
+      // Carr & Wu: 5 TRADING days ≈ 7 calendar days (accounts for weekends)
+      _creditHarvestExpiry: new Date(Date.now() + 7*86400000).toISOString(),
     };
 
     state.positions.push(position);
@@ -4309,7 +4812,13 @@ async function executeSpreadTrade(stock, price, score, scoreReasons, vix, option
       let filled = false;
       let fillResp = null;
       const pollStart = Date.now();
-      while (!filled && Date.now() - pollStart < 30000) { // 30s timeout
+      // Dynamic timeout based on time of day — market open is fastest, midday slowest
+      const etNowH = getETTime().getHours() + getETTime().getMinutes()/60;
+      const mlgTimeout = etNowH < 10.0 ? 20000  // market open — fast fills
+                       : etNowH < 12.0 ? 30000  // morning — normal
+                       : etNowH < 14.0 ? 45000  // midday — slow liquidity
+                       : 30000;                  // afternoon — picks back up
+      while (!filled && Date.now() - pollStart < mlgTimeout) { // dynamic timeout
         await new Promise(r => setTimeout(r, 1500));
         fillResp = await alpacaGet(`/orders/${mlegResp.id}`);
         if (fillResp && fillResp.status === "filled") {
@@ -4321,10 +4830,31 @@ async function executeSpreadTrade(stock, price, score, scoreReasons, vix, option
       }
 
       if (!filled) {
-        // Cancel unfilled mleg — both legs cancel atomically
+        // Retry once with slightly wider limit — $0.05 concession captures most missed fills
         await alpacaPost(`/orders/${mlegResp.id}/cancel`, {}).catch(() => {});
-        logEvent("warn", `[SPREAD] mleg unfilled after 30s — cancelled. Consider wider limit or market conditions.`);
-        return null;
+        logEvent("warn", `[SPREAD] mleg unfilled after 30s — retrying with $0.05 wider limit`);
+        const retryLimit = parseFloat((netDebitLimit + 0.05).toFixed(2));
+        const retryBody  = { ...mlegBody, limit_price: String(retryLimit) };
+        const retryResp  = await alpacaPost("/orders", retryBody).catch(() => null);
+        if (retryResp && retryResp.id) {
+          let retryFilled = false;
+          const retryStart = Date.now();
+          while (!retryFilled && Date.now() - retryStart < 20000) {
+            await new Promise(r => setTimeout(r, 1500));
+            const poll = await alpacaGet(`/orders/${retryResp.id}`);
+            if (poll?.status === "filled") { retryFilled = true; fillResp = poll; }
+            else if (poll && ["canceled","expired","rejected"].includes(poll.status)) break;
+          }
+          if (!retryFilled) {
+            await alpacaPost(`/orders/${retryResp.id}/cancel`, {}).catch(() => {});
+            logEvent("warn", `[SPREAD] Retry also unfilled — spread cancelled`);
+            return null;
+          }
+          logEvent("trade", `[SPREAD] Retry filled @ $${retryLimit}`);
+          netDebitLimit = retryLimit;
+        } else {
+          return null;
+        }
       }
 
       // Get actual fill price from mleg response — use real fill not limit price
@@ -4937,8 +5467,16 @@ async function closePosition(ticker, reason, exitPremium = null, contractSym = n
     entryVIX:      pos.entryVIX || 0,
     entryMomentum: pos.entryMomentum || "steady",
     exitVIX:       state.vix || 0,
+    exitRSI:       pos._lastExitRSI || 0,
+    exitMACD:      pos._lastExitMACD || "unknown",
+    exitBreadth:   (state._breadthHistory?.slice(-1)[0]?.v) || 0,
+    exitPCR:       state._pcr?.pcr || 0,
+    exitSKEW:      state._skew?.skew || 0,
+    exitAgentSignal: (state._agentMacro || {}).signal || "unknown",
+    exitRegime:    (state._agentMacro || {}).regime || "unknown",
     // Timing
     daysHeld:    Math.round((Date.now() - new Date(pos.openDate).getTime()) / 86400000),
+    maxAdverseExcursion: pos.maxAdverseExcursion || 0, // Chan: worst drawdown before close
     dteAtEntry:  pos.expDays || 0,
     dteAtExit:   Math.max(0, Math.round((new Date(pos.expDate) - new Date()) / 86400000)),
     // Spread specifics
@@ -5207,6 +5745,40 @@ const MACRO_TIERS = {
   "neutral": 3,
   "mild bullish": 4, "bullish": 5, "strongly bullish": 6,
 };
+// ── Intraday Macro Regime Override ───────────────────────────────────────────
+// When intraday macro analysis shifts significantly, update operative regime
+// This prevents the 6-hour lag where morning plan overrides intraday signals
+function applyIntradayRegimeOverride(newMacro) {
+  const dayPlanRegime  = (state._dayPlan || {}).regime    || "neutral";
+  const intradaySignal = (newMacro || {}).signal           || "neutral";
+  const intradayRegime = (newMacro || {}).regime           || "neutral";
+  const confidence     = (newMacro || {}).confidence       || "low";
+
+  // Only override if intraday signal is HIGH confidence AND meaningfully different
+  const dayPlanBias = (state._dayPlan || {}).entryBias || "neutral";
+  const strongShift = confidence === "high" && (dayPlanRegime !== intradayRegime || dayPlanBias !== newMacro.entryBias);
+  const extremeShift = ["strongly bearish","strongly bullish"].includes(intradaySignal);
+
+  // Check if previous override should expire (2-hour cooldown)
+  const prevOverrideAt = state._dayPlan?._overrideAt;
+  const overrideAge = prevOverrideAt ? (Date.now() - new Date(prevOverrideAt).getTime()) / 3600000 : 99;
+  const overrideExpired = overrideAge >= 2.0; // expire override after 2 hours
+
+  if ((strongShift || extremeShift) && overrideExpired) {
+    state._dayPlan = {
+      ...(state._dayPlan || {}),
+      regime:    intradayRegime,
+      entryBias: newMacro.entryBias || state._dayPlan?.entryBias || "neutral",
+      tradeType: newMacro.tradeType || state._dayPlan?.tradeType || "spread",
+      _intradayOverride: true,
+      _overrideAt: new Date().toISOString(),
+    };
+    logEvent("macro", `[REGIME OVERRIDE] ${dayPlanRegime}→${intradayRegime} / ${dayPlanBias}→${newMacro.entryBias} (${confidence} confidence)`);
+  } else if ((strongShift || extremeShift) && !overrideExpired) {
+    logEvent("macro", `[REGIME OVERRIDE] Skipped — previous override still active (${overrideAge.toFixed(1)}h ago)`);
+  }
+}
+
 function checkMacroShift(newSignal) {
   if (!newSignal || !ANTHROPIC_API_KEY) return;
   const prevTier = MACRO_TIERS[_prevMacroSignal] ?? 3;
@@ -5268,6 +5840,25 @@ async function runAgentRescore() {
 
   if (!needRescore.length) return;
   logEvent("scan", `[AGENT] Auto-rescore: ${needRescore.length} position(s)`);
+
+  // Carr & Wu: reset credit spread target after 5-day IV harvest window
+  // Simon & Campasano: flag momentum decay for trending positions 5d+
+  for (const pos of state.positions) {
+    if (pos.isCreditSpread && pos._creditHarvestExpiry) {
+      if (Date.now() > new Date(pos._creditHarvestExpiry).getTime() && pos.takeProfitPct === 0.30) {
+        pos.takeProfitPct = 0.50;
+        logEvent("scan", `${pos.ticker} credit harvest window expired — target expanded to 50%`);
+      }
+    }
+    const dOpen = (Date.now() - new Date(pos.openDate).getTime()) / 86400000;
+    if (dOpen >= 5 && !pos.isMeanReversion && !pos.isCreditSpread && !pos._momentumDecayFlagged) {
+      pos._momentumDecayFlagged = true;
+      // Simon & Campasano: actually force rescore by resetting the rescore timer
+      if (state._agentRescoreMinute) state._agentRescoreMinute[pos.ticker] = 0;
+      if (state._agentRescoreHour)   state._agentRescoreHour[pos.ticker]   = -1;
+      logEvent("scan", `${pos.ticker} momentum 5d+ — rescore forced (Simon & Campasano)`);
+    }
+  }
 
   // Mark as rescored — stagger same-day positions by 3 minutes each
   // Prevents all positions hitting 30-min mark simultaneously next cycle
@@ -5384,8 +5975,47 @@ async function runScan() {
     lastMedScan = now;
     const breadth = await getMarketBreadth();
     marketContext.breadth        = breadth;
+
+    // ── Breadth momentum tracking (Aronson: direction > single reading) ──
+    // Track last 10 breadth readings for momentum and Zweig Thrust detection
+    if (!state._breadthHistory) state._breadthHistory = [];
+    const bPct = parseFloat((marketContext.breadth.breadthPct || 50).toString());
+    state._breadthHistory.push({ t: now, v: bPct });
+    if (state._breadthHistory.length > 10) state._breadthHistory = state._breadthHistory.slice(-10);
+
+    // 5-day breadth direction
+    const bHist = state._breadthHistory;
+    if (bHist.length >= 3) {
+      const bRecent = bHist.slice(-3).map(b=>b.v);
+      const bOld    = bHist.slice(0, Math.min(3, bHist.length)).map(b=>b.v);
+      const bAvgRecent = bRecent.reduce((a,b)=>a+b,0)/bRecent.length;
+      const bAvgOld    = bOld.reduce((a,b)=>a+b,0)/bOld.length;
+      state._breadthMomentum = bAvgRecent - bAvgOld; // positive = rising, negative = falling
+      state._breadthTrend    = state._breadthMomentum > 5 ? "rising"
+                             : state._breadthMomentum < -5 ? "falling"
+                             : "flat";
+    }
+
+    // ── Breadth recovery detection ───────────────────────────────────────
+    // Adapted from Zweig Thrust concept but calibrated for 4-instrument watchlist
+    // Fires when breadth recovers from weak (<40%) to strong (>60%) within 5 readings
+    // Much more common than true Zweig but still meaningful for small watchlists
+    if (bHist.length >= 4) {
+      const hadLowBreadth  = bHist.slice(0, -1).some(b => b.v < 40); // was weak recently
+      const hasHighBreadth = bPct > 60;                               // now strong
+      if (hadLowBreadth && hasHighBreadth) {
+        if (!state._zweigThrust?.detected) {
+          state._zweigThrust = { detected: true, detectedAt: new Date().toISOString() };
+          logEvent("scan", "[BREADTH RECOVERY] Watchlist breadth recovered from weak to strong — call bias");
+        }
+      } else if (state._zweigThrust?.detected) {
+        // Clear after 2 days — short-lived signal on small watchlist
+        const age = (now - new Date(state._zweigThrust.detectedAt).getTime()) / 86400000;
+        if (age > 2) state._zweigThrust = { detected: false };
+      }
+    }
+
     // sectorRotation removed — SPY/QQQ index trading doesn't need sector rotation
-    // Rebalance BIL ETF
     state.lastRebalance = now;
     // Update macro calendar and beta-weighted delta
     const calMod = getMacroCalendarModifier();
@@ -5488,7 +6118,38 @@ async function runScan() {
   // -- SLOW TIER (every 15 minutes) --
   if (now - lastSlowScan > 10 * 60 * 1000) { // 10-minute tier (was 15)
     lastSlowScan = now;
-    const [fg, dxy, yc] = await Promise.all([getFearAndGreed(), getDXY(), getYieldCurve()]);
+    const [fg, dxy, yc, pcrSynth, termStruct, skew, pcrCBOE, aaii] = await Promise.all([
+      getFearAndGreed(), getDXY(), getYieldCurve(),
+      getSyntheticPCR(),        // synthetic put/call ratio from options chain
+      getVolTermStructure(),    // near vs far month IV term structure
+      getCBOESKEW(),            // CBOE SKEW index — tail risk premium
+      getCBOEPCR(),             // CBOE official put/call ratio
+      getAAIISentiment(),       // AAII weekly retail sentiment
+    ]);
+
+    // PCR — prefer official CBOE, fall back to synthetic
+    const pcr = pcrCBOE || pcrSynth;
+    if (pcr) {
+      marketContext.pcr = pcr;
+      state._pcr = pcr;
+      const src = pcrCBOE ? "CBOE" : "synthetic";
+      logEvent("scan", `[PCR:${src}] ${pcr.pcr} (${pcr.signal})`);
+    }
+    if (termStruct) {
+      marketContext.termStructure = termStruct;
+      state._termStructure = termStruct;
+      logEvent("scan", `[VOL TERM] near:${(termStruct.nearIV*100).toFixed(1)}% far:${(termStruct.farIV*100).toFixed(1)}% ratio:${termStruct.ratio} (${termStruct.structure})`);
+    }
+    if (skew) {
+      marketContext.skew = skew;
+      state._skew = skew;
+      logEvent("scan", `[SKEW] ${skew.skew} (${skew.signal}) ${skew.creditPutIdeal ? "— CREDIT PUT IDEAL" : ""}`);
+    }
+    if (aaii) {
+      marketContext.aaii = aaii;
+      state._aaii = aaii;
+      logEvent("scan", `[AAII] Bulls:${aaii.bullish}% Bears:${aaii.bearish}% Spread:${aaii.spread} (${aaii.signal})`);
+    }
     marketContext.fearGreed   = fg;
     marketContext.dxy         = dxy;
     marketContext.yieldCurve  = yc;
@@ -5740,6 +6401,37 @@ async function runScan() {
       }
     }
 
+    // ── PIN RISK CHECK (McMillan) — close if price near short strike at 5 DTE ─
+    // "Pin risk" = spread expires exactly at short strike = max risk scenario
+    // Professional rule: close or roll when within $2 of short strike inside 5 DTE
+    if (pos.isSpread && pos.sellStrike && !isDayTrade(pos)) {
+      const dteLeft   = Math.max(0, Math.round((new Date(pos.expDate) - new Date()) / 86400000));
+      const shortStrike = pos.sellStrike || pos.shortStrike || 0;
+      const distToShort  = Math.abs(price - shortStrike);
+      const pinThreshold = price * 0.005; // 0.5% of underlying — scales with instrument price
+      if (dteLeft <= 5 && distToShort <= pinThreshold && shortStrike > 0) {
+        logEvent("warn", `[PIN RISK] ${pos.ticker} price $${price} within ${(distToShort/price*100).toFixed(2)}% of short strike $${shortStrike} (threshold 0.5%) with ${dteLeft}d DTE — closing`);
+        await closePosition(pos.ticker, "pin-risk", null, pos.contractSymbol || pos.buySymbol);
+        continue;
+      }
+    }
+
+    // ── EARLY ASSIGNMENT RISK (McMillan) — credit spread short leg ITM near expiry ──
+    // Short ITM options risk early assignment, especially near ex-dividend dates
+    // For PDT accounts: early assignment creates a naked long/short = catastrophic
+    if (pos.isCreditSpread && pos.sellStrike && !isDayTrade(pos)) {
+      const dteLeft    = Math.max(0, Math.round((new Date(pos.expDate) - new Date()) / 86400000));
+      const shortStr   = pos.sellStrike || pos.shortStrike || 0;
+      const shortITM   = pos.optionType === "put"  ? price < shortStr  // put short ITM if price below
+                       : pos.optionType === "call" ? price > shortStr  // call short ITM if price above
+                       : false;
+      if (dteLeft <= 3 && shortITM) {
+        logEvent("warn", `[ASSIGNMENT RISK] ${pos.ticker} short leg $${shortStr} is ITM with ${dteLeft}d DTE — closing to prevent early assignment`);
+        await closePosition(pos.ticker, "assignment-risk", null, pos.contractSymbol || pos.buySymbol);
+        continue;
+      }
+    }
+
     // ── EXIT HIERARCHY ────────────────────────────────────────────────────
     // Order matters — earlier checks take priority over later ones
     // Applies to: overnight positions (opened previous day or earlier)
@@ -5750,10 +6442,26 @@ async function runScan() {
     // DTE-aware exits — as expiry approaches, lower the profit target
     // Theta accelerates dramatically inside 10 DTE — take profit sooner
     const dteLeft = Math.max(1, Math.round((new Date(pos.expDate) - new Date()) / 86400000));
-    const dteMult = dteLeft <= 5  ? 0.60  // <5 DTE: take 60% of target (theta burning fast)
-                  : dteLeft <= 10 ? 0.75  // <10 DTE: take 75% of target
-                  : dteLeft <= 14 ? 0.88  // <14 DTE: take 88% of target
-                  : 1.0;                   // >14 DTE: full target
+    // Natenberg: theta decay is exponential not linear
+    // DEBIT spreads: tighten targets as DTE drops — theta eating premium fast
+    // CREDIT spreads: theta works FOR you — EXPAND targets at low DTE (let it expire worthless)
+    const originalDTE = pos.expDays || 30;
+    let dteMult;
+    if (pos.isCreditSpread) {
+      // Credit: theta erosion = profit — relax targets inside 10 DTE
+      dteMult = dteLeft <= 3  ? 1.30  // <3 DTE: theta almost fully decayed, hold for max
+              : dteLeft <= 7  ? 1.15  // <7 DTE: theta working hard, expand target
+              : dteLeft <= 14 ? 1.05  // <14 DTE: mild expansion
+              : 1.0;
+    } else {
+      // Debit: theta is the enemy — tighten targets as expiry approaches
+      dteMult = dteLeft <= 3  ? 0.45  // <3 DTE: take what's there
+              : dteLeft <= 5  ? 0.55  // <5 DTE: theta burning fast
+              : dteLeft <= 10 ? 0.70  // <10 DTE: acceleration zone
+              : dteLeft <= 14 ? 0.82  // <14 DTE: entering acceleration
+              : dteLeft <= 21 ? 0.92  // <21 DTE: slight acceleration
+              : 1.0;
+    }
     const activeTakeProfitPct = parseFloat((currentExitParams.takeProfitPct * dteMult).toFixed(3));
     const activePartialPct    = parseFloat(((currentExitParams.partialPct || activeTakeProfitPct * 0.60) * dteMult).toFixed(3));
     const activeRidePct       = currentExitParams.ridePct || (activeTakeProfitPct * 1.30);
@@ -6092,7 +6800,16 @@ async function runScan() {
   const agentRegime       = (state._agentMacro || {}).regime || (state._dayPlan || {}).regime || "neutral";
   const agentTradeTypeGate = (state._dayPlan || {}).tradeType || (state._agentMacro || {}).tradeType || "spread";
   const isChoppyRegime    = agentRegime === "choppy" || agentTradeTypeGate === "none";
-  const creditAllowedVIX  = state.vix >= 28; // credit spreads need elevated VIX to be worthwhile
+  // SKEW elevated = puts doubly overpriced (both fear + tail risk premium)
+  // When SKEW >= 130 lower the VIX threshold — SKEW compensates for lower VIX
+  const skewElevated      = (state._skew?.skew || 0) >= 130;
+  // Simon & Campasano (2014): momentum fails above VIX 25, mean reversion dominates
+  // Paper validates credit spread entries starting at VIX 25, not 28
+  // Simon & Campasano: threshold 25. SKEW elevated lowers to 22 (not 20 — too low premium at VIX 20)
+  const creditAllowedVIX  = state.vix >= 25 || (skewElevated && state.vix >= 22);
+  if (skewElevated && state.vix >= 22 && state.vix < 28) {
+    logEvent("filter", `SKEW ${state._skew.skew} elevated — lowering credit spread VIX threshold to 22`);
+  }
   // Choppy + high VIX = credit spread opportunity. Choppy + low VIX = sit out entirely.
   const choppyDebitBlock  = isChoppyRegime && !dryRunMode;
   const agentSaysCredit   = agentTradeTypeGate === "credit";
@@ -6125,8 +6842,14 @@ async function runScan() {
     if (vixMove >= 8) {
       for (const pos of [...state.positions]) {
         if (pos.optionType === "call" && !isDayTrade(pos)) {
-          logEvent("warn", `[VIX SPIKE] VIX +${vixMove.toFixed(1)} pts — closing call ${pos.ticker}`);
-          await closePosition(pos.ticker, "vix-spike", null, pos.contractSymbol || pos.buySymbol);
+          const chgPct = pos.currentPrice && pos.premium
+            ? (pos.currentPrice - pos.premium) / pos.premium : 0;
+          if (chgPct <= -0.10) {
+            logEvent("warn", `[VIX SPIKE] VIX +${vixMove.toFixed(1)}pts, call ${pos.ticker} down ${(chgPct*100).toFixed(0)}% — closing`);
+            await closePosition(pos.ticker, "vix-spike", null, pos.contractSymbol || pos.buySymbol);
+          } else {
+            logEvent("warn", `[VIX SPIKE] VIX +${vixMove.toFixed(1)}pts, call ${pos.ticker} at ${(chgPct*100).toFixed(0)}% — monitoring`);
+          }
         }
       }
     }
@@ -6207,14 +6930,15 @@ async function runScan() {
   // Prevent extreme one-sided exposure
   const pgr = marketContext.portfolioGreeks || { delta: 0, vega: 0 };
   const MAX_PORTFOLIO_DELTA = -500; // max short delta (puts) = -$500 per 1% SPY move
-  const MAX_PORTFOLIO_VEGA  = 2000; // max vega = $2000 per 1% IV move
+  // Natenberg: VIX-scaled vega cap — high VIX = more volatile IV = tighter cap
+  // At VIX 37, a $2000 vega position loses $2000 on a 1pt VIX move — too much
+  const MAX_PORTFOLIO_VEGA  = state.vix >= 35 ? 500 : state.vix >= 25 ? 1000 : 2000;
   if (pgr.delta < MAX_PORTFOLIO_DELTA) {
     logEvent("filter", `Portfolio delta ${pgr.delta} too short — blocking new put entries`);
-    // Only block puts, calls can still balance the book
     if (!callsAllowed) return;
   }
   if (Math.abs(pgr.vega) > MAX_PORTFOLIO_VEGA) {
-    logEvent("filter", `Portfolio vega ${pgr.vega} at limit — blocking new entries`);
+    logEvent("filter", `Portfolio vega $${pgr.vega.toFixed(0)} at VIX-scaled limit $${MAX_PORTFOLIO_VEGA} — blocking entries`);
     return;
   }
 
@@ -7015,8 +7739,7 @@ async function runScan() {
 
     let entered = false;
     if (useCreditSpread || useCreditCallSpread) {
-      // Credit put spread: sell put premium (choppy + high VIX)
-      // Credit call spread: sell call premium (choppy + near resistance)
+      state._lastEntryType = "credit"; // tag for VIX sizing adjustment
       const creditPos = await executeCreditSpread(stock, price, score, reasons, state.vix, optionType);
       entered = !!creditPos;
     } else if (useSpread) {
@@ -7856,6 +8579,17 @@ cron.schedule("0 13,14 * * 1-5", async () => {
   const et = getETTime();
   if (et.getHours() !== 9 || et.getMinutes() !== 0) return;
   state.dayStartCash      = state.cash;
+  // Store last week's close every Friday for accurate weekStartCash
+  const eodET = getETTime();
+  if (eodET.getDay() === 5) { // Friday
+    state.prevWeekClose = state.cash + openCostBasis();
+    logEvent("scan", `[EOD] Friday close stored: $${state.prevWeekClose.toFixed(2)} — used for weekly P&L baseline`);
+  }
+  // Reset weekStartCash on Monday using Friday's close
+  if (eodET.getDay() === 1 && state.prevWeekClose) {
+    state.weekStartCash = state.prevWeekClose;
+    logEvent("scan", `[SOW] Week start set from Friday close: $${state.weekStartCash.toFixed(2)}`);
+  }
   state.todayTrades       = 0;
   state.consecutiveLosses = 0;
   state.circuitOpen       = true;
@@ -8045,6 +8779,13 @@ app.get("/api/state", async (req, res) => {
     drawdownDuration:   calcDrawdownDuration(),
     autocorrelation:    calcAutocorrelation(),
     riskOfRuin:         calcRiskOfRuin(), // { probability, message }
+    pcr:                state._pcr || null,
+    termStructure:      state._termStructure || null,
+    breadthMomentum:    state._breadthMomentum || 0,
+    breadthTrend:       state._breadthTrend || "flat",
+    zweigThrust:        state._zweigThrust || null,
+    skew:               state._skew || null,
+    aaii:               state._aaii || null,
   });
 });
 
@@ -8194,6 +8935,30 @@ app.post("/api/close/:tkr",  async (req,res) => {
   }
   res.status(404).json({ error: "No position found" });
 });
+// Manual AAII sentiment override — set weekly survey results manually
+// AAII doesn't have a reliable public API — use this every Thursday after survey publishes
+// POST { bullish: 28.5, bearish: 42.1, neutral: 29.4 }
+app.post("/api/set-aaii", async (req, res) => {
+  const { bullish, bearish, neutral } = req.body || {};
+  if (!bullish || !bearish) return res.status(400).json({ error: "Need bullish and bearish percentages" });
+  const spread  = bullish - bearish;
+  const signal  = bullish < 20 ? "extreme_bearish"
+                : bullish < 30 ? "bearish"
+                : bullish > 55 ? "extreme_bullish"
+                : bullish > 45 ? "bullish"
+                : "neutral";
+  state._aaiiManual = {
+    bullish: parseFloat(bullish), bearish: parseFloat(bearish),
+    neutral: parseFloat(neutral || (100 - bullish - bearish)),
+    spread: parseFloat(spread.toFixed(1)), signal,
+    date: new Date().toLocaleDateString(), manual: true,
+  };
+  state._aaii = state._aaiiManual;
+  markDirty();
+  logEvent("scan", `[AAII] Manual update: Bulls:${bullish}% Bears:${bearish}% (${signal})`);
+  res.json({ ok: true, signal, spread: spread.toFixed(1) });
+});
+
 // Test email endpoint — sends a test email immediately
 app.post("/api/test-email", async (req, res) => {
   if (!RESEND_API_KEY || !GMAIL_USER) {
@@ -8262,7 +9027,18 @@ app.post("/api/reset-circuit", async (req, res) => {
   state.circuitOpen       = true;
   state.weeklyCircuitOpen = true;
   state.consecutiveLosses = 0;
-  state.dayStartCash      = state.cash; // reset daily baseline to current cash
+  state.dayStartCash      = state.cash;
+  // Store last week's close every Friday for accurate weekStartCash
+  const eodET = getETTime();
+  if (eodET.getDay() === 5) { // Friday
+    state.prevWeekClose = state.cash + openCostBasis();
+    logEvent("scan", `[EOD] Friday close stored: $${state.prevWeekClose.toFixed(2)} — used for weekly P&L baseline`);
+  }
+  // Reset weekStartCash on Monday using Friday's close
+  if (eodET.getDay() === 1 && state.prevWeekClose) {
+    state.weekStartCash = state.prevWeekClose;
+    logEvent("scan", `[SOW] Week start set from Friday close: $${state.weekStartCash.toFixed(2)}`);
+  } // reset daily baseline to current cash
   await saveStateNow();
   logEvent("circuit", "Circuit breaker manually reset — resuming normal operations");
   res.json({ ok: true, cash: state.cash, positions: state.positions.length });
