@@ -1133,16 +1133,17 @@ function renderMetrics() {
       : '<span style="color:#555">none</span>';
   }
 
-  // PDT remaining day trades
+  // PDT remaining day trades — sourced from Alpaca when available
   const pdtUsed      = state.pdtCount || 0;
   const pdtLimit     = state.pdtLimit || 3;
-  const pdtRemaining = Math.max(0, pdtLimit - pdtUsed);
+  const pdtRemaining = state.pdtRemaining !== undefined ? state.pdtRemaining : Math.max(0, pdtLimit - pdtUsed);
   const pdtBlocked   = state.pdtBlocked || false;
+  const pdtSource    = state.pdtSource || "internal";
   const pdtEl        = document.getElementById('pdt-remaining');
   const pdtCard      = document.getElementById('pdt-card');
   const pdtSub       = document.getElementById('pdt-sub');
   pdtEl.textContent  = pdtBlocked ? 'BLOCKED' : pdtRemaining;
-  pdtSub.textContent = pdtUsed + ' of ' + pdtLimit + ' used this week';
+  pdtSub.textContent = pdtUsed + ' of ' + pdtLimit + ' used · ' + (pdtSource === 'alpaca' ? '✓ Alpaca' : '⚠ internal');
   if (pdtBlocked || pdtRemaining === 0) {
     pdtEl.style.color  = 'var(--red)';
     pdtCard.style.borderColor = '#ff4444';
