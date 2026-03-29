@@ -3287,15 +3287,18 @@ async function getSyntheticPCR() {
     if (!data || !data.snapshots) return null;
 
     let putOI = 0, callOI = 0, putVol = 0, callVol = 0;
+    let contractsFound = 0;
     for (const [sym, snap] of Object.entries(data.snapshots)) {
-      const oi  = parseFloat(snap.greeks?.open_interest || snap.openInterest || 0);
-      const vol = parseFloat(snap.dailyBar?.volume || 0);
-      // Option type is the character after the 6-digit date in the symbol
-      // e.g. SPY260419P00500000 — 'P' at position after date, not in ticker
+      // Alpaca snapshot fields: openInterest (not greeks.open_interest), dailyBar.v (not .volume)
+      const oi  = parseFloat(snap.openInterest || snap.greeks?.open_interest || 0);
+      const vol = parseFloat(snap.dailyBar?.v || snap.dailyBar?.volume || 0);
+      // Option type character after the 6-digit date: SPY260419P00500000
       const optChar = sym.match(/\d{6}([CP])\d/)?.[1];
       if (optChar === "P") { putOI  += oi; putVol  += vol; }
-      else                 { callOI += oi; callVol += vol; }
+      else if (optChar === "C") { callOI += oi; callVol += vol; }
+      contractsFound++;
     }
+    if (contractsFound === 0) return null;
 
     const oiPCR  = callOI  > 0 ? parseFloat((putOI  / callOI ).toFixed(3)) : null;
     const volPCR = callVol > 0 ? parseFloat((putVol / callVol).toFixed(3)) : null;
@@ -5792,7 +5795,11 @@ function applyIntradayRegimeOverride(newMacro) {
 
   // Only override if intraday signal is HIGH confidence AND meaningfully different
   const dayPlanBias = (state._dayPlan || {}).entryBias || "neutral";
-  const strongShift = confidence === "high" && (dayPlanRegime !== intradayRegime || dayPlanBias !== newMacro.entryBias);
+  // Require BOTH regime AND bias to change for non-extreme shifts
+  // Prevents spurious overrides when only confidence level changes
+  const regimeChanged = dayPlanRegime !== intradayRegime;
+  const biasChanged   = dayPlanBias   !== newMacro.entryBias;
+  const strongShift   = confidence === "high" && (regimeChanged && biasChanged);
   const extremeShift = ["strongly bearish","strongly bullish"].includes(intradaySignal);
 
   // Check if previous override should expire (2-hour cooldown)
@@ -6131,7 +6138,8 @@ async function runScan() {
 
     // Strongly bearish macro — close all calls immediately
     if (macro.mode === "defensive" && state.circuitOpen) {
-      logEvent("macro", `DEFENSIVE MODE — macro strongly bearish: ${macro.triggers.join(", ")} — closing calls`);
+      const defTriggers = (macro.triggers || []).slice(0,3).join(", ") || "strongly bearish signal";
+      logEvent("macro", `DEFENSIVE MODE — macro strongly bearish: ${defTriggers} — closing calls`);
       for (const pos of [...state.positions]) {
         if (pos.optionType === "call") await closePosition(pos.ticker, "macro-defensive");
       }
@@ -6179,6 +6187,8 @@ async function runScan() {
       state._pcr = pcr;
       const src = pcrCBOE ? "CBOE" : "synthetic";
       logEvent("scan", `[PCR:${src}] ${pcr.pcr} (${pcr.signal})`);
+    } else {
+      logEvent("scan", `[PCR] unavailable — CBOE:${pcrCBOE ? 'ok' : 'null'} synthetic:${pcrSynth ? 'ok' : 'null'} — scoring uses cached value`);
     }
     if (termStruct) {
       marketContext.termStructure = termStruct;
@@ -6513,7 +6523,9 @@ async function runScan() {
               : 1.0;
     }
     const activeTakeProfitPct = parseFloat((currentExitParams.takeProfitPct * dteMult).toFixed(3));
-    const activePartialPct    = parseFloat(((currentExitParams.partialPct || activeTakeProfitPct * 0.60) * dteMult).toFixed(3));
+    // partialPct already derived from tp (which has overnightMult) — don't apply dteMult again
+    // Partial should fire at 60% of the DTE-adjusted take profit target
+    const activePartialPct    = parseFloat((activeTakeProfitPct * 0.60).toFixed(3));
     const activeRidePct       = currentExitParams.ridePct || (activeTakeProfitPct * 1.30);
     if (dteMult < 1.0 && pos.isSpread) logEvent("scan", `${pos.ticker} DTE-adjusted target: ${(activeTakeProfitPct*100).toFixed(0)}% (${dteLeft}d remaining)`);
 
@@ -6602,9 +6614,10 @@ async function runScan() {
 
     // 4. PARTIAL CLOSE — at 60% of active take profit target
     // Uses live overnight-adjusted params — tighter targets on older positions
-    if (!pos.partialClosed && chg >= activePartialPct) {
+    if (!pos.partialClosed && chg >= activePartialPct && chg < activeTakeProfitPct) {
       logEvent("scan", `${pos.ticker} partial close at +${(chg*100).toFixed(0)}% [${currentExitParams.label}] (partial threshold: +${(activePartialPct*100).toFixed(0)}%)`);
       await partialClose(pos.ticker);
+      continue; // don't evaluate take profit in same scan as partial — wait for next cycle
     }
 
     // 5. FULL TARGET — take profit
