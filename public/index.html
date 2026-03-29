@@ -339,6 +339,11 @@ input[type=text]:focus{border-color:var(--blue)}
       <div class="sub" id="breadth-sub">-- advancing</div>
     </div>
     <div class="card">
+      <div class="card-title">AAII SENTIMENT</div>
+      <div class="metric-sm" id="aaii-status" style="font-size:10px;color:var(--muted)">--</div>
+      <div class="sub">weekly retail · POST /api/set-aaii</div>
+    </div>
+    <div class="card">
       <div class="card-title">Leading Sector</div>
       <div class="metric-sm" style="font-size:13px" id="sector-leading">--</div>
       <div class="sub" id="sector-lagging">lagging: --</div>
@@ -1180,6 +1185,19 @@ function renderMetrics() {
     el2('fg-score').style.color = fg.score < 25 ? 'var(--red)' : fg.score > 75 ? 'var(--green)' : 'var(--gold)';
     el2('fg-rating').textContent = fg.rating;
   }
+  const aaiiEl = el2('aaii-status');
+  if (aaiiEl) {
+    if (state.aaii) {
+      const sig = (state.aaii.signal||'').replace(/_/g,' ');
+      aaiiEl.textContent = `Bulls:${state.aaii.bullish}% Bears:${state.aaii.bearish}% · ${sig}`;
+      aaiiEl.style.color = state.aaii.signal === 'extreme_bearish' ? 'var(--green)'
+                         : state.aaii.signal === 'extreme_bullish' ? 'var(--red)'
+                         : 'var(--muted)';
+    } else {
+      aaiiEl.textContent = 'manual input needed';
+      aaiiEl.style.color = 'var(--muted)';
+    }
+  }
   if (el2('breadth-pct')) {
     el2('breadth-pct').textContent = br.breadthPct + '%';
     el2('breadth-pct').style.color = br.breadthPct > 60 ? 'var(--green)' : br.breadthPct < 40 ? 'var(--red)' : 'var(--gold)';
@@ -1509,6 +1527,8 @@ function renderPositions() {
         <div><div style="font-size:9px;color:var(--muted)">DTE</div><div style="font-weight:700">${Math.max(1,Math.round((new Date(p.expDate)-new Date())/86400000))}d</div></div>
         <div><div style="font-size:9px;color:var(--muted)">CONTRACTS</div><div style="font-weight:700">${p.contracts}x</div></div>
         <div><div style="font-size:9px;color:var(--muted)">EXP DATE</div><div style="font-weight:700">${p.expDate}</div></div>
+        <div><div style="font-size:9px;color:var(--muted)">PROB OF PROFIT</div><div style="font-weight:700;color:${p.probabilityOfProfit>=70?'var(--green)':p.probabilityOfProfit>=50?'var(--gold)':'var(--red)'}">${p.probabilityOfProfit!=null?p.probabilityOfProfit+'%':'--'}</div></div>
+        <div><div style="font-size:9px;color:var(--muted)">BREAKEVEN</div><div style="font-weight:700">$${p.breakeven||'--'}</div></div>
       </div>` : `
       <!-- Naked option position grid -->
       <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-bottom:10px">
