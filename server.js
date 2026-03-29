@@ -859,6 +859,10 @@ async function getLiveBeta(ticker) {
 }
 
 async function getDynamicSignals(ticker, bars, intradayBars = null, realOptionsIV = null) {
+  // Cache signals within scan window — same bars = same signals
+  const sigKey = `sigs:${ticker}:${(bars||[]).length}`;
+  const sigCached = getCached(sigKey);
+  if (sigCached) return sigCached;
   // Use prefetched intraday bars if provided, otherwise fetch now
   if (!intradayBars) intradayBars = await getIntradayBars(ticker);
   const signalBars   = intradayBars.length >= 10 ? intradayBars : bars;
@@ -1545,7 +1549,9 @@ function scorePutSetup(stock, relStrength, adx, volume, avgVolume, vix = 20) {
 
   // Hard cap at 95 — a 100/100 is now mathematically impossible
   // Forces discrimination between setups even in broad selloffs
-  return { score: Math.min(Math.max(score, 0), 95), reasons };
+  const _sigResult = { score: Math.min(Math.max(score, 0), 95), reasons };
+  setCache(sigKey, _sigResult);
+  return _sigResult;
 }
 
 // - Alpaca API -
