@@ -525,6 +525,10 @@ async function runReconciliation() {
         const qty     = Math.abs(parseInt(alpPos.qty || 1));
         const curP    = qty > 0 && mktVal > 0 ? parseFloat((mktVal / (qty * 100)).toFixed(2)) : pos.currentPrice;
         if (curP > 0) pos.currentPrice = curP;
+        // Update POP from live delta (market maker: track current not entry POP)
+        if (alpPos.greeks?.delta) {
+          pos.probabilityOfProfit = parseFloat(((1 - Math.abs(parseFloat(alpPos.greeks.delta))) * 100).toFixed(1));
+        }
       }
     }
 
@@ -6440,6 +6444,11 @@ async function runScan() {
     // Refresh exit params based on current daysOpen — targets tighten overnight
     const currentExitParams = getDTEExitParams(pos.expDays || 30, daysOpen);
     // DTE-aware exits — as expiry approaches, lower the profit target
+    // Carr & Wu: respect pos.takeProfitPct if it was explicitly set (harvest window)
+    // pos.takeProfitPct = 0.30 during 5-day harvest window (tighter initial target)
+    if (pos.takeProfitPct && pos.takeProfitPct < currentExitParams.takeProfitPct) {
+      currentExitParams.takeProfitPct = pos.takeProfitPct; // harvest window overrides DTE params
+    }
     // Theta accelerates dramatically inside 10 DTE — take profit sooner
     const dteLeft = Math.max(1, Math.round((new Date(pos.expDate) - new Date()) / 86400000));
     // Natenberg: theta decay is exponential not linear
@@ -7738,6 +7747,7 @@ async function runScan() {
     const useSpread           = stock.isIndex && !useCreditSpread && !useCreditCallSpread && agentTradeType !== "naked" && !isMeanReversion;
 
     let entered = false;
+    state._lastEntryType = null; // reset before each entry attempt
     if (useCreditSpread || useCreditCallSpread) {
       state._lastEntryType = "credit"; // tag for VIX sizing adjustment
       const creditPos = await executeCreditSpread(stock, price, score, reasons, state.vix, optionType);
