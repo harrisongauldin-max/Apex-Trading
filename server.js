@@ -420,6 +420,10 @@ async function saveState() {
   }
 }
 
+// Mark state as dirty — flushed by dedicated 30s interval
+// Use instead of saveState() for non-critical updates that don't need immediate persist
+function markDirty() { stateDirty = true; }
+
 // Force save — used for critical state changes (trade open/close, circuit breaker)
 async function saveStateNow() {
   try {
