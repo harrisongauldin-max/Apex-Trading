@@ -1177,12 +1177,15 @@ function scoreIndexSetup(stock, optionType, spyRSI, spyMACD, spyMomentum, breadt
   const tradeType  = (agentMacro || {}).tradeType  || "spread";
   const vixOutlook = (agentMacro || {}).vixOutlook || "unknown";
 
+  // Supplementary signals — capped at +25 total, declared at function scope
+  // so both put and call branches can use it
+  let supplementScore = 0;
+
   if (optionType === "put") {
     // ── Supplementary signals — capped at +25 total contribution ──────────
     // These signals CONFIRM the primary thesis (agent + regime + RSI + MACD)
     // They should not dominate the score on their own
     // Cap: track supplement score separately, add min(supplementScore, 25) at end
-    let supplementScore = 0;
 
     // ── Put/Call Ratio signal (Bollen & Whaley 2004) ─────────────────────
     const pcrData = state._pcr || null;
@@ -4124,13 +4127,14 @@ function getBusinessDaysAgo(n) {
 }
 
 function countRecentDayTrades() {
-  // Count day trades in the rolling 5 business day window
-  const cutoff    = getBusinessDaysAgo(PDT_DAYS);
-  const cutoffStr = cutoff.toLocaleDateString();
-  const recent    = (state.dayTrades || []).filter(dt => {
-    // Compare date strings to avoid timezone issues
-    return new Date(dt.closeTime) >= cutoff;
-  });
+  // Prefer Alpaca's authoritative day trade count when available
+  // Alpaca tracks the rolling 5-day window accurately including trades from previous sessions
+  if (state._alpacaDayTradeCount !== undefined && state._alpacaDayTradeCount !== null) {
+    return state._alpacaDayTradeCount;
+  }
+  // Fallback to internal counter if Alpaca count not yet synced
+  const cutoff = getBusinessDaysAgo(PDT_DAYS);
+  const recent = (state.dayTrades || []).filter(dt => new Date(dt.closeTime) >= cutoff);
   return recent.length;
 }
 
@@ -4501,6 +4505,24 @@ async function syncCashFromAlpaca() {
     const alpacaBuyPower  = parseFloat(acct.buying_power || acct.cash);
     state.alpacaCash      = alpacaCash;
     state.alpacaBuyPower  = alpacaBuyPower;
+
+    // Alpaca tracks day trades authoritatively — use their count as source of truth
+    // acct.daytrade_count = rolling 5-day day trade count (resets as old trades age out)
+    // acct.pattern_day_trader = true if account has been flagged as PDT
+    if (acct.daytrade_count !== undefined) {
+      const alpacaDTCount = parseInt(acct.daytrade_count, 10);
+      if (!isNaN(alpacaDTCount)) {
+        const dtLeft = Math.max(0, PDT_LIMIT - alpacaDTCount);
+        if (alpacaDTCount !== (state._alpacaDayTradeCount || 0)) {
+          logEvent("scan", `[PDT] Alpaca count: ${alpacaDTCount}/3 — ${dtLeft} day trade${dtLeft===1?'':'s'} remaining (rolling 5-day window)`);
+        }
+        state._alpacaDayTradeCount = alpacaDTCount;
+        state._alpacaDayTradesLeft = dtLeft;
+      }
+    }
+    if (acct.pattern_day_trader !== undefined) {
+      state._patternDayTrader = acct.pattern_day_trader;
+    }
     // Set accountBaseline on first sync if not already established
     if (!state.accountBaseline) state.accountBaseline = alpacaCash;
     const hasCustomBudget = state.customBudget && state.customBudget > 0 && state.customBudget !== MONTHLY_BUDGET;
@@ -5969,6 +5991,15 @@ async function runScan() {
   const newVIX  = await getVIX() || state.vix;
   const isBlackSwan = checkVIXVelocity(newVIX);
   state.vix     = newVIX;
+
+  // Refresh PDT count from Alpaca at scan start — lightweight single field read
+  // Runs in parallel with VIX already fetched above — no added latency
+  // Keeps day trade count current without waiting for the 30s sync interval
+  alpacaGet("/account").then(acct => {
+    if (acct?.daytrade_count !== undefined) {
+      state._alpacaDayTradeCount = parseInt(acct.daytrade_count, 10);
+    }
+  }).catch(() => {}); // fire-and-forget — non-blocking, falls back to last known value
 
   // Emergency close all on VIX velocity spike
   if (isBlackSwan) {
@@ -8764,6 +8795,12 @@ app.get("/api/state", async (req, res) => {
     })(),
     alpacaCash:         state.alpacaCash || null,
     pdtCount:           countRecentDayTrades(),
+    pdtRemaining:       Math.max(0, PDT_LIMIT - countRecentDayTrades()),
+    alpacaDayTradesLeft: state._alpacaDayTradesLeft ?? null,
+    pdtSource:          state._alpacaDayTradeCount !== undefined ? "alpaca" : "internal",
+    pdtSource:          state._alpacaDayTradeCount !== undefined ? "alpaca" : "internal",
+    pdtRemaining:       Math.max(0, PDT_LIMIT - countRecentDayTrades()),
+    patternDayTrader:   state._patternDayTrader || false,
 
     tickerBlacklist:    state.tickerBlacklist || [],
     pdtLimit:           PDT_LIMIT,
