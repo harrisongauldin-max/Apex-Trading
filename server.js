@@ -1198,7 +1198,12 @@ function scoreIndexSetup(stock, optionType, spyRSI, spyMACD, spyMomentum, breadt
     }
 
   } else {
-    // ── CALL scoring ────────────────────────────────────────────────────
+    // ── CALL SCORING — two distinct theses handled separately ───────────
+    // Thesis A: Mean Reversion Call — RSI crash + high VIX + capitulation
+    // Thesis B: Trending Bull Call  — VIX compression + breadth thrust + momentum
+    // Both share this path but scoring weights differ by regime/RSI context
+
+    // ── Agent macro signal — primary gate ──────────────────────────────
     if (["strongly bullish","bullish"].includes(signal) && confidence === "high") { score += 35; reasons.push(`Agent ${signal} high confidence (+35)`); }
     else if (["strongly bullish","bullish"].includes(signal))                     { score += 25; reasons.push(`Agent ${signal} (+25)`); }
     else if (signal === "mild bullish")                                            { score += 15; reasons.push("Agent mild bullish (+15)"); }
@@ -1206,30 +1211,87 @@ function scoreIndexSetup(stock, optionType, spyRSI, spyMACD, spyMomentum, breadt
     else if (signal === "neutral")                                                 { score += 0;  reasons.push("Agent neutral (+0)"); }
     else { score -= 20; reasons.push(`Agent ${signal} — wrong direction for calls (-20)`); }
 
+    // ── Regime confirmation ─────────────────────────────────────────────
     if (["trending_bull","recovery"].includes(regime))                            { score += 20; reasons.push(`Regime: ${regime} (+20)`); }
     else if (regime === "choppy")                                                  { score -= 10; reasons.push("Choppy regime — calls risky (-10)"); }
     else if (["trending_bear","breakdown"].includes(regime))                      { score -= 25; reasons.push(`Regime: ${regime} — wrong for calls (-25)`); }
 
-    if (spyRSI <= 30)                                                             { score += 20; reasons.push(`SPY RSI ${spyRSI} deeply oversold — mean reversion (+20)`); }
-    else if (spyRSI <= 40)                                                        { score += 12; reasons.push(`SPY RSI ${spyRSI} oversold (+12)`); }
+    // ── RSI — context-aware for two theses ─────────────────────────────
+    // Mean reversion: deeply oversold RSI = ideal call entry
+    // Trending bull: healthy RSI (45-60) on a dip = ideal call entry
+    // Overbought RSI (70+) = wrong entry point for both theses
+    if (spyRSI <= 25)                                                             { score += 25; reasons.push(`SPY RSI ${spyRSI} extreme oversold — mean reversion call (+25)`); }
+    else if (spyRSI <= 35)                                                        { score += 18; reasons.push(`SPY RSI ${spyRSI} deeply oversold — mean reversion (+18)`); }
+    else if (spyRSI <= 42)                                                        { score += 10; reasons.push(`SPY RSI ${spyRSI} oversold (+10)`); }
+    else if (spyRSI >= 45 && spyRSI <= 58 && ["trending_bull","recovery"].includes(regime)) {
+      score += 12; reasons.push(`SPY RSI ${spyRSI} healthy dip in bull trend — ideal call entry (+12)`);
+    }
     else if (spyRSI >= 70)                                                        { score -= 15; reasons.push(`SPY RSI ${spyRSI} overbought for calls (-15)`); }
 
+    // ── MACD ────────────────────────────────────────────────────────────
     if (spyMACD && spyMACD.includes("bullish crossover"))                        { score += 15; reasons.push("SPY MACD bullish crossover (+15)"); }
     else if (spyMACD && spyMACD.includes("bullish"))                             { score += 8;  reasons.push("SPY MACD bullish (+8)"); }
-    else if (spyMACD && spyMACD.includes("bearish crossover"))                   { score -= 15; reasons.push("SPY MACD bearish crossover (-15)"); }
+    else if (spyMACD && spyMACD.includes("bearish crossover"))                   { score -= 15; reasons.push("SPY MACD bearish crossover — wrong for calls (-15)"); }
+    else if (spyMACD && spyMACD.includes("bearish"))                             { score -= 5;  reasons.push("SPY MACD bearish — headwind for calls (-5)"); }
 
-    if (breadth >= 65)       { score += 10; reasons.push(`Breadth ${breadth}% recovering (+10)`); }
-    else if (breadth <= 30)  { score -= 10; reasons.push(`Breadth ${breadth}% — market still weak (-10)`); }
+    // ── Breadth — dip in bull trend is ideal, not extended rally ────────
+    if (breadth >= 75)       { score += 10; reasons.push(`Breadth ${breadth}% strong (+10)`); }
+    else if (breadth >= 65)  { score += 8;  reasons.push(`Breadth ${breadth}% recovering (+8)`); }
+    else if (breadth >= 40 && breadth < 55 && ["trending_bull","recovery"].includes(regime)) {
+      score += 12; reasons.push(`Breadth ${breadth}% dip in bull trend — ideal call entry (+12)`);
+    }
+    else if (breadth <= 30)  { score -= 10; reasons.push(`Breadth ${breadth}% — market weak, calls risky (-10)`); }
 
-    if (vixOutlook === "falling")          { score += 10; reasons.push("VIX falling — calls gaining (+10)"); }
-    else if (vixOutlook === "spiking")     { score -= 10; reasons.push("VIX spiking — calls losing (-10)"); }
+    // ── VIX — absolute level matters for calls, not just direction ──────
+    // Low VIX = cheap call premium = historically excellent call entry cost
+    // High VIX = expensive calls + wrong macro environment for bull thesis
+    if (vix <= 18)            { score += 12; reasons.push(`VIX ${vix} — calls historically cheap, low premium (+12)`); }
+    else if (vix <= 22)       { score += 8;  reasons.push(`VIX ${vix} — moderate, calls reasonably priced (+8)`); }
+    else if (vix >= 35)       { score -= 10; reasons.push(`VIX ${vix} — calls expensive in fear environment (-10)`); }
+    // VIX direction (falling = calls gaining value, spiking = calls losing)
+    if (vixOutlook === "falling")      { score += 12; reasons.push("VIX compressing — call premium expanding (+12)"); }
+    else if (vixOutlook === "mean_reverting") { score += 6; reasons.push("VIX mean reverting — calls improving (+6)"); }
+    else if (vixOutlook === "spiking") { score -= 12; reasons.push("VIX spiking — calls losing value fast (-12)"); }
 
-    if (entryBias === "calls_on_dips" && spyMomentum === "steady") { score += 8; reasons.push("Entry bias: calls on dips — good timing (+8)"); }
+    // ── Weekly trend alignment ───────────────────────────────────────────
+    // Above 10-week MA = trend working for calls, not against
+    const weeklyTrendBonus = (stock._weeklyTrend || {}).above10wk;
+    if (weeklyTrendBonus === true)  { score += 8;  reasons.push("Above 10-wk MA — trend aligned for calls (+8)"); }
+    else if (weeklyTrendBonus === false) { score -= 8; reasons.push("Below 10-wk MA — fighting trend for calls (-8)"); }
+
+    // ── Momentum ─────────────────────────────────────────────────────────
+    // Recovering momentum in bull regime = dip is done, resuming uptrend
+    if (spyMomentum === "recovering" && ["trending_bull","recovery"].includes(regime)) {
+      score += 10; reasons.push("Momentum recovering in bull regime — resuming uptrend (+10)");
+    } else if (spyMomentum === "steady") {
+      score += 3; reasons.push("Momentum steady (+3)");
+    }
+
+    // ── Entry bias ───────────────────────────────────────────────────────
+    if (entryBias === "calls_on_dips") {
+      if (spyMomentum === "recovering" || spyRSI <= 45) {
+        score += 12; reasons.push("Entry bias: calls on dips — dip confirmed, ideal timing (+12)");
+      } else {
+        score += 6; reasons.push("Entry bias: calls on dips (+6)");
+      }
+    }
     if (entryBias === "avoid") { score = Math.min(score, 50); reasons.push("Agent says avoid — capping at 50"); }
 
+    // ── QQQ — requires tech bullish confirmation ─────────────────────────
+    // Relaxed: QQQ can lead in tech rallies — only penalize if NO bullish thesis
     if (stock.ticker === "QQQ") {
-      const techBullish = (agentMacro || {}).bullishTickers && (agentMacro.bullishTickers.some(t => ["NVDA","MSFT","AAPL","META","GOOGL"].includes(t)));
-      if (!techBullish) { score -= 15; reasons.push("QQQ: no clear tech bullish thesis (-15)"); }
+      const techBullish = (agentMacro || {}).bullishTickers &&
+        agentMacro.bullishTickers.some(t => ["NVDA","MSFT","AAPL","META","GOOGL","AMD"].includes(t));
+      if (!techBullish && !["trending_bull","recovery"].includes(regime)) {
+        score -= 10; reasons.push("QQQ: no tech bullish thesis in non-bull regime (-10)");
+      } else if (techBullish) {
+        score += 5; reasons.push("QQQ: tech names bullish (+5)");
+      }
+    }
+
+    // ── IWM — small caps confirm broad market strength ───────────────────
+    if (stock.ticker === "IWM" && ["trending_bull","recovery"].includes(regime)) {
+      score += 8; reasons.push("IWM in bull/recovery regime — small cap confirmation (+8)");
     }
   }
 
@@ -3768,24 +3830,28 @@ function selectExpiry(score, vix, optionType, earningsDate, ticker = null, isMea
       expiryType = "monthly";
     }
 
-  // ── CALL tiers ─────────────────────────────────────────────────────────
-  // Mean reversion calls (isMeanReversion flag) stay weekly — quick bounce play
-  // All other calls go monthly — PDT accounts need holding time
+  // ── CALL tiers — two distinct theses need different DTE ───────────────
+  // Mean reversion (high VIX, deeply oversold): 14-21 DTE — quick bounce
+  // Trending bull (VIX falling, regime=bull): 30 DTE — ride the trend
+  } else if (vix >= 28 && score >= 70) {
+    // Mean reversion call in high VIX — quick bounce play
+    // High VIX = cheap calls, but thesis is short-term bounce, not a trend
+    targetDays = 21;
+    expiryType = "weekly";
   } else if (score >= 85 && vix < 25) {
-    // High conviction call in calm market — 30 DTE standard
+    // High conviction trending bull call in calm market — 30 DTE, ride the move
     targetDays = 30;
     expiryType = "monthly";
-  } else if (score >= 70 && vix < 30) {
-    // Normal call setup — monthly gives thesis time
+  } else if (score >= 70 && vix < 25) {
+    // Standard trending bull call — 30 DTE gives thesis time to develop
     targetDays = 30;
     expiryType = "monthly";
-  } else if (vix >= 25) {
-    // Mean reversion call in high VIX — 45 DTE, wait for VIX reversion
-    targetDays = 45;
+  } else if (vix >= 25 && vix < 28) {
+    // Transitional VIX — moderate, 30 DTE gives flexibility
+    targetDays = 30;
     expiryType = "monthly";
   } else {
-    // Default
-    targetDays = 45;
+    targetDays = 30;
     expiryType = "monthly";
   }
 
@@ -5587,11 +5653,18 @@ async function runScan() {
             // Trigger if RSI has recovered significantly from entry level
             const putThesisDegrading = pos.optionType === "put" &&
               entryRSI >= 65 && liveRSI < 45 && prevRSI >= 50;
-            // Call thesis: entered when RSI was low (oversold)
-            const callThesisDegrading = pos.optionType === "call" &&
+            // Call thesis degradation checks:
+            // 1. RSI reversal: entered oversold, now overbought (mean reversion played out)
+            const callRSIDegrading = pos.optionType === "call" &&
               entryRSI <= 40 && liveRSI > 55 && prevRSI <= 50;
+            // 2. MACD turned bearish on a call position — momentum reversing
+            const callMACDDegrading = pos.optionType === "call" &&
+              (liveStock?.macd || "").includes("bearish crossover") &&
+              !(pos.entryMACD || "").includes("bearish");
+            const callThesisDegrading = callRSIDegrading || callMACDDegrading;
             if (putThesisDegrading || callThesisDegrading) {
-              triggerRescore(pos, `rsi-reversal: entry ${entryRSI} → now ${liveRSI.toFixed(0)}`);
+              const reason = callMACDDegrading ? "macd-crossover-bearish" : `rsi-reversal: entry ${entryRSI} → now ${liveRSI.toFixed(0)}`;
+              triggerRescore(pos, reason);
             }
           }
         } catch(e) {}
@@ -6023,16 +6096,58 @@ async function runScan() {
   // Choppy + high VIX = credit spread opportunity. Choppy + low VIX = sit out entirely.
   const choppyDebitBlock  = isChoppyRegime && !dryRunMode;
   const agentSaysCredit   = agentTradeTypeGate === "credit";
-  const creditModeActive  = (isChoppyRegime || agentSaysCredit) && creditAllowedVIX && !dryRunMode;
-  if (choppyDebitBlock) logEvent("filter", `Choppy regime — debit entries blocked${creditModeActive ? ", credit spread mode active" : ", VIX too low for credits"}`);
+  const creditModeActive      = (isChoppyRegime || agentSaysCredit) && creditAllowedVIX && !dryRunMode;
+  // Bear call spread (credit call spread): sell call + buy higher strike call
+  // Activates in choppy regime near resistance — collect premium on capped upside
+  const spyNearResistance     = (() => {
+    const res = (state._agentMacro || {}).keyLevels?.spyResistance;
+    if (!res || !state.spyPrice) return false;
+    return Math.abs(state.spyPrice - res) / res < 0.015; // within 1.5% of resistance
+  })();
+  const creditCallModeActive  = isChoppyRegime && creditAllowedVIX && spyNearResistance && !dryRunMode;
+  if (choppyDebitBlock) logEvent("filter", `Choppy regime — debit entries blocked${creditModeActive ? ", credit PUT mode active" : creditCallModeActive ? ", credit CALL mode active (near resistance)" : ", VIX too low for credits"}`);
 
   const callsAllowed  = (isEntryWindow("call", true) && !finalHourBlock && !suppressBlock && !choppyDebitBlock) || dryRunMode;
   const putsAllowed   = (isEntryWindow("put",  true) && !vixFallingPause && !spyGapUp && !postReversalBlock && !finalHourBlock && !suppressBlock && !macroBullish && !choppyDebitBlock) || dryRunMode;
   // Credit spreads allowed even in choppy regime — that's the point of credit mode
-  const creditAllowed = creditModeActive && isEntryWindow("put", true) && !finalHourBlock && !suppressBlock && !vixFallingPause;
-  if (creditAllowed && !putsAllowed) logEvent("filter", `Debit puts blocked but credit spread mode active — will attempt credit entries`);
+  const creditAllowed     = creditModeActive     && isEntryWindow("put",  true) && !finalHourBlock && !suppressBlock && !vixFallingPause;
+  const callCreditAllowed = creditCallModeActive && isEntryWindow("call", true) && !finalHourBlock && !suppressBlock;
+  if (creditAllowed && !putsAllowed) logEvent("filter", "Debit puts blocked — credit put spread mode active");
+  if (callCreditAllowed)             logEvent("filter", "Near resistance in choppy regime — credit call spread mode active");
   if (macroBullish && !dryRunMode) logEvent("filter", `Macro bullish (${marketContext.macro?.signal}) — puts blocked`);
-  if (vixFallingPause && !dryRunMode) logEvent("filter", "VIX falling — put entries paused this scan");
+  if (vixFallingPause && !dryRunMode) logEvent("filter", "VIX falling — put entries paused, call entries favored (VIX compression)");
+
+  // ── VIX SPIKE EXIT — close call positions on sharp VIX spike ────────────
+  // VIX jumping 8+ points intraday crushes call delta AND increases IV on short leg
+  if (!dryRunMode) {
+    const vixPrev = state._prevScanVIX || state.vix;
+    const vixMove = state.vix - vixPrev;
+    if (vixMove >= 8) {
+      for (const pos of [...state.positions]) {
+        if (pos.optionType === "call" && !isDayTrade(pos)) {
+          logEvent("warn", `[VIX SPIKE] VIX +${vixMove.toFixed(1)} pts — closing call ${pos.ticker}`);
+          await closePosition(pos.ticker, "vix-spike", null, pos.contractSymbol || pos.buySymbol);
+        }
+      }
+    }
+    state._prevScanVIX = state.vix;
+  }
+
+  // ── BREADTH COLLAPSE EXIT — close calls on sharp breadth deterioration ───
+  if (!dryRunMode) {
+    const breadthNow  = typeof marketContext?.breadth === "number" ? marketContext.breadth * 100 : parseFloat((marketContext?.breadth || "50").toString()) || 50;
+    const breadthPrev = state._prevBreadth || breadthNow;
+    const breadthDrop = breadthPrev - breadthNow;
+    if (breadthDrop >= 30 && breadthNow <= 35) {
+      for (const pos of [...state.positions]) {
+        if (pos.optionType === "call" && !isDayTrade(pos)) {
+          logEvent("warn", `[BREADTH COLLAPSE] Breadth dropped ${breadthDrop.toFixed(0)}pts → ${breadthNow}% — closing call ${pos.ticker}`);
+          await closePosition(pos.ticker, "breadth-collapse", null, pos.contractSymbol || pos.buySymbol);
+        }
+      }
+    }
+    state._prevBreadth = breadthNow;
+  }
 
   // ── SPY STRONG RECOVERY — exit losing puts ────────────────────────────
   // If SPY is up 1%+ from prior close, the macro environment has reversed
@@ -6069,7 +6184,7 @@ async function runScan() {
       }
     }
   }
-  if (!callsAllowed && !putsAllowed && !creditAllowed) return;
+  if (!callsAllowed && !putsAllowed && !creditAllowed && !callCreditAllowed) return;
 
   // [opening/final hour blocks moved above callsAllowed]
   if (state.circuitOpen === false || state.weeklyCircuitOpen === false) return;
@@ -6422,21 +6537,45 @@ async function runScan() {
       putSetup  = scorePutSetup(liveStock, relStrength, signals.adx, todayVol, avgVol, state.vix);
     }
 
-    // Weekly trend adjustment — fighting a bullish weekly trend on puts needs higher conviction
+    // Weekly trend adjustment — applies symmetrically to both puts and calls
     if (weeklyTrend.above10wk === true) {
-      putSetup.score = Math.max(0, putSetup.score - 10);
+      putSetup.score  = Math.max(0,  putSetup.score  - 10);
       putSetup.reasons.push(`Above 10-wk MA $${weeklyTrend.ma10w} — puts fighting trend (-10)`);
+      callSetup.score = Math.min(95, callSetup.score + 8);
+      callSetup.reasons.push(`Above 10-wk MA $${weeklyTrend.ma10w} — calls aligned with trend (+8)`);
+      // Store for scoreIndexSetup reference
+      liveStock._weeklyTrend = weeklyTrend;
     } else if (weeklyTrend.above10wk === false) {
-      putSetup.score = Math.min(95, putSetup.score + 8);
+      putSetup.score  = Math.min(95, putSetup.score  + 8);
       putSetup.reasons.push(`Below 10-wk MA $${weeklyTrend.ma10w} — aligned with downtrend (+8)`);
+      callSetup.score = Math.max(0,  callSetup.score - 8);
+      callSetup.reasons.push(`Below 10-wk MA $${weeklyTrend.ma10w} — calls fighting downtrend (-8)`);
+      liveStock._weeklyTrend = weeklyTrend;
     }
 
     // Track relative weakness points to enforce group cap below
     let relWeaknessPoints = 0;
 
-    // Volume context for puts — high volume confirms distribution, but capitulation
-    // (extreme high volume) can signal reversal. Use nuanced scoring.
+    // Volume scoring — applies to BOTH puts and calls, direction-aware
     const volRatio = avgVol > 0 ? todayVol / avgVol : 1;
+
+    // Call volume scoring — accumulation days boost calls, distribution days penalize
+    const priceAboveOpen = liveStock.price > (liveStock.intradayOpen || liveStock.price);
+    if (callSetup.score > 0) {
+      if (volRatio > 1.5 && priceAboveOpen) {
+        callSetup.score = Math.min(100, callSetup.score + 10);
+        callSetup.reasons.push(`High volume UP day — accumulation signal (+10)`);
+      } else if (volRatio < 0.7 && !priceAboveOpen) {
+        callSetup.score = Math.min(100, callSetup.score + 8);
+        callSetup.reasons.push(`Low volume pullback — healthy dip, call entry (+8)`);
+      } else if (volRatio > 1.5 && !priceAboveOpen) {
+        callSetup.score = Math.max(0, callSetup.score - 8);
+        callSetup.reasons.push(`High volume DOWN day — distribution, wrong for calls (-8)`);
+      }
+    }
+
+    // Put volume context — high volume confirms distribution, but capitulation
+    // (extreme high volume) can signal reversal. Use nuanced scoring.
     if (volRatio > 2.0) {
       // Extreme volume — could be capitulation (reversal) or panic (continuation)
       // Slight put boost but less than moderate high volume
@@ -6868,12 +7007,16 @@ async function runScan() {
     // Trending regime → debit spread (buy direction, need move to profit)
     // Mean reversion → naked option (quick move, full leverage)
     const agentTradeType  = (state._agentMacro || {}).tradeType || "spread";
-    const useCreditSpread = creditModeActive && stock.isIndex && !isMeanReversion;
-    const useSpread       = stock.isIndex && !useCreditSpread && agentTradeType !== "naked" && !isMeanReversion;
+    // Credit put spread: choppy + high VIX → sell put premium
+    // Credit call spread: choppy + near resistance → sell call premium (bear call)
+    const useCreditSpread     = creditModeActive && stock.isIndex && !isMeanReversion && optionType === "put";
+    const useCreditCallSpread = creditCallModeActive && stock.isIndex && !isMeanReversion && optionType === "call";
+    const useSpread           = stock.isIndex && !useCreditSpread && !useCreditCallSpread && agentTradeType !== "naked" && !isMeanReversion;
 
     let entered = false;
-    if (useCreditSpread) {
-      // Choppy + high VIX: sell premium via credit spread
+    if (useCreditSpread || useCreditCallSpread) {
+      // Credit put spread: sell put premium (choppy + high VIX)
+      // Credit call spread: sell call premium (choppy + near resistance)
       const creditPos = await executeCreditSpread(stock, price, score, reasons, state.vix, optionType);
       entered = !!creditPos;
     } else if (useSpread) {
@@ -7901,7 +8044,7 @@ app.get("/api/state", async (req, res) => {
     informationRatio:   calcInformationRatio(),
     drawdownDuration:   calcDrawdownDuration(),
     autocorrelation:    calcAutocorrelation(),
-    riskOfRuin:         calcRiskOfRuin(),
+    riskOfRuin:         calcRiskOfRuin(), // { probability, message }
   });
 });
 
@@ -8400,13 +8543,26 @@ function calcAutocorrelation() {
 }
 function calcRiskOfRuin() {
   const trades = state.closedTrades || [];
-  if (trades.length < 5) return null;
-  const wins  = trades.filter(t=>(t.pnl||0)>0).length;
+  if (trades.length < 5) return { probability: 0, message: `Need ${5 - trades.length} more trades for estimate` };
+  const wins  = trades.filter(t => (t.pnl||0) > 0).length;
+  const losses = trades.length - wins;
   const wr    = wins / trades.length;
-  const avgW  = trades.filter(t=>(t.pnl||0)>0).reduce((s,t)=>s+(t.pnl||0),0) / Math.max(wins,1);
-  const avgL  = Math.abs(trades.filter(t=>(t.pnl||0)<0).reduce((s,t)=>s+(t.pnl||0),0)) / Math.max(trades.length-wins,1);
-  const edge  = wr * avgW - (1-wr) * avgL;
-  return edge > 0 ? parseFloat((Math.pow((1-wr)/wr, 10) * 100).toFixed(1)) : 99.9;
+  if (wr === 0) return { probability: 99.9, message: "No winning trades yet" };
+  if (wr === 1) return { probability: 0.0,  message: "100% win rate (small sample)" };
+  const avgW = trades.filter(t=>(t.pnl||0)>0).reduce((s,t)=>s+(t.pnl||0),0) / Math.max(wins,1);
+  const avgL = Math.abs(trades.filter(t=>(t.pnl||0)<=0).reduce((s,t)=>s+(t.pnl||0),0)) / Math.max(losses,1);
+  const edge = wr * avgW - (1-wr) * avgL;
+  if (edge <= 0) return { probability: 99.9, message: "Negative edge — review strategy" };
+  // Risk of ruin formula: ((1-wr)/wr)^(capital/avgL)
+  // Simplified: use 10 unit approximation
+  const ratio = (1 - wr) / wr;
+  const ror   = Math.min(99.9, parseFloat((Math.pow(ratio, 10) * 100).toFixed(1)));
+  const msg   = ror < 1   ? "Excellent — very low ruin risk"
+              : ror < 5   ? "Good — manageable risk profile"
+              : ror < 20  ? "Moderate — watch position sizing"
+              : ror < 50  ? "High — reduce size or improve edge"
+              : "Critical — strategy needs review";
+  return { probability: isNaN(ror) ? 0 : ror, message: msg };
 }
 function getStreakAnalysis() {
   const trades = state.closedTrades || [];
