@@ -5376,26 +5376,61 @@ async function closePosition(ticker, reason, exitPremium = null, contractSym = n
     if (idx === -1) return;
     const pos  = state.positions[idx];
 
-    // ── Spread close — close both legs ─────────────────────────────────
+    // ── Spread close — close both legs atomically via mleg ─────────────
+    // CRITICAL: Must close both legs together — separate orders leave naked positions
+    // if one fills and the other doesn't (or if code crashes between them)
     if (pos.isSpread && !dryRunMode) {
       try {
-        // Close buy leg (sell it)
-        if (pos.buySymbol) {
-          await alpacaPost("/orders", {
-            symbol: pos.buySymbol, qty: pos.contracts,
-            side: "sell", type: "market", time_in_force: "day",
-            position_intent: "sell_to_close",
+        if (pos.buySymbol && pos.sellSymbol) {
+          // Use mleg to close both legs atomically
+          const closeResp = await alpacaPost("/orders", {
+            order_class:   "mleg",
+            type:          "market",
+            time_in_force: "day",
+            qty:           String(pos.contracts || 1),
+            legs: [
+              { symbol: pos.buySymbol,  side: "sell", ratio_qty: "1", position_intent: "sell_to_close" },
+              { symbol: pos.sellSymbol, side: "buy",  ratio_qty: "1", position_intent: "buy_to_close"  },
+            ],
           });
-          logEvent("trade", `[SPREAD CLOSE] Buy leg closed: ${pos.buySymbol}`);
-        }
-        // Close sell leg (buy it back)
-        if (pos.sellSymbol) {
-          await alpacaPost("/orders", {
-            symbol: pos.sellSymbol, qty: pos.contracts,
-            side: "buy", type: "market", time_in_force: "day",
-            position_intent: "buy_to_close",
-          });
-          logEvent("trade", `[SPREAD CLOSE] Sell leg closed: ${pos.sellSymbol}`);
+          if (closeResp && closeResp.id) {
+            logEvent("trade", `[SPREAD CLOSE] mleg close submitted: ${closeResp.id} | ${pos.buySymbol} + ${pos.sellSymbol}`);
+            // Wait for fill confirmation (up to 10s — market orders fill fast)
+            let filled = false;
+            const closeStart = Date.now();
+            while (!filled && Date.now() - closeStart < 10000) {
+              await new Promise(r => setTimeout(r, 1000));
+              const poll = await alpacaGet(`/orders/${closeResp.id}`);
+              if (poll?.status === "filled") { filled = true; }
+              else if (poll && ["canceled","expired","rejected"].includes(poll.status)) break;
+            }
+            if (filled) {
+              logEvent("trade", `[SPREAD CLOSE] Both legs closed: ${pos.buySymbol} + ${pos.sellSymbol}`);
+            } else {
+              logEvent("warn", `[SPREAD CLOSE] mleg close unconfirmed — legs may still be open, check Alpaca`);
+            }
+          } else {
+            // mleg failed — fall back to individual market orders
+            logEvent("warn", `[SPREAD CLOSE] mleg failed, falling back to individual close orders`);
+            if (pos.buySymbol) {
+              await alpacaPost("/orders", { symbol: pos.buySymbol, qty: pos.contracts, side: "sell", type: "market", time_in_force: "day", position_intent: "sell_to_close" });
+              logEvent("trade", `[SPREAD CLOSE] Buy leg closed: ${pos.buySymbol}`);
+            }
+            if (pos.sellSymbol) {
+              await alpacaPost("/orders", { symbol: pos.sellSymbol, qty: pos.contracts, side: "buy", type: "market", time_in_force: "day", position_intent: "buy_to_close" });
+              logEvent("trade", `[SPREAD CLOSE] Sell leg closed: ${pos.sellSymbol}`);
+            }
+          }
+        } else {
+          // Only one leg symbol — close whichever we have
+          if (pos.buySymbol) {
+            await alpacaPost("/orders", { symbol: pos.buySymbol, qty: pos.contracts, side: "sell", type: "market", time_in_force: "day", position_intent: "sell_to_close" });
+            logEvent("trade", `[SPREAD CLOSE] Buy leg closed: ${pos.buySymbol}`);
+          }
+          if (pos.sellSymbol) {
+            await alpacaPost("/orders", { symbol: pos.sellSymbol, qty: pos.contracts, side: "buy", type: "market", time_in_force: "day", position_intent: "buy_to_close" });
+            logEvent("trade", `[SPREAD CLOSE] Sell leg closed: ${pos.sellSymbol}`);
+          }
         }
       } catch(e) {
         logEvent("error", `[SPREAD CLOSE] Error closing legs: ${e.message}`);
@@ -5459,6 +5494,12 @@ async function closePosition(ticker, reason, exitPremium = null, contractSym = n
   const alpacaCloseAllowed = heldSeconds >= 60;
   if (!alpacaCloseAllowed) logEvent("warn", `${ticker} held only ${heldSeconds.toFixed(0)}s — skipping Alpaca close order to avoid wash trade`);
   if (!pos.isSpread && pos.contractSymbol && closeQty > 0 && !dryRunMode && alpacaCloseAllowed) {
+    // Safety: if this naked position still has a sell leg open (short position),
+    // buy it back first to avoid leaving a naked short
+    if (pos.sellSymbol && pos.sellSymbol !== pos.contractSymbol) {
+      logEvent("warn", `${ticker} has sell leg ${pos.sellSymbol} — buying back to prevent naked short`);
+      await alpacaPost("/orders", { symbol: pos.sellSymbol, qty: closeQty, side: "buy", type: "market", time_in_force: "day", position_intent: "buy_to_close" }).catch(e => logEvent("error", `${ticker} sell leg close: ${e.message}`));
+    }
     try {
       // Use real bid if available, else use ep (mid) as limit
       // Real bid from position tracking is more reliable than derived estimate
@@ -5497,9 +5538,11 @@ async function closePosition(ticker, reason, exitPremium = null, contractSym = n
     recordDayTrade(pos, reason);
   }
   // ── Trade Outcome Tracker — full data for post-30 analysis ─────────────
+  // Derive tradeType from position structure — isSpread may be false if state was corrupted
+  const hasSpreadStructure = !!(pos.buySymbol && pos.sellSymbol && pos.buyStrike && pos.sellStrike);
   const tradeOutcome = {
     // Identity
-    ticker, tradeType: pos.isCreditSpread ? "credit_spread" : pos.isSpread ? "debit_spread" : "naked",
+    ticker, tradeType: pos.isCreditSpread ? "credit_spread" : (pos.isSpread || hasSpreadStructure) ? "debit_spread" : "naked",
     optionType: pos.optionType,
     // Outcome
     pnl, pct, reason, date: new Date().toLocaleDateString(), closeTime: Date.now(),
@@ -5609,6 +5652,13 @@ async function closePosition(ticker, reason, exitPremium = null, contractSym = n
     ticker,
     action:    "CLOSE",
     reason,
+    optionType: pos.optionType,
+    isSpread:   pos.isSpread || !!(pos.buySymbol && pos.sellSymbol),
+    isCreditSpread: pos.isCreditSpread || false,
+    strike:    pos.strike || pos.buyStrike || null,
+    expDate:   pos.expDate || null,
+    buyStrike: pos.buyStrike || null,
+    sellStrike: pos.sellStrike || null,
     exitPremium: ep,
     pnl,
     pct,
@@ -5739,7 +5789,7 @@ async function partialClose(ticker) {
   state.closedTrades.push({
     ticker, pnl, pct: ((pnl/(pos.cost*0.5))*100).toFixed(1),
     date: new Date().toLocaleDateString(), reason: "partial",
-    tradeType:  pos.isCreditSpread ? "credit_spread" : pos.isSpread ? "debit_spread" : "naked",
+    tradeType:  pos.isCreditSpread ? "credit_spread" : (pos.isSpread || (pos.buySymbol && pos.sellSymbol)) ? "debit_spread" : "naked",
     optionType: pos.optionType,
     closeTime:  Date.now(),
   });
@@ -6161,7 +6211,8 @@ async function runScan() {
         if (pos.optionType !== "put") continue;
         const curP = pos.currentPrice || pos.premium;
         const chg  = pos.premium > 0 ? (curP - pos.premium) / pos.premium : 0;
-        if (chg < -0.05) await closePosition(pos.ticker, "macro-bullish");
+        // Use contractSymbol to target exact position — multiple same-ticker puts possible
+        if (chg < -0.05) await closePosition(pos.ticker, "macro-bullish", null, pos.contractSymbol || pos.buySymbol);
       }
     }
     logEvent("scan", `[5min] Regime:${regime.regime}(${regime.confidence}%) | Kelly:${marketContext.kelly?.contracts||1}x | Streak:${marketContext.streaks?.currentStreak||0}x${marketContext.streaks?.currentType||'--'}`);
