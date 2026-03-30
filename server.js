@@ -3633,8 +3633,8 @@ async function getRealOptionsContract(ticker, price, optionType, score, vix, ear
 
     // Format date for API: YYYY-MM-DD
     const today      = getETTime();
-    const minExpiry  = new Date(today.getTime() + 3   * MS_PER_DAY).toISOString().split("T")[0]; // 3 day floor — scoring handles DTE preference
-        const maxDays    = expiryType === "monthly"
+    const minExpiry  = new Date(today.getTime() + 3   * MS_PER_DAY).toISOString().split("T")[0]; // 3 day floor
+    const maxDays    = expiryType === "monthly" ? 65 : expiryType === "leaps" ? 400 : 35; // weekly=35, monthly=65, leaps=400
     const maxExpiry  = new Date(today.getTime() + maxDays * MS_PER_DAY).toISOString().split("T")[0];
 
     // Fetch ALL contracts with no filters — paginate until we have everything
@@ -5440,6 +5440,7 @@ async function closePosition(ticker, reason, exitPremium = null, contractSym = n
   // In dry run — log what would happen but don't mutate state or submit orders
   if (dryRunMode) {
     logEvent("dryrun", `WOULD CLOSE ${ticker} | reason:${reason} | exit:$${ep} | P&L:${pnl>=0?"+":""}$${pnl.toFixed(2)} (${pct}%)`);
+    pos._dryRunWouldClose = true; // flag so position loop skips further exit checks this scan
     return;
   }
 
@@ -5987,6 +5988,8 @@ async function runScan() {
   if (!ALPACA_KEY) { logEvent("warn", "No ALPACA_API_KEY set - check Railway variables"); scanRunning = false; return; }
   if (!isMarketHours() && !dryRunMode) { logEvent("scan", "Outside market hours - skipping trade logic"); scanRunning = false; return; }
   if (dryRunMode) logEvent("scan", "⚡ DRY RUN MODE — no orders submitted, no state changes");
+  // Clear dry run close flags from previous scan
+  if (dryRunMode) state.positions.forEach(p => { delete p._dryRunWouldClose; });
 
   const now    = Date.now();
   const scanET = getETTime(); // single ET time reference for entire scan
@@ -6272,6 +6275,7 @@ async function runScan() {
     const pos   = state.positions[pi];
     const price = posQuotes[pi];
     if (!price) continue;
+    if (pos._dryRunWouldClose) continue; // already flagged for close this scan — skip
     try { // wrap each position in try/catch — one bad position can't crash the whole scan
 
     const dte      = Math.max(1, Math.round((new Date(pos.expDate)-new Date())/MS_PER_DAY));
