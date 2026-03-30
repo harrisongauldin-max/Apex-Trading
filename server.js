@@ -7605,9 +7605,41 @@ async function runScan() {
     const effectiveMinScore = Math.max(ddProtocol.minScore || MIN_SCORE, regimeMinScore, agentMinScore);
     if (agentStale && !dryRunMode) logEvent("filter", `Agent macro stale (${agentStaleMins.toFixed(0)}min) — raising min score to 80`);
 
-    // Staggered entry scoring — require higher conviction for 2nd/3rd position in same ticker
+    // ── Staggered entry logic ────────────────────────────────────────────
+    // Professional spread traders build positions in tranches on bounces
+    // Rules: +5pts higher conviction, 4hr gap, existing pos <20% profit, max 2 positions
     const sameTickerSameDir = state.positions.filter(p => p.ticker === stock.ticker && p.optionType === optionType);
-    const staggeredMinScore = sameTickerSameDir.length === 1 ? 85 : sameTickerSameDir.length >= 2 ? 90 : effectiveMinScore;
+    let staggeredMinScore = effectiveMinScore;
+    let staggerBlock = false;
+    let staggerReason = "";
+
+    if (sameTickerSameDir.length >= 2) {
+      // Already have 2 staggered positions — no 3rd (cap at 2 per direction per ticker)
+      staggerBlock = true;
+      staggerReason = "max 2 staggered positions reached";
+    } else if (sameTickerSameDir.length === 1) {
+      const existingPos = sameTickerSameDir[0];
+      // Gate 1: Minimum 4 hours between stagger entries (different session or bounce)
+      const hoursAgo = existingPos.openDate
+        ? (Date.now() - new Date(existingPos.openDate).getTime()) / 3600000 : 0;
+      if (hoursAgo < 4) {
+        staggerBlock = true;
+        staggerReason = `too soon (${hoursAgo.toFixed(1)}h since first entry, need 4h)`;
+      }
+      // Gate 2: Existing position must not already be working hard (< 20% profit)
+      const existingChg = existingPos.currentPrice && existingPos.premium
+        ? (existingPos.currentPrice - existingPos.premium) / existingPos.premium : 0;
+      if (!staggerBlock && existingChg > 0.20) {
+        staggerBlock = true;
+        staggerReason = `existing pos +${(existingChg*100).toFixed(0)}% — thesis already playing out`;
+      }
+      // Gate 3: Only +5pts higher conviction (not +15)
+      if (!staggerBlock) {
+        staggeredMinScore = effectiveMinScore + 5;
+        staggerReason = `stagger (+5 conviction, ${hoursAgo.toFixed(1)}h gap, existing ${(existingChg*100).toFixed(0)}%)`;
+      }
+    }
+    if (staggerBlock) { logEvent("filter", `${stock.ticker} stagger blocked — ${staggerReason}`); continue; }
 
     // MACD contradiction gate — if MACD contradicts direction, require higher conviction
     // Credit spreads are direction-neutral — MACD is irrelevant, bypass gate
@@ -7622,7 +7654,7 @@ async function runScan() {
 
     const finalMinScore = Math.max(effectiveMinScore, staggeredMinScore, macdMinScore);
     if (bestScore < finalMinScore) {
-      const reason = sameTickerSameDir.length > 0 ? `staggered entry (${sameTickerSameDir.length+1}x)` : macdContradicts ? "MACD contradiction" : (etHourNow >= 13 ? "afternoon" : ddProtocol.level) + " protocol";
+      const reason = sameTickerSameDir.length > 0 ? staggerReason : macdContradicts ? "MACD contradiction" : (etHourNow >= 13 ? "afternoon" : ddProtocol.level) + " protocol";
       logEvent("filter", `${stock.ticker} call:${callSetup.score} put:${putSetup.score} - below ${finalMinScore} (${reason}) - skip`);
       continue;
     }
