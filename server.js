@@ -247,6 +247,7 @@ function defaultState() {
     _recentLosses:       {},    // ticker -> {closedAt, reason, agentSignal, price} for re-entry veto
     _agentHistory:       {},    // ticker -> last 5 rescore results for agent memory
     portfolioSnapshots: [], // time-series portfolio value: [{t, v}] sampled every 5 min
+    _pendingOrder:       null, // in-flight mleg order: {orderId, ticker, type, submittedAt, ...}
   };
 }
 
@@ -512,6 +513,23 @@ async function initState() {
       state._agentMacro.mode = correctedMode;
     }
   }
+
+  // ── Cancel any open orders from previous session ─────────────────────────
+  // Prevents dangling mleg orders from partial fills or crashes
+  if (ALPACA_KEY) {
+    try {
+      const openOrders = await alpacaGet("/orders?status=open&limit=50");
+      if (Array.isArray(openOrders) && openOrders.length > 0) {
+        console.log(`[STARTUP] Cancelling ${openOrders.length} open order(s) from previous session`);
+        for (const ord of openOrders) {
+          await alpacaPost(`/orders/${ord.id}/cancel`, {}).catch(() => {});
+          console.log(`[STARTUP] Cancelled order ${ord.id} (${ord.symbol || 'mleg'} ${ord.status})`);
+        }
+      }
+    } catch(e) { console.log("[STARTUP] Could not cancel open orders:", e.message); }
+  }
+  // Clear any pending order state from previous session
+  state._pendingOrder = null;
 
   // ── POSITION RECONCILIATION — runs on startup and every 5 minutes ────────
   await runReconciliation();
@@ -4683,114 +4701,42 @@ async function executeCreditSpread(stock, price, score, scoreReasons, vix, optio
       longOrderId  = mlegResp.id;
       logEvent("trade", `[CREDIT SPREAD] mleg submitted: ${mlegResp.id} | status: ${mlegResp.status}`);
 
-      scanRunning = false; // allow next scan while polling for credit spread fill
-      let filled = false;
-      let fillResp = null;
-      const pollStart = Date.now();
-      while (!filled && Date.now() - pollStart < 30000) {
-        await new Promise(r => setTimeout(r, 1500));
-        fillResp = await alpacaGet(`/orders/${mlegResp.id}`);
-        if (fillResp && fillResp.status === "filled") {
-          filled = true;
-        } else if (fillResp && ["canceled","expired","rejected","done_for_day"].includes(fillResp.status)) {
-          logEvent("warn", `[CREDIT SPREAD] mleg ${fillResp.status}`);
-          return null;
-        }
-      }
-
-      if (!filled) {
-        await alpacaPost(`/orders/${mlegResp.id}/cancel`, {}).catch(() => {});
-        logEvent("warn", `[CREDIT SPREAD] mleg unfilled after 30s — cancelled`);
-        return null;
-      }
+      // Fire-and-forget — store pending order, confirm on next scan
+      // DO NOT poll here — blocking causes scan overlap and duplicate submissions
+      state._pendingOrder = {
+        orderId:      mlegResp.id,
+        ticker:       stock.ticker,
+        optionType,
+        isCreditSpread: true,
+        buySymbol:    longContract.symbol,
+        sellSymbol:   shortContract.symbol,
+        buyStrike:    longContract.strike,
+        sellStrike:   shortContract.strike,
+        netCredit,
+        netDebitLimit: netCredit,
+        finalCost:    marginRequired,
+        contracts,
+        score,
+        scoreReasons,
+        expDate:      shortContract.expDate,
+        expDays:      shortContract.expDays,
+        submittedAt:  Date.now(),
+        isSpread:     true,
+        isChoppyEntry: false,
+        mlegBody,
+      };
+      markDirty();
+      logEvent("trade", `[CREDIT SPREAD] Order pending — will confirm fill on next scan`);
+      return { pending: true };
     } catch(e) {
       logEvent("error", `[CREDIT SPREAD] mleg error: ${e.message}`);
+      state._pendingOrder = null;
       return null;
     }
-
-    // Record credit spread position
-    // Note: cash INCREASES by netCredit (we received premium), margin is reserved separately
-    state.cash += parseFloat((netCredit * 100 * contracts).toFixed(2));
-
-    const position = {
-      ticker:           stock.ticker,
-      optionType,
-      isSpread:         true,
-      isCreditSpread:   true,
-      shortStrike:      shortContract.strike,  // we sold this
-      longStrike:       longContract.strike,   // we bought this (protection)
-      buyStrike:        longContract.strike,   // long leg = "buy" leg for display
-      sellStrike:       shortContract.strike,  // short leg = "sell" leg for display
-      spreadWidth:      actualWidth,
-      buySymbol:        longContract.symbol,
-      sellSymbol:       shortContract.symbol,
-      probabilityOfProfit: shortContract?.greeks?.delta
-        ? parseFloat(((1 - Math.abs(shortContract.greeks.delta)) * 100).toFixed(1)) : null,
-      contractSymbol:   shortContract.symbol,
-      premium:          netCredit,   // credit received (positive = we collected)
-      breakeven:        parseFloat((shortContract.strike - netCredit).toFixed(2)), // put credit: price must stay above this
-      // McMillan: POP = 1 - |delta of short strike| for credit spreads
-      probabilityOfProfit: shortContract.greeks?.delta
-        ? parseFloat(((1 - Math.abs(shortContract.greeks.delta)) * 100).toFixed(1))
-        : null,
-      maxProfit,
-      maxLoss,
-      marginRequired,
-      contracts,
-      expDate:          shortContract.expDate,
-      expDays:          shortContract.expDays,
-      cost:             marginRequired,        // heat is based on max risk not credit
-      score,
-      reasons:          scoreReasons,
-      openDate:         new Date().toISOString(),
-      currentPrice:     netCredit,
-      peakPremium:      netCredit,
-      entryRSI:         stock.rsi || 50,
-      entryMACD:        stock.macd || "neutral",
-      entryMomentum:    stock.momentum || "steady",
-      entryMacro:       (state._agentMacro || {}).signal || "neutral",
-      entryThesisScore: 100,
-      thesisHistory:    [],
-      agentHistory:     [],
-      shortOrderId,
-      longOrderId,
-      realData:         true,
-      vix,
-      entryVIX:         vix,
-      expiryType:       "monthly",
-      dteLabel:         "CREDIT-SPREAD",
-      partialClosed:    false,
-      isMeanReversion:  false,
-      trailStop:        null,
-      breakevenLocked:  false,
-      halfPosition:     false,
-      // Profit target: 50% of max profit (close when credit decays by half)
-      target:           parseFloat((netCredit * 0.50).toFixed(2)),
-      // Stop: max loss (close if spread widens to full width)
-      stop:             parseFloat((maxLoss * 0.75).toFixed(2)),
-      // Carr & Wu: tighter initial target (30%) in first 5 days when IV premium highest
-      takeProfitPct:    0.30,
-      fastStopPct:      0.75,
-      // Carr & Wu: 5 TRADING days ≈ 7 calendar days (accounts for weekends)
-      _creditHarvestExpiry: new Date(Date.now() + 7*86400000).toISOString(),
-    };
-
-    state.positions.push(position);
-    logEvent("trade", `[CREDIT SPREAD] SOLD ${stock.ticker} $${shortContract.strike}/$${longContract.strike} ${optionType.toUpperCase()} exp ${shortContract.expDate} | credit $${netCredit} | max profit $${maxProfit} | max loss $${maxLoss} | margin $${marginRequired} | score ${score}/100`);
-
-    state.tradeJournal.unshift({
-      time: new Date().toISOString(), ticker: stock.ticker,
-      action: "OPEN", optionType, isSpread: true, isCreditSpread: true,
-      shortStrike: shortContract.strike, longStrike: longContract.strike,
-      premium: netCredit, cost: marginRequired, score, scoreReasons,
-      reasoning: `[CREDIT SPREAD] Score ${score}/100. Net credit $${netCredit}. Max profit $${maxProfit}. Max loss $${maxLoss}.`,
-    });
-    if (state.tradeJournal.length > 100) state.tradeJournal = state.tradeJournal.slice(0, 100);
-
-    await saveStateNow();
-    return position;
+    // Position recording now handled by confirmPendingOrder() on fill confirmation
   } catch(e) {
     logEvent("error", `executeCreditSpread(${stock.ticker}): ${e.message}`);
+    state._pendingOrder = null;
     return null;
   }
 }
@@ -4888,146 +4834,197 @@ async function executeSpreadTrade(stock, price, score, scoreReasons, vix, option
 
       logEvent("trade", `[SPREAD] mleg order submitted: ${mlegResp.id} | status: ${mlegResp.status}`);
 
-      // Poll for fill — mleg fills atomically so just poll the parent order
-      // Release scanRunning flag so subsequent scans aren't blocked during fill wait
-      // executeSpreadTrade returns a promise — scan waits for it but scanRunning is freed
-      scanRunning = false; // allow next scan while we poll for fill
-      let filled = false;
-      let fillResp = null;
-      const pollStart = Date.now();
-      // Dynamic timeout based on time of day — market open is fastest, midday slowest
-      const etNowH = getETTime().getHours() + getETTime().getMinutes()/60;
-      const mlgTimeout = etNowH < 10.0 ? 20000  // market open — fast fills
-                       : etNowH < 12.0 ? 30000  // morning — normal
-                       : etNowH < 14.0 ? 45000  // midday — slow liquidity
-                       : 30000;                  // afternoon — picks back up
-      while (!filled && Date.now() - pollStart < mlgTimeout) { // dynamic timeout
-        await new Promise(r => setTimeout(r, 1500));
-        fillResp = await alpacaGet(`/orders/${mlegResp.id}`);
-        if (fillResp && fillResp.status === "filled") {
-          filled = true;
-        } else if (fillResp && ["canceled","expired","rejected","done_for_day"].includes(fillResp.status)) {
-          logEvent("warn", `[SPREAD] mleg order ${fillResp.status} — spread not entered`);
-          return null;
-        }
-      }
-
-      if (!filled) {
-        // Retry once with slightly wider limit — $0.05 concession captures most missed fills
-        await alpacaPost(`/orders/${mlegResp.id}/cancel`, {}).catch(() => {});
-        logEvent("warn", `[SPREAD] mleg unfilled after 30s — retrying with $0.05 wider limit`);
-        const retryLimit = parseFloat((netDebitLimit + 0.05).toFixed(2));
-        const retryBody  = { ...mlegBody, limit_price: String(retryLimit) };
-        const retryResp  = await alpacaPost("/orders", retryBody).catch(() => null);
-        if (retryResp && retryResp.id) {
-          let retryFilled = false;
-          const retryStart = Date.now();
-          while (!retryFilled && Date.now() - retryStart < 20000) {
-            await new Promise(r => setTimeout(r, 1500));
-            const poll = await alpacaGet(`/orders/${retryResp.id}`);
-            if (poll?.status === "filled") { retryFilled = true; fillResp = poll; }
-            else if (poll && ["canceled","expired","rejected"].includes(poll.status)) break;
-          }
-          if (!retryFilled) {
-            await alpacaPost(`/orders/${retryResp.id}/cancel`, {}).catch(() => {});
-            logEvent("warn", `[SPREAD] Retry also unfilled — spread cancelled`);
-            return null;
-          }
-          logEvent("trade", `[SPREAD] Retry filled @ $${retryLimit}`);
-          netDebitLimit = retryLimit;
-        } else {
-          return null;
-        }
-      }
-
-      // Get actual fill price from mleg response — use real fill not limit price
-      if (fillResp && fillResp.filled_avg_price) {
-        const actualDebit = parseFloat(fillResp.filled_avg_price);
-        if (actualDebit > 0 && actualDebit !== netDebit) {
-          logEvent("trade", `[SPREAD] Fill improvement: limit $${netDebit} → actual $${actualDebit}`);
-          netDebit = actualDebit; // use real fill price
-          finalCost = parseFloat((netDebit * 100 * contracts).toFixed(2));
-        }
-      }
+      // ── Fire-and-forget — record pending order and return immediately ─────
+      // DO NOT poll inside the scan — this caused race conditions where
+      // multiple scans submitted duplicate orders while waiting for fill.
+      // Instead: store order ID in state._pendingOrder, next scan confirms fill.
+      state._pendingOrder = {
+        orderId:      mlegResp.id,
+        ticker:       stock.ticker,
+        optionType,
+        buySymbol:    buyContract.symbol,
+        sellSymbol:   sellContract.symbol,
+        buyStrike:    buyContract.strike,
+        sellStrike:   sellContract.strike,
+        netDebit,
+        netDebitLimit,
+        finalCost,
+        contracts,
+        score,
+        scoreReasons,
+        expDate:      buyContract.expDate,
+        expDays:      buyContract.expDays,
+        submittedAt:  Date.now(),
+        isSpread:     true,
+        isChoppyEntry,
+        mlegBody,     // saved for retry if needed
+      };
+      markDirty();
+      logEvent("trade", `[SPREAD] Order pending — will confirm fill on next scan`);
+      return { pending: true }; // signal to caller that entry is in flight
     } catch(e) {
       logEvent("error", `[SPREAD] mleg order error: ${e.message}`);
+      state._pendingOrder = null;
       return null;
     }
   }
+  return null;
+}
 
-  // Record spread position using ACTUAL fill price not limit price
-  state.cash -= finalCost;
-  const actualSpreadWidthDebit = Math.abs(buyContract.strike - sellContract.strike);
-  const position = {
-    ticker:           stock.ticker,
-    optionType,
-    isSpread:         true,
-    buyStrike:        buyContract.strike,
-    sellStrike:       sellContract.strike,
-    spreadWidth:      actualSpreadWidthDebit,
-    buySymbol:        buyContract.symbol,
-    sellSymbol:       sellContract.symbol,
-    premium:          netDebit,        // ACTUAL fill price, not limit
-    maxProfit,
-    maxLoss,
-    contracts,
-    expDate:          buyContract.expDate,
-    expDays:          buyContract.expDays,
-    cost:             finalCost,
-    score,
-    reasons:          scoreReasons,
-    openDate:         new Date().toISOString(),
-    currentPrice:     netDebit,
-    peakPremium:      netDebit,
-    entryRSI:         stock.rsi || 50,
-    entryMACD:        stock.macd || "neutral",
-    entryMomentum:    stock.momentum || "steady",
-    entryMacro:       (state._agentMacro || {}).signal || "neutral",
-    entryThesisScore: 100,
-    thesisHistory:    [],
-    agentHistory:     [],
-    buyOrderId,
-    sellOrderId,
-    realData:         !!(buyContract.symbol && sellContract.symbol),
-    vix,
-    entryVIX:         vix,
-    expiryType:       "monthly",
-    dteLabel:         "SPREAD-MONTHLY",
-    partialClosed:    false,
-    isMeanReversion:  false,
-    trailStop:        null,
-    breakevenLocked:  false,
-    halfPosition:     false,
-    // Tighter stops in choppy regime — less conviction = faster exit
-    target:           parseFloat((netDebit * 1.50).toFixed(2)),
-    stop:             parseFloat((netDebit * (isChoppyEntry ? 0.20 : 0.50)).toFixed(2)),
-    takeProfitPct:    0.50,
-    fastStopPct:      isChoppyEntry ? 0.20 : 0.50,
-  };
+// ── Confirm pending mleg order — runs at start of every scan ─────────────────
+// Checks if a previously submitted mleg order has filled, cancelled, or expired
+// Handles retry with wider limit if unfilled after 30s
+// This decouples fill confirmation from order submission — no scan blocking
+async function confirmPendingOrder() {
+  const pending = state._pendingOrder;
+  if (!pending || !pending.orderId) return;
 
-  state.positions.push(position);
-  await syncCashFromAlpaca(); // sync cash from Alpaca after trade
+  const age = (Date.now() - pending.submittedAt) / 1000;
+  try {
+    const fillResp = await alpacaGet(`/orders/${pending.orderId}`);
+    if (!fillResp) return;
 
-  logEvent("trade",
-    `[SPREAD] BUY ${stock.ticker} $${buyContract.strike}/${sellContract.strike} ${optionType.toUpperCase()} exp ${buyContract.expDate} | ` +
-    `net debit $${netDebit} | max profit $${maxProfit} | max loss $${maxLoss} | cost $${finalCost} | score ${score}/100 | cash $${state.cash.toFixed(2)}`
-  );
-  logEvent("trade", `Live fill confirmed — real trade count: ${(state.closedTrades||[]).length + (state.positions||[]).length}/30 before Kelly activates`);
+    if (fillResp.status === "filled") {
+      // Order filled — record the position
+      const typeLabel = pending.isCreditSpread ? "CREDIT SPREAD" : "SPREAD";
+      logEvent("trade", `[${typeLabel}] Fill confirmed: ${pending.orderId} | age: ${age.toFixed(0)}s`);
 
-  state.tradeJournal.unshift({
-    time: new Date().toISOString(), ticker: stock.ticker,
-    action: "OPEN", optionType, isSpread: true,
-    strike: buyContract.strike, expDate: buyContract.expDate,  // for dashboard display
-    buyStrike: buyContract.strike, sellStrike: sellContract.strike,
-    spreadLabel: `$${buyContract.strike}/$${sellContract.strike}`,
-    premium: netDebit, cost: finalCost, score, scoreReasons,
-    delta: buyContract.greeks?.delta, iv: parseFloat(((buyContract.iv||0.3)*100).toFixed(1)), vix,
-    reasoning: `[SPREAD] Score ${score}/100. Net debit $${netDebit}. Max profit $${maxProfit}. ${scoreReasons.slice(0,2).join(". ")}.`,
-  });
-  if (state.tradeJournal.length > 100) state.tradeJournal = state.tradeJournal.slice(0, 100);
+      if (pending.isCreditSpread) {
+        // Credit spread: cash increases by net credit received
+        const netCredit = pending.netCredit || pending.netDebit;
+        const marginRequired = pending.finalCost;
+        state.cash += parseFloat((netCredit * 100 * pending.contracts).toFixed(2));
+        const maxProfit = parseFloat((netCredit * 100 * pending.contracts).toFixed(2));
+        const maxLoss   = parseFloat(((Math.abs(pending.buyStrike - pending.sellStrike) - netCredit) * 100 * pending.contracts).toFixed(2));
+        const position = {
+          ticker: pending.ticker, optionType: pending.optionType,
+          isSpread: true, isCreditSpread: true,
+          shortStrike: pending.sellStrike, longStrike: pending.buyStrike,
+          buyStrike: pending.buyStrike, sellStrike: pending.sellStrike,
+          spreadWidth: Math.abs(pending.buyStrike - pending.sellStrike),
+          buySymbol: pending.buySymbol, sellSymbol: pending.sellSymbol,
+          contractSymbol: pending.sellSymbol,
+          premium: netCredit, maxProfit, maxLoss, contracts: pending.contracts,
+          expDate: pending.expDate, expDays: pending.expDays,
+          cost: marginRequired, score: pending.score,
+          reasons: pending.scoreReasons,
+          openDate: new Date().toISOString(),
+          currentPrice: netCredit, peakPremium: netCredit,
+          entryRSI: 50, entryMACD: "neutral", entryMomentum: "steady",
+          entryMacro: (state._agentMacro || {}).signal || "neutral",
+          entryThesisScore: 100, thesisHistory: [], agentHistory: [],
+          realData: true, vix: state.vix, entryVIX: state.vix,
+          expiryType: "monthly", dteLabel: "CREDIT-SPREAD-MONTHLY",
+          partialClosed: false, isMeanReversion: false, trailStop: null,
+          breakevenLocked: false, halfPosition: false,
+          takeProfitPct: 0.30, fastStopPct: 0.75,
+          _creditHarvestExpiry: new Date(Date.now() + 7*86400000).toISOString(),
+        };
+        state.positions.push(position);
+        state._pendingOrder = null;
+        logEvent("trade", `[CREDIT SPREAD] ENTERED ${pending.ticker} $${pending.sellStrike}/$${pending.buyStrike} exp ${pending.expDate} | credit $${netCredit} | margin $${marginRequired}`);
+        await syncCashFromAlpaca();
+        await saveStateNow();
+        return;
+      }
 
-  await saveStateNow();
-  return position;
+      let netDebit   = pending.netDebit;
+      let finalCost  = pending.finalCost;
+      if (fillResp.filled_avg_price) {
+        const actual = parseFloat(fillResp.filled_avg_price);
+        if (actual > 0 && actual !== netDebit) {
+          logEvent("trade", `[SPREAD] Fill improvement: limit $${netDebit} → actual $${actual}`);
+          netDebit  = actual;
+          finalCost = parseFloat((netDebit * 100 * pending.contracts).toFixed(2));
+        }
+      }
+
+      const { contracts, score, scoreReasons, expDate, expDays,
+              buyStrike, sellStrike, buySymbol, sellSymbol, optionType,
+              isChoppyEntry, isSpread } = pending;
+      const maxProfit = parseFloat(((Math.abs(buyStrike - sellStrike) - netDebit) * 100 * contracts).toFixed(2));
+      const maxLoss   = parseFloat((netDebit * 100 * contracts).toFixed(2));
+
+      state.cash -= finalCost;
+      const position = {
+        ticker:        pending.ticker, optionType, isSpread: true,
+        buyStrike, sellStrike,
+        spreadWidth:   Math.abs(buyStrike - sellStrike),
+        buySymbol, sellSymbol,
+        contractSymbol: buySymbol,
+        premium:       netDebit, maxProfit, maxLoss, contracts,
+        expDate, expDays, cost: finalCost, score,
+        reasons:       scoreReasons,
+        openDate:      new Date().toISOString(),
+        currentPrice:  netDebit, peakPremium: netDebit,
+        entryRSI:      50, entryMACD: "neutral", entryMomentum: "steady",
+        entryMacro:    (state._agentMacro || {}).signal || "neutral",
+        entryThesisScore: 100, thesisHistory: [], agentHistory: [],
+        realData:      true, vix: state.vix, entryVIX: state.vix,
+        expiryType:    "monthly", dteLabel: "SPREAD-MONTHLY",
+        partialClosed: false, isMeanReversion: false, trailStop: null,
+        breakevenLocked: false, halfPosition: false,
+        target:        parseFloat((netDebit * 1.50).toFixed(2)),
+        stop:          parseFloat((netDebit * (isChoppyEntry ? 0.20 : 0.50)).toFixed(2)),
+        takeProfitPct: 0.50, fastStopPct: isChoppyEntry ? 0.20 : 0.50,
+        breakeven:     optionType === "put"
+          ? parseFloat((buyStrike - netDebit).toFixed(2))
+          : parseFloat((buyStrike + netDebit).toFixed(2)),
+      };
+
+      state.positions.push(position);
+      state._pendingOrder = null;
+
+      logEvent("trade", `[SPREAD] ENTERED ${pending.ticker} $${buyStrike}/$${sellStrike} ${optionType.toUpperCase()} exp ${expDate} | net $${netDebit} | cost $${finalCost} | score ${score}/100`);
+      logEvent("trade", `Live fill count: ${(state.closedTrades||[]).length + state.positions.length}/30`);
+
+      state.tradeJournal.unshift({
+        time: new Date().toISOString(), ticker: pending.ticker,
+        action: "OPEN", optionType, isSpread: true,
+        strike: buyStrike, expDate,
+        buyStrike, sellStrike,
+        spreadLabel: `$${buyStrike}/$${sellStrike}`,
+        premium: netDebit, cost: finalCost, score, scoreReasons,
+        reasoning: `[SPREAD] Score ${score}/100. Net debit $${netDebit}. Max profit $${maxProfit}.`,
+      });
+      if (state.tradeJournal.length > 100) state.tradeJournal = state.tradeJournal.slice(0, 100);
+
+      await syncCashFromAlpaca();
+      await saveStateNow();
+
+    } else if (["canceled","expired","rejected","done_for_day"].includes(fillResp.status)) {
+      logEvent("warn", `[SPREAD] Order ${fillResp.status} after ${age.toFixed(0)}s — clearing pending`);
+      state._pendingOrder = null;
+      markDirty();
+
+    } else if (age > 30 && !pending._retried) {
+      // Unfilled after 30s — retry once with $0.05 wider limit
+      await alpacaPost(`/orders/${pending.orderId}/cancel`, {}).catch(() => {});
+      logEvent("warn", `[SPREAD] Unfilled after ${age.toFixed(0)}s — retrying with $0.05 wider limit`);
+      const retryLimit = parseFloat((pending.netDebitLimit + 0.05).toFixed(2));
+      const retryBody  = { ...pending.mlegBody, limit_price: String(retryLimit) };
+      const retryResp  = await alpacaPost("/orders", retryBody).catch(() => null);
+      if (retryResp && retryResp.id) {
+        state._pendingOrder = { ...pending, orderId: retryResp.id, submittedAt: Date.now(), _retried: true, netDebitLimit: retryLimit };
+        logEvent("trade", `[SPREAD] Retry submitted: ${retryResp.id} @ $${retryLimit}`);
+        markDirty();
+      } else {
+        logEvent("warn", `[SPREAD] Retry failed — clearing pending`);
+        state._pendingOrder = null;
+        markDirty();
+      }
+
+    } else if (pending._retried && age > 60) {
+      // Retry also unfilled after 60s total — cancel and give up
+      await alpacaPost(`/orders/${pending.orderId}/cancel`, {}).catch(() => {});
+      logEvent("warn", `[SPREAD] Retry also unfilled — spread cancelled`);
+      state._pendingOrder = null;
+      markDirty();
+    }
+    // else: still pending within timeout — check again next scan
+  } catch(e) {
+    logEvent("error", `[SPREAD] confirmPendingOrder error: ${e.message}`);
+  }
 }
 
 async function executeTrade(stock, price, score, scoreReasons, vix, optionType = "call", isMeanReversion = false) {
@@ -6106,6 +6103,18 @@ async function runScan() {
   const isBlackSwan = checkVIXVelocity(newVIX);
   state.vix     = newVIX;
 
+  // ── Confirm any pending mleg order from previous scan ────────────────────
+  // Must run before entry logic — if filled, records position and clears pending
+  // If still pending, blocks new entries to prevent duplicate orders
+  if (state._pendingOrder) {
+    await confirmPendingOrder();
+    if (state._pendingOrder) {
+      // Still pending after check — skip entry section entirely this scan
+      // This is the ONLY safe way to prevent duplicate mleg submissions
+      logEvent("scan", `[SPREAD] Order ${state._pendingOrder.orderId} still pending (${((Date.now()-state._pendingOrder.submittedAt)/1000).toFixed(0)}s) — skipping entries`);
+    }
+  }
+
   // Refresh PDT count from Alpaca at scan start — lightweight single field read
   // Runs in parallel with VIX already fetched above — no added latency
   // Keeps day trade count current without waiting for the 30s sync interval
@@ -6837,6 +6846,10 @@ async function runScan() {
   }
 
   // 2. New entries — check if any entry type is valid
+  // Skip entirely if a pending mleg order is in flight — prevents duplicate submissions
+  if (state._pendingOrder) {
+    // Already logged above — just skip to end of scan
+  } else {
   // Fetch SPY data first — needed for spyRecovering which gates putsAllowed
   const spyPrice     = await getStockQuote("SPY") || 500;
   if (spyPrice) state._liveSPY = spyPrice;
@@ -7990,6 +8003,8 @@ async function runScan() {
   }
 
   // Individual stock buys disabled — SPY/QQQ only
+
+  } // end else (no pending order)
 
   state.lastScan    = new Date().toISOString();
   state._scanFailures = 0; // reset consecutive failure counter on success
