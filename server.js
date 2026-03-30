@@ -4276,7 +4276,15 @@ function selectExpiry(score, vix, optionType, earningsDate, ticker = null, isMea
   const today  = getETTime();
   const now    = today.getTime();
 
-  // Determine target DTE window based on conditions
+  // Regime duration — declared at top so ALL paths (put, call, MR) can access it
+  const regimeDuration = (state._agentMacro || {}).regimeDuration || "1-3 days";
+  const regimeDurMult  = regimeDuration === "intraday"   ? 0.5
+                       : regimeDuration === "1-3 days"   ? 0.75
+                       : regimeDuration === "3-7 days"   ? 1.0
+                       : regimeDuration === "1-2 weeks"  ? 1.2
+                       : regimeDuration === "multi-week" ? 1.5
+                       : 1.0;
+
   let targetDays;
   let expiryType;
 
@@ -4296,21 +4304,12 @@ function selectExpiry(score, vix, optionType, earningsDate, ticker = null, isMea
   }
 
   // ── PUT tiers — PDT-aware monthly targeting ──────────────────────────
-  // Sub-$25k accounts cannot day trade — weekly options are a trap:
-  // fast theta decay + PDT hold = losing time value while waiting for thesis to play out
-  // Default to 30-45 DTE so we have time to be right without theta grinding us down
-  // Weeklies only for mean-reversion setups where a 2-3 day bounce is the explicit thesis
   if (optionType === "put") {
-    // Guo & Whitelaw: DTE should mature before expected VIX reversion
-    // If VIX at 37 and expected to revert in 12 days — target 10-14 DTE for mean reversion
-    // If VIX elevated but stable — target 30 DTE for trend continuation
     const vixRevDays = getVIXReversionDays(vix);
     if (score >= 90 && vix >= 30) {
-      // High conviction — 60% of VIX reversion window (capture move, exit before reversion)
       targetDays = Math.max(21, Math.min(35, Math.round(vixRevDays * 0.6)));
       expiryType = "monthly";
     } else if (score >= 75) {
-      // Standard put — 30-45 DTE depending on VIX reversion expectation
       targetDays = vix >= 35 ? 25 : 35;
       expiryType = "monthly";
     } else {
@@ -4321,13 +4320,6 @@ function selectExpiry(score, vix, optionType, earningsDate, ticker = null, isMea
   // ── Regime duration adjusts DTE — agent knows how long regime lasts ──────
   // "intraday" → short DTE regardless of option type
   // "multi-week" → go further out for trend plays
-  const regimeDuration = (state._agentMacro || {}).regimeDuration || "1-3 days";
-  const regimeDurMult  = regimeDuration === "intraday"   ? 0.5
-                       : regimeDuration === "1-3 days"   ? 0.75
-                       : regimeDuration === "3-7 days"   ? 1.0
-                       : regimeDuration === "1-2 weeks"  ? 1.2
-                       : regimeDuration === "multi-week" ? 1.5
-                       : 1.0;
   // Apply duration multiplier to targetDays at the end of selection
 
   // ── CALL tiers — two distinct theses need different DTE ───────────────
