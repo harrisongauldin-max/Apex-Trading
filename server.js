@@ -498,6 +498,21 @@ async function initState() {
     }
   }
 
+  // ── Sanitize cached agentMacro — fix stale mode field from old builds ────
+  // Old builds stored mode directly from agent which could be wrong
+  // Always re-derive mode from signal on startup
+  if (state._agentMacro?.signal) {
+    const modeMap = {
+      "strongly bearish": "defensive", "bearish": "cautious", "mild bearish": "cautious",
+      "neutral": "normal", "mild bullish": "normal", "bullish": "normal", "strongly bullish": "aggressive",
+    };
+    const correctedMode = modeMap[state._agentMacro.signal] || "normal";
+    if (state._agentMacro.mode !== correctedMode) {
+      console.log(`[STARTUP] Correcting stale agentMacro mode: ${state._agentMacro.mode} → ${correctedMode} (signal: ${state._agentMacro.signal})`);
+      state._agentMacro.mode = correctedMode;
+    }
+  }
+
   // ── POSITION RECONCILIATION — runs on startup and every 5 minutes ────────
   await runReconciliation();
 
@@ -2249,8 +2264,10 @@ function checkConcentrationRisk() {
 // ── Drawdown Recovery Protocol ────────────────────────────────────────────
 function getDrawdownProtocol() {
   const trades    = state.closedTrades || [];
-  const peak      = state.peakCash || MONTHLY_BUDGET;
-  const current   = state.cash + (state.positions || []).reduce((s, p) => s + p.cost, 0) ;
+  // Use accountBaseline as the reference point — stable starting value from Alpaca sync
+  // peakCash fluctuates with mark-to-market and doesn't represent actual starting capital
+  const peak      = state.accountBaseline || state.peakCash || MONTHLY_BUDGET;
+  const current   = state.cash + openCostBasis(); // use cost basis not MTM for drawdown
   const drawdown  = (current - peak) / peak * 100;
 
   // Only trigger if we have actual trade history
@@ -3179,6 +3196,7 @@ async function getMacroNews() {
     const agentWindowOpen = etH >= 8.5 && etH <= 17.0; // 8:30am–5pm ET
     if (ANTHROPIC_API_KEY && headlines.length > 0 && agentWindowOpen) {
       try {
+        logEvent("macro", `[AGENT] Running macro analysis (${headlines.length} headlines)...`);
         const agentResult = await getAgentMacroAnalysis(headlines);
         if (agentResult) {
           // Store for rescore use
@@ -3750,7 +3768,12 @@ async function getRealOptionsContract(ticker, price, optionType, score, vix, ear
       // Only hard filter: contract must have a tradeable price
       if (mid <= 0) { skipped++; continue; }
       // Only hard filter on delta — everything else is a scoring factor not a gate
-      if (delta < deltaMin || delta > deltaMax) { skipped++; continue; }
+      if (delta < deltaMin || delta > deltaMax) {
+        skipped++;
+        // Log first rejection in crash mode for visibility
+        if (inCrash && skipped <= 3) logEvent("filter", `${ticker} contract delta ${delta.toFixed(3)} outside crash range ${deltaMin}-${deltaMax} — skipped`);
+        continue;
+      }
       // Hard DTE floor — spreads need 21+ DTE for PDT accounts
       // PDT forces overnight holds — short DTE means theta destroys value before exit
       // MR calls can use 14 DTE (quick bounce play)
@@ -3837,10 +3860,11 @@ async function getRealOptionsContract(ticker, price, optionType, score, vix, ear
         const m2 = b > 0 && a > 0 ? (b + a) / 2 : 0;
         if (m2 <= 0) { noPrice++; continue; }
         // Track closest delta to our range among priced contracts
+        // Track closest delta for diagnostic logging only
         if (closestDelta < 0 || Math.abs(d - (deltaMin+deltaMax)/2) < Math.abs(closestDelta - (deltaMin+deltaMax)/2)) {
           closestDelta = d;
         }
-        if (d < deltaMin || d > deltaMax) deltaOutOfRange++;
+        if (d < deltaMin || d > deltaMax) { deltaOutOfRange++; continue; } // skip out-of-range
       }
       const cdStr = closestDelta >= 0 ? closestDelta.toFixed(3) : "none";
       logEvent("warn", `${ticker} no valid contract | closest delta:${cdStr} (need ${deltaMin}-${deltaMax}) | no-price:${noPrice} | delta-out:${deltaOutOfRange} | total:${sortedContracts.length}`);
@@ -7664,7 +7688,13 @@ async function runScan() {
     const isLowConfidence  = agentConf === "low" || agentStale;
     const agentMinScore    = isBearishHigh ? 65 : isLowConfidence ? 80 : MIN_SCORE;
     const effectiveMinScore = Math.max(ddProtocol.minScore || MIN_SCORE, regimeMinScore, agentMinScore);
-    if (agentStale && !dryRunMode) logEvent("filter", `Agent macro stale (${agentStaleMins.toFixed(0)}min) — raising min score to 80`);
+    if (agentStale && !dryRunMode) {
+      logEvent("filter", `Agent macro stale (${agentStaleMins.toFixed(0)}min) — raising min score to 80. Last signal: ${agentSig || "none"}`);
+      // If stale > 90 min during market hours, flag for investigation
+      if (agentStaleMins > 90 && isMarketHours()) {
+        logEvent("warn", `[AGENT] Macro analysis has not run in ${agentStaleMins.toFixed(0)} minutes — check API key and headlines`);
+      }
+    }
 
     // ── Staggered entry logic ────────────────────────────────────────────
     // Professional spread traders build positions in tranches on bounces
