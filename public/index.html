@@ -1543,7 +1543,7 @@ function renderPositions() {
         <div><div style="font-size:9px;color:var(--muted)">DTE</div><div style="font-weight:700">${Math.max(1,Math.round((new Date(p.expDate)-new Date())/86400000))}d</div></div>
         <div><div style="font-size:9px;color:var(--muted)">TARGET</div><div style="font-weight:700;color:var(--green)">$${p.target}</div></div>
         <div><div style="font-size:9px;color:var(--muted)">STOP</div><div style="font-weight:700;color:var(--red)">$${p.stop}</div></div>
-        <div><div style="font-size:9px;color:var(--muted)">BREAKEVEN</div><div style="font-weight:700">$${p.breakeven}</div></div>
+        <div><div style="font-size:9px;color:var(--muted)">BREAKEVEN</div><div style="font-weight:700">$${p.breakeven||'--'}</div></div>
         <div><div style="font-size:9px;color:var(--muted)">IVR</div><div style="font-weight:700">${p.ivr||'--'}</div></div>
       </div>
       <div style="display:flex;gap:8px;flex-wrap:wrap">
