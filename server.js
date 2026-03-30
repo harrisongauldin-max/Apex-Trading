@@ -499,6 +499,47 @@ async function initState() {
     }
   }
 
+  // ── Consolidate duplicate credit spread positions (same ticker/strikes) ──────
+  // If ARGO entered the same credit spread multiple times (stagger bug),
+  // merge them into one position with summed contracts to match Alpaca reality
+  if (state.positions) {
+    const creditSpreads = state.positions.filter(p => p.isCreditSpread);
+    const seen = new Map();
+    const toRemove = new Set();
+    for (let i = 0; i < creditSpreads.length; i++) {
+      const pos = creditSpreads[i];
+      const key = `${pos.ticker}|${pos.optionType}|${pos.buyStrike}|${pos.sellStrike}|${pos.expDate}`;
+      if (seen.has(key)) {
+        // Duplicate — merge contracts into the first, remove this one
+        const first = seen.get(key);
+        first.contracts = (first.contracts || 1) + (pos.contracts || 1);
+        first.cost      = parseFloat(((first.cost || 0) + (pos.cost || 0)).toFixed(2));
+        toRemove.add(state.positions.indexOf(pos));
+        console.log(`[STARTUP] Merging duplicate credit spread: ${pos.ticker} $${pos.sellStrike}/$${pos.buyStrike} into ${first.contracts}x`);
+      } else {
+        seen.set(key, pos);
+      }
+    }
+    if (toRemove.size > 0) {
+      state.positions = state.positions.filter((_, i) => !toRemove.has(i));
+      console.log(`[STARTUP] Removed ${toRemove.size} duplicate credit spread position(s)`);
+    }
+  }
+
+  // ── Fix maxProfit/maxLoss for credit spread positions (were 100x too large) ─
+  // One-time correction — positions recorded before the fix have dollar values
+  // instead of per-share values. Dashboard multiplies by 100, so fix in place.
+  if (state.positions) {
+    for (const pos of state.positions) {
+      if (pos.isCreditSpread && pos.maxProfit > 1000 && pos.contracts <= 2) {
+        // maxProfit was stored as netCredit × 100 × contracts, should be just netCredit
+        pos.maxProfit = parseFloat((pos.maxProfit / 100 / (pos.contracts || 1)).toFixed(2));
+        pos.maxLoss   = parseFloat((pos.maxLoss   / 100 / (pos.contracts || 1)).toFixed(2));
+        console.log(`[STARTUP] Fixed maxProfit/maxLoss for ${pos.ticker} credit spread`);
+      }
+    }
+  }
+
   // ── Sanitize cached agentMacro — fix stale mode field from old builds ────
   // Old builds stored mode directly from agent which could be wrong
   // Always re-derive mode from signal on startup
@@ -7749,9 +7790,14 @@ async function runScan() {
     }
 
     // ── Staggered entry logic ────────────────────────────────────────────
-    // Professional spread traders build positions in tranches on bounces
-    // Rules: +5pts higher conviction, 30min gap, existing pos <20% profit, max 3 total
+    // Stagger applies to DEBIT spreads only — buying direction in tranches on bounces
+    // Credit spreads are premium sellers — multiple entries = more uncapped short exposure
+    // For credit spreads: allow only 1 per ticker per direction
     const sameTickerSameDir = state.positions.filter(p => p.ticker === stock.ticker && p.optionType === optionType);
+    if (creditModeActive && sameTickerSameDir.length >= 1) {
+      logEvent("filter", `${stock.ticker} credit spread — already have ${sameTickerSameDir.length} position(s) in this direction — no stagger for credit spreads`);
+      continue;
+    }
     let staggeredMinScore = effectiveMinScore;
     let staggerBlock = false;
     let staggerReason = "";
