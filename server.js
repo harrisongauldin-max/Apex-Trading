@@ -7731,7 +7731,7 @@ async function runScan() {
       // Gate 3: Only +5pts higher conviction (not +15)
       if (!staggerBlock) {
         staggeredMinScore = effectiveMinScore + 5;
-        staggerReason = `stagger (+5 conviction, ${hoursAgo.toFixed(1)}h gap, existing ${(existingChg*100).toFixed(0)}%)`;
+        staggerReason = `stagger (+5 conviction, ${minsAgo.toFixed(0)}min gap, existing ${(existingChg*100).toFixed(0)}%)`;
       }
     }
     if (staggerBlock) { logEvent("filter", `${stock.ticker} stagger blocked — ${staggerReason}`); continue; }
