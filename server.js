@@ -4536,8 +4536,10 @@ async function syncCashFromAlpaca() {
     if (!acct || !acct.cash) return;
     const alpacaCash      = parseFloat(acct.cash);
     const alpacaBuyPower  = parseFloat(acct.buying_power || acct.cash);
+    const alpacaOptBP     = parseFloat(acct.options_buying_power || acct.buying_power || acct.cash);
     state.alpacaCash      = alpacaCash;
     state.alpacaBuyPower  = alpacaBuyPower;
+    state.alpacaOptBP     = alpacaOptBP; // options-specific buying power — gates new option entries
 
     // Alpaca tracks day trades authoritatively — use their count as source of truth
     // acct.daytrade_count = rolling 5-day day trade count (resets as old trades age out)
@@ -4632,6 +4634,11 @@ async function executeCreditSpread(stock, price, score, scoreReasons, vix, optio
     }
     if (state.cash - marginRequired < CAPITAL_FLOOR) {
       logEvent("filter", `${stock.ticker} credit spread would breach capital floor`);
+      return null;
+    }
+    const optBPCredit = state.alpacaOptBP || state.alpacaBuyPower || state.cash;
+    if (marginRequired > optBPCredit) {
+      logEvent("filter", `${stock.ticker} credit spread margin $${marginRequired} exceeds Alpaca options buying power $${optBPCredit.toFixed(2)} — skip`);
       return null;
     }
 
@@ -4823,6 +4830,13 @@ async function executeSpreadTrade(stock, price, score, scoreReasons, vix, option
   }
   if (state.cash - finalCost < CAPITAL_FLOOR) {
     logEvent("filter", `${stock.ticker} spread would breach capital floor`);
+    return null;
+  }
+  // Gate on Alpaca's actual options buying power — prevents rejected orders
+  // options_buying_power is separate from cash — naked puts reserve margin
+  const optBP = state.alpacaOptBP || state.alpacaBuyPower || state.cash;
+  if (finalCost > optBP) {
+    logEvent("filter", `${stock.ticker} spread cost $${finalCost} exceeds Alpaca options buying power $${optBP.toFixed(2)} — skip`);
     return null;
   }
 
@@ -8979,6 +8993,7 @@ app.get("/api/state", async (req, res) => {
       return (real + est) > 0 ? Math.round(real / (real + est) * 100) : 100;
     })(),
     alpacaCash:         state.alpacaCash || null,
+    alpacaOptBP:        state.alpacaOptBP || null,
     pdtCount:           countRecentDayTrades(),
     pdtRemaining:       Math.max(0, PDT_LIMIT - countRecentDayTrades()),
     alpacaDayTradesLeft: state._alpacaDayTradesLeft ?? null,
