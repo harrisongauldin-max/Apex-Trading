@@ -7702,24 +7702,24 @@ async function runScan() {
 
     // ── Staggered entry logic ────────────────────────────────────────────
     // Professional spread traders build positions in tranches on bounces
-    // Rules: +5pts higher conviction, 4hr gap, existing pos <20% profit, max 2 positions
+    // Rules: +5pts higher conviction, 30min gap, existing pos <20% profit, max 3 total
     const sameTickerSameDir = state.positions.filter(p => p.ticker === stock.ticker && p.optionType === optionType);
     let staggeredMinScore = effectiveMinScore;
     let staggerBlock = false;
     let staggerReason = "";
 
-    if (sameTickerSameDir.length >= 2) {
-      // Already have 2 staggered positions — no 3rd (cap at 2 per direction per ticker)
+    if (sameTickerSameDir.length >= maxPerTicker) {
+      // Already at max positions for this ticker/direction
       staggerBlock = true;
-      staggerReason = "max 2 staggered positions reached";
-    } else if (sameTickerSameDir.length === 1) {
-      const existingPos = sameTickerSameDir[0];
-      // Gate 1: Minimum 4 hours between stagger entries (different session or bounce)
-      const hoursAgo = existingPos.openDate
-        ? (Date.now() - new Date(existingPos.openDate).getTime()) / 3600000 : 0;
-      if (hoursAgo < 4) {
+      staggerReason = `max ${maxPerTicker} positions reached`;
+    } else if (sameTickerSameDir.length >= 1) {
+      const existingPos = sameTickerSameDir[sameTickerSameDir.length - 1]; // most recent
+      // Gate 1: Minimum 30 minutes between stagger entries — avoid double-entry on same spike
+      const minsAgo = existingPos.openDate
+        ? (Date.now() - new Date(existingPos.openDate).getTime()) / 60000 : 0;
+      if (minsAgo < 30) {
         staggerBlock = true;
-        staggerReason = `too soon (${hoursAgo.toFixed(1)}h since first entry, need 4h)`;
+        staggerReason = `too soon (${minsAgo.toFixed(0)}min since last entry, need 30min)`;
       }
       // Gate 2: Existing position must not already be working hard (< 20% profit)
       const existingChg = existingPos.currentPrice && existingPos.premium
