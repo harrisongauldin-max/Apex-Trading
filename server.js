@@ -642,6 +642,9 @@ async function runReconciliation() {
             buySymbol: p.qty > 0 ? p.sym : null,
             sellSymbol: p.qty < 0 ? p.sym : null,
             premium: p.avgEntry, currentPrice: curP,
+            breakeven: p.optType === 'put'
+              ? parseFloat((p.strike - p.avgEntry).toFixed(2))
+              : parseFloat((p.strike + p.avgEntry).toFixed(2)),
             contracts: Math.abs(p.qty), expDate: p.expDate, expDays: p.expDays,
             cost: Math.abs(p.mktVal) || parseFloat((p.avgEntry * 100 * Math.abs(p.qty)).toFixed(2)),
             score: 75, reasons: ['Reconstructed from Alpaca reconciliation'],
@@ -1613,7 +1616,10 @@ async function alpacaPost(endpoint, body, method = "POST") {
     const res = await withTimeout(fetch(`${ALPACA_BASE}${endpoint}`, opts), 8000);
     const text = await res.text();
     if (!text || text.trim() === "") return { ok: true }; // DELETE returns empty
-    return JSON.parse(text);
+    // Alpaca cancel endpoint returns plain text "Not Found" when order already gone
+    if (res.status === 404 || text.trim() === "Not Found") return { status: "not_found" };
+    try { return JSON.parse(text); }
+    catch(e) { return { status: res.status, raw: text }; } // non-JSON fallback
   } catch(e) { logEvent("error", `alpacaPost(${endpoint}): ${e.message}`); return null; }
 }
 
@@ -3193,7 +3199,7 @@ async function getMacroNews() {
           return {
             signal:       agentResult.signal,
             scoreModifier:mapped.modifier,
-            mode:         agentResult.mode || mapped.mode,
+            mode:         mapped.mode, // always derive from signal — never trust agent mode field directly
             triggers:     agentResult.keyThemes || [],
             topStories:   (agentResult.topStories || []).slice(0, 5).map(s => ({
               headline:    s.headline,
@@ -3627,8 +3633,12 @@ async function getRealOptionsContract(ticker, price, optionType, score, vix, ear
   // Cheap (<$100): 0.28-0.50 — fewer strikes, liquid ones are closer to ATM
   // Normal: 0.28-0.42 — standard target
   // Expensive (>$400): 0.20-0.55 — wide range needed to find liquid OTM puts
+    // In crash conditions (VIX > 35), delta range shifts higher — all contracts become ITM
+    // Widen to 0.28-0.65 in crash mode to still find valid put entries
+    const inCrash  = (state.vix || 0) >= 35 && optionType === "put";
+    const crashMax = 0.65; // don't go above 0.65 even in crash — too deep ITM
     const deltaMin = isLeaps ? 0.65 : (isPut && isExpensive ? 0.20 : TARGET_DELTA_MIN);
-  const deltaMax = isLeaps ? 0.85 : (isPut && isCheap ? 0.50 : isPut && isExpensive ? 0.55 : TARGET_DELTA_MAX);
+    const deltaMax = isLeaps ? 0.85 : inCrash ? crashMax : (isPut && isCheap ? 0.50 : isPut && isExpensive ? 0.55 : TARGET_DELTA_MAX);
   const strikeRange = 0; // unused — delta now selects contracts, not strike range
 
     // Format date for API: YYYY-MM-DD
@@ -4965,8 +4975,11 @@ async function executeSpreadTrade(stock, price, score, scoreReasons, vix, option
   state.tradeJournal.unshift({
     time: new Date().toISOString(), ticker: stock.ticker,
     action: "OPEN", optionType, isSpread: true,
+    strike: buyContract.strike, expDate: buyContract.expDate,  // for dashboard display
     buyStrike: buyContract.strike, sellStrike: sellContract.strike,
+    spreadLabel: `$${buyContract.strike}/$${sellContract.strike}`,
     premium: netDebit, cost: finalCost, score, scoreReasons,
+    delta: buyContract.greeks?.delta, iv: parseFloat(((buyContract.iv||0.3)*100).toFixed(1)), vix,
     reasoning: `[SPREAD] Score ${score}/100. Net debit $${netDebit}. Max profit $${maxProfit}. ${scoreReasons.slice(0,2).join(". ")}.`,
   });
   if (state.tradeJournal.length > 100) state.tradeJournal = state.tradeJournal.slice(0, 100);
@@ -5527,6 +5540,7 @@ async function closePosition(ticker, reason, exitPremium = null, contractSym = n
 
   // ── Score bracket win rate — updated on every close ──────────────────
   if (!state.scoreBrackets) state.scoreBrackets = {};
+  const entryScore = pos.score || 0; // extract here — not in scope from tradeOutcome object
   const bracket = entryScore >= 90 ? "90-100" : entryScore >= 80 ? "80-89" : entryScore >= 70 ? "70-79" : "below-70";
   if (!state.scoreBrackets[bracket]) state.scoreBrackets[bracket] = { trades:0, wins:0, totalPnl:0 };
   state.scoreBrackets[bracket].trades++;
@@ -7849,10 +7863,22 @@ async function runScan() {
         const spreadPos = await executeSpreadTrade(stock, price, score, reasons, state.vix, optionType, buyContract, sellContract, isChoppyRegime);
         entered = !!spreadPos;
       } else {
-        logEvent("warn", `${stock.ticker} spread: sell leg not found or too narrow (width $${spreadActualWidth}) — skipping`);
+        // Sell leg not found — SKIP entirely, never fall through to naked
+        // Naked puts have unlimited downside — not acceptable for defined-risk strategy
+        logEvent("warn", `${stock.ticker} spread: sell leg not found or too narrow (width $${spreadActualWidth}) — SKIPPING (no naked fallthrough)`);
+        continue;
       }
+    } else if (isMeanReversion) {
+      // Mean reversion only: naked option for full leverage on quick move
+      // Only when isMeanReversion explicitly set — not as a default fallback
+      entered = await executeTrade(stock, price, score, reasons, state.vix, optionType, isMeanReversion);
     } else {
-      // Mean reversion: naked option for full leverage on quick move
+      // useSpread=false, not credit, not MR — agent said naked or non-index
+      // For index instruments this shouldn't happen — log and skip
+      if (stock.isIndex) {
+        logEvent("filter", `${stock.ticker} index trade type unclear (agent: ${agentTradeType}) — skipping`);
+        continue;
+      }
       entered = await executeTrade(stock, price, score, reasons, state.vix, optionType, isMeanReversion);
     }
     if (entered) await new Promise(r=>setTimeout(r,500));
