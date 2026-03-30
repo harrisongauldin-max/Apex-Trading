@@ -4676,6 +4676,7 @@ async function executeCreditSpread(stock, price, score, scoreReasons, vix, optio
       longOrderId  = mlegResp.id;
       logEvent("trade", `[CREDIT SPREAD] mleg submitted: ${mlegResp.id} | status: ${mlegResp.status}`);
 
+      scanRunning = false; // allow next scan while polling for credit spread fill
       let filled = false;
       let fillResp = null;
       const pollStart = Date.now();
@@ -4874,6 +4875,9 @@ async function executeSpreadTrade(stock, price, score, scoreReasons, vix, option
       logEvent("trade", `[SPREAD] mleg order submitted: ${mlegResp.id} | status: ${mlegResp.status}`);
 
       // Poll for fill — mleg fills atomically so just poll the parent order
+      // Release scanRunning flag so subsequent scans aren't blocked during fill wait
+      // executeSpreadTrade returns a promise — scan waits for it but scanRunning is freed
+      scanRunning = false; // allow next scan while we poll for fill
       let filled = false;
       let fillResp = null;
       const pollStart = Date.now();
@@ -6033,6 +6037,7 @@ async function runAgentRescore() {
 
 // - Main Scan Engine -
 let scanRunning  = false;
+let _scanGen     = 0; // increments each scan — finally block only resets its own generation
 let lastMedScan  = 0;  // 5 minute tier
 let lastSlowScan = 0;  // 15 minute tier
 let lastHourScan = 0;  // 60 minute tier
@@ -6064,6 +6069,7 @@ let marketContext = {
 async function runScan() {
   if (scanRunning) { logEvent("scan", "Scan skipped — previous scan still running"); return; }
   scanRunning = true;
+  const thisScanGen = ++_scanGen; // stamp this scan's generation
   try {
   if (!ALPACA_KEY) { logEvent("warn", "No ALPACA_API_KEY set - check Railway variables"); scanRunning = false; return; }
   if (!isMarketHours() && !dryRunMode) { logEvent("scan", "Outside market hours - skipping trade logic"); scanRunning = false; return; }
@@ -7996,7 +8002,9 @@ async function runScan() {
   } finally {
     // Reset failure counter on successful scan completion
     if (!state._scanFailures) state._scanFailures = 0;
-    scanRunning = false;
+    // Only reset scanRunning if this scan still owns it
+    // (poll loops release scanRunning early — a new scan may have started)
+    if (_scanGen === thisScanGen) scanRunning = false;
   }
 }
 
@@ -8560,6 +8568,27 @@ setInterval(() => {
 // ── F4: Alpaca account balance sync every 60 seconds ─────────────────────
 // ── Alpaca cash sync interval — calls syncCashFromAlpaca every 30s ─────────
 setInterval(syncCashFromAlpaca, 30 * 1000); // every 30 seconds
+
+// ── Independent agent macro interval — runs every 3 minutes regardless of scan state ──
+// Decoupled from scan so long mleg poll loops don't starve the agent
+// Scan medium tier still runs getMacroNews but this ensures agent never goes stale
+let _lastAgentInterval = 0;
+setInterval(async () => {
+  const et  = getETTime();
+  const day = et.getDay();
+  if (day === 0 || day === 6) return;
+  const etH = et.getHours() + et.getMinutes() / 60;
+  if (etH < 8.5 || etH > 17.0) return; // 8:30am-5pm ET only
+  if (Date.now() - _lastAgentInterval < 2.5 * 60 * 1000) return; // 2.5 min debounce
+  _lastAgentInterval = Date.now();
+  try {
+    const macro = await getMacroNews();
+    if (macro) {
+      marketContext.macro = macro;
+      markDirty();
+    }
+  } catch(e) { /* silent — scan will retry */ }
+}, 3 * 60 * 1000); // every 3 minutes
 
 // ── F2: Pre-market carry-over assessment (9:00 AM ET) ────────────────────
 // Checks overnight positions against pre-market conditions
