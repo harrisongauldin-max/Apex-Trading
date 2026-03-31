@@ -555,6 +555,23 @@ async function initState() {
     }
   }
 
+  // ── Reset stale currentPrice for credit spreads ───────────────────────────
+  // currentPrice for credit spreads should be sellMid-buyMid, not the long leg price
+  // If it looks like a leg price (> spreadWidth/2 + premium), it's stale — reset to premium
+  if (state.positions) {
+    for (const pos of state.positions) {
+      if (pos.isCreditSpread && pos.currentPrice && pos.premium) {
+        const width = Math.abs((pos.buyStrike||0) - (pos.sellStrike||0));
+        // If currentPrice > spread width it's definitely wrong (long leg price leaked in)
+        if (pos.currentPrice > width) {
+          console.log(`[STARTUP] Resetting stale currentPrice for ${pos.ticker} credit spread: $${pos.currentPrice} → $${pos.premium}`);
+          pos.currentPrice = pos.premium;
+          pos.peakPremium  = pos.premium;
+        }
+      }
+    }
+  }
+
   // ── Sanitize cached agentMacro — fix stale mode field from old builds ────
   // Old builds stored mode directly from agent which could be wrong
   // Always re-derive mode from signal on startup
@@ -6460,9 +6477,11 @@ async function runScan() {
         const buyQ  = buySnap?.latestQuote  || {};
         const sellQ = sellSnap?.latestQuote || {};
         const buyMid  = parseFloat(buyQ.bp || 0) > 0 && parseFloat(buyQ.ap || 0) > 0
-          ? (parseFloat(buyQ.bp) + parseFloat(buyQ.ap)) / 2 : 0;
+          ? (parseFloat(buyQ.bp) + parseFloat(buyQ.ap)) / 2
+          : parseFloat(buySnap?.lastTrade?.p || buySnap?.latestTrade?.p || 0);
         const sellMid = parseFloat(sellQ.bp || 0) > 0 && parseFloat(sellQ.ap || 0) > 0
-          ? (parseFloat(sellQ.bp) + parseFloat(sellQ.ap)) / 2 : 0;
+          ? (parseFloat(sellQ.bp) + parseFloat(sellQ.ap)) / 2
+          : parseFloat(sellSnap?.lastTrade?.p || sellSnap?.latestTrade?.p || 0);
         if (buyMid > 0 && sellMid > 0) {
           if (pos.isCreditSpread) {
             // Credit spread: we SOLD the sell leg and BOUGHT the buy leg (protection)
