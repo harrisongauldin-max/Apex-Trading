@@ -4672,6 +4672,57 @@ async function syncCashFromAlpaca() {
 }
 
 
+
+// ── Sync spread P&L from Alpaca positions ────────────────────────────────────
+// Alpaca already calculates unrealized P&L correctly for each leg.
+// For spreads: net P&L = sum of unrealized_pl across buy + sell legs
+// Net current price = shortLeg.current_price - longLeg.current_price (credit)
+//                   = longLeg.current_price - shortLeg.current_price (debit)
+async function syncPositionPnLFromAlpaca() {
+  if (!ALPACA_KEY) return;
+  try {
+    const alpacaPositions = await alpacaGet("/positions");
+    if (!alpacaPositions || !Array.isArray(alpacaPositions)) return;
+
+    // Build lookup by symbol
+    const alpacaBySymbol = {};
+    for (const ap of alpacaPositions) {
+      alpacaBySymbol[ap.symbol] = ap;
+    }
+
+    let updated = 0;
+    for (const pos of state.positions) {
+      if (!pos.isSpread || !pos.buySymbol || !pos.sellSymbol) continue;
+
+      const buyLeg  = alpacaBySymbol[pos.buySymbol];
+      const sellLeg = alpacaBySymbol[pos.sellSymbol];
+
+      if (!buyLeg || !sellLeg) continue;
+
+      // Net P&L = sum of both legs (Alpaca already handles sign for long/short)
+      const netPnL = parseFloat(buyLeg.unrealized_pl || 0) + parseFloat(sellLeg.unrealized_pl || 0);
+
+      // Net current price per contract
+      const buyPrice  = parseFloat(buyLeg.current_price  || 0);
+      const sellPrice = parseFloat(sellLeg.current_price || 0);
+
+      if (buyPrice > 0 && sellPrice > 0) {
+        // Credit spread: cost to close = sellPrice - buyPrice (we need to buy back short, sell long)
+        // Debit spread: current value = buyPrice - sellPrice
+        const netPrice = pos.isCreditSpread
+          ? parseFloat((sellPrice - buyPrice).toFixed(2))
+          : parseFloat((buyPrice - sellPrice).toFixed(2));
+
+        pos.currentPrice  = netPrice;
+        pos.unrealizedPnL = parseFloat(netPnL.toFixed(2));
+        pos.realData      = true;
+        updated++;
+      }
+    }
+    if (updated > 0) markDirty();
+  } catch(e) { /* silent */ }
+}
+
 async function executeCreditSpread(stock, price, score, scoreReasons, vix, optionType) {
   try {
     // For put credit spread: sell ~0.30 delta put (OTM), buy ~0.20 delta put (further OTM)
@@ -6196,11 +6247,13 @@ async function runScan() {
   // Refresh PDT count from Alpaca at scan start — lightweight single field read
   // Runs in parallel with VIX already fetched above — no added latency
   // Keeps day trade count current without waiting for the 30s sync interval
+  // Fire-and-forget Alpaca syncs — non-blocking, run in background
   alpacaGet("/account").then(acct => {
     if (acct?.daytrade_count !== undefined) {
       state._alpacaDayTradeCount = parseInt(acct.daytrade_count, 10);
     }
-  }).catch(() => {}); // fire-and-forget — non-blocking, falls back to last known value
+  }).catch(() => {});
+  syncPositionPnLFromAlpaca().catch(() => {}); // sync spread P&L from Alpaca — most accurate source
 
   // Emergency close all on VIX velocity spike
   if (isBlackSwan) {
@@ -6473,10 +6526,6 @@ async function runScan() {
       // Spread P&L: net value = buy leg mid - sell leg mid
       const buySnap  = posSnapshots[pos.buySymbol];
       const sellSnap = posSnapshots[pos.sellSymbol];
-      // Diagnostic — log what we found for credit spreads
-      if (pos.isCreditSpread) {
-        logEvent("scan", `[SPREAD DBG] ${pos.ticker} buySymbol:${pos.buySymbol} sellSymbol:${pos.sellSymbol} buySnap:${!!buySnap} sellSnap:${!!sellSnap} snapKeys:${Object.keys(posSnapshots).length}`);
-      }
       if (buySnap && sellSnap) {
         const buyQ  = buySnap?.latestQuote  || {};
         const sellQ = sellSnap?.latestQuote || {};
