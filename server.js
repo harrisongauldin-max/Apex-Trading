@@ -6473,6 +6473,10 @@ async function runScan() {
       // Spread P&L: net value = buy leg mid - sell leg mid
       const buySnap  = posSnapshots[pos.buySymbol];
       const sellSnap = posSnapshots[pos.sellSymbol];
+      // Diagnostic — log what we found for credit spreads
+      if (pos.isCreditSpread) {
+        logEvent("scan", `[SPREAD DBG] ${pos.ticker} buySymbol:${pos.buySymbol} sellSymbol:${pos.sellSymbol} buySnap:${!!buySnap} sellSnap:${!!sellSnap} snapKeys:${Object.keys(posSnapshots).length}`);
+      }
       if (buySnap && sellSnap) {
         const buyQ  = buySnap?.latestQuote  || {};
         const sellQ = sellSnap?.latestQuote || {};
