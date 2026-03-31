@@ -2332,7 +2332,11 @@ function checkConcentrationRisk() {
   // Check sector concentration
   const sectorTotals = {};
   for (const pos of positions) {
-    sectorTotals[pos.sector] = (sectorTotals[pos.sector] || 0) + pos.cost;
+    // pos.sector may not be set — look up from WATCHLIST as fallback
+    const sector = pos.sector
+      || (WATCHLIST.find(w => w.ticker === pos.ticker) || {}).sector
+      || "Unknown";
+    sectorTotals[sector] = (sectorTotals[sector] || 0) + pos.cost;
   }
   for (const [sector, val] of Object.entries(sectorTotals)) {
     const pct = val / totalValue * 100;
@@ -5108,6 +5112,7 @@ async function confirmPendingOrder() {
         const maxLoss   = parseFloat(((Math.abs(pending.buyStrike - pending.sellStrike) - netCredit) * 100 * pending.contracts).toFixed(2));
         const position = {
           ticker: pending.ticker, optionType: pending.optionType,
+          sector: (WATCHLIST.find(w => w.ticker === pending.ticker) || {}).sector || "Unknown",
           isSpread: true, isCreditSpread: true,
           shortStrike: pending.sellStrike, longStrike: pending.buyStrike,
           buyStrike: pending.buyStrike, sellStrike: pending.sellStrike,
@@ -5162,6 +5167,7 @@ async function confirmPendingOrder() {
       state.cash -= finalCost;
       const position = {
         ticker:        pending.ticker, optionType, isSpread: true,
+        sector:        (WATCHLIST.find(w => w.ticker === pending.ticker) || {}).sector || "Unknown",
         buyStrike, sellStrike,
         spreadWidth:   Math.abs(buyStrike - sellStrike),
         buySymbol, sellSymbol,
@@ -8264,17 +8270,21 @@ async function runScan() {
 
   state.lastScan    = new Date().toISOString();
   state._scanFailures = 0;
-  // Single Redis write at scan end — flushes all close/entry markDirty() calls
-  // Prevents N sequential Redis writes when multiple positions close in one scan
-  await saveStateNow();
+  // Single Redis write at scan end — with timeout so a Redis hang can't block the scanner
+  // If Redis is slow, markDirty() ensures the periodic flush interval catches it
+  await Promise.race([
+    saveStateNow(),
+    new Promise(r => setTimeout(r, 3000)), // 3s timeout — don't let Redis block next scan
+  ]).catch(() => { markDirty(); }); // on timeout: mark dirty, periodic flush will handle it
   } catch(e) {
     logEvent("error", `runScan crashed: ${e.message} | stack: ${e.stack?.split("\n")[1]?.trim() || "unknown"}`);
     // Track consecutive scan failures — alert after 3 in a row
     state._scanFailures = (state._scanFailures || 0) + 1;
     if (state._scanFailures >= 3 && RESEND_API_KEY && GMAIL_USER && isMarketHours()) {
-      await sendResendEmail(
-        `ARGO-V2.2 ALERT — Scanner failing (${state._scanFailures} errors)`,
-        `<div style="font-family:monospace;background:#07101f;color:#ff5555;padding:20px">
+      Promise.race([
+        sendResendEmail(
+          `ARGO-V2.2 ALERT — Scanner failing (${state._scanFailures} errors)`,
+          `<div style="font-family:monospace;background:#07101f;color:#ff5555;padding:20px">
           <h2>⚠ ARGO-V2.2 Scanner Error</h2>
           <p>Consecutive scan failures: <strong>${state._scanFailures}</strong></p>
           <p>Last error: ${e.message}</p>
@@ -8283,7 +8293,9 @@ async function runScan() {
           <p>Cash: $${state.cash}</p>
           <p><strong>Check Railway logs immediately.</strong></p>
         </div>`
-      );
+        ),
+        new Promise(r => setTimeout(r, 5000)), // 5s timeout — don't let email hang block finally
+      ]).catch(() => {});
       logEvent("warn", `Scan failure alert sent — ${state._scanFailures} consecutive errors`);
     }
   } finally {
