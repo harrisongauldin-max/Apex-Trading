@@ -1486,16 +1486,13 @@ function renderPositions() {
     const curPrice = p.currentPrice || p.premium;
     let chgPct, chgDollar;
     if (p.isCreditSpread) {
-      // For credit: positive P&L when spread narrows (currentPrice < premium received)
-      chgPct    = p.premium ? ((p.premium - curPrice) / p.premium * 100) : 0;
-      chgDollar = p.unrealizedPnL !== undefined
-        ? p.unrealizedPnL  // use Alpaca-sourced P&L when available — most accurate
-        : (p.premium - curPrice) * 100 * (p.contracts||1) * (p.partialClosed?0.5:1);
+      chgDollar = p.unrealizedPnL !== undefined ? p.unrealizedPnL : (p.premium - curPrice) * 100 * (p.contracts||1);
+      // % = P&L / max profit (how much of the max credit have we captured/lost)
+      chgPct = p.maxProfit ? (chgDollar / p.maxProfit * 100) : 0;
     } else {
-      chgPct    = p.currentPrice && p.premium ? ((p.currentPrice - p.premium) / p.premium * 100) : 0;
-      chgDollar = p.unrealizedPnL !== undefined
-        ? p.unrealizedPnL
-        : (curPrice - p.premium) * 100 * (p.contracts||1) * (p.partialClosed?0.5:1);
+      chgDollar = p.unrealizedPnL !== undefined ? p.unrealizedPnL : (curPrice - p.premium) * 100 * (p.contracts||1);
+      // % = P&L / cost (how much of the debit paid have we gained/lost)
+      chgPct = p.maxLoss ? (chgDollar / p.maxLoss * 100) : 0;
     }
     const thesisScore = p.entryThesisScore || 100;
     const thesisColor = thesisScore >= 70 ? 'var(--green)' : thesisScore >= 40 ? 'var(--gold)' : 'var(--red)';
