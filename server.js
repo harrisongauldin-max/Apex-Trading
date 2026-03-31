@@ -876,7 +876,7 @@ async function runReconciliation() {
 function logEvent(type, message) {
   const entry = { time: new Date().toISOString(), type, message };
   state.tradeLog.unshift(entry);
-  if (state.tradeLog.length > 200) state.tradeLog = state.tradeLog.slice(0, 200);
+  if (state.tradeLog.length > 500) state.tradeLog = state.tradeLog.slice(0, 500);
   console.log(`[${type.toUpperCase()}] ${message}`);
 }
 
@@ -1058,7 +1058,7 @@ async function getDynamicSignals(ticker, bars, intradayBars = null, realOptionsI
 const fmt         = n  => "$" + parseFloat(n).toFixed(2);
 // Use actual account baseline (set from Alpaca on first sync) not hardcoded constant
 // state.accountBaseline tracks the real starting value for performance calculations
-const totalCap    = () => state.customBudget || state.accountBaseline || MONTHLY_BUDGET;
+const totalCap    = () => state.customBudget || Math.max(state.cash || 0, state.accountBaseline || 0, MONTHLY_BUDGET);
 // Mark-to-market: use current price not entry cost for real portfolio value
 // currentPrice is updated every reconciliation from Alpaca market values
 const openRisk    = () => state.positions.reduce((s,p) => {
@@ -3196,6 +3196,10 @@ function scoreArticle(article) {
 }
 
 async function getMacroNews() {
+  // Cache for 60 seconds — news doesn't change faster than this
+  // Prevents redundant fetches when both the 3-min interval and scan medium tier fire close together
+  const cached = getCached("macronews:v1");
+  if (cached) return cached;
   try {
     // Fetch from both sources in parallel — Alpaca + Marketaux
     const [alpacaData, marketauxArticles] = await Promise.all([
@@ -3305,7 +3309,7 @@ async function getMacroNews() {
             "strongly bullish": { modifier: 15,  mode: "aggressive"},
           };
           const mapped = agentModeMap[agentResult.signal] || { modifier: 0, mode: "normal" };
-          return {
+          const result = {
             signal:       agentResult.signal,
             scoreModifier:mapped.modifier,
             mode:         mapped.mode, // always derive from signal — never trust agent mode field directly
@@ -3327,6 +3331,8 @@ async function getMacroNews() {
             sourceCount:   sourceCount + " + Claude",
             updatedAt:     new Date().toISOString(),
           };
+          setCache("macronews:v1", result, 60);
+          return result;
         }
       } catch(agentErr) {
         logEvent("warn", `[AGENT] Macro analysis failed, using keywords: ${agentErr.message}`);
@@ -3334,7 +3340,7 @@ async function getMacroNews() {
     }
 
     // Keyword fallback
-    return {
+    const kwResult = {
       signal, scoreModifier, mode,
       bearishScore: parseFloat(totalBearish.toFixed(1)),
       bullishScore: parseFloat(totalBullish.toFixed(1)),
@@ -3346,6 +3352,8 @@ async function getMacroNews() {
       sourceCount,
       updatedAt: new Date().toISOString(),
     };
+    setCache("macronews:v1", kwResult, 60);
+    return kwResult;
   } catch(e) {
     logEvent("error", `getMacroNews: ${e.message}`);
     return { signal: "neutral", scoreModifier: 0, mode: "normal", triggers: [], topStories: [], sectorBearish: [], sectorBullish: [] };
@@ -3354,12 +3362,16 @@ async function getMacroNews() {
 
 // - Fear & Greed -
 async function getFearAndGreed() {
+  const cached = getCached("feargreed:v1");
+  if (cached) return cached;
   try {
     const res  = await withTimeout(fetch("https://production.dataviz.cnn.io/index/fearandgreed/graphdata"), 5000);
     const data = await res.json();
     const score  = data?.fear_and_greed?.score || 50;
     const rating = data?.fear_and_greed?.rating || "neutral";
-    return { score: parseFloat(parseFloat(score).toFixed(0)), rating };
+    const result = { score: parseFloat(parseFloat(score).toFixed(0)), rating };
+    setCache("feargreed:v1", result, 300); // 5 minute TTL — updates once per day
+    return result;
   } catch(e) { return { score: 50, rating: "neutral" }; }
 }
 
@@ -4548,20 +4560,43 @@ async function getSpreadSellLeg(ticker, optionType, buyContract, targetWidth = 1
 
     if (!contracts.length) return null;
 
-    // Find contract closest to target strike
+    // Find contract closest to target strike, with delta preference
+    // Protection leg should ideally be 0.15–0.20 delta (further OTM than short leg)
+    // This gives real protection without paying too much for the hedge
+    const TARGET_PROTECTION_DELTA_MIN = 0.10;
+    const TARGET_PROTECTION_DELTA_MAX = 0.25;
+
+    // First pass: try to find a contract at target strike with good delta
+    // Second pass: fall back to closest strike if no delta match
     let best = null;
-    let bestDist = 999;
+    let bestScore = -1;
+
     for (const c of contracts) {
       const strike = parseFloat(c.strike_price);
       const dist   = Math.abs(strike - targetStrike);
-      if (dist < bestDist) {
-        bestDist = dist;
-        best     = c;
+      if (dist > Math.max(targetWidth * 0.5, 5)) continue; // limit search range
+
+      // Score by strike proximity (primary) + delta quality (secondary, if available)
+      const strikeScore = 1 - (dist / Math.max(targetWidth * 0.5, 5));
+      const score = strikeScore; // delta scored below after snapshot fetch
+      if (score > bestScore || best === null) {
+        bestScore = score;
+        best = c;
+      }
+    }
+
+    // Fallback: find absolute closest if search range too tight
+    if (!best) {
+      let bestDist = 999;
+      for (const c of contracts) {
+        const strike = parseFloat(c.strike_price);
+        const dist   = Math.abs(strike - targetStrike);
+        if (dist < bestDist) { bestDist = dist; best = c; }
       }
     }
 
     const maxDist = Math.max(3, targetWidth * 0.15); // allow 15% of width as tolerance
-    if (!best || bestDist > maxDist) {
+    if (!best || Math.abs(parseFloat(best.strike_price) - targetStrike) > maxDist) {
       logEvent("warn", `${ticker} spread: no sell leg within $${maxDist.toFixed(0)} of target $${targetStrike} (width $${targetWidth})`);
       return null;
     }
@@ -4583,8 +4618,12 @@ async function getSpreadSellLeg(ticker, optionType, buyContract, targetWidth = 1
 
     const strike = parseFloat(best.strike_price);
     const actualWidth = Math.abs(buyContract.strike - strike);
+    const protectionDelta = Math.abs(parseFloat(greeks.delta || 0));
 
-    logEvent("filter", `${ticker} sell leg: $${strike} | mid $${mid.toFixed(2)} | width $${actualWidth} from buy $${buyContract.strike}`);
+    // Log delta quality of protection leg
+    const deltaQuality = protectionDelta >= TARGET_PROTECTION_DELTA_MIN && protectionDelta <= TARGET_PROTECTION_DELTA_MAX
+      ? "good" : protectionDelta > 0 ? `outside target ${TARGET_PROTECTION_DELTA_MIN}-${TARGET_PROTECTION_DELTA_MAX}` : "unknown";
+    logEvent("filter", `${ticker} sell leg: $${strike} | mid $${mid.toFixed(2)} | width $${actualWidth} from buy $${buyContract.strike} | delta ${protectionDelta.toFixed(3)} (${deltaQuality})`);
 
     return {
       symbol:    best.symbol,
@@ -4724,27 +4763,16 @@ async function syncPositionPnLFromAlpaca() {
       const netPnL = parseFloat(buyLeg.unrealized_pl || 0) + parseFloat(sellLeg.unrealized_pl || 0);
       pos.unrealizedPnL = parseFloat(netPnL.toFixed(2));
 
-      // ── Entry price / premium from Alpaca avg_entry_price ───────────────
-      // For debit spreads: avg net debit = buyAvg - sellAvg
-      // For credit spreads: avg net credit = sellAvg - buyAvg
-      const buyAvg  = parseFloat(buyLeg.avg_entry_price  || 0);
-      const sellAvg = parseFloat(sellLeg.avg_entry_price || 0);
-      if (buyAvg > 0 && sellAvg > 0) {
-        const netEntry = pos.isCreditSpread
-          ? parseFloat((sellAvg - buyAvg).toFixed(2))
-          : parseFloat((buyAvg  - sellAvg).toFixed(2));
-        if (netEntry > 0) pos.premium = netEntry;
-      }
+      // ── Entry price / premium ───────────────────────────────────────────
+      // Do NOT overwrite pos.premium from avg_entry_price — individual leg
+      // avg_entry_price doesn't reflect the net credit/debit received at entry.
+      // pos.premium is set correctly at fill confirmation and must be preserved.
 
-      // ── Cost basis from Alpaca ──────────────────────────────────────────
-      // For debit: cost = net debit × 100 × contracts
-      // For credit: cost = margin required (max loss × 100 × contracts)
-      const buyMarketVal  = Math.abs(parseFloat(buyLeg.market_value  || 0));
-      const sellMarketVal = Math.abs(parseFloat(sellLeg.market_value || 0));
-      if (buyMarketVal > 0) {
-        pos.cost = pos.isCreditSpread
-          ? parseFloat(((pos.spreadWidth || Math.abs(pos.buyStrike - pos.sellStrike)) - pos.premium) * 100 * pos.contracts).toFixed(2) * 1
-          : parseFloat((pos.premium * 100 * pos.contracts).toFixed(2));
+      // ── Cost basis ──────────────────────────────────────────────────────
+      // Credit spread cost = margin reserved = maxLoss (max risk)
+      // Debit spread cost  = net debit paid  = premium × 100 × contracts
+      if (pos.maxLoss > 0) {
+        pos.cost = pos.isCreditSpread ? pos.maxLoss : pos.maxLoss;
       }
 
       // ── Max profit / max loss (always recalculate from Alpaca data) ─────
@@ -5896,7 +5924,7 @@ async function closePosition(ticker, reason, exitPremium = null, contractSym = n
     `cash ${fmt(state.cash)} | consec losses: ${state.consecutiveLosses}`
   );
   await syncCashFromAlpaca(); // sync cash from Alpaca after close
-  await saveStateNow();
+  markDirty(); // caller saves — prevents N Redis writes when multiple positions close together
   return true;
   } catch(e) {
     logEvent("error", `closePosition crashed for ${ticker} (${reason}): ${e.message}`);
@@ -6277,6 +6305,13 @@ async function runScan() {
 
   const now    = Date.now();
   const scanET = getETTime(); // single ET time reference for entire scan
+
+  // Scan-level memos — computed once, reused throughout scan
+  // Prevents repeated iteration over state.positions on every check
+  const _totalCap  = totalCap();
+  const _openRisk  = openRisk();
+  const _heatPct   = openCostBasis() / _totalCap;
+  const _heatPctPc = parseFloat((_heatPct * 100).toFixed(1));
 
   // Scan-cycle cache — expensive fetches reused within same scan window
   if (!runScan._cache || Date.now() - (runScan._cacheTime||0) > 8000) {
@@ -6871,6 +6906,12 @@ async function runScan() {
         continue;
       } else if (integrity.score < 40) {
         logEvent("warn", `[THESIS] ${pos.ticker} integrity degraded ${integrity.score}/100 — ${integrity.reasons.slice(0,2).join(", ")}`);
+        // INVALID score — tighten stop to 25% so a losing position exits sooner
+        // Thesis is broken; holding at 50% stop means taking max loss on a bad trade
+        if ((pos.fastStopPct || FAST_STOP_PCT) > 0.25) {
+          pos.fastStopPct = 0.25;
+          logEvent("warn", `[THESIS] ${pos.ticker} stop tightened to 25% (thesis INVALID)`);
+        }
       }
 
       // Time-adjusted stop — tightens as position ages
@@ -7052,12 +7093,14 @@ async function runScan() {
   if (state._pendingOrder) {
     // Already logged above — just skip to end of scan
   } else {
-  // Fetch SPY data first — needed for spyRecovering which gates putsAllowed
-  const spyPrice     = await getStockQuote("SPY") || 500;
+  // Fetch SPY data in parallel — all three are independent requests
+  const [spyPrice, spyBars, spyIntraday] = await Promise.all([
+    getStockQuote("SPY").then(p => p || 500),
+    getStockBars("SPY", 5),
+    getIntradayBars("SPY"),
+  ]);
   if (spyPrice) state._liveSPY = spyPrice;
-  const spyBars      = await getStockBars("SPY", 5);
   const spyReturn    = spyBars.length >= 5 ? (spyBars[spyBars.length-1].c - spyBars[0].o) / spyBars[0].o : 0;
-  const spyIntraday  = await getIntradayBars("SPY");
   const spyRecovering = (() => {
     if (spyIntraday.length >= 15) {
       const recent  = spyIntraday.slice(-15);
@@ -7424,7 +7467,10 @@ async function runScan() {
     // Allow stagger entries (up to maxPerTicker) — don't skip entirely if one position open
     const maxPerTicker = stock.isIndex ? 3 : 2;
     const existingForTicker = state.positions.filter(p => p.ticker === stock.ticker);
-    if (existingForTicker.length >= maxPerTicker) continue;
+    // Combined cap: credit + debit spreads on same ticker count together
+    // Prevents GLD credit spread + 2 debit spreads = 3 positions on one name
+    const maxCombined = stock.isIndex ? 2 : 1;
+    if (existingForTicker.length >= maxCombined) continue;
 
     // ── F14: Check ticker blacklist ───────────────────────────────────────
     if ((state.tickerBlacklist || []).includes(stock.ticker)) {
@@ -8069,11 +8115,14 @@ async function runScan() {
 
   // ── PARALLEL OPTIONS PREFETCH ─────────────────────────────────────────────
   // Fetch options chains for all scored stocks simultaneously before executing
-  // This eliminates sequential chain fetching when multiple trades fire at once
   // Skip options prefetch entirely if choppy and credit mode not active (nothing will enter)
-  const skipPrefetch = choppyDebitBlock && !creditModeActive;
+  // Also skip if already at heat cap — entry will be blocked anyway, no need to fetch chains
+  const skipPrefetch = (choppyDebitBlock && !creditModeActive) || (_heatPct >= MAX_HEAT);
   if (skipPrefetch && !dryRunMode) {
-    logEvent("filter", `Choppy regime + low VIX — skipping options prefetch (no entries possible)`);
+    if (_heatPct >= MAX_HEAT)
+      logEvent("filter", `Heat ${_heatPctPc}% at cap — skipping options prefetch`);
+    else
+      logEvent("filter", `Choppy regime + low VIX — skipping options prefetch (no entries possible)`);
   }
   if (scored.length > 0 && !skipPrefetch) {
     logEvent("scan", `Prefetching options chains for ${scored.length} candidates in parallel...`);
@@ -8214,8 +8263,10 @@ async function runScan() {
   } // end else (no pending order)
 
   state.lastScan    = new Date().toISOString();
-  state._scanFailures = 0; // reset consecutive failure counter on success
-  markDirty(); // flush handled by dedicated interval below
+  state._scanFailures = 0;
+  // Single Redis write at scan end — flushes all close/entry markDirty() calls
+  // Prevents N sequential Redis writes when multiple positions close in one scan
+  await saveStateNow();
   } catch(e) {
     logEvent("error", `runScan crashed: ${e.message} | stack: ${e.stack?.split("\n")[1]?.trim() || "unknown"}`);
     // Track consecutive scan failures — alert after 3 in a row
