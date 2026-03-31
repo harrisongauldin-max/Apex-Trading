@@ -46,7 +46,8 @@ const MONTHLY_BUDGET      = 10000;
 const CAPITAL_FLOOR       = 3000;
 const REVENUE_THRESHOLD   = 2000;
 const BONUS_AMOUNT        = 1000;
-const MAX_HEAT            = 0.60;
+const MAX_HEAT            = 0.60; // base cap — reduced dynamically at elevated VIX (see effectiveHeatCap())
+const effectiveHeatCap    = () => state.vix >= 30 ? 0.40 : state.vix >= 25 ? 0.50 : MAX_HEAT;
 const MAX_SECTOR_PCT      = 0.50;
 const STOP_LOSS_PCT       = 0.35;
 const FAST_STOP_PCT       = 0.20;   // -20% in first 48hrs
@@ -4084,7 +4085,7 @@ async function checkAllFilters(stock, price) {
   if (existingPositions.length >= maxPerTicker) return { pass:false, reason:`Already have ${maxPerTicker} positions in ${stock.ticker}` };
 
   // 7. Portfolio heat
-  if (heatPct() >= MAX_HEAT) return { pass:false, reason:`Portfolio heat at ${(heatPct()*100).toFixed(0)}% max` };
+  if (heatPct() >= effectiveHeatCap()) return { pass:false, reason:`Portfolio heat at ${(heatPct()*100).toFixed(0)}% max` };
 
   // 8. Sector exposure
   const sectorExp = state.positions.filter(p=>p.sector===stock.sector).reduce((s,p)=>s+p.cost,0);
@@ -5136,7 +5137,7 @@ async function confirmPendingOrder() {
           expiryType: "monthly", dteLabel: "CREDIT-SPREAD-MONTHLY",
           partialClosed: false, isMeanReversion: false, trailStop: null,
           breakevenLocked: false, halfPosition: false,
-          takeProfitPct: 0.30, fastStopPct: 0.75,
+          takeProfitPct: 0.50, fastStopPct: 0.75,
           _creditHarvestExpiry: new Date(Date.now() + 7*86400000).toISOString(),
         };
         state.positions.push(position);
@@ -5152,9 +5153,21 @@ async function confirmPendingOrder() {
       if (fillResp.filled_avg_price) {
         const actual = parseFloat(fillResp.filled_avg_price);
         if (actual > 0 && actual !== netDebit) {
-          logEvent("trade", `[SPREAD] Fill improvement: limit $${netDebit} → actual $${actual}`);
+          const slippage = parseFloat((actual - netDebit).toFixed(2));
+          logEvent("trade", `[SPREAD] Fill: limit $${netDebit} → actual $${actual} | slippage ${slippage >= 0 ? '+' : ''}$${slippage}`);
+          // Track fill quality for live deployment validation
+          if (!state._fillQuality) state._fillQuality = { count: 0, totalSlippage: 0, misses: 0 };
+          state._fillQuality.count++;
+          state._fillQuality.totalSlippage = parseFloat((state._fillQuality.totalSlippage + slippage).toFixed(2));
+          if (slippage > 0.05) state._fillQuality.misses++;
+          state._fillQuality.avgSlippage = parseFloat((state._fillQuality.totalSlippage / state._fillQuality.count).toFixed(3));
           netDebit  = actual;
           finalCost = parseFloat((netDebit * 100 * pending.contracts).toFixed(2));
+        } else {
+          // Perfect fill at limit price — track this too
+          if (!state._fillQuality) state._fillQuality = { count: 0, totalSlippage: 0, misses: 0 };
+          state._fillQuality.count++;
+          state._fillQuality.avgSlippage = parseFloat((state._fillQuality.totalSlippage / state._fillQuality.count).toFixed(3));
         }
       }
 
@@ -5426,7 +5439,7 @@ async function executeTrade(stock, price, score, scoreReasons, vix, optionType =
   // Final heat check — projected heat AFTER this position is added
   // This catches the scan-level blindness where multiple positions queue before any are entered
   const projectedHeat = (openRisk() + finalCost) / totalCap();
-  if (projectedHeat > MAX_HEAT) {
+  if (projectedHeat > effectiveHeatCap()) {
     logEvent("filter", `${stock.ticker} - projected heat ${(projectedHeat*100).toFixed(0)}% would exceed ${MAX_HEAT*100}% max — skipping`);
     if (alpacaOrderId) {
       try { await alpacaDelete(`/orders/${alpacaOrderId}`); } catch(e) {}
@@ -6205,7 +6218,7 @@ async function runAgentRescore() {
   // Simon & Campasano: flag momentum decay for trending positions 5d+
   for (const pos of state.positions) {
     if (pos.isCreditSpread && pos._creditHarvestExpiry) {
-      if (Date.now() > new Date(pos._creditHarvestExpiry).getTime() && pos.takeProfitPct === 0.30) {
+      if (Date.now() > new Date(pos._creditHarvestExpiry).getTime() && pos.takeProfitPct === 0.50) {
         pos.takeProfitPct = 0.50;
         logEvent("scan", `${pos.ticker} credit harvest window expired — target expanded to 50%`);
       }
@@ -8013,12 +8026,18 @@ async function runScan() {
         staggerBlock = true;
         staggerReason = `too soon (${minsAgo.toFixed(0)}min since last entry, need 30min)`;
       }
-      // Gate 2: Existing position must not already be working hard (< 20% profit)
+      // Gate 2: Existing position must be profitable before adding a second tranche
+      // Averaging into a loser encodes the most dangerous trading bias — do not allow it
+      // Only stagger when the first entry is working (>5% profit confirms thesis)
       const existingChg = existingPos.currentPrice && existingPos.premium
         ? (existingPos.currentPrice - existingPos.premium) / existingPos.premium : 0;
-      if (!staggerBlock && existingChg > 0.20) {
+      if (!staggerBlock && existingChg <= 0.05) {
         staggerBlock = true;
-        staggerReason = `existing pos +${(existingChg*100).toFixed(0)}% — thesis already playing out`;
+        staggerReason = `existing pos ${(existingChg*100).toFixed(0)}% — thesis not confirmed (need >5% profit to add)`;
+      }
+      if (!staggerBlock && existingChg > 0.50) {
+        staggerBlock = true;
+        staggerReason = `existing pos +${(existingChg*100).toFixed(0)}% — thesis already played out, don't chase`;
       }
       // Gate 3: Only +5pts higher conviction (not +15)
       if (!staggerBlock) {
@@ -8123,9 +8142,9 @@ async function runScan() {
   // Fetch options chains for all scored stocks simultaneously before executing
   // Skip options prefetch entirely if choppy and credit mode not active (nothing will enter)
   // Also skip if already at heat cap — entry will be blocked anyway, no need to fetch chains
-  const skipPrefetch = (choppyDebitBlock && !creditModeActive) || (_heatPct >= MAX_HEAT);
+  const skipPrefetch = (choppyDebitBlock && !creditModeActive) || (_heatPct >= effectiveHeatCap());
   if (skipPrefetch && !dryRunMode) {
-    if (_heatPct >= MAX_HEAT)
+    if (_heatPct >= effectiveHeatCap())
       logEvent("filter", `Heat ${_heatPctPc}% at cap — skipping options prefetch`);
     else
       logEvent("filter", `Choppy regime + low VIX — skipping options prefetch (no entries possible)`);
@@ -8157,7 +8176,7 @@ async function runScan() {
   // Enter trades — sorted by score, best first
   // heatPct() is live and updates after every executeTrade call
   for (const { stock, price, score, reasons, optionType, isMeanReversion } of scored) {
-    if (heatPct() >= MAX_HEAT) break;
+    if (heatPct() >= effectiveHeatCap()) break;
     if (state.cash <= CAPITAL_FLOOR) break;
 
     const { pass, reason } = await checkAllFilters(stock, price);
@@ -9261,6 +9280,8 @@ app.get("/api/state", async (req, res) => {
   res.json({
     ...state,
     heatPct:       parseFloat((heatPct()*100).toFixed(1)),
+    heatCap:       parseFloat((effectiveHeatCap()*100).toFixed(0)),
+    fillQuality:   state._fillQuality || { count: 0, totalSlippage: 0, misses: 0, avgSlippage: 0 },
     realizedPnL:   parseFloat(realizedPnL().toFixed(2)),
     totalCap:      totalCap(),
     stockValue:    parseFloat(stockValue().toFixed(2)),
