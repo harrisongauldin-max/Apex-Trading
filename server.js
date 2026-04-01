@@ -1,5 +1,5 @@
 // -
-// ARGO V2.2 - Systematic SPY/QQQ Options Trading Agent
+// ARGO V2.3 - Systematic SPY/QQQ Options Trading Agent
 // Alpaca Paper Trading Edition
 // -
 const express    = require("express");
@@ -122,7 +122,7 @@ const CORRELATION_GROUPS = [
 const SEMIS = ["NVDA", "AMD", "SMCI", "ARM", "AVGO", "MU"];
 
 // - Watchlist (36 high-liquidity stocks) -
-// ── ARGO-V2.2 Instrument Configuration ────────────────────────────────────────
+// ── ARGO-V2.3 Instrument Configuration ────────────────────────────────────────
 // Phase 1: SPY primary, QQQ secondary — building to $25k
 // At $25k: set INDIVIDUAL_STOCKS_ENABLED = true to unlock full watchlist
 const INDIVIDUAL_STOCKS_ENABLED = false;
@@ -2727,12 +2727,12 @@ const AGENT_MACRO_CACHE_MS = 3 * 60 * 1000; // 3 minutes — faster macro reacti
 async function getAgentDayPlan(scanType = "morning") {
   if (!ANTHROPIC_API_KEY) return null;
 
-  const systemPrompt = `You are the head macro strategist for ARGO-V2.2, a systematic SPY/QQQ options spread trading system. Return ONLY valid JSON — no markdown, no preamble.
+  const systemPrompt = `You are the head macro strategist for ARGO-V2.3, a systematic SPY/QQQ options spread trading system. Return ONLY valid JSON — no markdown, no preamble.
 
 {"regime":"trending_bear"|"trending_bull"|"choppy"|"breakdown"|"recovery"|"neutral","signal":"strongly bearish"|"bearish"|"mild bearish"|"neutral"|"mild bullish"|"bullish"|"strongly bullish","confidence":"high"|"medium"|"low","entryBias":"puts_on_bounces"|"calls_on_dips"|"neutral"|"avoid","tradeType":"spread"|"credit"|"naked"|"none","suppressUntil":null|"HH:MM","riskLevel":"low"|"medium"|"high","vixOutlook":"spiking"|"elevated_stable"|"mean_reverting"|"falling","keyLevels":{"spySupport":null,"spyResistance":null},"catalysts":[],"reasoning":"2 sentences max","weeklyBias":"bullish"|"bearish"|"neutral","overnightMove":"string describing futures direction"}
 
 Rules:
-- suppressUntil: set to "HH:MM" ET if high-impact event today (CPI 08:30, FOMC 14:00, NFP 08:30) — ARGO-V2.2 will not enter before this time
+- suppressUntil: set to "HH:MM" ET if high-impact event today (CPI 08:30, FOMC 14:00, NFP 08:30) — ARGO-V2.3 will not enter before this time
 - riskLevel high = FOMC day, CPI day, major geopolitical event — reduce position size
 - entryBias puts_on_bounces = bearish trend, wait for intraday relief before entering puts
 - entryBias calls_on_dips = bullish trend, wait for intraday weakness before entering calls
@@ -2780,7 +2780,7 @@ What is your strategic assessment for today's trading session?`;
 async function getAgentPostMarketAssessment(scanType = "post-market") {
   if (!ANTHROPIC_API_KEY) return null;
 
-  const systemPrompt = `Post-market analyst for ARGO-V2.2. Return ONLY valid JSON — no markdown.
+  const systemPrompt = `Post-market analyst for ARGO-V2.3. Return ONLY valid JSON — no markdown.
 {"overnightRisk":"low"|"medium"|"high","holdRecommendations":{},"tomorrowBias":"bullish"|"bearish"|"neutral","catalystsTomorrow":[],"reasoning":"1-2 sentences"}
 holdRecommendations: {ticker: "HOLD"|"MONITOR"|"EXIT_AT_OPEN"} for each open position.`;
 
@@ -2832,7 +2832,7 @@ async function getAgentMacroAnalysis(headlines) {
   if (_agentMacroCache.result && Date.now() - _agentMacroCache.fetchedAt < AGENT_MACRO_CACHE_MS) {
     return _agentMacroCache.result;
   }
-  const systemPrompt = `You are the head macro strategist for ARGO-V2.2, a systematic SPY/QQQ options trading system. Return ONLY valid JSON — no markdown, no preamble.
+  const systemPrompt = `You are the head macro strategist for ARGO-V2.3, a systematic SPY/QQQ options trading system. Return ONLY valid JSON — no markdown, no preamble.
 
 {"signal":"strongly bearish"|"bearish"|"mild bearish"|"neutral"|"mild bullish"|"bullish"|"strongly bullish","modifier":-20to20,"confidence":"high"|"medium"|"low","mode":"defensive"|"cautious"|"normal"|"aggressive","reasoning":"1 sentence","regime":"trending_bear"|"trending_bull"|"choppy"|"breakdown"|"recovery"|"neutral","regimeDuration":"intraday"|"1-3 days"|"3-7 days"|"1-2 weeks"|"multi-week","entryBias":"puts_on_bounces"|"calls_on_dips"|"neutral"|"avoid","tradeType":"spread"|"credit"|"naked"|"none","vixOutlook":"spiking"|"elevated_stable"|"mean_reverting"|"falling"|"unknown","keyLevels":{"spySupport":null,"spyResistance":null},"catalysts":[],"bearishTickers":[],"bullishTickers":[],"themes":[]}
 
@@ -2925,7 +2925,7 @@ RSI: ${stock.rsi} | MACD: ${stock.macd} | Momentum: ${stock.momentum}
 Score: ${score}/100 | Top reasons: ${reasons.slice(0,4).join('; ')}
 Macro: ${(state._agentMacro||{}).signal||'neutral'} (${(state._agentMacro||{}).confidence||'unknown'})
 VIX: ${state.vix}
-Should ARGO-V2.2 enter this ${optionType} position?`;
+Should ARGO-V2.3 enter this ${optionType} position?`;
 
   const raw = await callClaudeAgent(systemPrompt, userPrompt, 200, false);
   if (!raw) return { approved: true, reason: "agent unavailable — allowing" };
@@ -5132,12 +5132,13 @@ async function confirmPendingOrder() {
             : parseFloat((pending.sellStrike + netCredit).toFixed(2)),
           entryRSI: 50, entryMACD: "neutral", entryMomentum: "steady",
           entryMacro: (state._agentMacro || {}).signal || "neutral",
-          entryThesisScore: 100, thesisHistory: [], agentHistory: [],
+          entryThesisScore: pending.score || 100, thesisHistory: [], agentHistory: [],
           realData: true, vix: state.vix, entryVIX: state.vix,
           expiryType: "monthly", dteLabel: "CREDIT-SPREAD-MONTHLY",
           partialClosed: false, isMeanReversion: false, trailStop: null,
           breakevenLocked: false, halfPosition: false,
           takeProfitPct: 0.50, fastStopPct: 0.75,
+          _originalEntryScore: pending.score || 100, // baseline for dynamic TP scaling
           _creditHarvestExpiry: new Date(Date.now() + 7*86400000).toISOString(),
         };
         state.positions.push(position);
@@ -5192,7 +5193,7 @@ async function confirmPendingOrder() {
         currentPrice:  netDebit, peakPremium: netDebit,
         entryRSI:      50, entryMACD: "neutral", entryMomentum: "steady",
         entryMacro:    (state._agentMacro || {}).signal || "neutral",
-        entryThesisScore: 100, thesisHistory: [], agentHistory: [],
+        entryThesisScore: score || 100, thesisHistory: [], agentHistory: [],
         realData:      true, vix: state.vix, entryVIX: state.vix,
         expiryType:    "monthly", dteLabel: "SPREAD-MONTHLY",
         partialClosed: false, isMeanReversion: false, trailStop: null,
@@ -5200,6 +5201,7 @@ async function confirmPendingOrder() {
         target:        parseFloat((netDebit * 1.50).toFixed(2)),
         stop:          parseFloat((netDebit * (isChoppyEntry ? 0.20 : 0.50)).toFixed(2)),
         takeProfitPct: 0.50, fastStopPct: isChoppyEntry ? 0.20 : 0.50,
+        _originalEntryScore: score || 100, // baseline for dynamic TP scaling
         breakeven:     optionType === "put"
           ? parseFloat((buyStrike - netDebit).toFixed(2))
           : parseFloat((buyStrike + netDebit).toFixed(2)),
@@ -5744,8 +5746,17 @@ async function closePosition(ticker, reason, exitPremium = null, contractSym = n
   }
   ep = parseFloat(ep.toFixed(2));
   const ev   = parseFloat((ep*100*pos.contracts*mult).toFixed(2));
-  const pnl  = parseFloat((ev - pos.cost*mult).toFixed(2));
-  const pct  = ((pnl/(pos.cost*mult))*100).toFixed(1);
+  // Credit spreads: P&L = (premium received - cost to close) × 100 × contracts
+  // Debit spreads:  P&L = (current value - premium paid) × 100 × contracts
+  let pnl;
+  if (pos.isCreditSpread) {
+    pnl = parseFloat(((pos.premium - ep) * 100 * pos.contracts * mult).toFixed(2));
+  } else {
+    pnl = parseFloat((ev - pos.cost * mult).toFixed(2));
+  }
+  const pct  = pos.isCreditSpread
+    ? ((pnl / (pos.maxProfit || (pos.premium * 100 * pos.contracts))) * 100).toFixed(1)
+    : ((pnl / (pos.cost * mult)) * 100).toFixed(1);
   const nr   = state.totalRevenue + (pnl > 0 ? pnl : 0);
   const bonus= state.totalRevenue < REVENUE_THRESHOLD && nr >= REVENUE_THRESHOLD;
 
@@ -6365,7 +6376,13 @@ async function runScan() {
       state._alpacaDayTradeCount = parseInt(acct.daytrade_count, 10);
     }
   }).catch(() => {});
-  syncPositionPnLFromAlpaca().catch(() => {}); // sync spread P&L from Alpaca — most accurate source
+  // Await Alpaca sync BEFORE exit evaluation — ensures pos.currentPrice is fresh
+  // from Alpaca before any stop/TP checks run. Timeout prevents stalling scanner.
+  // Fix for Bug 1: stale Redis currentPrice causing false stop triggers.
+  await Promise.race([
+    syncPositionPnLFromAlpaca(),
+    new Promise(r => setTimeout(r, 2000)), // 2s max — fast Alpaca /positions call
+  ]).catch(() => {});
 
   // Emergency close all on VIX velocity spike
   if (isBlackSwan) {
@@ -6892,7 +6909,38 @@ async function runScan() {
               : dteLeft <= 21 ? 0.92  // <21 DTE: slight acceleration
               : 1.0;
     }
-    const activeTakeProfitPct = parseFloat((currentExitParams.takeProfitPct * dteMult).toFixed(3));
+    // ── Dynamic Take Profit for credit spreads (V2.3) ────────────────────────
+    // Base TP = 50%. Scale DOWN when thesis is degrading AND position has aged.
+    // Formula: TP = max(0.25, 0.50 × (liveScore / entryScore))
+    // Conditions: credit spread + used >10% of position life + score available
+    // Hard floor at 40%+ profit: always exit regardless of score (don't hold a near-winner)
+    // Score < 40: thesis collapsed — handled by hard exit above, so TP is moot
+    let activeTakeProfitPct;
+    if (pos.isCreditSpread && pos.expDays > 0) {
+      const lifePctUsed = daysOpen / pos.expDays;
+      // Use freshest score: _liveRescore if <30min old, otherwise integrity score
+      // Take the lower (more conservative) if both are available
+      const liveRescoreAge = (pos._liveRescore && pos._liveRescore.updatedAt)
+        ? (Date.now() - new Date(pos._liveRescore.updatedAt).getTime()) / 60000 : 999;
+      const liveScore = (liveRescoreAge < 30 && pos._liveRescore && pos._liveRescore.score)
+        ? Math.min(pos._liveRescore.score, pos.entryThesisScore || 100)
+        : (pos.entryThesisScore || 100);
+      const entryScore = pos._originalEntryScore || 100; // stamped at confirm — never changes
+      if (lifePctUsed > 0.10 && liveScore < entryScore) {
+        // Thesis has degraded and position has used >10% of its life
+        const scaledTP = Math.max(0.25, 0.50 * (liveScore / entryScore));
+        activeTakeProfitPct = parseFloat((scaledTP * dteMult).toFixed(3));
+        if (liveScore < 60) logEvent("scan", `${pos.ticker} dynamic TP: ${(activeTakeProfitPct*100).toFixed(0)}% (score ${liveScore}/${entryScore}, life ${(lifePctUsed*100).toFixed(0)}% used)`);
+      } else {
+        activeTakeProfitPct = parseFloat((currentExitParams.takeProfitPct * dteMult).toFixed(3));
+      }
+      // Hard floor: always exit at 40%+ regardless of score — don't hold a near-winner
+      if (chg >= 0.40 && activeTakeProfitPct > 0.40) {
+        activeTakeProfitPct = 0.40;
+      }
+    } else {
+      activeTakeProfitPct = parseFloat((currentExitParams.takeProfitPct * dteMult).toFixed(3));
+    }
     // partialPct already derived from tp (which has overnightMult) — don't apply dteMult again
     // Partial should fire at 60% of the DTE-adjusted take profit target
     const activePartialPct    = parseFloat((activeTakeProfitPct * 0.60).toFixed(3));
@@ -8302,9 +8350,9 @@ async function runScan() {
     if (state._scanFailures >= 3 && RESEND_API_KEY && GMAIL_USER && isMarketHours()) {
       Promise.race([
         sendResendEmail(
-          `ARGO-V2.2 ALERT — Scanner failing (${state._scanFailures} errors)`,
+          `ARGO-V2.3 ALERT — Scanner failing (${state._scanFailures} errors)`,
           `<div style="font-family:monospace;background:#07101f;color:#ff5555;padding:20px">
-          <h2>⚠ ARGO-V2.2 Scanner Error</h2>
+          <h2>⚠ ARGO-V2.3 Scanner Error</h2>
           <p>Consecutive scan failures: <strong>${state._scanFailures}</strong></p>
           <p>Last error: ${e.message}</p>
           <p>Time: ${new Date().toISOString()}</p>
@@ -8382,7 +8430,7 @@ async function sendMorningBriefing() {
     // ── Header ───────────────────────────────────────────────────────────
     const header = `
       <div style="text-align:center;border-bottom:3px double #333;padding-bottom:12px;margin-bottom:12px">
-        <div style="font-family:Georgia,serif;font-size:22px;font-weight:bold;color:#111;letter-spacing:1px">ARGO-V2.2 TRADING DESK</div>
+        <div style="font-family:Georgia,serif;font-size:22px;font-weight:bold;color:#111;letter-spacing:1px">ARGO-V2.3 TRADING DESK</div>
         <div style="font-size:10px;color:#555;margin-top:4px;letter-spacing:1px">${dateStr.toUpperCase()}</div>
       </div>
       <div style="display:flex;gap:0;border:1px solid #ccc;margin-bottom:4px">
@@ -8555,7 +8603,7 @@ async function sendMorningBriefing() {
     // ── Footer ────────────────────────────────────────────────────────
     const footer = `
       <div style="border-top:3px double #333;margin-top:16px;padding-top:8px;text-align:center;font-size:9px;color:#999;letter-spacing:1px">
-        ARGO V2.2 · Entry window 9:30am–3:45pm ET · SPY/QQQ primary · Monthly options
+        ARGO V2.3 · Entry window 9:30am–3:45pm ET · SPY/QQQ primary · Monthly options
       </div>`;
 
     // ── Assemble ──────────────────────────────────────────────────────
@@ -8563,7 +8611,7 @@ async function sendMorningBriefing() {
       <div style="font-family:Georgia,serif;background:#ffffff;color:#111;padding:24px;max-width:620px;border:1px solid #ccc">
         ${header}
         ${divider}
-        ${agentNarrative ? sectionHead('ANALYST BRIEFING — ARGO-V2.2 INTELLIGENCE') + '<div style="font-family:Georgia,serif;font-size:13px;color:#111;line-height:1.7;white-space:pre-wrap;padding:8px 0">' + agentNarrative + '</div>' + divider : ''}
+        ${agentNarrative ? sectionHead('ANALYST BRIEFING — ARGO-V2.3 INTELLIGENCE') + '<div style="font-family:Georgia,serif;font-size:13px;color:#111;line-height:1.7;white-space:pre-wrap;padding:8px 0">' + agentNarrative + '</div>' + divider : ''}
         ${sectionHead('Open Positions — ' + positions.length + ' active')}
         ${posTable}
         ${triggersHTML}
@@ -8574,7 +8622,7 @@ async function sendMorningBriefing() {
       </div>`;
 
     await sendResendEmail(
-      `ARGO-V2.2 Desk — ${dateStr} | VIX ${state.vix} | ${positions.length} positions`,
+      `ARGO-V2.3 Desk — ${dateStr} | VIX ${state.vix} | ${positions.length} positions`,
       html
     );
     logEvent("scan", "Morning briefing email sent");
@@ -8597,7 +8645,7 @@ async function sendResendEmail(subject, html) {
         "Content-Type":  "application/json",
       },
       body: JSON.stringify({
-        from:    "ARGO-V2.2 <onboarding@resend.dev>",
+        from:    "ARGO-V2.3 <onboarding@resend.dev>",
         to:      [GMAIL_USER],
         subject,
         html,
@@ -8640,7 +8688,7 @@ function buildEmailHTML(type) {
   return `
 <!DOCTYPE html><html><body style="font-family:monospace;background:#07101f;color:#cce8ff;padding:20px;max-width:600px">
 <div style="background:#0a1628;border:1px solid #0d3050;border-radius:12px;padding:20px;margin-bottom:16px">
-  <h2 style="color:#00ff88;margin:0 0 4px">- ARGO-V2.2 ${type === "morning" ? "Morning Briefing" : "End of Day Report"}</h2>
+  <h2 style="color:#00ff88;margin:0 0 4px">- ARGO-V2.3 ${type === "morning" ? "Morning Briefing" : "End of Day Report"}</h2>
   <p style="color:#336688;margin:0;font-size:12px">${new Date().toLocaleDateString("en-US",{weekday:"long",month:"long",day:"numeric"})}</p>
 </div>
 
@@ -8694,22 +8742,22 @@ function buildEmailHTML(type) {
 ${type === "morning" ? `
 <div style="background:rgba(0,255,136,0.05);border:1px solid rgba(0,255,136,0.15);border-radius:8px;padding:14px">
   <h3 style="color:#00ff88;font-size:11px;margin:0 0 6px">TODAY'S OUTLOOK</h3>
-  <p style="font-size:12px;color:#cce8ff;margin:0">ARGO-V2.2 will scan every 10 seconds from 10:00 AM - 3:30 PM ET. VIX is currently ${state.vix} - ${state.vix<20?"normal conditions, full sizing":"reduced sizing active"}. ${state.positions.length} position${state.positions.length!==1?"s":""} currently open.</p>
+  <p style="font-size:12px;color:#cce8ff;margin:0">ARGO-V2.3 will scan every 10 seconds from 10:00 AM - 3:30 PM ET. VIX is currently ${state.vix} - ${state.vix<20?"normal conditions, full sizing":"reduced sizing active"}. ${state.positions.length} position${state.positions.length!==1?"s":""} currently open.</p>
 </div>` : `
 <div style="background:rgba(0,196,255,0.05);border:1px solid rgba(0,196,255,0.15);border-radius:8px;padding:14px">
   <h3 style="color:#00c4ff;font-size:11px;margin:0 0 6px">END OF DAY SUMMARY</h3>
-  <p style="font-size:12px;color:#cce8ff;margin:0">Market closed. ${state.todayTrades} trade${state.todayTrades!==1?"s":""} executed today. Daily P&L: ${parseFloat(daily)>=0?"+":""}$${daily}. ARGO-V2.2 resumes scanning tomorrow at 10:00 AM ET.</p>
+  <p style="font-size:12px;color:#cce8ff;margin:0">Market closed. ${state.todayTrades} trade${state.todayTrades!==1?"s":""} executed today. Daily P&L: ${parseFloat(daily)>=0?"+":""}$${daily}. ARGO-V2.3 resumes scanning tomorrow at 10:00 AM ET.</p>
 </div>`}
 
-<p style="font-size:10px;color:#336688;text-align:center;margin-top:16px">ARGO-V2.2 SPY Spread Trader - Paper Trading - Not financial advice</p>
+<p style="font-size:10px;color:#336688;text-align:center;margin-top:16px">ARGO-V2.3 SPY Spread Trader - Paper Trading - Not financial advice</p>
 </body></html>`;
 }
 
 async function sendEmail(type) {
   if (!RESEND_API_KEY || !GMAIL_USER) { logEvent("warn", "Email not configured"); return; }
   const subject = type === "morning"
-    ? `ARGO-V2.2 Morning Briefing - ${new Date().toLocaleDateString()}`
-    : `ARGO-V2.2 EOD Report - P&L ${(state.cash-state.dayStartCash)>=0?"+":""}$${(state.cash-state.dayStartCash).toFixed(2)}`;
+    ? `ARGO-V2.3 Morning Briefing - ${new Date().toLocaleDateString()}`
+    : `ARGO-V2.3 EOD Report - P&L ${(state.cash-state.dayStartCash)>=0?"+":""}$${(state.cash-state.dayStartCash).toFixed(2)}`;
   try {
     await sendResendEmail(subject, buildEmailHTML(type));
     logEvent("email", `${type} email sent to ${GMAIL_USER}`);
@@ -8735,7 +8783,7 @@ function buildMonthlyReport() {
   const bestTrade  = trades.length ? trades.reduce((b,t)=>t.pnl>b.pnl?t:b) : null;
   const worstTrade = trades.length ? trades.reduce((w,t)=>t.pnl<w.pnl?t:w) : null;
 
-  return `ARGO-V2.2 MONTHLY PERFORMANCE REPORT
+  return `ARGO-V2.3 MONTHLY PERFORMANCE REPORT
 ${"-".repeat(48)}
 Period:           ${state.monthStart} - ${new Date().toLocaleDateString()}
 
@@ -9012,10 +9060,10 @@ async function premarketAssessment() {
       const watches = assessments.filter(a => a.recommendation === "WATCH");
       const holds  = assessments.filter(a => a.recommendation === "HOLD");
       const subject = assessments.length === 0
-        ? `ARGO-V2.2 Pre-Market — No Positions | ${macro.signal.toUpperCase()} | ${new Date().toLocaleDateString()}`
+        ? `ARGO-V2.3 Pre-Market — No Positions | ${macro.signal.toUpperCase()} | ${new Date().toLocaleDateString()}`
         : closes.length
-        ? `ARGO-V2.2 Pre-Market — ${closes.length} CLOSE, ${watches.length} WATCH | ${new Date().toLocaleDateString()}`
-        : `ARGO-V2.2 Pre-Market — All Clear | ${new Date().toLocaleDateString()}`;
+        ? `ARGO-V2.3 Pre-Market — ${closes.length} CLOSE, ${watches.length} WATCH | ${new Date().toLocaleDateString()}`
+        : `ARGO-V2.3 Pre-Market — All Clear | ${new Date().toLocaleDateString()}`;
 
       const rowColor = (rec) => rec === "CLOSE" ? "#cc0000" : rec === "WATCH" ? "#cc6600" : "#006600";
       const rows = assessments.map(a => `
@@ -9032,7 +9080,7 @@ async function premarketAssessment() {
       await sendResendEmail(subject, `
         <div style="font-family:Georgia,serif;background:#fff;color:#111;padding:24px;max-width:700px;border:1px solid #ccc">
           <div style="text-align:center;border-bottom:3px double #333;padding-bottom:12px;margin-bottom:16px">
-            <div style="font-size:20px;font-weight:bold;letter-spacing:1px">ARGO-V2.2 PRE-MARKET ASSESSMENT</div>
+            <div style="font-size:20px;font-weight:bold;letter-spacing:1px">ARGO-V2.3 PRE-MARKET ASSESSMENT</div>
             <div style="font-size:10px;color:#555;margin-top:4px;letter-spacing:1px">${new Date().toLocaleDateString('en-US',{weekday:'long',month:'long',day:'numeric'}).toUpperCase()} · 8:45AM ET</div>
           </div>
           <div style="display:flex;gap:0;border:1px solid #ccc;margin-bottom:16px">
@@ -9070,10 +9118,10 @@ async function premarketAssessment() {
           </table>
           <div style="border-top:1px solid #ccc;margin-top:12px;padding-top:8px;font-size:10px;color:#555">
             ${macro.triggers && macro.triggers.length ? '<strong>Macro signals:</strong> ' + macro.triggers.join(' · ') + '<br>' : ''}
-            <em>These are recommendations only. ARGO-V2.2 will manage exits automatically at open.</em>
+            <em>These are recommendations only. ARGO-V2.3 will manage exits automatically at open.</em>
           </div>
           <div style="border-top:3px double #333;margin-top:12px;padding-top:8px;text-align:center;font-size:9px;color:#999;letter-spacing:1px">
-            ARGO V2.2 · Market opens in ~45 minutes · Entry window 9:30am ET
+            ARGO V2.3 · Market opens in ~45 minutes · Entry window 9:30am ET
           </div>
         </div>`
       );
@@ -9235,8 +9283,8 @@ cron.schedule("*/15 12-21 * * 1-5", async () => {
   if (minsSinceLastScan > 15 && minsSinceLastScan < 999 && RESEND_API_KEY && GMAIL_USER) {
     logEvent("warn", `Health check: no scan in ${minsSinceLastScan.toFixed(0)} minutes - sending alert`);
     sendResendEmail(
-      "ARGO-V2.2 ALERT — Scanner may be down",
-      `<p>ARGO-V2.2 has not scanned in ${minsSinceLastScan.toFixed(0)} minutes during market hours.</p>
+      "ARGO-V2.3 ALERT — Scanner may be down",
+      `<p>ARGO-V2.3 has not scanned in ${minsSinceLastScan.toFixed(0)} minutes during market hours.</p>
              <p>Last scan: ${state.lastScan || "unknown"}</p>
              <p>Check Railway logs immediately.</p>`
     );
@@ -9266,7 +9314,7 @@ cron.schedule("0 13,14 * * 1", async () => {
   await saveStateNow();
   if (RESEND_API_KEY && GMAIL_USER) {
     sendResendEmail(
-      `ARGO-V2.2 Monthly Report - ${et.toLocaleDateString("en-US",{month:"long",year:"numeric"})}`,
+      `ARGO-V2.3 Monthly Report - ${et.toLocaleDateString("en-US",{month:"long",year:"numeric"})}`,
       `<pre style="font-family:monospace;background:#07101f;color:#cce8ff;padding:20px">${report}</pre>`
     );
   }
@@ -9547,9 +9595,9 @@ app.post("/api/test-email", async (req, res) => {
       return res.json({ ok: true, message: `Morning briefing sent to ${GMAIL_USER}` });
     }
     await sendResendEmail(
-      `ARGO-V2.2 Email Test - ${new Date().toLocaleTimeString()}`,
+      `ARGO-V2.3 Email Test - ${new Date().toLocaleTimeString()}`,
       `<div style="font-family:monospace;background:#07101f;color:#00ff88;padding:20px;border-radius:8px">
-        <h2>✅ ARGO-V2.2 Email Working</h2>
+        <h2>✅ ARGO-V2.3 Email Working</h2>
         <p style="color:#cce8ff">If you received this, Resend is configured correctly.</p>
         <p style="color:#336688">Recipient: ${GMAIL_USER}</p>
         <p style="color:#336688">Sent at: ${new Date().toISOString()}</p>
@@ -9837,6 +9885,51 @@ app.post("/api/reset-month", async (req, res) => {
   state.circuitOpen=true; state.weeklyCircuitOpen=true; state.monthlyProfit=0;
   logEvent("reset",`Month reset - cash: ${fmt(state.cash)}`); res.json({ok:true});
 });
+
+// ── V2.3 Clean Account Reset ─────────────────────────────────────────────────
+// Call after resetting the Alpaca paper account. Clears all ARGO state that
+// would carry over incorrectly (positions, trades, P&L, PDT counts, fill quality).
+// Cash and baselines are re-synced from Alpaca on the next scan automatically.
+app.post("/api/reset-account", async (req, res) => {
+  const prevCash = state.cash;
+  // Clear positions and trade history
+  state.positions       = [];
+  state.closedTrades    = [];
+  state.tradeJournal    = [];
+  state.todayTrades     = 0;
+  state.monthlyProfit   = 0;
+  state.totalRevenue    = 0;
+  // Reset cash to Alpaca default — will be corrected on next account sync
+  state.cash            = MONTHLY_BUDGET;
+  state.dayStartCash    = MONTHLY_BUDGET;
+  state.weekStartCash   = MONTHLY_BUDGET;
+  state.peakCash        = MONTHLY_BUDGET;
+  state.accountBaseline = null; // will be set on next Alpaca sync
+  // Reset risk tracking
+  state._macroReversalAt    = null;
+  state._macroReversalCount = 0;
+  state._macroReversalSPY   = null;
+  state._scanFailures       = 0;
+  state._pendingOrder       = null;
+  // Reset PDT tracking — Alpaca will resync on next account poll
+  state._alpacaDayTradeCount = 0;
+  state._alpacaDayTradesLeft = 3;
+  state.dayTrades           = [];
+  // Reset fill quality — start fresh data collection
+  state._fillQuality = { count: 0, totalSlippage: 0, misses: 0, avgSlippage: 0 };
+  // Reset circuit breakers
+  state.circuitOpen         = true;
+  state.weeklyCircuitOpen   = true;
+  // Reset weekly/daily counters
+  state.monthStart          = new Date().toLocaleDateString();
+  // Clear breadth history and agent history
+  state._breadthHistory     = [];
+  state._agentRescoreMinute = {};
+  markDirty();
+  await saveStateNow();
+  logEvent("reset", `[V2.3] Clean account reset — previous cash: $${prevCash?.toFixed(2)||'?'} | ARGO state cleared | awaiting Alpaca sync`);
+  res.json({ ok: true, message: "Account reset complete. ARGO state cleared. Cash will sync from Alpaca on next scan." });
+});
 app.get("/api/journal",      (req,res) => res.json(state.tradeJournal.slice(0,50)));
 app.get("/api/report",       (req,res) => res.json({report:buildMonthlyReport()}));
 
@@ -9982,7 +10075,7 @@ process.on("unhandledRejection", (reason, promise) => {
 // Boot sequence - load state from Redis then start server
 initState().then(() => {
   app.listen(PORT, () => {
-    console.log(`ARGO V2.2 running on port ${PORT}`);
+    console.log(`ARGO V2.3 running on port ${PORT}`);
     console.log(`Alpaca key:  ${ALPACA_KEY?"SET":"NOT SET"}`);
     console.log(`Gmail:       ${GMAIL_USER||"NOT SET"}`);
     console.log(`Resend:      ${RESEND_API_KEY?"SET ✅":"NOT SET — email disabled"}`);
