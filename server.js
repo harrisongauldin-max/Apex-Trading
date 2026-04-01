@@ -6513,12 +6513,22 @@ async function runScan() {
     }
 
     // Strongly bearish macro — close all calls immediately
-    if (macro.mode === "defensive" && state.circuitOpen) {
+    // ONLY fire if agent also agrees — keyword scorer alone can give false positives
+    // If agent is fresh and bullish/neutral, suppress keyword defensive close
+    const agentSignal      = (state._agentMacro || {}).signal || "neutral";
+    const agentIsBullish   = ["bullish","strongly bullish","mild bullish"].includes(agentSignal);
+    const agentIsNeutral   = agentSignal === "neutral";
+    const agentFresh       = state._agentMacro && state._agentMacro.timestamp
+      && (Date.now() - new Date(state._agentMacro.timestamp).getTime()) < 30 * 60 * 1000;
+    const defensiveSuppressed = agentFresh && (agentIsBullish || agentIsNeutral);
+    if (macro.mode === "defensive" && state.circuitOpen && !defensiveSuppressed) {
       const defTriggers = (macro.triggers || []).slice(0,3).join(", ") || "strongly bearish signal";
       logEvent("macro", `DEFENSIVE MODE — macro strongly bearish: ${defTriggers} — closing calls`);
       for (const pos of [...state.positions]) {
         if (pos.optionType === "call") await closePosition(pos.ticker, "macro-defensive");
       }
+    } else if (macro.mode === "defensive" && defensiveSuppressed) {
+      logEvent("macro", `[AGENT OVERRIDE] Keyword defensive suppressed — agent says ${agentSignal} (${(state._agentMacro||{}).confidence||"unknown"}) — keeping calls open`);
     }
 
     // Strongly bullish macro — close losing puts (thesis broken by macro tailwind)
