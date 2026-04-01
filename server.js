@@ -2629,7 +2629,7 @@ async function callClaudeAgent(systemPrompt, userPrompt, maxTokens = 800, useToo
 
     if (!res.ok) {
       const err = await res.text();
-      console.log("[AGENT] API error:", err.slice(0, 150));
+      logEvent("warn", `[AGENT] API error ${res.status}: ${err.slice(0, 120)}`);
       return null;
     }
 
@@ -2664,7 +2664,11 @@ async function callClaudeAgent(systemPrompt, userPrompt, maxTokens = 800, useToo
         body: JSON.stringify({ model: ANTHROPIC_MODEL, max_tokens: maxTokens, system: systemPrompt, messages: followMessages }),
       }), 30000);
 
-      if (!followRes.ok) return null;
+      if (!followRes.ok) {
+        const ferr = await followRes.text().catch(() => '');
+        logEvent("warn", `[AGENT] Tool follow error ${followRes.status}: ${ferr.slice(0,80)}`);
+        return null;
+      }
       const followData = await followRes.json();
       const text = followData.content?.find(b => b.type === "text")?.text || "";
       return text.replace(/^```json\s*/i, "").replace(/\s*```$/i, "").trim();
@@ -2674,7 +2678,7 @@ async function callClaudeAgent(systemPrompt, userPrompt, maxTokens = 800, useToo
     const text = data.content?.find(b => b.type === "text")?.text || "";
     return text.replace(/^```json\s*/i, "").replace(/\s*```$/i, "").trim();
   } catch(e) {
-    console.log("[AGENT] Call failed:", e.message);
+    logEvent("warn", `[AGENT] Call failed: ${e.message}`);
     return null;
   }
 }
@@ -2862,7 +2866,7 @@ Analyze and return your JSON. Use tools only if you need data not shown above.`;
     checkMacroShift(parsed.signal); // trigger position rescores if macro shifted
     return parsed;
   } catch(e) {
-    console.log("[AGENT] Failed to parse macro response:", raw.slice(0,100));
+    logEvent("warn", `[AGENT] Failed to parse macro response: ${raw?.slice(0,80)}`);
     return null;
   }
 }
@@ -8937,8 +8941,23 @@ setInterval(syncCashFromAlpaca, 30 * 1000); // every 30 seconds
 
 // ── Independent agent macro interval — runs every 3 minutes regardless of scan state ──
 // Decoupled from scan so long mleg poll loops don't starve the agent
-// Scan medium tier still runs getMacroNews but this ensures agent never goes stale
 let _lastAgentInterval = 0;
+
+// Run immediately on startup during market hours — don't wait 3 min for first signal
+setTimeout(async () => {
+  const et = getETTime();
+  const etH = et.getHours() + et.getMinutes() / 60;
+  const day = et.getDay();
+  if (day >= 1 && day <= 5 && etH >= 8.5 && etH <= 17.0) {
+    logEvent("macro", "[AGENT] Running initial macro analysis on startup...");
+    try {
+      const macro = await getMacroNews();
+      if (macro) { marketContext.macro = macro; markDirty(); }
+    } catch(e) { logEvent("warn", `[AGENT] Startup macro failed: ${e.message}`); }
+    _lastAgentInterval = Date.now();
+  }
+}, 5000); // 5s after startup — let Redis rehydrate first
+
 setInterval(async () => {
   const et  = getETTime();
   const day = et.getDay();
@@ -8953,7 +8972,7 @@ setInterval(async () => {
       marketContext.macro = macro;
       markDirty();
     }
-  } catch(e) { /* silent — scan will retry */ }
+  } catch(e) { logEvent("warn", `[AGENT] Interval macro failed: ${e.message}`); }
 }, 3 * 60 * 1000); // every 3 minutes
 
 // ── F2: Pre-market carry-over assessment (9:00 AM ET) ────────────────────
