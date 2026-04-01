@@ -981,9 +981,11 @@ async function getDynamicSignals(ticker, bars, intradayBars = null, realOptionsI
   if (!intradayBars) intradayBars = await getIntradayBars(ticker);
   const signalBars   = intradayBars.length >= 10 ? intradayBars : bars;
 
-  // RSI and MACD from intraday if available — captures today's move
+  // RSI: intraday bars — captures today's move in real time
+  // MACD: daily bars ONLY — intraday MACD (12/26/9) produces false crossovers on sub-daily data
+  // Technical analyst fix: standardize MACD to daily timeframe
   const rsi      = calcRSI(signalBars);
-  const macd     = calcMACD(signalBars);
+  const macd     = calcMACD(bars.length >= 26 ? bars : signalBars); // daily preferred
 
   // Momentum from intraday — is it moving up or down TODAY?
   let momentum;
@@ -1294,6 +1296,10 @@ function scoreIndexSetup(stock, optionType, spyRSI, spyMACD, spyMomentum, breadt
   // Supplementary signals — capped at +25 total, declared at function scope
   // so both put and call branches can use it
   let supplementScore = 0;
+  // Supplementary signal staleness — max age for each signal type
+  // PCR/SKEW update every 15 minutes, AAII weekly, term structure every 15 min
+  const SUPP_MAX_AGE_MS = 60 * 60 * 1000; // 1 hour — stale beyond this, ignore
+  const isDataFresh = (data) => data && data.updatedAt && (Date.now() - data.updatedAt) < SUPP_MAX_AGE_MS;
 
   if (optionType === "put") {
     // ── Supplementary signals — capped at +25 total contribution ──────────
@@ -1302,7 +1308,7 @@ function scoreIndexSetup(stock, optionType, spyRSI, spyMACD, spyMomentum, breadt
     // Cap: track supplement score separately, add min(supplementScore, 25) at end
 
     // ── Put/Call Ratio signal (Bollen & Whaley 2004) ─────────────────────
-    const pcrData = state._pcr || null;
+    const pcrData = isDataFresh(state._pcr) ? state._pcr : null;
     if (pcrData && optionType === "put") {
       if (pcrData.signal === "extreme_fear")       { supplementScore += 10; reasons.push(`PCR ${pcrData.pcr} — extreme fear, put momentum strong (+10)`); }
       else if (pcrData.signal === "fear")          { supplementScore += 6;  reasons.push(`PCR ${pcrData.pcr} — elevated fear, put bias (+6)`); }
@@ -1316,7 +1322,7 @@ function scoreIndexSetup(stock, optionType, spyRSI, spyMACD, spyMomentum, breadt
     }
 
     // ── Vol term structure (Natenberg) ───────────────────────────────────
-    const ts = state._termStructure || null;
+    const ts = isDataFresh(state._termStructure) ? state._termStructure : null;
     if (ts && optionType === "put") {
       if (ts.creditFavorable) { supplementScore += 8; reasons.push(`Vol backwardation (${ts.ratio}) — near-term fear premium elevated (+8)`); }
     }
@@ -1327,7 +1333,7 @@ function scoreIndexSetup(stock, optionType, spyRSI, spyMACD, spyMomentum, breadt
     // ── CBOE SKEW Index ──────────────────────────────────────────────────
     // SKEW elevated + VIX elevated = put premium doubly rich = ideal credit puts
     // SKEW low = tail risk not priced = normal environment
-    const skewData = state._skew || null;
+    const skewData = isDataFresh(state._skew) ? state._skew : null;
     if (skewData) {
       if (optionType === "put") {
         if (skewData.signal === "extreme" && skewData.creditPutIdeal) {
@@ -1350,7 +1356,7 @@ function scoreIndexSetup(stock, optionType, spyRSI, spyMACD, spyMomentum, breadt
     // ── AAII Sentiment (Ned Davis Research validation) ───────────────────
     // Extreme retail bearishness = contrarian call signal (bulls historically wrong at extremes)
     // Extreme retail bullishness = contrarian put signal
-    const aaiiData = state._aaii || null;
+    const aaiiData = (state._aaii && state._aaii.updatedAt && (Date.now() - state._aaii.updatedAt) < 8 * 24 * 60 * 60 * 1000) ? state._aaii : null; // 8-day TTL (weekly data)
     if (aaiiData) {
       if (optionType === "call") {
         if (aaiiData.signal === "extreme_bearish") {
@@ -1434,15 +1440,25 @@ function scoreIndexSetup(stock, optionType, spyRSI, spyMACD, spyMomentum, breadt
     // ── Entry bias alignment ────────────────────────────────────────────
     // Bounce quality scoring — best put entries are on relief bounces not crashes
     if (entryBias === "puts_on_bounces") {
+      const agentAlreadyBearish = ["strongly bearish","bearish","mild bearish"].includes(signal);
       if (spyMomentum === "steady" && spyRSI >= 45 && spyRSI <= 60) {
-        score += 15; reasons.push(`Entry bias: fading bounce RSI ${spyRSI} (+15)`);
+        const biasBonus = agentAlreadyBearish ? 8 : 15;
+        score += biasBonus; reasons.push(`Entry bias: fading bounce RSI ${spyRSI} (+${biasBonus})`);
       } else if (spyMomentum === "steady") {
-        score += 8; reasons.push("Entry bias: puts on bounces — good timing (+8)");
+        const biasBonus = agentAlreadyBearish ? 4 : 8;
+        score += biasBonus; reasons.push(`Entry bias: puts on bounces (+${biasBonus})`);
       } else if (spyMomentum === "recovering" && spyRSI >= 40) {
-        score += 5; reasons.push("Entry bias: momentum recovering — wait for better entry (+5)");
+        score += 3; reasons.push("Entry bias: momentum recovering — timing not ideal (+3)");
       }
     }
-    if (entryBias === "avoid")           { score = Math.min(score, 50); reasons.push("Agent says avoid — capping at 50"); }
+    if (entryBias === "avoid") { score = Math.min(score, 0); reasons.push("Agent says avoid — blocked"); }
+
+    // ── IV Percentile for puts — high IVR is partially favorable (richer premium)
+    // but very high IVR means move already happened (less upside)
+    const ivpPut = stock.ivPercentile || 50;
+    if (ivpPut < 25)       { score += 8;  reasons.push(`IVP ${ivpPut}% — cheap puts, favorable entry (+8)`); }
+    else if (ivpPut >= 70) { score += 5;  reasons.push(`IVP ${ivpPut}% — elevated IV, rich put premium (+5)`); }
+    else if (ivpPut >= 90) { score -= 5;  reasons.push(`IVP ${ivpPut}% — extreme IV, move may be priced in (-5)`); }
 
     // ── QQQ secondary — only when tech thesis clear ─────────────────────
     if (stock.ticker === "QQQ") {
@@ -1488,13 +1504,21 @@ function scoreIndexSetup(stock, optionType, spyRSI, spyMACD, spyMomentum, breadt
     else if (spyMACD && spyMACD.includes("bearish crossover"))                   { score -= 15; reasons.push("SPY MACD bearish crossover — wrong for calls (-15)"); }
     else if (spyMACD && spyMACD.includes("bearish"))                             { score -= 5;  reasons.push("SPY MACD bearish — headwind for calls (-5)"); }
 
-    // ── Breadth — dip in bull trend is ideal, not extended rally ────────
-    if (breadth >= 75)       { score += 10; reasons.push(`Breadth ${breadth}% strong (+10)`); }
-    else if (breadth >= 65)  { score += 8;  reasons.push(`Breadth ${breadth}% recovering (+8)`); }
-    else if (breadth >= 40 && breadth < 55 && ["trending_bull","recovery"].includes(regime)) {
-      score += 12; reasons.push(`Breadth ${breadth}% dip in bull trend — ideal call entry (+12)`);
+    // ── Breadth — normalized to recent history ──────────────────────────
+    // Raw 80% means nothing without context — normalized reading is more meaningful
+    // Compare current breadth to recent 10-reading range
+    const bHist10 = (state._breadthHistory || []).map(b => b.v);
+    const bMin = bHist10.length >= 3 ? Math.min(...bHist10) : 0;
+    const bMax = bHist10.length >= 3 ? Math.max(...bHist10) : 100;
+    const bRange = bMax - bMin;
+    // Normalized breadth: 0-100 within recent range (above/below recent midpoint)
+    const bNorm = bRange > 5 ? ((breadth - bMin) / bRange) * 100 : 50; // 50 = neutral if no range
+    if (bNorm >= 75 && breadth >= 60)      { score += 10; reasons.push(`Breadth ${breadth}% (${bNorm.toFixed(0)}th pctile) — strong relative to recent (+10)`); }
+    else if (bNorm >= 60)                  { score += 6;  reasons.push(`Breadth ${breadth}% (${bNorm.toFixed(0)}th pctile) — recovering (+6)`); }
+    else if (bNorm <= 30 && ["trending_bull","recovery"].includes(regime)) {
+      score += 12; reasons.push(`Breadth ${breadth}% (${bNorm.toFixed(0)}th pctile) — low relative to recent in bull regime — ideal dip entry (+12)`);
     }
-    else if (breadth <= 30)  { score -= 10; reasons.push(`Breadth ${breadth}% — market weak, calls risky (-10)`); }
+    else if (bNorm <= 20)                  { score -= 8; reasons.push(`Breadth ${breadth}% (${bNorm.toFixed(0)}th pctile) — very weak relative to recent (-8)`); }
 
     // ── VIX — absolute level matters for calls, not just direction ──────
     // Low VIX = cheap call premium = historically excellent call entry cost
@@ -1506,6 +1530,18 @@ function scoreIndexSetup(stock, optionType, spyRSI, spyMACD, spyMomentum, breadt
     if (vixOutlook === "falling")      { score += 12; reasons.push("VIX compressing — call premium expanding (+12)"); }
     else if (vixOutlook === "mean_reverting") { score += 6; reasons.push("VIX mean reverting — calls improving (+6)"); }
     else if (vixOutlook === "spiking") { score -= 12; reasons.push("VIX spiking — calls losing value fast (-12)"); }
+
+    // ── IV Percentile — cost of entry matters for spreads ──────────────────
+    // High IVR = expensive spreads = worse risk/reward even with same directional thesis
+    // Low IVR = cheap spreads = same expected move costs less
+    // Note: debit spreads partially offset high IV by selling the short leg
+    // so penalty is softer than for naked options
+    const ivpCall = stock.ivPercentile || 50;
+    const highVIXNow = vix >= 30;
+    if (ivpCall < 25)      { score += 10; reasons.push(`IVP ${ivpCall}% — cheap call spreads, favorable entry (+10)`); }
+    else if (ivpCall < 45) { score += 5;  reasons.push(`IVP ${ivpCall}% — moderate IV, reasonable entry (+5)`); }
+    else if (ivpCall >= 75 && !highVIXNow) { score -= 8; reasons.push(`IVP ${ivpCall}% — expensive calls in calm VIX (-8)`); }
+    else if (ivpCall >= 75)  { score -= 3; reasons.push(`IVP ${ivpCall}% — expensive but VIX elevated, partial offset (-3)`); }
 
     // ── Weekly trend alignment ───────────────────────────────────────────
     // Above 10-week MA = trend working for calls, not against
@@ -1522,14 +1558,19 @@ function scoreIndexSetup(stock, optionType, spyRSI, spyMACD, spyMomentum, breadt
     }
 
     // ── Entry bias ───────────────────────────────────────────────────────
+    // Market maker fix: halve bonus when agent already scored bullish to avoid double-counting
+    // Agent signal + regime already capture the macro view — bias refines TIMING not direction
+    const agentAlreadyBullish = ["strongly bullish","bullish","mild bullish"].includes(signal);
     if (entryBias === "calls_on_dips") {
       if (spyMomentum === "recovering" || spyRSI <= 45) {
-        score += 12; reasons.push("Entry bias: calls on dips — dip confirmed, ideal timing (+12)");
+        const biasBonus = agentAlreadyBullish ? 6 : 12;
+        score += biasBonus; reasons.push(`Entry bias: calls on dips — dip confirmed (+${biasBonus})`);
       } else {
-        score += 6; reasons.push("Entry bias: calls on dips (+6)");
+        const biasBonus = agentAlreadyBullish ? 3 : 6;
+        score += biasBonus; reasons.push(`Entry bias: calls on dips (+${biasBonus})`);
       }
     }
-    if (entryBias === "avoid") { score = Math.min(score, 50); reasons.push("Agent says avoid — capping at 50"); }
+    if (entryBias === "avoid") { score = Math.min(score, 0); reasons.push("Agent says avoid — blocked"); }
 
     // ── QQQ — requires tech bullish confirmation ─────────────────────────
     // Relaxed: QQQ can lead in tech rallies — only penalize if NO bullish thesis
@@ -6571,7 +6612,7 @@ async function runScan() {
     const pcr = pcrCBOE || pcrSynth;
     if (pcr) {
       marketContext.pcr = pcr;
-      state._pcr = pcr;
+      state._pcr = { ...pcr, updatedAt: Date.now() };
       const src = pcrCBOE ? "CBOE" : "synthetic";
       logEvent("scan", `[PCR:${src}] ${pcr.pcr} (${pcr.signal})`);
     } else {
@@ -6579,17 +6620,17 @@ async function runScan() {
     }
     if (termStruct) {
       marketContext.termStructure = termStruct;
-      state._termStructure = termStruct;
+      state._termStructure = { ...termStruct, updatedAt: Date.now() };
       logEvent("scan", `[VOL TERM] near:${(termStruct.nearIV*100).toFixed(1)}% far:${(termStruct.farIV*100).toFixed(1)}% ratio:${termStruct.ratio} (${termStruct.structure})`);
     }
     if (skew) {
       marketContext.skew = skew;
-      state._skew = skew;
+      state._skew = { ...skew, updatedAt: Date.now() };
       logEvent("scan", `[SKEW] ${skew.skew} (${skew.signal}) ${skew.creditPutIdeal ? "— CREDIT PUT IDEAL" : ""}`);
     }
     if (aaii) {
       marketContext.aaii = aaii;
-      state._aaii = aaii;
+      state._aaii = { ...aaii, updatedAt: Date.now() };
       logEvent("scan", `[AAII] Bulls:${aaii.bullish}% Bears:${aaii.bearish}% Spread:${aaii.spread} (${aaii.signal})`);
     }
     marketContext.fearGreed   = fg;
