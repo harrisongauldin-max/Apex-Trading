@@ -8571,7 +8571,13 @@ async function runScan() {
     const isBearishHigh    = ["bearish","strongly bearish"].includes(agentSig) && agentConf === "high" && !agentStale;
     const isLowConfidence  = agentConf === "low" || agentStale;
     const agentMinScore    = isBearishHigh ? 65 : isLowConfidence ? 80 : MIN_SCORE;
-    const effectiveMinScore = Math.max(ddProtocol.minScore || MIN_SCORE, regimeMinScore, agentMinScore);
+    // ── Backtest-validated instrument-specific min scores ───────────────────
+    // Derived from 2024 full-year walk-forward backtest (149 trades, 3 instruments)
+    // IWM 70-79 bracket: 39% WR, $-199 net — no edge below 80. Raised floor to 80.
+    // QQQ 70-79 bracket: 57% WR, $+4,941 — edge exists at 70+, keep at MIN_SCORE.
+    // SPY 70-79 bracket: 46% WR, $+1,088 — marginal edge, keep at MIN_SCORE.
+    const instrumentMinScore = stock.ticker === "IWM" ? 80 : MIN_SCORE;
+    const effectiveMinScore = Math.max(ddProtocol.minScore || MIN_SCORE, regimeMinScore, agentMinScore, instrumentMinScore);
     // QS-C2: In choppy regime, effectiveMinScore=90 + choppy score penalty (-10) means
     // a position needs 100 base score to clear the bar. Log this near-lockout for visibility.
     if (effectiveMinScore >= 90 && isChoppyRegime) {
