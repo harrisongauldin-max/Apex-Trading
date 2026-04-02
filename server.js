@@ -7647,13 +7647,26 @@ async function runScan() {
       const prevClose  = spyBars[spyBars.length-2].c;
       const curSPY     = spyBars[spyBars.length-1].c;
       const gapPct     = (curSPY - prevClose) / prevClose;
-      // Only block puts on a genuinely large gap-up open (1.5%+) in first 15 min
       const etMinSince = (scanET.getHours() - 9) * 60 + scanET.getMinutes() - 30;
-      return gapPct > 0.015 && etMinSince >= 0 && etMinSince < 15;
+      if (!(gapPct > 0.015 && etMinSince >= 0)) return false; // no gap or outside window
+
+      // PM/TA panel modification: shorten delay to 10min when gap is already fading
+      // Gap fading = current price already below intraday VWAP (selling into the gap)
+      // In that case the gap-up thesis has failed — weaker reason to delay puts
+      const spyVWAP = spyIntraday.length >= 5 ? calcVWAP(spyIntraday) : 0;
+      const gapFading = spyVWAP > 0 && curSPY < spyVWAP;
+      const delayMins = gapFading ? 10 : 15;
+
+      return etMinSince < delayMins;
     }
     return false;
   })();
-  if (spyGapUp && !dryRunMode) logEvent("filter", `SPY gap-up open >1.5% — delaying puts 15min for price discovery`);
+  if (spyGapUp && !dryRunMode) {
+    const etMinSince = (scanET.getHours() - 9) * 60 + scanET.getMinutes() - 30;
+    const spyVWAP    = spyIntraday.length >= 5 ? calcVWAP(spyIntraday) : 0;
+    const gapFading  = spyVWAP > 0 && spyPrice < spyVWAP;
+    logEvent("filter", `SPY gap-up open >1.5% — delaying puts ${gapFading ? "10" : "15"}min${gapFading ? " (gap fading, below VWAP — shortened)" : " for price discovery"} (${etMinSince.toFixed(0)}min elapsed)`);
+  }
 
   // ── CONDITION-BASED POST-REVERSAL COOLDOWN ──────────────────────────────
   // After macro-reversal closes puts, don't re-enter until conditions confirm
@@ -8077,7 +8090,7 @@ async function runScan() {
     // Wash sale detection — IRS disallows loss if same security re-entered within 30 days
     // Options on same underlying = "substantially identical" security under wash sale rules
     const WASH_SALE_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
-    const washSaleClose = (state.closedTrades || []).find(t =>
+    const washSaleClose = (state.closedTrades || []).filter(t => t.reason !== "reconcile-removed").find(t =>
       t.ticker === stock.ticker &&
       t.pnl < 0 &&               // was a loss
       t.closeTime &&
@@ -8890,16 +8903,26 @@ async function runScan() {
   // SE-W4/SE-C2: Track actual scan interval for frequency drift monitoring
   const scanNow = Date.now();
   const lastScanMs = state.lastScan ? scanNow - new Date(state.lastScan).getTime() : 0;
-  if (lastScanMs > 0) {
+  // Only record intervals that are plausible scan gaps (5s–120s)
+  // Excludes: first boot gap (hours since last Redis write), hung scans >2min
+  const isPlausibleInterval = lastScanMs >= 5000 && lastScanMs <= 120000;
+  if (lastScanMs > 0 && isPlausibleInterval) {
     if (!state._scanIntervals) state._scanIntervals = [];
     state._scanIntervals.push(lastScanMs);
     if (state._scanIntervals.length > 30) state._scanIntervals = state._scanIntervals.slice(-30);
     const avgInterval = state._scanIntervals.reduce((s,v)=>s+v,0) / state._scanIntervals.length;
     state._avgScanIntervalMs = Math.round(avgInterval);
-    // Alert if average scan interval >15s (intended: 10s)
-    if (avgInterval > 15000 && state._scanIntervals.length >= 5) {
+    // Alert if average scan interval >15s — only log once per boot to avoid spam
+    if (avgInterval > 15000 && state._scanIntervals.length >= 5 && !state._perfWarnedThisBoot) {
+      state._perfWarnedThisBoot = true;
       logEvent("warn", `[PERF] Scan frequency degraded — avg ${(avgInterval/1000).toFixed(1)}s (target: 10s)`);
+    } else if (avgInterval <= 12000 && state._perfWarnedThisBoot) {
+      // Clear flag once performance recovers
+      state._perfWarnedThisBoot = false;
     }
+  } else if (lastScanMs > 120000) {
+    // Gap > 2min — log but don't pollute interval stats (restart gap, not scan drift)
+    logEvent("scan", `[PERF] Scan gap ${(lastScanMs/1000/60).toFixed(1)}min since last scan (boot/restart)`);
   }
   state.lastScan    = new Date().toISOString();
   state._scanFailures = 0;
