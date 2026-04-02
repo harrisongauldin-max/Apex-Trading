@@ -1,5 +1,5 @@
 // -
-// ARGO V2.3 - Systematic SPY/QQQ Options Trading Agent
+// ARGO V2.5 - Systematic SPY/QQQ Options Trading Agent
 // Alpaca Paper Trading Edition
 // -
 const express    = require("express");
@@ -43,16 +43,33 @@ const REDIS_KEY         = "spt1:state";
 
 // - Trading Constants -
 const MONTHLY_BUDGET      = 10000;
-const CAPITAL_FLOOR       = 3000;
+const CAPITAL_FLOOR       = 7500; // max 25% drawdown on $10k account — raised from $3k (70% drawdown was unsafe)
 const REVENUE_THRESHOLD   = 2000;
 const BONUS_AMOUNT        = 1000;
 const MAX_HEAT            = 0.60; // base cap — reduced dynamically at elevated VIX (see effectiveHeatCap())
-const effectiveHeatCap    = () => state.vix >= 30 ? 0.40 : state.vix >= 25 ? 0.50 : MAX_HEAT;
+// PM-C1: Growth vs preservation phase switch
+// Below $15k: growth mode — full risk budget to reach PDT threshold
+// $15k-$20k: transition — moderate controls while protecting gains
+// Above $20k: preservation — protect the capital needed for live deployment
+function getAccountPhase() {
+  const accountVal = (state.alpacaCash || state.cash || 0) + openCostBasis();
+  if (accountVal >= 20000) return "preservation";
+  if (accountVal >= 15000) return "transition";
+  return "growth";
+}
+const effectiveHeatCap = () => {
+  const phase = getAccountPhase();
+  // Preservation phase: tighter heat caps regardless of VIX
+  if (phase === "preservation") return state.vix >= 25 ? 0.30 : 0.40;
+  if (phase === "transition")   return state.vix >= 30 ? 0.35 : state.vix >= 25 ? 0.45 : 0.50;
+  // Growth phase: current VIX-adjusted caps
+  return state.vix >= 30 ? 0.40 : state.vix >= 25 ? 0.50 : MAX_HEAT;
+};
 const MAX_SECTOR_PCT      = 0.50;
 const STOP_LOSS_PCT       = 0.35;
 const FAST_STOP_PCT       = 0.20;   // -20% in first 48hrs
 const FAST_STOP_HOURS     = 48;
-const TAKE_PROFIT_PCT     = 0.30;  // tightened — faster exits, less overnight risk
+const TAKE_PROFIT_PCT     = 0.50;  // fallback only — spread positions use per-position takeProfitPct stamped at entry
 const PARTIAL_CLOSE_PCT   = 0.18;  // partial at 18% — lock in gains early
 const TRAIL_ACTIVATE_PCT  = 0.15;   // start trailing at +15% — tightened with new targets
 const TRAIL_STOP_PCT      = 0.15;   // trail 15% below peak
@@ -73,6 +90,11 @@ const EARLY_SPREAD_PCT    = 0.10;  // tighter spread required for early 9:45AM p
 const MAX_GAP_PCT         = 0.03;
 const TARGET_DELTA_MIN    = 0.28;
 const TARGET_DELTA_MAX    = 0.42;
+// MM-C1: Contract selection priority order (explicit):
+// 1. OTM% target from VIX level sets the strike zone
+// 2. Delta filtering WITHIN that zone — rejects contracts outside 0.28-0.42
+// 3. If no contract in delta range, widen delta range (crash mode) rather than use OTM%
+// OTM% wins for strike zone; delta wins for contract selection within that zone
 // MAX_TRADES_PER_DAY removed - portfolio heat (60%) controls position limits
 const CONSEC_LOSS_LIMIT   = 3;
 const WEEKLY_DD_LIMIT     = 0.25;
@@ -122,7 +144,7 @@ const CORRELATION_GROUPS = [
 const SEMIS = ["NVDA", "AMD", "SMCI", "ARM", "AVGO", "MU"];
 
 // - Watchlist (36 high-liquidity stocks) -
-// ── ARGO-V2.3 Instrument Configuration ────────────────────────────────────────
+// ── ARGO-V2.5 Instrument Configuration ────────────────────────────────────────
 // Phase 1: SPY primary, QQQ secondary — building to $25k
 // At $25k: set INDIVIDUAL_STOCKS_ENABLED = true to unlock full watchlist
 const INDIVIDUAL_STOCKS_ENABLED = false;
@@ -240,6 +262,7 @@ function defaultState() {
     agentAutoExitEnabled: false, // controlled by dashboard toggle
     _agentRescoreHour:   {}, // tracks last rescore hour per ticker (overnight)
     _agentRescoreMinute: {}, // tracks last rescore time per ticker (same-day)
+    _avoidUntil:         null,  // timestamp until which entries are blocked after avoid signal
     _macroReversalAt:    null,  // timestamp of last macro-reversal exit batch
     _macroReversalCount: 0,     // how many positions closed in the reversal batch
     _macroReversalSPY:   null,  // SPY price at time of reversal — for comparison
@@ -986,6 +1009,9 @@ async function getDynamicSignals(ticker, bars, intradayBars = null, realOptionsI
   // Technical analyst fix: standardize MACD to daily timeframe
   const rsi      = calcRSI(signalBars);
   const macd     = calcMACD(bars.length >= 26 ? bars : signalBars); // daily preferred
+  // TA-W2: ATR from daily bars — normalizes signal interpretation
+  const atrRaw   = calcATR(bars.length >= 15 ? bars : signalBars, 14);
+  const atrPct   = atrRaw && bars.length > 0 ? atrRaw / bars[bars.length-1].c : null; // ATR as % of price
 
   // Momentum from intraday — is it moving up or down TODAY?
   let momentum;
@@ -1053,6 +1079,7 @@ async function getDynamicSignals(ticker, bars, intradayBars = null, realOptionsI
     intradayVWAP,
     intradayVol,
     volPaceRatio,
+    atrPct:        atrPct || null, // ATR as % of price — TA-W2 normalization
     hasIntraday:   intradayBars.length >= 10,
   };
 }
@@ -1295,6 +1322,28 @@ function scoreIndexSetup(stock, optionType, spyRSI, spyMACD, spyMomentum, breadt
 
   // Supplementary signals — capped at +25 total, declared at function scope
   // so both put and call branches can use it
+  // ── QS-W1: Macro correlation discount (diminishing returns) ─────────────
+  // When multiple primary signals all share one macro driver (e.g. all bearish because
+  // SPY sold off today), adding them independently creates false precision.
+  // Rule: count how many primary signals fired in the SAME direction as the entry.
+  // 1-2 signals: full weight. 3rd signal: 70%. 4th+: 50%.
+  // Primary signals = agent, regime, RSI, MACD, breadth. Supplementary are separate.
+  // Count the number of primary pro-entry reasons already in the score
+  const proEntryKeywords = optionType === "put"
+    ? ["Agent strongly bearish","Agent bearish","Agent mild bearish","Regime: trending_bear","Regime: breakdown","RSI","MACD bearish","Breadth","VIX spiking"]
+    : ["Agent strongly bullish","Agent bullish","Agent mild bullish","Regime: recovery","Regime: trending_bull","RSI","MACD bullish","Breadth","VIX compressing","VIX mean reverting"];
+  const primaryFired = reasons.filter(r => proEntryKeywords.some(kw => r.includes(kw))).length;
+  if (primaryFired >= 4) {
+    // 4+ macro signals all firing together = likely same event counted multiple times
+    const discountPct = 15;
+    score = Math.round(score * (1 - discountPct/100));
+    reasons.push(`Macro correlation discount: ${primaryFired} correlated signals (-${discountPct}% on total)`);
+  } else if (primaryFired === 3) {
+    const discountPct = 8;
+    score = Math.round(score * (1 - discountPct/100));
+    reasons.push(`Macro correlation discount: ${primaryFired} correlated signals (-${discountPct}% on total)`);
+  }
+
   let supplementScore = 0;
   // Supplementary signal staleness — max age for each signal type
   // PCR/SKEW update every 15 minutes, AAII weekly, term structure every 15 min
@@ -1421,10 +1470,14 @@ function scoreIndexSetup(stock, optionType, spyRSI, spyMACD, spyMomentum, breadt
     }
     else if (spyRSI <= 45)                                                        { score -= 15; reasons.push(`SPY RSI ${spyRSI} oversold for puts (-15)`); }
 
-    if (spyMACD && spyMACD.includes("bearish crossover"))                        { score += 15; reasons.push("SPY MACD bearish crossover (+15)"); }
-    else if (spyMACD && spyMACD.includes("bearish"))                             { score += 10; reasons.push("SPY MACD bearish (+10)"); }
-    else if (spyMACD && spyMACD.includes("bullish crossover"))                   { score -= 15; reasons.push("SPY MACD bullish crossover (-15)"); }
-    else if (spyMACD && spyMACD.includes("bullish"))                             { score -= 8;  reasons.push("SPY MACD bullish (-8)"); }
+    // TA-C1: Dampen MACD when RSI is extreme opposite (intraday RSI more current than daily MACD)
+    const macdRSIConflictPut = spyRSI >= 70 && spyMACD && spyMACD.includes("bullish");
+    const macdMultPut = macdRSIConflictPut ? 0.4 : 1.0;
+    if (macdRSIConflictPut) reasons.push(`MACD/RSI conflict — RSI ${spyRSI} overbought, bullish MACD dampened`);
+    if (spyMACD && spyMACD.includes("bearish crossover"))      { score += Math.round(15*macdMultPut); reasons.push(`SPY MACD bearish crossover (+${Math.round(15*macdMultPut)})`); }
+    else if (spyMACD && spyMACD.includes("bearish"))           { score += Math.round(10*macdMultPut); reasons.push(`SPY MACD bearish (+${Math.round(10*macdMultPut)})`); }
+    else if (spyMACD && spyMACD.includes("bullish crossover")) { score -= Math.round(15*macdMultPut); reasons.push(`SPY MACD bullish crossover (-${Math.round(15*macdMultPut)})`); }
+    else if (spyMACD && spyMACD.includes("bullish"))           { score -= Math.round(8*macdMultPut);  reasons.push(`SPY MACD bullish (-${Math.round(8*macdMultPut)})`); }
 
     // ── Breadth confirmation ────────────────────────────────────────────
     if (breadth <= 30)       { score += 15; reasons.push(`Breadth ${breadth}% — severe weakness (+15)`); }
@@ -1452,6 +1505,15 @@ function scoreIndexSetup(stock, optionType, spyRSI, spyMACD, spyMomentum, breadt
       }
     }
     if (entryBias === "avoid") { score = Math.min(score, 0); reasons.push("Agent says avoid — blocked"); }
+
+    // ── VWAP for puts (TA-C2) ────────────────────────────────────────────────
+    const putVWAP  = stock.intradayVWAP || 0;
+    const putPrice = stock.price || 0;
+    if (putVWAP > 0 && putPrice > 0) {
+      const vwapDiffPut = (putPrice - putVWAP) / putVWAP;
+      if (vwapDiffPut < -0.01)     { score += 8; reasons.push(`Below VWAP ${(vwapDiffPut*100).toFixed(1)}% — weakness confirmed (+8)`); }
+      else if (vwapDiffPut > 0.02) { score -= 6; reasons.push(`Extended above VWAP ${(vwapDiffPut*100).toFixed(1)}% — overbought vs today (+6 short)`); }
+    }
 
     // ── IV Percentile for puts — high IVR is partially favorable (richer premium)
     // but very high IVR means move already happened (less upside)
@@ -1498,11 +1560,17 @@ function scoreIndexSetup(stock, optionType, spyRSI, spyMACD, spyMomentum, breadt
     }
     else if (spyRSI >= 70)                                                        { score -= 15; reasons.push(`SPY RSI ${spyRSI} overbought for calls (-15)`); }
 
-    // ── MACD ────────────────────────────────────────────────────────────
-    if (spyMACD && spyMACD.includes("bullish crossover"))                        { score += 15; reasons.push("SPY MACD bullish crossover (+15)"); }
-    else if (spyMACD && spyMACD.includes("bullish"))                             { score += 8;  reasons.push("SPY MACD bullish (+8)"); }
-    else if (spyMACD && spyMACD.includes("bearish crossover"))                   { score -= 15; reasons.push("SPY MACD bearish crossover — wrong for calls (-15)"); }
-    else if (spyMACD && spyMACD.includes("bearish"))                             { score -= 5;  reasons.push("SPY MACD bearish — headwind for calls (-5)"); }
+    // ── MACD (with RSI contradiction dampening) ─────────────────────────────
+    // TA-C1: Intraday RSI (responsive) and daily MACD (slow) can conflict on fast-moving days
+    // When RSI is deeply oversold (<35) but MACD is bearish — RSI signal is more current
+    // Dampen MACD penalty when it contradicts an extreme RSI reading
+    const macdRSIConflict = spyRSI <= 35 && spyMACD && spyMACD.includes("bearish");
+    const macdMult = macdRSIConflict ? 0.4 : 1.0; // reduce MACD weight when RSI is extreme opposite
+    if (macdRSIConflict) reasons.push(`MACD/RSI conflict — intraday RSI ${spyRSI} oversold, MACD dampened`);
+    if (spyMACD && spyMACD.includes("bullish crossover"))  { score += Math.round(15*macdMult); reasons.push(`SPY MACD bullish crossover (+${Math.round(15*macdMult)})`); }
+    else if (spyMACD && spyMACD.includes("bullish"))       { score += Math.round(8*macdMult);  reasons.push(`SPY MACD bullish (+${Math.round(8*macdMult)})`); }
+    else if (spyMACD && spyMACD.includes("bearish crossover")) { score -= Math.round(15*macdMult); reasons.push(`SPY MACD bearish crossover (-${Math.round(15*macdMult)})`); }
+    else if (spyMACD && spyMACD.includes("bearish"))       { score -= Math.round(5*macdMult);  reasons.push(`SPY MACD bearish (-${Math.round(5*macdMult)})`); }
 
     // ── Breadth — normalized to recent history ──────────────────────────
     // Raw 80% means nothing without context — normalized reading is more meaningful
@@ -1531,6 +1599,16 @@ function scoreIndexSetup(stock, optionType, spyRSI, spyMACD, spyMomentum, breadt
     else if (vixOutlook === "mean_reverting") { score += 6; reasons.push("VIX mean reverting — calls improving (+6)"); }
     else if (vixOutlook === "spiking") { score -= 12; reasons.push("VIX spiking — calls losing value fast (-12)"); }
 
+    // ── VWAP (TA-C2: now used for index instruments) ────────────────────────
+    // VWAP is calculated but was discarded for index instruments — fixed here
+    const callVWAP = stock.intradayVWAP || 0;
+    const callPrice = stock.price || 0;
+    if (callVWAP > 0 && callPrice > 0) {
+      const vwapDiff = (callPrice - callVWAP) / callVWAP;
+      if (vwapDiff < -0.005)      { score += 8; reasons.push(`Below VWAP ${(vwapDiff*100).toFixed(1)}% — dip entry (+8)`); }
+      else if (vwapDiff > 0.015)  { score -= 5; reasons.push(`Extended above VWAP ${(vwapDiff*100).toFixed(1)}% — chasing (+−5)`); }
+    }
+
     // ── IV Percentile — cost of entry matters for spreads ──────────────────
     // High IVR = expensive spreads = worse risk/reward even with same directional thesis
     // Low IVR = cheap spreads = same expected move costs less
@@ -1543,11 +1621,15 @@ function scoreIndexSetup(stock, optionType, spyRSI, spyMACD, spyMomentum, breadt
     else if (ivpCall >= 75 && !highVIXNow) { score -= 8; reasons.push(`IVP ${ivpCall}% — expensive calls in calm VIX (-8)`); }
     else if (ivpCall >= 75)  { score -= 3; reasons.push(`IVP ${ivpCall}% — expensive but VIX elevated, partial offset (-3)`); }
 
-    // ── Weekly trend alignment ───────────────────────────────────────────
-    // Above 10-week MA = trend working for calls, not against
-    const weeklyTrendBonus = (stock._weeklyTrend || {}).above10wk;
-    if (weeklyTrendBonus === true)  { score += 8;  reasons.push("Above 10-wk MA — trend aligned for calls (+8)"); }
-    else if (weeklyTrendBonus === false) { score -= 8; reasons.push("Below 10-wk MA — fighting trend for calls (-8)"); }
+    // ── Weekly trend alignment (slope-aware) ────────────────────────────────
+    // TA-W3: MA slope matters more than price position
+    const weeklyTrend    = stock._weeklyTrend || {};
+    const trendCtx       = weeklyTrend.trendContext;
+    if (trendCtx === 'aligned_bull')   { score += 10; reasons.push(`10-wk MA aligned bull (${weeklyTrend.maSlopeDir}) (+10)`); }
+    else if (trendCtx === 'pullback_bull') { score += 6; reasons.push(`10-wk MA rising — pullback buy (+6)`); }
+    else if (trendCtx === 'confirmed_bear') { score -= 12; reasons.push(`10-wk MA falling + price below — confirmed bear (-12)`); }
+    else if (weeklyTrend.above10wk === true)  { score += 5; reasons.push("Above 10-wk MA (+5)"); }
+    else if (weeklyTrend.above10wk === false) { score -= 5; reasons.push("Below 10-wk MA (-5)"); }
 
     // ── Momentum ─────────────────────────────────────────────────────────
     // Recovering momentum in bull regime = dip is done, resuming uptrend
@@ -1741,20 +1823,47 @@ function withTimeout(promise, ms = 5000) {
   ]);
 }
 
+// ── SE-W1: Alpaca circuit breaker ────────────────────────────────────────
+// Consecutive Alpaca failures pause trading to prevent state corruption
+// Resets on first successful call
+let _alpacaConsecFails = 0;
+const ALPACA_CIRCUIT_THRESHOLD = 5; // 5 consecutive failures = circuit open
+let _alpacaCircuitOpen = false;
+
 async function alpacaGet(endpoint, base = ALPACA_BASE) {
   try {
     trackAPICall();
     const res  = await withTimeout(fetch(`${base}${endpoint}`, { headers: alpacaHeaders() }));
     const text = await res.text();
     if (text.startsWith("<")) {
-      // HTML response = rate limit or auth error
+      _alpacaConsecFails++;
       if (res.status === 429) { logEvent("warn", `Rate limit hit: ${endpoint} — slowing down`); await new Promise(r => setTimeout(r, 2000)); }
       else if (res.status === 401 || res.status === 403) { logEvent("error", `Auth error ${res.status} on ${endpoint} — check API keys`); }
       else { logEvent("warn", `API returned HTML on ${endpoint} (status ${res.status}) — skipping`); }
+      if (_alpacaConsecFails >= ALPACA_CIRCUIT_THRESHOLD && !_alpacaCircuitOpen) {
+        _alpacaCircuitOpen = true;
+        logEvent("warn", `[CIRCUIT] Alpaca API degraded (${_alpacaConsecFails} consecutive failures) — new entries paused`);
+        if (RESEND_API_KEY && GMAIL_USER) sendResendEmail("ARGO-V2.5 ALERT — Alpaca API degraded",
+          `<p>${_alpacaConsecFails} consecutive Alpaca failures. New entries paused. Check Railway logs.</p>`).catch(()=>{});
+      }
       return null;
     }
+    // Successful call — reset circuit
+    if (_alpacaConsecFails > 0) {
+      logEvent("scan", `[CIRCUIT] Alpaca API recovered after ${_alpacaConsecFails} failures`);
+      _alpacaConsecFails = 0;
+      _alpacaCircuitOpen = false;
+    }
     return JSON.parse(text);
-  } catch(e) { logEvent("error", `alpacaGet(${endpoint}): ${e.message}`); return null; }
+  } catch(e) {
+    _alpacaConsecFails++;
+    if (_alpacaConsecFails >= ALPACA_CIRCUIT_THRESHOLD && !_alpacaCircuitOpen) {
+      _alpacaCircuitOpen = true;
+      logEvent("warn", `[CIRCUIT] Alpaca API circuit open after network failures`);
+    }
+    logEvent("error", `alpacaGet(${endpoint}): ${e.message}`);
+    return null;
+  }
 }
 
 async function alpacaPost(endpoint, body, method = "POST") {
@@ -2167,7 +2276,11 @@ function calcFactorScore(stock, signals, relStrength, newsModifier, analystModif
 // ── Monte Carlo Simulation ────────────────────────────────────────────────
 function calcKellySize(recentTrades = 20) {
   const trades  = (state.closedTrades || []).slice(0, recentTrades);
-  if (trades.length < 5) return { contracts: 1, kelly: 0, halfKelly: 0, winRate: 0, payoffRatio: 0 };
+  // QS-W3: Kelly needs minimum 10 trades for any statistical relevance
+  // Below 10 trades, Kelly is noise not signal — default to 1 contract
+  // Below 20 trades, Kelly is unreliable — cap its influence at half weight
+  if (trades.length < 5)  return { contracts: 1, kelly: 0, halfKelly: 0, winRate: 0, payoffRatio: 0 };
+  if (trades.length < 10) return { contracts: 1, kelly: 0, halfKelly: 0, winRate: 0, payoffRatio: 0, note: "insufficient history" };
   const wins      = trades.filter(t => t.pnl > 0);
   const losses    = trades.filter(t => t.pnl <= 0);
   const winRate   = wins.length / trades.length;
@@ -2416,11 +2529,26 @@ function getDrawdownProtocol() {
   // Score quality is now handled by agent confidence and scoring system
   // Raising the score bar after a loss day was preventing recovery entries
   if (drawdown <= -20) {
-    return { level: "critical", sizeMultiplier: 0.25, message: "CRITICAL drawdown — 25% position sizing.", minScore: MIN_SCORE };
+    // PAUSE: at -20% drawdown new entries are blocked entirely — only exits allowed
+    // Risk manager: a system at -20% drawdown should not be adding new directional bets
+    return { level: "critical", sizeMultiplier: 0.0, pauseEntries: true, message: "CRITICAL drawdown — entries paused, exits only.", minScore: MIN_SCORE };
   } else if (drawdown <= -15) {
-    return { level: "severe",   sizeMultiplier: 0.50, message: "SEVERE drawdown — 50% position sizing.", minScore: MIN_SCORE };
+    return { level: "severe",   sizeMultiplier: 0.25, message: "SEVERE drawdown — 25% position sizing.", minScore: MIN_SCORE };
   } else if (drawdown <= -10) {
-    return { level: "caution",  sizeMultiplier: 0.75, message: "CAUTION drawdown — 75% position sizing.", minScore: MIN_SCORE };
+    return { level: "caution",  sizeMultiplier: 0.50, message: "CAUTION drawdown — 50% position sizing.", minScore: MIN_SCORE };
+  } else if (drawdown <= -5) {
+    return { level: "watch",    sizeMultiplier: 0.75, message: "WATCH drawdown — 75% position sizing.", minScore: MIN_SCORE };
+  }
+  // Profit-lock: if account has grown >10% this month, protect gains by reducing size
+  const monthStart  = state.dayStartCash || MONTHLY_BUDGET;
+  const currentVal  = state.cash + openCostBasis();
+  const monthReturn = (currentVal - monthStart) / monthStart;
+  if (monthReturn >= 0.15) {
+    // Up 15%+ on month — lock in gains, minimal new risk
+    return { level: "profit_lock", sizeMultiplier: 0.25, message: "Profit-lock: up 15%+ this month — protecting gains.", minScore: MIN_SCORE };
+  } else if (monthReturn >= 0.10) {
+    // Up 10%+ — reduce new exposure
+    return { level: "profit_protect", sizeMultiplier: 0.50, message: "Profit-protect: up 10%+ this month — reduced sizing.", minScore: MIN_SCORE };
   }
   return { level: "normal", sizeMultiplier: 1.0, message: "Normal operations.", minScore: MIN_SCORE };
 }
@@ -2772,12 +2900,12 @@ const AGENT_MACRO_CACHE_MS = 3 * 60 * 1000; // 3 minutes — faster macro reacti
 async function getAgentDayPlan(scanType = "morning") {
   if (!ANTHROPIC_API_KEY) return null;
 
-  const systemPrompt = `You are the head macro strategist for ARGO-V2.3, a systematic SPY/QQQ options spread trading system. Return ONLY valid JSON — no markdown, no preamble.
+  const systemPrompt = `You are the head macro strategist for ARGO-V2.5, a systematic SPY/QQQ options spread trading system. Return ONLY valid JSON — no markdown, no preamble.
 
 {"regime":"trending_bear"|"trending_bull"|"choppy"|"breakdown"|"recovery"|"neutral","signal":"strongly bearish"|"bearish"|"mild bearish"|"neutral"|"mild bullish"|"bullish"|"strongly bullish","confidence":"high"|"medium"|"low","entryBias":"puts_on_bounces"|"calls_on_dips"|"neutral"|"avoid","tradeType":"spread"|"credit"|"naked"|"none","suppressUntil":null|"HH:MM","riskLevel":"low"|"medium"|"high","vixOutlook":"spiking"|"elevated_stable"|"mean_reverting"|"falling","keyLevels":{"spySupport":null,"spyResistance":null},"catalysts":[],"reasoning":"2 sentences max","weeklyBias":"bullish"|"bearish"|"neutral","overnightMove":"string describing futures direction"}
 
 Rules:
-- suppressUntil: set to "HH:MM" ET if high-impact event today (CPI 08:30, FOMC 14:00, NFP 08:30) — ARGO-V2.3 will not enter before this time
+- suppressUntil: set to "HH:MM" ET if high-impact event today (CPI 08:30, FOMC 14:00, NFP 08:30) — ARGO-V2.5 will not enter before this time
 - riskLevel high = FOMC day, CPI day, major geopolitical event — reduce position size
 - entryBias puts_on_bounces = bearish trend, wait for intraday relief before entering puts
 - entryBias calls_on_dips = bullish trend, wait for intraday weakness before entering calls
@@ -2825,7 +2953,7 @@ What is your strategic assessment for today's trading session?`;
 async function getAgentPostMarketAssessment(scanType = "post-market") {
   if (!ANTHROPIC_API_KEY) return null;
 
-  const systemPrompt = `Post-market analyst for ARGO-V2.3. Return ONLY valid JSON — no markdown.
+  const systemPrompt = `Post-market analyst for ARGO-V2.5. Return ONLY valid JSON — no markdown.
 {"overnightRisk":"low"|"medium"|"high","holdRecommendations":{},"tomorrowBias":"bullish"|"bearish"|"neutral","catalystsTomorrow":[],"reasoning":"1-2 sentences"}
 holdRecommendations: {ticker: "HOLD"|"MONITOR"|"EXIT_AT_OPEN"} for each open position.`;
 
@@ -2871,13 +2999,18 @@ What is the overnight risk and tomorrow's bias?`;
   }
 }
 
+// ── SE/BF note: Claude agent is inherently probabilistic (LLM) ─────────────
+// The same market conditions presented on different days may produce different signals
+// due to LLM temperature and context variation. This is expected behavior — not a bug.
+// The system is not purely deterministic: rules are deterministic, agent is probabilistic.
+// Do not assume identical inputs produce identical outputs from the agent.
 async function getAgentMacroAnalysis(headlines) {
   if (!ANTHROPIC_API_KEY || !headlines || headlines.length === 0) return null;
   // Return cached result if fresh
   if (_agentMacroCache.result && Date.now() - _agentMacroCache.fetchedAt < AGENT_MACRO_CACHE_MS) {
     return _agentMacroCache.result;
   }
-  const systemPrompt = `You are the head macro strategist for ARGO-V2.3, a systematic SPY/QQQ options trading system. Return ONLY valid JSON — no markdown, no preamble.
+  const systemPrompt = `You are the head macro strategist for ARGO-V2.5, a systematic SPY/QQQ options trading system. Return ONLY valid JSON — no markdown, no preamble.
 
 {"signal":"strongly bearish"|"bearish"|"mild bearish"|"neutral"|"mild bullish"|"bullish"|"strongly bullish","modifier":-20to20,"confidence":"high"|"medium"|"low","mode":"defensive"|"cautious"|"normal"|"aggressive","reasoning":"1 sentence","regime":"trending_bear"|"trending_bull"|"choppy"|"breakdown"|"recovery"|"neutral","regimeDuration":"intraday"|"1-3 days"|"3-7 days"|"1-2 weeks"|"multi-week","entryBias":"puts_on_bounces"|"calls_on_dips"|"neutral"|"avoid","tradeType":"spread"|"credit"|"naked"|"none","vixOutlook":"spiking"|"elevated_stable"|"mean_reverting"|"falling"|"unknown","keyLevels":{"spySupport":null,"spyResistance":null},"catalysts":[],"bearishTickers":[],"bullishTickers":[],"themes":[]}
 
@@ -2970,7 +3103,7 @@ RSI: ${stock.rsi} | MACD: ${stock.macd} | Momentum: ${stock.momentum}
 Score: ${score}/100 | Top reasons: ${reasons.slice(0,4).join('; ')}
 Macro: ${(state._agentMacro||{}).signal||'neutral'} (${(state._agentMacro||{}).confidence||'unknown'})
 VIX: ${state.vix}
-Should ARGO-V2.3 enter this ${optionType} position?`;
+Should ARGO-V2.5 enter this ${optionType} position?`;
 
   const raw = await callClaudeAgent(systemPrompt, userPrompt, 200, false);
   if (!raw) return { approved: true, reason: "agent unavailable — allowing" };
@@ -3307,7 +3440,7 @@ async function getMacroNews() {
     const net = totalBullish - totalBearish;
     let signal = "neutral", scoreModifier = 0, mode = "normal";
     // Weighted scoring needs higher threshold than count-based
-    if (net <= -6)      { signal = "strongly bearish"; scoreModifier = -20; mode = "defensive"; }
+    if (net <= -10)     { signal = "strongly bearish"; scoreModifier = -20; mode = "defensive"; } // raised from -6: prevents single story triggering defensive
     else if (net <= -3) { signal = "bearish";          scoreModifier = -10; mode = "cautious";  }
     else if (net <= -1) { signal = "mild bearish";     scoreModifier = -5;  mode = "cautious";  }
     else if (net >= 6)  { signal = "strongly bullish"; scoreModifier = 15;  mode = "aggressive";}
@@ -4092,7 +4225,18 @@ async function getWeeklyTrend(ticker) {
     const price = bars[bars.length-1].c;
     const pctFromMA = (price - ma10w) / ma10w;
     const trend = pctFromMA > 0.02 ? 'above' : pctFromMA < -0.02 ? 'below' : 'at';
-    return setCache('weekly:' + ticker, { trend, ma10w: parseFloat(ma10w.toFixed(2)), pctFromMA: parseFloat((pctFromMA*100).toFixed(1)), above10wk: price > ma10w });
+    // TA-W3: MA slope matters more than price position
+    // Rising MA with price below = bullish context; falling MA with price above = bearish
+    const ma10w_prev  = bars.length >= 55 ? bars.slice(-55,-5).reduce((s,b)=>s+b.c,0)/50 : ma10w;
+    const maSlope     = (ma10w - ma10w_prev) / ma10w_prev; // positive = rising, negative = falling
+    const maSlopeDir  = maSlope > 0.005 ? 'rising' : maSlope < -0.005 ? 'falling' : 'flat';
+    // Bullish when: above MA or (below MA but MA rising = pullback in uptrend)
+    // Bearish when: below MA and MA falling (confirmed downtrend)
+    const trendContext = (price > ma10w && maSlopeDir !== 'falling') ? 'aligned_bull'
+                       : (price < ma10w && maSlopeDir === 'rising')  ? 'pullback_bull'
+                       : (price < ma10w && maSlopeDir === 'falling') ? 'confirmed_bear'
+                       : 'neutral';
+    return setCache('weekly:' + ticker, { trend, ma10w: parseFloat(ma10w.toFixed(2)), pctFromMA: parseFloat((pctFromMA*100).toFixed(1)), above10wk: price > ma10w, maSlope: parseFloat((maSlope*100).toFixed(2)), maSlopeDir, trendContext });
   } catch(e) { return { trend: 'neutral', above10wk: null }; }
 }
 
@@ -4226,6 +4370,8 @@ async function checkAllFilters(stock, price) {
 // Short DTE = take profits fast, trail tight (theta kills you)
 // Monthly   = moderate targets, standard trail
 function getDTEExitParams(dte, daysOpen = 0) {
+  // Phase-aware exit tightening — preservation mode locks profits faster
+  const acctPhase = getAccountPhase();
   // PDT-aware target adjustment
   const pdtRemaining = Math.max(0, PDT_LIMIT - countRecentDayTrades());
   const pdtTight     = pdtRemaining <= 1;
@@ -4869,7 +5015,10 @@ async function executeCreditSpread(stock, price, score, scoreReasons, vix, optio
     // Market maker principle: sell premium when it's rich, but reduce max loss
     // High VIX = tail events more likely = tighter protection = less max loss
     // Debit spreads (executeSpreadTrade) correctly WIDEN at high VIX — different thesis
-    const spreadWidth = vix >= 35 ? 8 : vix >= 25 ? 10 : 12;
+    // OT-W1: At VIX 35, daily expected move is ~1.5% — $8 spread on $430 GLD = $6.45/day expected
+    // A spread narrower than one daily expected move will be crossed by normal vol
+    // Fix: minimum $12 at all VIX levels, wider at high VIX to capture more premium
+    const spreadWidth = vix >= 35 ? 15 : vix >= 25 ? 12 : 12; // raised from 8/10/12
     // OTM % scales with VIX — higher fear = go further OTM for more buffer
     const baseOTM    = vix >= 30 ? 0.07 : vix >= 25 ? 0.06 : 0.05;
     logEvent("filter", `${stock.ticker} credit spread: $${spreadWidth} wide, ${(baseOTM*100).toFixed(0)}% OTM (VIX ${vix.toFixed(1)})`);
@@ -5014,6 +5163,11 @@ async function executeSpreadTrade(stock, price, score, scoreReasons, vix, option
   // Under 20 profitable trades: conservative 15% — system unvalidated
   // 20+ profitable trades: unlock 25% — system has demonstrated edge
   const profitableTradeCount = (state.closedTrades || []).filter(t => t.pnl > 0).length;
+  // SIZING HIERARCHY (explicit priority order):
+  // 1. Score-based starting point: score>=90=3, score>=80=2, else=1
+  // 2. Kelly adjustment: multiplies base by Kelly fraction (win-rate informed)
+  // 3. posCapPct hard dollar cap: overrides everything — max 15%/25% of cash
+  // This order is intentional: score sets intent, Kelly adjusts for edge, cap enforces risk limit
   const posCapPct = profitableTradeCount >= 20 ? 0.25 : 0.15;
   if (profitableTradeCount < 20) logEvent("filter", `Position cap at 15% (${profitableTradeCount}/20 profitable trades — unlocks at 20)`);
   const cashCap   = Math.floor((state.cash * posCapPct) / costPer1);
@@ -5278,10 +5432,14 @@ async function confirmPendingOrder() {
       markDirty();
 
     } else if (age > 30 && !pending._retried) {
-      // Unfilled after 30s — retry once with $0.05 wider limit
+      // Unfilled after 30s — retry with spread-aware concession
+      // Scale concession to bid-ask spread: narrow spread = small concession, wide = larger
+      // Market maker fix: $0.05 static is too small in VIX 35+ wide markets
       await alpacaPost(`/orders/${pending.orderId}/cancel`, {}).catch(() => {});
-      logEvent("warn", `[SPREAD] Unfilled after ${age.toFixed(0)}s — retrying with $0.05 wider limit`);
-      const retryLimit = parseFloat((pending.netDebitLimit + 0.05).toFixed(2));
+      const spreadPct     = pending.spreadPct || 0.05; // bid-ask spread % at entry time
+      const rawConcession = Math.max(0.05, Math.min(0.20, parseFloat((pending.netDebitLimit * spreadPct * 0.5).toFixed(2))));
+      const retryLimit    = parseFloat((pending.netDebitLimit + rawConcession).toFixed(2));
+      logEvent("warn", `[SPREAD] Unfilled after ${age.toFixed(0)}s — retrying with $${rawConcession.toFixed(2)} concession (spread ${(spreadPct*100).toFixed(0)}%) @ $${retryLimit}`);
       const retryBody  = { ...pending.mlegBody, limit_price: String(retryLimit) };
       const retryResp  = await alpacaPost("/orders", retryBody).catch(() => null);
       if (retryResp && retryResp.id) {
@@ -5500,6 +5658,7 @@ async function executeTrade(stock, price, score, scoreReasons, vix, optionType =
   const position = {
     ticker:         stock.ticker,
     sector:         stock.sector,
+    assetClass:     ["GLD","SLV","USO","TLT","GDX"].includes(stock.ticker) ? "commodity" : "equity",
     strike:         contract.strike,
     premium:        contract.premium,
     contracts,
@@ -5918,6 +6077,27 @@ async function closePosition(ticker, reason, exitPremium = null, contractSym = n
   if (pnl > 0) state.scoreBrackets[bracket].wins++;
   state.scoreBrackets[bracket].totalPnl = parseFloat((state.scoreBrackets[bracket].totalPnl + pnl).toFixed(2));
   state.scoreBrackets[bracket].winRate  = parseFloat(((state.scoreBrackets[bracket].wins / state.scoreBrackets[bracket].trades) * 100).toFixed(1));
+
+  // BF-W4: Spiral detection — track consecutive losses by option type
+  // A put spiral (5+ consecutive put losses) = system keeps entering the same losing trade
+  if (!state._spiralTracker) state._spiralTracker = { put: 0, call: 0 };
+  const posType = pos.optionType || "unknown";
+  if (pnl <= 0) {
+    state._spiralTracker[posType] = (state._spiralTracker[posType] || 0) + 1;
+    const consecLosses = state._spiralTracker[posType];
+    if (consecLosses >= 5) {
+      logEvent("warn", `[SPIRAL] ${consecLosses} consecutive ${posType} losses — consider pausing ${posType} entries to review thesis`);
+      state._spiralActive = posType; // flag visible in /api/state
+    }
+  } else {
+    // Win resets that type's spiral counter
+    state._spiralTracker[posType] = 0;
+    if (state._spiralActive === posType) {
+      state._spiralActive = null;
+      logEvent("scan", `[SPIRAL] ${posType} spiral broken — consecutive wins reset`);
+    }
+  }
+
   // Cap closedTrades at 200
   if (state.closedTrades.length > 200) state.closedTrades = state.closedTrades.slice(0, 200);
 
@@ -6554,22 +6734,43 @@ async function runScan() {
     }
 
     // Strongly bearish macro — close all calls immediately
-    // ONLY fire if agent also agrees — keyword scorer alone can give false positives
-    // If agent is fresh and bullish/neutral, suppress keyword defensive close
+    // ONLY fire if agent also confirms bearish — keyword scorer alone gives false positives
+    // Agent signal takes priority: if agent ever said bullish/neutral, suppress keyword defensive
+    // This protects against: keyword fires on GLD/tariff headlines while SPY is rallying
     const agentSignal      = (state._agentMacro || {}).signal || "neutral";
     const agentIsBullish   = ["bullish","strongly bullish","mild bullish"].includes(agentSignal);
     const agentIsNeutral   = agentSignal === "neutral";
-    const agentFresh       = state._agentMacro && state._agentMacro.timestamp
-      && (Date.now() - new Date(state._agentMacro.timestamp).getTime()) < 30 * 60 * 1000;
-    const defensiveSuppressed = agentFresh && (agentIsBullish || agentIsNeutral);
+    const agentIsBearish   = ["strongly bearish","bearish"].includes(agentSignal);
+    const agentAge         = state._agentMacro && state._agentMacro.timestamp
+      ? (Date.now() - new Date(state._agentMacro.timestamp).getTime()) / 60000 : 999;
+    // Extend freshness to 60 min — agent runs every 3 min but cache + restart gaps can widen this
+    // If no agent signal ever (agentAge=999), allow defensive to fire (can't suppress without data)
+    const agentFresh       = agentAge < 60;
+    // Suppress if: agent is fresh AND (bullish or neutral) — don't close calls on keyword alone
+    // Also suppress if: agent is fresh AND bearish but NOT strongly bearish (mild disagreement)
+    const defensiveSuppressed = agentFresh && !agentIsBearish; // only strongly bearish fires through
     if (macro.mode === "defensive" && state.circuitOpen && !defensiveSuppressed) {
       const defTriggers = (macro.triggers || []).slice(0,3).join(", ") || "strongly bearish signal";
-      logEvent("macro", `DEFENSIVE MODE — macro strongly bearish: ${defTriggers} — closing calls`);
+      logEvent("macro", `DEFENSIVE MODE — keyword+agent agree bearish: ${defTriggers} — closing calls`);
       for (const pos of [...state.positions]) {
-        if (pos.optionType === "call") await closePosition(pos.ticker, "macro-defensive");
+        if (pos.optionType === "call") {
+          if (!state._macroDefensiveCooldown) state._macroDefensiveCooldown = {};
+          state._macroDefensiveCooldown[pos.ticker] = Date.now();
+          await closePosition(pos.ticker, "macro-defensive");
+        }
       }
     } else if (macro.mode === "defensive" && defensiveSuppressed) {
-      logEvent("macro", `[AGENT OVERRIDE] Keyword defensive suppressed — agent says ${agentSignal} (${(state._agentMacro||{}).confidence||"unknown"}) — keeping calls open`);
+      logEvent("macro", `[AGENT OVERRIDE] Defensive suppressed — agent ${agentSignal} (${agentAge.toFixed(0)}min ago, conf:${(state._agentMacro||{}).confidence||"unknown"}) overrides keyword — keeping calls open`);
+    } else if (macro.mode === "defensive" && !agentFresh) {
+      logEvent("warn", `[AGENT] Defensive triggered but agent stale (${agentAge.toFixed(0)}min) — firing anyway, redeploy to fix`);
+      for (const pos of [...state.positions]) {
+        if (pos.optionType === "call") {
+          // BF-W2: Stamp per-ticker cooldown to prevent mechanical FOMO re-entry
+          if (!state._macroDefensiveCooldown) state._macroDefensiveCooldown = {};
+          state._macroDefensiveCooldown[pos.ticker] = Date.now();
+          await closePosition(pos.ticker, "macro-defensive");
+        }
+      }
     }
 
     // Strongly bullish macro — close losing puts (thesis broken by macro tailwind)
@@ -7045,6 +7246,18 @@ async function runScan() {
       }
     }
 
+    // 0b. DTE EXPIRY URGENCY — close positions in danger near expiry
+    // OT-W4: Calendar time stop misses options-specific expiry risk
+    const dteDaysLeft = pos.expDate ? Math.max(0, Math.round((new Date(pos.expDate) - new Date()) / 86400000)) : 30;
+    if (pos.isSpread && dteDaysLeft <= 1) {
+      logEvent("warn", `${pos.ticker} DTE=1 — closing spread to avoid pin/assignment risk`);
+      await closePosition(pos.ticker, "expiry-close"); continue;
+    }
+    if (dteDaysLeft <= 5 && dteDaysLeft > 0 && chg < -0.15 && !pdtProtected) {
+      logEvent("warn", `${pos.ticker} DTE urgency: ${dteDaysLeft}d remaining, ${(chg*100).toFixed(0)}% — closing`);
+      await closePosition(pos.ticker, "dte-urgency"); continue;
+    }
+
     // 1. FAST STOP — tighter window for weeklies, wider for monthlies
     // Weeklies: 2-48hrs (theta racing, exit fast on loss)
     // Monthlies: 2-120hrs (5 days — thesis needs time to play out)
@@ -7093,10 +7306,25 @@ async function runScan() {
 
     // 4. PARTIAL CLOSE — at 60% of active take profit target
     // Uses live overnight-adjusted params — tighter targets on older positions
-    if (!pos.partialClosed && chg >= activePartialPct && chg < activeTakeProfitPct) {
+    // Guard: don't fire partial if trail is already active (trail takes over above trailActivate)
+    const trailAlreadyActive = chg >= (pos.trailActivate || TRAIL_ACTIVATE_PCT);
+    if (!pos.partialClosed && !trailAlreadyActive && chg >= activePartialPct && chg < activeTakeProfitPct) {
       logEvent("scan", `${pos.ticker} partial close at +${(chg*100).toFixed(0)}% [${currentExitParams.label}] (partial threshold: +${(activePartialPct*100).toFixed(0)}%)`);
       await partialClose(pos.ticker);
       continue; // don't evaluate take profit in same scan as partial — wait for next cycle
+    }
+
+    // 4b. NEAR-MAX-PROFIT EXIT — close when spread reaches 88%+ of theoretical max
+    // OT-W3: At near-max, remaining upside is tiny vs gamma/pin risk of holding
+    if (pos.isSpread && !pos.partialClosed) {
+      const nearMaxProfit = pos.isCreditSpread
+        ? chg >= 0.88  // collected 88%+ of max credit — close to lock in
+        : (pos.maxProfit > 0 && pos.currentPrice > 0 && pos.premium > 0 &&
+           (pos.currentPrice - pos.premium) >= 0.88 * (pos.maxProfit / 100 / Math.max(pos.contracts || 1, 1)));
+      if (nearMaxProfit) {
+        logEvent("scan", `${pos.ticker} near max profit (chg:${(chg*100).toFixed(0)}%) — closing to lock in gains before gamma risk`);
+        await closePosition(pos.ticker, "near-max-profit"); continue;
+      }
     }
 
     // 5. FULL TARGET — take profit
@@ -7326,7 +7554,8 @@ async function runScan() {
     } else {
       // All conditions met — clear the cooldown
       logEvent("filter", `Post-reversal cooldown cleared — macro confirmed bearish, conditions met`);
-      state._macroReversalAt    = null;
+      state._avoidUntil         = null; // clear avoid hold on account reset
+  state._macroReversalAt    = null;
       state._macroReversalCount = 0;
       state._macroReversalSPY   = null;
       markDirty();
@@ -7345,6 +7574,10 @@ async function runScan() {
   const isIndexScan  = true; // scan loop handles both index and stocks
 
   // ── REGIME GATE — choppy blocks debit entries, credit still allowed ───
+  // UNIFIED REGIME SOURCE: _agentMacro.regime is authoritative (updated every 3min).
+  // _dayPlan.regime is the morning baseline, used only when _agentMacro hasn't run yet.
+  // applyIntradayRegimeOverride updates _dayPlan for the morning context — but scoring
+  // uses _agentMacro directly so intraday shifts are immediately reflected.
   const agentRegime       = (state._agentMacro || {}).regime || (state._dayPlan || {}).regime || "neutral";
   const agentTradeTypeGate = (state._dayPlan || {}).tradeType || (state._agentMacro || {}).tradeType || "spread";
   const isChoppyRegime    = agentRegime === "choppy" || agentTradeTypeGate === "none";
@@ -7372,10 +7605,39 @@ async function runScan() {
   const creditCallModeActive  = isChoppyRegime && creditAllowedVIX && spyNearResistance && !dryRunMode;
   if (choppyDebitBlock) logEvent("filter", `Choppy regime — debit entries blocked${creditModeActive ? ", credit PUT mode active" : creditCallModeActive ? ", credit CALL mode active (near resistance)" : ", VIX too low for credits"}`);
 
-  const callsAllowed  = (isEntryWindow("call", true) && !finalHourBlock && !suppressBlock && !choppyDebitBlock) || dryRunMode;
-  const putsAllowed   = (isEntryWindow("put",  true) && !vixFallingPause && !spyGapUp && !postReversalBlock && !finalHourBlock && !suppressBlock && !macroBullish && !choppyDebitBlock) || dryRunMode;
+
+  // AVOID HOLD TIME: when agent says avoid, stamp _avoidUntil for 30 minutes
+  // Prevents the avoid -> immediate re-entry pattern (agent flips to calls_on_dips next cycle)
+  const agentBias = (state._agentMacro || {}).entryBias || (state._dayPlan || {}).entryBias || "neutral";
+  if (agentBias === "avoid") {
+    const holdUntil = Date.now() + 30 * 60 * 1000;
+    if (!state._avoidUntil || holdUntil > state._avoidUntil) {
+      state._avoidUntil = holdUntil;
+      logEvent("filter", `[AVOID] Entry block stamped — 30min hold until ${new Date(holdUntil).toLocaleTimeString("en-US",{timeZone:"America/New_York"})}`);
+    }
+  }
+  const avoidHoldActive = state._avoidUntil && Date.now() < state._avoidUntil && agentBias !== "avoid";
+  if (avoidHoldActive) {
+    const minsLeft = ((state._avoidUntil - Date.now()) / 60000).toFixed(0);
+    logEvent("filter", `[AVOID] Entry hold active — ${minsLeft}min remaining after previous avoid signal`);
+  }
+  // BF-W2: Enforce macro-defensive cooldown — 30min block on same ticker after defensive close
+  if (state._macroDefensiveCooldown) {
+    // Clean expired entries
+    const now30 = Date.now();
+    for (const tk of Object.keys(state._macroDefensiveCooldown)) {
+      if (now30 - state._macroDefensiveCooldown[tk] > 30 * 60 * 1000) delete state._macroDefensiveCooldown[tk];
+    }
+  }
+
+  // MR calls bypass choppy block — extreme oversold in high-VIX IS the ideal MR call setup
+  const spyRSIForMR   = (marketContext.spySignals && marketContext.spySignals.rsi) || state._lastSpyRSI || 50;
+  const isMRCondition = spyRSIForMR <= 35 && state.vix >= 25;
+  const callsAllowed  = (isEntryWindow("call", true) && !finalHourBlock && !suppressBlock && (!choppyDebitBlock || isMRCondition) && !avoidHoldActive) || dryRunMode;
+  if (isMRCondition && choppyDebitBlock) logEvent("filter", `MR call allowed in choppy — SPY RSI ${spyRSIForMR.toFixed(1)} extreme oversold + VIX ${state.vix}`);
+  const putsAllowed   = (isEntryWindow("put",  true) && !vixFallingPause && !spyGapUp && !postReversalBlock && !finalHourBlock && !suppressBlock && !macroBullish && !choppyDebitBlock && !avoidHoldActive) || dryRunMode;
   // Credit spreads allowed even in choppy regime — that's the point of credit mode
-  const creditAllowed     = creditModeActive     && isEntryWindow("put",  true) && !finalHourBlock && !suppressBlock && !vixFallingPause;
+  const creditAllowed     = creditModeActive     && isEntryWindow("put",  true) && !finalHourBlock && !suppressBlock && !vixFallingPause && !avoidHoldActive;
   const callCreditAllowed = creditCallModeActive && isEntryWindow("call", true) && !finalHourBlock && !suppressBlock;
   if (creditAllowed && !putsAllowed) logEvent("filter", "Debit puts blocked — credit put spread mode active");
   if (callCreditAllowed)             logEvent("filter", "Near resistance in choppy regime — credit call spread mode active");
@@ -7478,6 +7740,13 @@ async function runScan() {
   // Prevent extreme one-sided exposure
   const pgr = marketContext.portfolioGreeks || { delta: 0, vega: 0 };
   const MAX_PORTFOLIO_DELTA = -500; // max short delta (puts) = -$500 per 1% SPY move
+  // RM-C1 fix: heat cap does not prevent adding OPPOSITE-direction positions when PDT-locked
+  // If all positions are PDT-locked and losing, allowing a hedge is risk-reducing not risk-adding
+  const allPDTLocked = state.positions.length > 0 &&
+    state.positions.every(p => {
+      const alpacaBal = state.alpacaCash || state.cash || 0;
+      return alpacaBal < 25000 && ((Date.now() - new Date(p.openDate).getTime()) < 86400000);
+    });
   // Natenberg: VIX-scaled vega cap — high VIX = more volatile IV = tighter cap
   // At VIX 37, a $2000 vega position loses $2000 on a 1pt VIX move — too much
   const MAX_PORTFOLIO_VEGA  = state.vix >= 35 ? 500 : state.vix >= 25 ? 1000 : 2000;
@@ -7485,9 +7754,57 @@ async function runScan() {
     logEvent("filter", `Portfolio delta ${pgr.delta} too short — blocking new put entries`);
     if (!callsAllowed) return;
   }
+  // Directional concentration + Beta-adjusted portfolio delta check (DB-1/GL-3)
+  // Simple directional count
+  const openPuts  = (state.positions || []).filter(p => p.optionType === "put").length;
+  const openCalls = (state.positions || []).filter(p => p.optionType === "call").length;
+  const totalOpen = state.positions.length;
+  if (totalOpen >= 3 && openPuts === totalOpen) {
+    logEvent("filter", `Directional concentration: ${totalOpen} puts, 0 calls — blocking new put entries`);
+    if (!callsAllowed) return;
+  }
+  if (totalOpen >= 3 && openCalls === totalOpen) {
+    logEvent("filter", `Directional concentration: ${totalOpen} calls, 0 puts — blocking new call entries`);
+    if (!putsAllowed) return;
+  }
+  // Beta-adjusted net delta — measures true correlated directional exposure
+  // Each put = -1 delta unit × beta; each call = +1 delta unit × beta
+  // Index instruments (beta ~1): SPY/QQQ/IWM/GLD each count as 1 unit
+  const betaDelta = (state.positions || []).reduce((sum, p) => {
+    const beta = Math.min(p.beta || 1.0, 2.0); // cap beta at 2 for sizing purposes
+    const dir  = p.optionType === "put" ? -1 : 1;
+    const contracts = p.contracts || 1;
+    return sum + (dir * beta * contracts);
+  }, 0);
+  state._portfolioBetaDelta = parseFloat(betaDelta.toFixed(1));
+  const MAX_BETA_DELTA = 6; // max 6 beta-weighted contracts in any direction
+  if (betaDelta < -MAX_BETA_DELTA) {
+    logEvent("filter", `Beta-adjusted delta ${betaDelta.toFixed(1)} — too short, blocking puts (max: -${MAX_BETA_DELTA})`);
+    if (!callsAllowed) return;
+  }
+  if (betaDelta > MAX_BETA_DELTA) {
+    logEvent("filter", `Beta-adjusted delta +${betaDelta.toFixed(1)} — too long, blocking calls (max: +${MAX_BETA_DELTA})`);
+    if (!putsAllowed) return;
+  }
   if (Math.abs(pgr.vega) > MAX_PORTFOLIO_VEGA) {
     logEvent("filter", `Portfolio vega $${pgr.vega.toFixed(0)} at VIX-scaled limit $${MAX_PORTFOLIO_VEGA} — blocking entries`);
     return;
+  }
+
+  // ── DURATION DIVERSIFICATION CHECK ─────────────────────────────────────
+  // PM-W1: Prevent all positions expiring in same cycle — one event hits everything
+  // Allow entry only if there's at least one position expiring in a different month, OR no positions yet
+  if (state.positions.length >= 2) {
+    const expDates  = state.positions.map(p => p.expDate).filter(Boolean);
+    const uniqueExp = new Set(expDates.map(d => d.slice(0, 7))); // YYYY-MM
+    if (uniqueExp.size === 1 && state.positions.length >= 3) {
+      // All in same month — check if new entry would be in the same month
+      const sameMonthCap = 4; // max 4 positions in same expiry month
+      if (state.positions.length >= sameMonthCap) {
+        logEvent("filter", `Duration concentration: all ${state.positions.length} positions expire ${[...uniqueExp][0]} — capped at ${sameMonthCap}`);
+        // Don't return — just log. Entry scoring will naturally space out expiries.
+      }
+    }
   }
 
   // ── F8: High-beta correlation block ─────────────────────────────────────
@@ -7759,6 +8076,7 @@ async function runScan() {
       beta:          liveBeta,          // live beta overrides static watchlist value
       newsSentiment: newsSentiment.signal,
       intradayVWAP:  signals.intradayVWAP || 0,
+      atrPct:        signals.atrPct || null,
       volPaceRatio:  signals.volPaceRatio || 1,
       hasIntraday:   signals.hasIntraday || false,
       ivPercentile:  signals.ivPercentile || 50,
@@ -7804,10 +8122,15 @@ async function runScan() {
       const callResult = scoreIndexSetup(liveStock, "call", spyRSI, spyMACD, spyMomentum, breadthVal, state.vix, scoringMacro);
       putSetup  = { score: putResult.score,  reasons: putResult.reasons,  tradeType: putResult.tradeType  || "spread", isMeanReversion: false };
       callSetup = { score: callResult.score, reasons: callResult.reasons, tradeType: callResult.tradeType || "spread", isMeanReversion: false };
-      // QQQ: only enter if no SPY position in same direction already
-      if (stock.ticker === "QQQ") {
+      // Correlation suppression: QQQ and IWM both correlated to SPY (>0.90)
+      // If SPY already has a position in the same direction, suppress correlated duplicate
+      if (stock.ticker === "QQQ" || stock.ticker === "IWM") {
         if (state.positions.some(p => p.ticker === "SPY" && p.optionType === "put"))  putSetup.score  = Math.min(putSetup.score,  30);
         if (state.positions.some(p => p.ticker === "SPY" && p.optionType === "call")) callSetup.score = Math.min(callSetup.score, 30);
+        // Also suppress if the OTHER correlated ticker already has a position
+        const otherTicker = stock.ticker === "QQQ" ? "IWM" : "QQQ";
+        if (state.positions.some(p => p.ticker === otherTicker && p.optionType === "put"))  putSetup.score  = Math.min(putSetup.score,  45);
+        if (state.positions.some(p => p.ticker === otherTicker && p.optionType === "call")) callSetup.score = Math.min(callSetup.score, 45);
       }
     } else {
       // Individual stocks: use scorePutSetup/scoreCallSetup
@@ -8030,6 +8353,22 @@ async function runScan() {
 
     // Apply drawdown protocol min score
     const ddProtocol  = marketContext.drawdownProtocol || { minScore: MIN_SCORE, sizeMultiplier: 1.0 };
+    if (ddProtocol.pauseEntries) {
+      logEvent("filter", `[DRAWDOWN] Entries paused — drawdown critical (${ddProtocol.message})`);
+      continue;
+    }
+    if (_alpacaCircuitOpen) {
+      logEvent("filter", `[CIRCUIT] Entries paused — Alpaca API degraded (${_alpacaConsecFails} consecutive failures)`);
+      continue;
+    }
+    // BF-W4: Block entries when spiral is active for the same type
+    if (state._spiralActive) {
+      const spiralType = state._spiralActive;
+      const spiralCount = (state._spiralTracker || {})[spiralType] || 0;
+      logEvent("filter", `[SPIRAL] ${spiralType} spiral active (${spiralCount} consecutive losses) — ${spiralType} entries blocked. Fix thesis before re-entering.`);
+      if (spiralType === "call") { callSetup = { score: 0, reasons: ["Spiral block"] }; }
+      if (spiralType === "put")  { putSetup  = { score: 0, reasons: ["Spiral block"] }; }
+    }
 
     // Apply macro modifier - boosts or suppresses all entries based on current events
     const macro       = marketContext.macro || { scoreModifier: 0, sectorBearish: [], sectorBullish: [] };
@@ -8095,6 +8434,11 @@ async function runScan() {
     const isLowConfidence  = agentConf === "low" || agentStale;
     const agentMinScore    = isBearishHigh ? 65 : isLowConfidence ? 80 : MIN_SCORE;
     const effectiveMinScore = Math.max(ddProtocol.minScore || MIN_SCORE, regimeMinScore, agentMinScore);
+    // QS-C2: In choppy regime, effectiveMinScore=90 + choppy score penalty (-10) means
+    // a position needs 100 base score to clear the bar. Log this near-lockout for visibility.
+    if (effectiveMinScore >= 90 && isChoppyRegime) {
+      logEvent("filter", `[CHOPPY] Effective min score ${effectiveMinScore} in choppy regime — near-lockout condition, credit mode only`);
+    }
     if (agentStale && !dryRunMode) {
       logEvent("filter", `Agent macro stale (${agentStaleMins.toFixed(0)}min) — raising min score to 80. Last signal: ${agentSig || "none"}`);
       // If stale > 90 min during market hours, flag for investigation
@@ -8106,6 +8450,15 @@ async function runScan() {
     // ── Staggered entry logic ────────────────────────────────────────────
     // Stagger applies to DEBIT spreads only — buying direction in tranches on bounces
     // Credit spreads are premium sellers — multiple entries = more uncapped short exposure
+    // BF-W2: Per-ticker macro-defensive cooldown — skip re-entry 30min after defensive close
+    if (state._macroDefensiveCooldown && state._macroDefensiveCooldown[stock.ticker]) {
+      const cooldownMins = (Date.now() - state._macroDefensiveCooldown[stock.ticker]) / 60000;
+      if (cooldownMins < 30) {
+        logEvent("filter", `${stock.ticker} defensive cooldown ${cooldownMins.toFixed(0)}/30min — skipping re-entry`);
+        continue;
+      }
+    }
+
     // For credit spreads: allow only 1 per ticker per direction
     const sameTickerSameDir = state.positions.filter(p => p.ticker === stock.ticker && p.optionType === optionType);
     if (creditModeActive && sameTickerSameDir.length >= 1) {
@@ -8134,9 +8487,9 @@ async function runScan() {
       // Only stagger when the first entry is working (>5% profit confirms thesis)
       const existingChg = existingPos.currentPrice && existingPos.premium
         ? (existingPos.currentPrice - existingPos.premium) / existingPos.premium : 0;
-      if (!staggerBlock && existingChg <= 0.05) {
+      if (!staggerBlock && existingChg <= 0.15) {
         staggerBlock = true;
-        staggerReason = `existing pos ${(existingChg*100).toFixed(0)}% — thesis not confirmed (need >5% profit to add)`;
+        staggerReason = `existing pos ${(existingChg*100).toFixed(0)}% — thesis not confirmed (need >15% profit to add — 5% was within daily sigma)`;
       }
       if (!staggerBlock && existingChg > 0.50) {
         staggerBlock = true;
@@ -8390,6 +8743,20 @@ async function runScan() {
 
   } // end else (no pending order)
 
+  // SE-W4/SE-C2: Track actual scan interval for frequency drift monitoring
+  const scanNow = Date.now();
+  const lastScanMs = state.lastScan ? scanNow - new Date(state.lastScan).getTime() : 0;
+  if (lastScanMs > 0) {
+    if (!state._scanIntervals) state._scanIntervals = [];
+    state._scanIntervals.push(lastScanMs);
+    if (state._scanIntervals.length > 30) state._scanIntervals = state._scanIntervals.slice(-30);
+    const avgInterval = state._scanIntervals.reduce((s,v)=>s+v,0) / state._scanIntervals.length;
+    state._avgScanIntervalMs = Math.round(avgInterval);
+    // Alert if average scan interval >15s (intended: 10s)
+    if (avgInterval > 15000 && state._scanIntervals.length >= 5) {
+      logEvent("warn", `[PERF] Scan frequency degraded — avg ${(avgInterval/1000).toFixed(1)}s (target: 10s)`);
+    }
+  }
   state.lastScan    = new Date().toISOString();
   state._scanFailures = 0;
   // Single Redis write at scan end — with timeout so a Redis hang can't block the scanner
@@ -8405,9 +8772,9 @@ async function runScan() {
     if (state._scanFailures >= 3 && RESEND_API_KEY && GMAIL_USER && isMarketHours()) {
       Promise.race([
         sendResendEmail(
-          `ARGO-V2.3 ALERT — Scanner failing (${state._scanFailures} errors)`,
+          `ARGO-V2.5 ALERT — Scanner failing (${state._scanFailures} errors)`,
           `<div style="font-family:monospace;background:#07101f;color:#ff5555;padding:20px">
-          <h2>⚠ ARGO-V2.3 Scanner Error</h2>
+          <h2>⚠ ARGO-V2.5 Scanner Error</h2>
           <p>Consecutive scan failures: <strong>${state._scanFailures}</strong></p>
           <p>Last error: ${e.message}</p>
           <p>Time: ${new Date().toISOString()}</p>
@@ -8427,6 +8794,22 @@ async function runScan() {
     // (poll loops release scanRunning early — a new scan may have started)
     if (_scanGen === thisScanGen) scanRunning = false;
   }
+}
+
+// ── TA-W2: ATR (Average True Range) calculation ──────────────────────────
+// Normalizes RSI/MACD signals by whether the current move is within normal range
+// A 2% SPY move with ATR=0.5% is extreme; same 2% with ATR=2% is noise
+function calcATR(bars, period = 14) {
+  if (!bars || bars.length < period + 1) return null;
+  const recent = bars.slice(-(period + 1));
+  let atrSum = 0;
+  for (let i = 1; i < recent.length; i++) {
+    const high  = recent[i].h || recent[i].c;
+    const low   = recent[i].l || recent[i].c;
+    const prev  = recent[i-1].c;
+    atrSum += Math.max(high - low, Math.abs(high - prev), Math.abs(low - prev));
+  }
+  return parseFloat((atrSum / period).toFixed(4));
 }
 
 // - ADX Calculation -
@@ -8485,7 +8868,7 @@ async function sendMorningBriefing() {
     // ── Header ───────────────────────────────────────────────────────────
     const header = `
       <div style="text-align:center;border-bottom:3px double #333;padding-bottom:12px;margin-bottom:12px">
-        <div style="font-family:Georgia,serif;font-size:22px;font-weight:bold;color:#111;letter-spacing:1px">ARGO-V2.3 TRADING DESK</div>
+        <div style="font-family:Georgia,serif;font-size:22px;font-weight:bold;color:#111;letter-spacing:1px">ARGO-V2.5 TRADING DESK</div>
         <div style="font-size:10px;color:#555;margin-top:4px;letter-spacing:1px">${dateStr.toUpperCase()}</div>
       </div>
       <div style="display:flex;gap:0;border:1px solid #ccc;margin-bottom:4px">
@@ -8658,7 +9041,7 @@ async function sendMorningBriefing() {
     // ── Footer ────────────────────────────────────────────────────────
     const footer = `
       <div style="border-top:3px double #333;margin-top:16px;padding-top:8px;text-align:center;font-size:9px;color:#999;letter-spacing:1px">
-        ARGO V2.3 · Entry window 9:30am–3:45pm ET · SPY/QQQ primary · Monthly options
+        ARGO V2.5 · Entry window 9:30am–3:45pm ET · SPY/QQQ primary · Monthly options
       </div>`;
 
     // ── Assemble ──────────────────────────────────────────────────────
@@ -8666,7 +9049,7 @@ async function sendMorningBriefing() {
       <div style="font-family:Georgia,serif;background:#ffffff;color:#111;padding:24px;max-width:620px;border:1px solid #ccc">
         ${header}
         ${divider}
-        ${agentNarrative ? sectionHead('ANALYST BRIEFING — ARGO-V2.3 INTELLIGENCE') + '<div style="font-family:Georgia,serif;font-size:13px;color:#111;line-height:1.7;white-space:pre-wrap;padding:8px 0">' + agentNarrative + '</div>' + divider : ''}
+        ${agentNarrative ? sectionHead('ANALYST BRIEFING — ARGO-V2.5 INTELLIGENCE') + '<div style="font-family:Georgia,serif;font-size:13px;color:#111;line-height:1.7;white-space:pre-wrap;padding:8px 0">' + agentNarrative + '</div>' + divider : ''}
         ${sectionHead('Open Positions — ' + positions.length + ' active')}
         ${posTable}
         ${triggersHTML}
@@ -8677,7 +9060,7 @@ async function sendMorningBriefing() {
       </div>`;
 
     await sendResendEmail(
-      `ARGO-V2.3 Desk — ${dateStr} | VIX ${state.vix} | ${positions.length} positions`,
+      `ARGO-V2.5 Desk — ${dateStr} | VIX ${state.vix} | ${positions.length} positions`,
       html
     );
     logEvent("scan", "Morning briefing email sent");
@@ -8700,7 +9083,7 @@ async function sendResendEmail(subject, html) {
         "Content-Type":  "application/json",
       },
       body: JSON.stringify({
-        from:    "ARGO-V2.3 <onboarding@resend.dev>",
+        from:    "ARGO-V2.5 <onboarding@resend.dev>",
         to:      [GMAIL_USER],
         subject,
         html,
@@ -8743,7 +9126,7 @@ function buildEmailHTML(type) {
   return `
 <!DOCTYPE html><html><body style="font-family:monospace;background:#07101f;color:#cce8ff;padding:20px;max-width:600px">
 <div style="background:#0a1628;border:1px solid #0d3050;border-radius:12px;padding:20px;margin-bottom:16px">
-  <h2 style="color:#00ff88;margin:0 0 4px">- ARGO-V2.3 ${type === "morning" ? "Morning Briefing" : "End of Day Report"}</h2>
+  <h2 style="color:#00ff88;margin:0 0 4px">- ARGO-V2.5 ${type === "morning" ? "Morning Briefing" : "End of Day Report"}</h2>
   <p style="color:#336688;margin:0;font-size:12px">${new Date().toLocaleDateString("en-US",{weekday:"long",month:"long",day:"numeric"})}</p>
 </div>
 
@@ -8797,22 +9180,22 @@ function buildEmailHTML(type) {
 ${type === "morning" ? `
 <div style="background:rgba(0,255,136,0.05);border:1px solid rgba(0,255,136,0.15);border-radius:8px;padding:14px">
   <h3 style="color:#00ff88;font-size:11px;margin:0 0 6px">TODAY'S OUTLOOK</h3>
-  <p style="font-size:12px;color:#cce8ff;margin:0">ARGO-V2.3 will scan every 10 seconds from 10:00 AM - 3:30 PM ET. VIX is currently ${state.vix} - ${state.vix<20?"normal conditions, full sizing":"reduced sizing active"}. ${state.positions.length} position${state.positions.length!==1?"s":""} currently open.</p>
+  <p style="font-size:12px;color:#cce8ff;margin:0">ARGO-V2.5 will scan every 10 seconds from 10:00 AM - 3:30 PM ET. VIX is currently ${state.vix} - ${state.vix<20?"normal conditions, full sizing":"reduced sizing active"}. ${state.positions.length} position${state.positions.length!==1?"s":""} currently open.</p>
 </div>` : `
 <div style="background:rgba(0,196,255,0.05);border:1px solid rgba(0,196,255,0.15);border-radius:8px;padding:14px">
   <h3 style="color:#00c4ff;font-size:11px;margin:0 0 6px">END OF DAY SUMMARY</h3>
-  <p style="font-size:12px;color:#cce8ff;margin:0">Market closed. ${state.todayTrades} trade${state.todayTrades!==1?"s":""} executed today. Daily P&L: ${parseFloat(daily)>=0?"+":""}$${daily}. ARGO-V2.3 resumes scanning tomorrow at 10:00 AM ET.</p>
+  <p style="font-size:12px;color:#cce8ff;margin:0">Market closed. ${state.todayTrades} trade${state.todayTrades!==1?"s":""} executed today. Daily P&L: ${parseFloat(daily)>=0?"+":""}$${daily}. ARGO-V2.5 resumes scanning tomorrow at 10:00 AM ET.</p>
 </div>`}
 
-<p style="font-size:10px;color:#336688;text-align:center;margin-top:16px">ARGO-V2.3 SPY Spread Trader - Paper Trading - Not financial advice</p>
+<p style="font-size:10px;color:#336688;text-align:center;margin-top:16px">ARGO-V2.5 SPY Spread Trader - Paper Trading - Not financial advice</p>
 </body></html>`;
 }
 
 async function sendEmail(type) {
   if (!RESEND_API_KEY || !GMAIL_USER) { logEvent("warn", "Email not configured"); return; }
   const subject = type === "morning"
-    ? `ARGO-V2.3 Morning Briefing - ${new Date().toLocaleDateString()}`
-    : `ARGO-V2.3 EOD Report - P&L ${(state.cash-state.dayStartCash)>=0?"+":""}$${(state.cash-state.dayStartCash).toFixed(2)}`;
+    ? `ARGO-V2.5 Morning Briefing - ${new Date().toLocaleDateString()}`
+    : `ARGO-V2.5 EOD Report - P&L ${(state.cash-state.dayStartCash)>=0?"+":""}$${(state.cash-state.dayStartCash).toFixed(2)}`;
   try {
     await sendResendEmail(subject, buildEmailHTML(type));
     logEvent("email", `${type} email sent to ${GMAIL_USER}`);
@@ -8838,7 +9221,7 @@ function buildMonthlyReport() {
   const bestTrade  = trades.length ? trades.reduce((b,t)=>t.pnl>b.pnl?t:b) : null;
   const worstTrade = trades.length ? trades.reduce((w,t)=>t.pnl<w.pnl?t:w) : null;
 
-  return `ARGO-V2.3 MONTHLY PERFORMANCE REPORT
+  return `ARGO-V2.5 MONTHLY PERFORMANCE REPORT
 ${"-".repeat(48)}
 Period:           ${state.monthStart} - ${new Date().toLocaleDateString()}
 
@@ -9130,10 +9513,10 @@ async function premarketAssessment() {
       const watches = assessments.filter(a => a.recommendation === "WATCH");
       const holds  = assessments.filter(a => a.recommendation === "HOLD");
       const subject = assessments.length === 0
-        ? `ARGO-V2.3 Pre-Market — No Positions | ${macro.signal.toUpperCase()} | ${new Date().toLocaleDateString()}`
+        ? `ARGO-V2.5 Pre-Market — No Positions | ${macro.signal.toUpperCase()} | ${new Date().toLocaleDateString()}`
         : closes.length
-        ? `ARGO-V2.3 Pre-Market — ${closes.length} CLOSE, ${watches.length} WATCH | ${new Date().toLocaleDateString()}`
-        : `ARGO-V2.3 Pre-Market — All Clear | ${new Date().toLocaleDateString()}`;
+        ? `ARGO-V2.5 Pre-Market — ${closes.length} CLOSE, ${watches.length} WATCH | ${new Date().toLocaleDateString()}`
+        : `ARGO-V2.5 Pre-Market — All Clear | ${new Date().toLocaleDateString()}`;
 
       const rowColor = (rec) => rec === "CLOSE" ? "#cc0000" : rec === "WATCH" ? "#cc6600" : "#006600";
       const rows = assessments.map(a => `
@@ -9150,7 +9533,7 @@ async function premarketAssessment() {
       await sendResendEmail(subject, `
         <div style="font-family:Georgia,serif;background:#fff;color:#111;padding:24px;max-width:700px;border:1px solid #ccc">
           <div style="text-align:center;border-bottom:3px double #333;padding-bottom:12px;margin-bottom:16px">
-            <div style="font-size:20px;font-weight:bold;letter-spacing:1px">ARGO-V2.3 PRE-MARKET ASSESSMENT</div>
+            <div style="font-size:20px;font-weight:bold;letter-spacing:1px">ARGO-V2.5 PRE-MARKET ASSESSMENT</div>
             <div style="font-size:10px;color:#555;margin-top:4px;letter-spacing:1px">${new Date().toLocaleDateString('en-US',{weekday:'long',month:'long',day:'numeric'}).toUpperCase()} · 8:45AM ET</div>
           </div>
           <div style="display:flex;gap:0;border:1px solid #ccc;margin-bottom:16px">
@@ -9188,10 +9571,10 @@ async function premarketAssessment() {
           </table>
           <div style="border-top:1px solid #ccc;margin-top:12px;padding-top:8px;font-size:10px;color:#555">
             ${macro.triggers && macro.triggers.length ? '<strong>Macro signals:</strong> ' + macro.triggers.join(' · ') + '<br>' : ''}
-            <em>These are recommendations only. ARGO-V2.3 will manage exits automatically at open.</em>
+            <em>These are recommendations only. ARGO-V2.5 will manage exits automatically at open.</em>
           </div>
           <div style="border-top:3px double #333;margin-top:12px;padding-top:8px;text-align:center;font-size:9px;color:#999;letter-spacing:1px">
-            ARGO V2.3 · Market opens in ~45 minutes · Entry window 9:30am ET
+            ARGO V2.5 · Market opens in ~45 minutes · Entry window 9:30am ET
           </div>
         </div>`
       );
@@ -9353,8 +9736,8 @@ cron.schedule("*/15 12-21 * * 1-5", async () => {
   if (minsSinceLastScan > 15 && minsSinceLastScan < 999 && RESEND_API_KEY && GMAIL_USER) {
     logEvent("warn", `Health check: no scan in ${minsSinceLastScan.toFixed(0)} minutes - sending alert`);
     sendResendEmail(
-      "ARGO-V2.3 ALERT — Scanner may be down",
-      `<p>ARGO-V2.3 has not scanned in ${minsSinceLastScan.toFixed(0)} minutes during market hours.</p>
+      "ARGO-V2.5 ALERT — Scanner may be down",
+      `<p>ARGO-V2.5 has not scanned in ${minsSinceLastScan.toFixed(0)} minutes during market hours.</p>
              <p>Last scan: ${state.lastScan || "unknown"}</p>
              <p>Check Railway logs immediately.</p>`
     );
@@ -9384,7 +9767,7 @@ cron.schedule("0 13,14 * * 1", async () => {
   await saveStateNow();
   if (RESEND_API_KEY && GMAIL_USER) {
     sendResendEmail(
-      `ARGO-V2.3 Monthly Report - ${et.toLocaleDateString("en-US",{month:"long",year:"numeric"})}`,
+      `ARGO-V2.5 Monthly Report - ${et.toLocaleDateString("en-US",{month:"long",year:"numeric"})}`,
       `<pre style="font-family:monospace;background:#07101f;color:#cce8ff;padding:20px">${report}</pre>`
     );
   }
@@ -9400,6 +9783,10 @@ app.get("/api/state", async (req, res) => {
     heatPct:       parseFloat((heatPct()*100).toFixed(1)),
     heatCap:       parseFloat((effectiveHeatCap()*100).toFixed(0)),
     fillQuality:   state._fillQuality || { count: 0, totalSlippage: 0, misses: 0, avgSlippage: 0 },
+    alpacaCircuit: { open: _alpacaCircuitOpen, consecFails: _alpacaConsecFails },
+    avgScanIntervalMs: state._avgScanIntervalMs || 0,
+    portfolioBetaDelta: state._portfolioBetaDelta || 0,
+    accountPhase: getAccountPhase(),
     realizedPnL:   parseFloat(realizedPnL().toFixed(2)),
     totalCap:      totalCap(),
     stockValue:    parseFloat(stockValue().toFixed(2)),
@@ -9665,9 +10052,9 @@ app.post("/api/test-email", async (req, res) => {
       return res.json({ ok: true, message: `Morning briefing sent to ${GMAIL_USER}` });
     }
     await sendResendEmail(
-      `ARGO-V2.3 Email Test - ${new Date().toLocaleTimeString()}`,
+      `ARGO-V2.5 Email Test - ${new Date().toLocaleTimeString()}`,
       `<div style="font-family:monospace;background:#07101f;color:#00ff88;padding:20px;border-radius:8px">
-        <h2>✅ ARGO-V2.3 Email Working</h2>
+        <h2>✅ ARGO-V2.5 Email Working</h2>
         <p style="color:#cce8ff">If you received this, Resend is configured correctly.</p>
         <p style="color:#336688">Recipient: ${GMAIL_USER}</p>
         <p style="color:#336688">Sent at: ${new Date().toISOString()}</p>
@@ -10145,7 +10532,7 @@ process.on("unhandledRejection", (reason, promise) => {
 // Boot sequence - load state from Redis then start server
 initState().then(() => {
   app.listen(PORT, () => {
-    console.log(`ARGO V2.3 running on port ${PORT}`);
+    console.log(`ARGO V2.5 running on port ${PORT}`);
     console.log(`Alpaca key:  ${ALPACA_KEY?"SET":"NOT SET"}`);
     console.log(`Gmail:       ${GMAIL_USER||"NOT SET"}`);
     console.log(`Resend:      ${RESEND_API_KEY?"SET ✅":"NOT SET — email disabled"}`);
@@ -10158,4 +10545,326 @@ initState().then(() => {
     console.log(`Scan:        every 10 seconds, 9AM-4PM ET Mon-Fri (SPY/QQQ only)`);
     console.log(`Entry window: 9:30AM-3:45PM ET (SPY/QQQ spreads primary)`);
   });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// ARGO V2.5 — BACKTESTING ENGINE
+// Walk-forward simulation using Alpaca historical daily bars
+// Replays ARGO's scoring logic against historical data without real orders
+// QS-W2/GL-1: Addresses the out-of-sample validation gap identified by panel
+// ═══════════════════════════════════════════════════════════════════════════════
+
+async function fetchHistoricalBars(ticker, startDate, endDate) {
+  // Fetch a large window of daily bars between two dates
+  try {
+    const feeds = ["sip", "iex"];
+    for (const feed of feeds) {
+      const url  = `/stocks/${ticker}/bars?timeframe=1Day&start=${startDate}&end=${endDate}&limit=500&feed=${feed}`;
+      const data = await alpacaGet(url, ALPACA_DATA);
+      if (data && data.bars && data.bars.length > 5) return data.bars;
+    }
+    const last = await alpacaGet(`/stocks/${ticker}/bars?timeframe=1Day&start=${startDate}&end=${endDate}&limit=500`, ALPACA_DATA);
+    return last && last.bars ? last.bars : [];
+  } catch(e) { return []; }
+}
+
+function backtestScoreSignal(bars, idx, optionType) {
+  // Replay ARGO's scoring signals from a slice of historical bars
+  // Returns score + reasons using the same calcRSI/calcMACD/calcATR functions
+  if (idx < 26) return { score: 0, reasons: ["insufficient history"] };
+  const slice = bars.slice(0, idx + 1); // bars up to and including today
+  const rsi   = calcRSI(slice);
+  const macd  = calcMACD(slice);
+  const atrRaw = calcATR(slice, 14);
+  const price  = slice[slice.length - 1].c;
+  const atrPct = atrRaw ? atrRaw / price : 0.01;
+
+  let score   = 50; // base
+  const reasons = [];
+
+  // RSI signal
+  if (optionType === "put") {
+    if (rsi >= 70)       { score += 20; reasons.push(`RSI ${rsi.toFixed(0)} overbought (+20)`); }
+    else if (rsi >= 60)  { score += 10; reasons.push(`RSI ${rsi.toFixed(0)} elevated (+10)`); }
+    else if (rsi <= 35)  { return { score: 0, reasons: [`RSI ${rsi.toFixed(0)} oversold — HARD BLOCK`] }; }
+    else if (rsi <= 45)  { score -= 15; reasons.push(`RSI ${rsi.toFixed(0)} oversold for puts (-15)`); }
+    else                 { reasons.push(`RSI ${rsi.toFixed(0)} neutral`); }
+  } else {
+    if (rsi <= 35)       { score += 25; reasons.push(`RSI ${rsi.toFixed(0)} extreme oversold — MR call (+25)`); }
+    else if (rsi <= 45)  { score += 12; reasons.push(`RSI ${rsi.toFixed(0)} oversold dip (+12)`); }
+    else if (rsi >= 70)  { score -= 15; reasons.push(`RSI ${rsi.toFixed(0)} overbought for calls (-15)`); }
+    else                 { reasons.push(`RSI ${rsi.toFixed(0)} neutral`); }
+  }
+
+  // MACD signal
+  if (optionType === "put") {
+    if (macd.signal.includes("bearish crossover"))  { score += 15; reasons.push("MACD bearish crossover (+15)"); }
+    else if (macd.signal.includes("bearish"))       { score += 8;  reasons.push("MACD bearish (+8)"); }
+    else if (macd.signal.includes("bullish crossover")) { score -= 12; reasons.push("MACD bullish crossover (-12)"); }
+    else if (macd.signal.includes("bullish"))       { score -= 6;  reasons.push("MACD bullish (-6)"); }
+  } else {
+    if (macd.signal.includes("bullish crossover"))  { score += 15; reasons.push("MACD bullish crossover (+15)"); }
+    else if (macd.signal.includes("bullish"))       { score += 8;  reasons.push("MACD bullish (+8)"); }
+    else if (macd.signal.includes("bearish crossover")) { score -= 12; reasons.push("MACD bearish crossover (-12)"); }
+    else if (macd.signal.includes("bearish"))       { score -= 6;  reasons.push("MACD bearish (-6)"); }
+  }
+
+  // Momentum
+  const recent5  = (slice[slice.length-1].c - slice[slice.length-6].c) / slice[slice.length-6].c;
+  const recent20 = slice.length >= 21 ? (slice[slice.length-1].c - slice[slice.length-21].c) / slice[slice.length-21].c : 0;
+  if (optionType === "put") {
+    if (recent5 < -0.01 && recent20 < -0.02) { score += 15; reasons.push(`Weak momentum (${(recent5*100).toFixed(1)}% 5d) (+15)`); }
+    else if (recent5 > 0.01)                 { score -= 10; reasons.push(`Strong momentum — wrong for puts (-10)`); }
+  } else {
+    if (recent5 > 0.01 && recent20 > 0.02)   { score += 15; reasons.push(`Strong momentum (${(recent5*100).toFixed(1)}% 5d) (+15)`); }
+    else if (recent5 < -0.01)                { score -= 10; reasons.push(`Weak momentum — wrong for calls (-10)`); }
+  }
+
+  // ATR normalization — penalize chasing extended moves
+  const todayMove = Math.abs(slice[slice.length-1].c - slice[slice.length-2].c) / slice[slice.length-2].c;
+  if (atrPct > 0 && todayMove > atrPct * 2) {
+    score -= 10; reasons.push(`Move ${(todayMove*100).toFixed(1)}% > 2x ATR ${(atrPct*100).toFixed(1)}% — extended (-10)`);
+  }
+
+  return { score: Math.max(0, Math.min(100, score)), reasons };
+}
+
+function simulateOptionPnL(entryPrice, optionType, holdDays, outcome) {
+  // Simulate option P&L based on underlying price change
+  // Uses realistic delta-based approximation with theta decay
+  // outcome: { priceDelta (%), vixShift, daysToExpiry }
+  const { priceDelta, daysToExpiry = 21, vixShift = 0 } = outcome;
+
+  // Delta approximation: ATM delta ~0.50, shifts with price
+  const baseDelta  = optionType === "call" ? 0.45 : -0.45;
+  const deltaValue = baseDelta * priceDelta * entryPrice; // $ move in option
+
+  // Theta decay: daily theta ≈ premium / (2 * DTE) for ATM options
+  const dailyTheta = entryPrice / (2 * Math.max(daysToExpiry, 7));
+  const thetaLoss  = dailyTheta * holdDays;
+
+  // Vega shift: VIX up = calls hurt, puts benefit (simplified)
+  const vegaImpact = vixShift * entryPrice * 0.05 * (optionType === "call" ? -1 : 1);
+
+  const pnlPct = (deltaValue - thetaLoss + vegaImpact) / entryPrice;
+  return Math.max(-0.95, Math.min(2.0, pnlPct)); // cap at -95% to +200%
+}
+
+async function runBacktest(config) {
+  const {
+    ticker     = "SPY",
+    optionType = "put",
+    startDate,
+    endDate,
+    minScore   = 70,
+    holdDays   = 5,
+    takeProfitPct = 0.50,
+    stopLossPct   = 0.35,
+    capital    = 10000,
+  } = config;
+
+  logEvent("scan", `[BACKTEST] Starting: ${ticker} ${optionType} ${startDate}→${endDate} minScore:${minScore}`);
+
+  // Fetch historical bars
+  const bars = await fetchHistoricalBars(ticker, startDate, endDate);
+  if (bars.length < 30) {
+    return { error: `Insufficient data: only ${bars.length} bars fetched for ${ticker} ${startDate}→${endDate}` };
+  }
+
+  const trades    = [];
+  let cash        = capital;
+  let peakCash    = capital;
+  let maxDrawdown = 0;
+  const equityCurve = [{ date: bars[26]?.t?.split("T")[0] || startDate, value: capital }];
+
+  // Walk forward — skip first 26 bars (need for MACD)
+  for (let i = 26; i < bars.length - holdDays; i++) {
+    const bar      = bars[i];
+    const barDate  = bar.t?.split("T")[0] || `day-${i}`;
+    const price    = bar.c;
+
+    // Score this bar
+    const { score, reasons } = backtestScoreSignal(bars, i, optionType);
+    if (score < minScore) continue;
+
+    // Estimate option premium: ATM ~4% of underlying for 21 DTE at VIX 20-25
+    // Scale with recent vol — use ATR as vol proxy
+    const atr    = calcATR(bars.slice(Math.max(0, i-14), i+1), 14) || price * 0.01;
+    const vixEst = Math.min(50, Math.max(15, (atr / price) * 100 * 16)); // annualized vol estimate
+    const premiumPct = (vixEst / 100) * Math.sqrt(holdDays / 252) * 0.8; // simplified BSM
+    const entryPrem  = parseFloat((price * premiumPct).toFixed(2));
+    if (entryPrem < 0.30) continue; // too cheap to trade
+
+    const positionCost = entryPrem * 100; // 1 contract
+    if (positionCost > cash * 0.20) continue; // max 20% per position
+
+    // Simulate outcome over holdDays
+    const exitIdx    = Math.min(i + holdDays, bars.length - 1);
+    const exitBar    = bars[exitIdx];
+    const priceDelta = (exitBar.c - price) / price;
+    const vixShift   = 0; // simplified — no VIX history in this pass
+
+    // For puts: profit when price falls. For calls: profit when price rises.
+    const directedDelta = optionType === "put" ? -priceDelta : priceDelta;
+
+    // Check TP and stop hit during hold period
+    let pnlPct    = 0;
+    let exitReason = "hold_expired";
+    let actualDays = holdDays;
+
+    for (let d = 1; d <= holdDays && (i + d) < bars.length; d++) {
+      const dayBar   = bars[i + d];
+      const dayDelta = (dayBar.c - price) / price;
+      const dayDirected = optionType === "put" ? -dayDelta : dayDelta;
+      const estPnlPct  = simulateOptionPnL(entryPrem, optionType, d, { priceDelta: dayDirected * price, daysToExpiry: 21 });
+
+      if (estPnlPct >= takeProfitPct) {
+        pnlPct = takeProfitPct; exitReason = "take_profit"; actualDays = d; break;
+      }
+      if (estPnlPct <= -stopLossPct) {
+        pnlPct = -stopLossPct; exitReason = "stop_loss"; actualDays = d; break;
+      }
+      pnlPct = estPnlPct;
+    }
+
+    const pnlDollar = parseFloat((pnlPct * positionCost).toFixed(2));
+    cash = parseFloat((cash + pnlDollar).toFixed(2));
+
+    // Track drawdown
+    if (cash > peakCash) peakCash = cash;
+    const dd = (cash - peakCash) / peakCash;
+    if (dd < maxDrawdown) maxDrawdown = dd;
+
+    trades.push({
+      date:      barDate,
+      ticker,
+      optionType,
+      score,
+      entryPrice: price,
+      entryPrem:  entryPrem,
+      pnlPct:     parseFloat((pnlPct * 100).toFixed(1)),
+      pnlDollar,
+      exitReason,
+      holdDays:   actualDays,
+      cashAfter:  cash,
+      reasons:    reasons.slice(0, 3),
+    });
+
+    equityCurve.push({ date: bars[i + actualDays]?.t?.split("T")[0] || barDate, value: cash });
+
+    // Skip forward past this hold period to avoid overlapping positions
+    i += actualDays;
+  }
+
+  // Calculate statistics
+  const wins       = trades.filter(t => t.pnlDollar > 0);
+  const losses     = trades.filter(t => t.pnlDollar <= 0);
+  const winRate    = trades.length > 0 ? (wins.length / trades.length * 100) : 0;
+  const avgWin     = wins.length   ? wins.reduce((s,t)  => s + t.pnlDollar, 0) / wins.length   : 0;
+  const avgLoss    = losses.length ? losses.reduce((s,t) => s + t.pnlDollar, 0) / losses.length : 0;
+  const profitFactor = avgLoss !== 0 ? Math.abs(avgWin / avgLoss) : (avgWin > 0 ? 999 : 0);
+  const totalPnL   = trades.reduce((s,t) => s + t.pnlDollar, 0);
+  const totalReturn = (cash - capital) / capital * 100;
+
+  // Score bracket analysis — validates QS-W2
+  const brackets = { "90-100":{trades:0,wins:0}, "80-89":{trades:0,wins:0}, "70-79":{trades:0,wins:0} };
+  trades.forEach(t => {
+    const b = t.score >= 90 ? "90-100" : t.score >= 80 ? "80-89" : "70-79";
+    brackets[b].trades++;
+    if (t.pnlDollar > 0) brackets[b].wins++;
+  });
+  Object.keys(brackets).forEach(b => {
+    brackets[b].winRate = brackets[b].trades > 0 ? parseFloat((brackets[b].wins / brackets[b].trades * 100).toFixed(1)) : 0;
+  });
+
+  logEvent("scan", `[BACKTEST] Complete: ${trades.length} trades, ${winRate.toFixed(0)}% win rate, PF:${profitFactor.toFixed(2)}, return:${totalReturn.toFixed(1)}%`);
+
+  return {
+    config,
+    summary: {
+      ticker, optionType, startDate, endDate,
+      totalTrades:  trades.length,
+      wins:         wins.length,
+      losses:       losses.length,
+      winRate:      parseFloat(winRate.toFixed(1)),
+      avgWin:       parseFloat(avgWin.toFixed(2)),
+      avgLoss:      parseFloat(avgLoss.toFixed(2)),
+      profitFactor: parseFloat(profitFactor.toFixed(2)),
+      totalPnL:     parseFloat(totalPnL.toFixed(2)),
+      totalReturn:  parseFloat(totalReturn.toFixed(1)),
+      maxDrawdown:  parseFloat((maxDrawdown * 100).toFixed(1)),
+      finalCash:    parseFloat(cash.toFixed(2)),
+      barsAnalyzed: bars.length,
+    },
+    scoreBrackets: brackets,
+    equityCurve,
+    trades: trades.slice(-50), // last 50 trades for display
+  };
+}
+
+// ── Backtest API endpoint ─────────────────────────────────────────────────────
+app.post("/api/backtest", async (req, res) => {
+  try {
+    const {
+      ticker     = "SPY",
+      optionType = "put",
+      startDate,
+      endDate,
+      minScore   = 70,
+      holdDays   = 5,
+      takeProfitPct = 0.50,
+      stopLossPct   = 0.35,
+      capital    = 10000,
+    } = req.body || {};
+
+    if (!startDate || !endDate) {
+      return res.status(400).json({ error: "startDate and endDate required (YYYY-MM-DD)" });
+    }
+
+    // Validate date range
+    const start = new Date(startDate);
+    const end   = new Date(endDate);
+    const daysDiff = (end - start) / (1000 * 60 * 60 * 24);
+    if (daysDiff < 30)  return res.status(400).json({ error: "Date range must be at least 30 days" });
+    if (daysDiff > 730) return res.status(400).json({ error: "Date range cannot exceed 2 years" });
+
+    const result = await runBacktest({
+      ticker, optionType, startDate, endDate,
+      minScore: parseInt(minScore),
+      holdDays: parseInt(holdDays),
+      takeProfitPct: parseFloat(takeProfitPct),
+      stopLossPct:   parseFloat(stopLossPct),
+      capital:       parseFloat(capital),
+    });
+
+    res.json(result);
+  } catch(e) {
+    logEvent("error", `[BACKTEST] Error: ${e.message}`);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ── Stress test endpoint — predefined historical scenarios ────────────────────
+app.post("/api/backtest/stress", async (req, res) => {
+  try {
+    const { ticker = "SPY", optionType = "put", capital = 10000 } = req.body || {};
+    const scenarios = [
+      { name: "COVID Crash (Feb-Apr 2020)", startDate: "2020-01-15", endDate: "2020-04-30" },
+      { name: "Rate Hike Selloff (2022)",   startDate: "2022-01-03", endDate: "2022-10-15" },
+      { name: "SVB Crisis (Mar 2023)",       startDate: "2023-02-01", endDate: "2023-04-30" },
+      { name: "Aug 2024 Vol Spike",          startDate: "2024-07-01", endDate: "2024-09-30" },
+      { name: "Tariff Sell-off (Mar 2025)",  startDate: "2025-02-01", endDate: "2025-04-01" },
+    ];
+
+    const results = [];
+    for (const s of scenarios) {
+      const r = await runBacktest({ ticker, optionType, capital, minScore: 70, holdDays: 5, takeProfitPct: 0.50, stopLossPct: 0.35, ...s });
+      results.push({ scenario: s.name, ...r.summary });
+    }
+
+    res.json({ ticker, optionType, stressTests: results });
+  } catch(e) {
+    logEvent("error", `[BACKTEST/STRESS] Error: ${e.message}`);
+    res.status(500).json({ error: e.message });
+  }
 });
