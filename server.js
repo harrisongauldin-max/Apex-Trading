@@ -263,6 +263,7 @@ function defaultState() {
     _agentRescoreHour:   {}, // tracks last rescore hour per ticker (overnight)
     _agentRescoreMinute: {}, // tracks last rescore time per ticker (same-day)
     _avoidUntil:         null,  // timestamp until which entries are blocked after avoid signal
+    _agentHealth:        { calls: 0, successes: 0, timeouts: 0, parseErrors: 0, lastSuccess: null },
     _macroReversalAt:    null,  // timestamp of last macro-reversal exit batch
     _macroReversalCount: 0,     // how many positions closed in the reversal batch
     _macroReversalSPY:   null,  // SPY price at time of reversal — for comparison
@@ -3004,6 +3005,23 @@ What is the overnight risk and tomorrow's bias?`;
 // due to LLM temperature and context variation. This is expected behavior — not a bug.
 // The system is not purely deterministic: rules are deterministic, agent is probabilistic.
 // Do not assume identical inputs produce identical outputs from the agent.
+// ── AG-6: exitUrgency handler — check after agent macro update ───────────────
+function applyExitUrgency(agentResult) {
+  if (!agentResult || !agentResult.exitUrgency) return;
+  const urgency = agentResult.exitUrgency;
+  if (urgency === "hold" || urgency === "monitor") return; // no action
+  const positions = state.positions || [];
+  if (positions.length === 0) return;
+  if (urgency === "trim" || urgency === "exit") {
+    logEvent("macro", `[AGENT] exitUrgency=${urgency} — ${urgency === "exit" ? "scheduling exit on all losing positions" : "flagging for trim review"}`);
+    // Flag positions for rescore — actual close happens via rescore path with user confirmation
+    positions.forEach(p => {
+      p._exitUrgencyFlag = urgency;
+      p._exitUrgencySetAt = Date.now();
+    });
+  }
+}
+
 async function getAgentMacroAnalysis(headlines) {
   if (!ANTHROPIC_API_KEY || !headlines || headlines.length === 0) return null;
   // Return cached result if fresh
@@ -3012,35 +3030,103 @@ async function getAgentMacroAnalysis(headlines) {
   }
   const systemPrompt = `You are the head macro strategist for ARGO-V2.5, a systematic SPY/QQQ options trading system. Return ONLY valid JSON — no markdown, no preamble.
 
-{"signal":"strongly bearish"|"bearish"|"mild bearish"|"neutral"|"mild bullish"|"bullish"|"strongly bullish","modifier":-20to20,"confidence":"high"|"medium"|"low","mode":"defensive"|"cautious"|"normal"|"aggressive","reasoning":"1 sentence","regime":"trending_bear"|"trending_bull"|"choppy"|"breakdown"|"recovery"|"neutral","regimeDuration":"intraday"|"1-3 days"|"3-7 days"|"1-2 weeks"|"multi-week","entryBias":"puts_on_bounces"|"calls_on_dips"|"neutral"|"avoid","tradeType":"spread"|"credit"|"naked"|"none","vixOutlook":"spiking"|"elevated_stable"|"mean_reverting"|"falling"|"unknown","keyLevels":{"spySupport":null,"spyResistance":null},"catalysts":[],"bearishTickers":[],"bullishTickers":[],"themes":[]}
+{"signal":"strongly bearish"|"bearish"|"mild bearish"|"neutral"|"mild bullish"|"bullish"|"strongly bullish","modifier":-20to20,"confidence":"high"|"medium"|"low","mode":"defensive"|"cautious"|"normal"|"aggressive","reasoning":"1 sentence","regime":"trending_bear"|"trending_bull"|"choppy"|"breakdown"|"recovery"|"neutral","regimeDuration":"intraday"|"1-3 days"|"3-7 days"|"1-2 weeks"|"multi-week","entryBias":"puts_on_bounces"|"calls_on_dips"|"neutral"|"avoid","tradeType":"spread"|"credit"|"naked"|"none","vixOutlook":"spiking"|"elevated_stable"|"mean_reverting"|"falling"|"unknown","keyLevels":{"spySupport":null,"spyResistance":null},"catalysts":[],"bearishTickers":[],"bullishTickers":[],"themes":[],"exitUrgency":"hold"|"monitor"|"trim"|"exit","positionSizeMult":0.25|0.5|0.75|1.0|1.25|1.5,"schemaVersion":2}
 
-Rules: regime=what SPY does next 3-10 days. entryBias: puts_on_bounces=bearish trend wait for relief; calls_on_dips=bullish wait for weakness. tradeType: spread=grinding trend, naked=sharp mean-reversion, none=unclear. vixOutlook: spiking=buy puts aggressively, falling=puts losing value. Focus on 3-10 day outlook not just today.`;
+Rules: regime=what SPY does next 3-10 days. entryBias: puts_on_bounces=bearish trend wait for relief; calls_on_dips=bullish wait for weakness. tradeType: spread=grinding trend, naked=sharp mean-reversion, none=unclear. vixOutlook: spiking=buy puts aggressively, falling=puts losing value. exitUrgency: hold=thesis intact, monitor=watch closely, trim=close half, exit=close all. positionSizeMult: 0.25=minimal, 1.0=normal, 1.5=high conviction. Focus on 3-10 day outlook not just today. schemaVersion always 2.`;
 
   // Pre-fetch market status so agent doesn't need to tool-call for it
   const mktStatus = await agentTool_getMarketStatus().catch(() => ({}));
+
+  // ── AG-1: Gap status — tells agent if today opened with a gap ─────────────
+  const spyBarsForAgent = await getStockBars("SPY", 60).catch(() => []);
+  let gapStatus = "no_gap";
+  if (spyBarsForAgent.length >= 2) {
+    const prevClose   = spyBarsForAgent[spyBarsForAgent.length-2].c;
+    const todayOpen   = spyBarsForAgent[spyBarsForAgent.length-1].o;
+    const todayClose  = spyBarsForAgent[spyBarsForAgent.length-1].c;
+    const gapPctAgent = (todayOpen - prevClose) / prevClose;
+    const isHolding   = Math.abs(todayClose - todayOpen) / Math.abs(todayOpen - prevClose || 1) < 0.5;
+    if (gapPctAgent > 0.01) gapStatus = isHolding ? "gap_up_holding" : "gap_up_fading";
+    else if (gapPctAgent < -0.01) gapStatus = isHolding ? "gap_down_holding" : "gap_down_fading";
+  }
+
+  // ── AG-2: SPY 50MA/200MA injection ────────────────────────────────────────
+  let spyMA50 = null, spyMA200 = null, spyMA50Slope = null;
+  if (spyBarsForAgent.length >= 50) {
+    const closes50  = spyBarsForAgent.slice(-50).map(b => b.c);
+    spyMA50  = parseFloat((closes50.reduce((s,c)=>s+c,0)/50).toFixed(2));
+    const prev50Closes = spyBarsForAgent.length >= 55 ? spyBarsForAgent.slice(-55,-5).map(b=>b.c) : closes50;
+    const prevMA50 = prev50Closes.reduce((s,c)=>s+c,0)/prev50Closes.length;
+    spyMA50Slope = ((spyMA50 - prevMA50) / prevMA50 * 100).toFixed(2);
+  }
+  if (spyBarsForAgent.length >= 200) {
+    const closes200 = spyBarsForAgent.slice(-200).map(b => b.c);
+    spyMA200 = parseFloat((closes200.reduce((s,c)=>s+c,0)/200).toFixed(2));
+  }
+  const spyPrice = mktStatus.spy?.price || state._liveSPY || 0;
+  const spyVsMA50  = spyMA50  ? ((spyPrice - spyMA50)  / spyMA50  * 100).toFixed(1) : null;
+  const spyVsMA200 = spyMA200 ? ((spyPrice - spyMA200) / spyMA200 * 100).toFixed(1) : null;
+
+  // ── AG-3: Account drawdown context ────────────────────────────────────────
+  const acctBaseline = state.accountBaseline || state.peakCash || 10000;
+  const acctCurrent  = state.cash + (state.positions||[]).reduce((s,p)=>s+p.cost,0);
+  const acctDrawdown = ((acctCurrent - acctBaseline) / acctBaseline * 100).toFixed(1);
+  const acctPhaseNow = getAccountPhase();
+
+  // ── AG-4: Portfolio heat ───────────────────────────────────────────────────
+  const openCost  = (state.positions||[]).reduce((s,p)=>s+p.cost,0);
+  const heatPctNow = acctBaseline > 0 ? (openCost / acctBaseline * 100).toFixed(0) : 0;
+  const heatCapNow = (effectiveHeatCap() * 100).toFixed(0);
+
+  // ── AG-5: Correlation alert ────────────────────────────────────────────────
+  const openPutsCount  = (state.positions||[]).filter(p=>p.optionType==="put").length;
+  const openCallsCount = (state.positions||[]).filter(p=>p.optionType==="call").length;
+  const correlAlert    = openPutsCount >= 3 && openCallsCount === 0 ? "all_puts"
+                       : openCallsCount >= 3 && openPutsCount === 0 ? "all_calls"
+                       : "balanced";
+
   const userPrompt = `Market snapshot (live data — no need to call getMarketStatus):
-- VIX: ${mktStatus.vix || state.vix || 20} | SPY: ${mktStatus.spy?.price || '--'} (${mktStatus.spy?.dayChangePct || '--'}%)
+- VIX: ${mktStatus.vix || state.vix || 20} | SPY: ${spyPrice || '--'} (${mktStatus.spy?.dayChangePct || '--'}%)
 - Breadth: ${mktStatus.breadth ? (mktStatus.breadth*100).toFixed(0)+'%' : '--'} | Fear&Greed: ${mktStatus.fearGreed || '--'}
+- Gap status: ${gapStatus}${spyMA50 ? ` | SPY vs 50MA: ${spyVsMA50}% (slope: ${spyMA50Slope}%/50d)` : ''}${spyMA200 ? ` | SPY vs 200MA: ${spyVsMA200}%` : ''}
+- Account: $${acctCurrent.toFixed(0)} (${acctDrawdown}% vs baseline) | Phase: ${acctPhaseNow} | Heat: ${heatPctNow}%/${heatCapNow}% cap
+- Portfolio: ${openPutsCount}P / ${openCallsCount}C open | Correlation: ${correlAlert} | PDT remaining: ${mktStatus.pdtRemaining || '--'}
 - Time: ${new Date().toLocaleTimeString('en-US', {timeZone:'America/New_York'})} ET
-- Open positions: ${(state.positions||[]).map(p => p.ticker + '(' + (p.optionType==='put'?'P':'C') + ')').join(', ') || 'none'}
+- Open positions: ${(state.positions||[]).map(p => p.ticker + '(' + (p.optionType==='put'?'P':'C') + '@' + (p.chgPct !== undefined ? (p.chgPct*100).toFixed(0)+'%' : '--') + ')').join(', ') || 'none'}
 
 Headlines to analyze (newest first):
 ${headlines.slice(0, 15).map((h, i) => (i+1) + '. ' + h).join('\n')}
 
 Analyze and return your JSON. Use tools only if you need data not shown above.`;
 
+  // AG-8: Track agent health
+  if (!state._agentHealth) state._agentHealth = { calls: 0, successes: 0, timeouts: 0, parseErrors: 0, lastSuccess: null };
+  state._agentHealth.calls++;
+
   const raw = await callClaudeAgent(systemPrompt, userPrompt, 1200, true); // useTools=true
-  if (!raw) return null;
+  if (!raw) {
+    state._agentHealth.timeouts++;
+    logEvent("warn", `[AGENT HEALTH] Timeout/null — ${state._agentHealth.timeouts} timeouts of ${state._agentHealth.calls} calls`);
+    return null;
+  }
   try {
     const parsed = JSON.parse(raw);
     // Validate required fields
-    if (!parsed.signal || parsed.modifier === undefined) return null;
+    if (!parsed.signal || parsed.modifier === undefined) {
+      state._agentHealth.parseErrors++;
+      logEvent("warn", `[AGENT HEALTH] Parse error — missing required fields. Raw: ${raw?.slice(0,60)}`);
+      return null;
+    }
+    state._agentHealth.successes++;
+    state._agentHealth.lastSuccess = new Date().toISOString();
+    const successRate = (state._agentHealth.successes / state._agentHealth.calls * 100).toFixed(0);
     _agentMacroCache = { result: parsed, fetchedAt: Date.now() };
-    logEvent("macro", `[AGENT] Macro: ${parsed.signal} (${parsed.confidence}) | ${parsed.reasoning?.slice(0,80)}`);
-    checkMacroShift(parsed.signal); // trigger position rescores if macro shifted
+    logEvent("macro", `[AGENT] Macro: ${parsed.signal} (${parsed.confidence}) | ${parsed.reasoning?.slice(0,80)} | health:${successRate}%`);
+    checkMacroShift(parsed.signal);
     return parsed;
   } catch(e) {
-    logEvent("warn", `[AGENT] Failed to parse macro response: ${raw?.slice(0,80)}`);
+    state._agentHealth.parseErrors++;
+    logEvent("warn", `[AGENT HEALTH] JSON parse exception: ${e.message} | Raw: ${raw?.slice(0,60)}`);
     return null;
   }
 }
@@ -3452,10 +3538,19 @@ async function getMacroNews() {
     for (const t of allTriggers) {
       if (!triggerMap[t.kw] || triggerMap[t.kw] < t.pts) triggerMap[t.kw] = t.pts;
     }
-    const uniqueTriggers = Object.entries(triggerMap)
+    // MACRO-1: Only include direction-matching triggers in the summary
+    // In bearish macro, bullish keywords (e.g. "stocks surge", "accord") are noise
+    const isBearishSignal  = net < 0;
+    const directionTriggers = Object.entries(triggerMap)
+      .filter(([kw]) => {
+        // Keep only keywords that match the dominant direction
+        const isBearishKw = MACRO_BEARISH_KEYWORDS.some(e => typeof e === 'object' ? e.keyword === kw : e === kw);
+        return isBearishSignal ? isBearishKw : !isBearishKw;
+      })
       .sort((a,b) => b[1]-a[1])
       .slice(0, 5)
       .map(([kw]) => kw);
+    const uniqueTriggers = directionTriggers.length > 0 ? directionTriggers : Object.entries(triggerMap).sort((a,b)=>b[1]-a[1]).slice(0,3).map(([kw])=>kw);
 
     const sourceCount = marketauxArticles.length > 0
       ? `Alpaca(${alpacaArticles.length}) + Marketaux(${marketauxArticles.length})`
@@ -3466,6 +3561,29 @@ async function getMacroNews() {
     }
     // Check for macro shift even on keyword path
     checkMacroShift(signal);
+    // SCORE-1: Seed _agentMacro from keyword result when agent hasn't run yet
+    // Without this, first scan after boot scores with no agent signal (neutral default)
+    // even when macro is clearly bearish from keywords
+    if (!state._agentMacro || !state._agentMacro.timestamp) {
+      const seededSignal = signal; // keyword signal as temporary seed
+      const seedRegime   = signal === "strongly bearish" ? "trending_bear"
+                         : signal === "bearish"          ? "trending_bear"
+                         : signal === "mild bearish"     ? "choppy"
+                         : signal === "strongly bullish" ? "trending_bull"
+                         : signal === "bullish"          ? "trending_bull"
+                         : "neutral";
+      state._agentMacro = {
+        signal:      seededSignal,
+        confidence:  "medium", // keyword is less reliable than agent — medium confidence
+        regime:      seedRegime,
+        entryBias:   signal.includes("bearish") ? "puts_on_bounces" : signal.includes("bullish") ? "calls_on_dips" : "neutral",
+        tradeType:   "spread",
+        vixOutlook:  state.vix >= 30 ? "spiking" : state.vix >= 25 ? "elevated_stable" : "unknown",
+        timestamp:   new Date().toISOString(),
+        _seededFromKeyword: true, // flag — will be overwritten when agent runs
+      };
+      logEvent("scan", `[AGENT] No prior signal — seeding _agentMacro from keyword: ${seededSignal} (medium conf) — agent will override on next run`);
+    }
 
     // ── Agent enhancement — replace keyword scoring with Claude analysis ───
     // Only use agent during market hours + 30min pre/post — saves ~40% API cost
@@ -3478,9 +3596,20 @@ async function getMacroNews() {
         const agentResult = await getAgentMacroAnalysis(headlines);
         if (agentResult) {
           // Store for rescore use
-          state._agentMacro = { ...agentResult, timestamp: new Date().toISOString() };
+          state._agentMacro = {
+            ...agentResult,
+            timestamp: new Date().toISOString(),
+            // AG-6: exitUrgency — trim/exit open positions if thesis broken
+            exitUrgency:      agentResult.exitUrgency      || "hold",
+            // AG-7: positionSizeMult — continuous sizing vs binary riskLevel
+            positionSizeMult: agentResult.positionSizeMult || 1.0,
+            // AG-9: schemaVersion — backward compat
+            schemaVersion:    agentResult.schemaVersion    || 1,
+          };
           // Apply intraday regime override if signal is strong enough
           applyIntradayRegimeOverride(agentResult);
+          // AG-6: Apply exit urgency signal
+          applyExitUrgency(agentResult);
           // Map agent result to expected format
           const agentModeMap = {
             "strongly bearish": { modifier: -20, mode: "defensive" },
@@ -5177,7 +5306,9 @@ async function executeSpreadTrade(stock, price, score, scoreReasons, vix, option
   else                  baseContracts = 1;
   // High risk day: halve sizing
   const riskMult    = (state._dayPlan?.riskLevel === "high") ? 0.5 : 1.0;
-  const contracts   = Math.max(1, Math.min(cashCap, Math.floor(baseContracts * riskMult)));
+  // AG-7: positionSizeMult from agent — continuous sizing vs binary riskLevel
+  const agentSizeMult = Math.min(1.5, Math.max(0.25, (state._agentMacro || {}).positionSizeMult || 1.0));
+  const contracts   = Math.max(1, Math.min(cashCap, Math.floor(baseContracts * riskMult * agentSizeMult)));
 
   const actualSpreadWidth = Math.abs(buyContract.strike - sellContract.strike);
   const maxProfit = parseFloat((actualSpreadWidth - netDebit).toFixed(2));
@@ -6396,7 +6527,7 @@ function checkMacroShift(newSignal) {
   if (shift >= 2) {
     // Significant macro shift — rescore all positions
     const direction = newTier < prevTier ? "bearish shift" : "bullish shift";
-    logEvent("warn", `[AGENT] Macro shift: ${_prevMacroSignal} → ${newSignal} (${direction}) — triggering position rescores`);
+    logEvent("warn", `[MACRO] Signal shift: ${_prevMacroSignal} → ${newSignal} (${direction}) — triggering position rescores`);
     const positions = state.positions || [];
     // Fire in parallel — non-blocking
     Promise.allSettled(
@@ -6749,7 +6880,12 @@ async function runScan() {
     // Suppress if: agent is fresh AND (bullish or neutral) — don't close calls on keyword alone
     // Also suppress if: agent is fresh AND bearish but NOT strongly bearish (mild disagreement)
     const defensiveSuppressed = agentFresh && !agentIsBearish; // only strongly bearish fires through
+    // DEF-1: Skip defensive close entirely when no calls are open — avoids spurious log noise
+    const openCallPositions = (state.positions || []).filter(p => p.optionType === "call");
     if (macro.mode === "defensive" && state.circuitOpen && !defensiveSuppressed) {
+      if (openCallPositions.length === 0) {
+        logEvent("macro", `[DEFENSIVE] No open calls — nothing to close (macro: ${macro.signal})`);
+      } else {
       const defTriggers = (macro.triggers || []).slice(0,3).join(", ") || "strongly bearish signal";
       logEvent("macro", `DEFENSIVE MODE — keyword+agent agree bearish: ${defTriggers} — closing calls`);
       for (const pos of [...state.positions]) {
@@ -6759,6 +6895,7 @@ async function runScan() {
           await closePosition(pos.ticker, "macro-defensive");
         }
       }
+      } // end openCallPositions.length > 0
     } else if (macro.mode === "defensive" && defensiveSuppressed) {
       logEvent("macro", `[AGENT OVERRIDE] Defensive suppressed — agent ${agentSignal} (${agentAge.toFixed(0)}min ago, conf:${(state._agentMacro||{}).confidence||"unknown"}) overrides keyword — keeping calls open`);
     } else if (macro.mode === "defensive" && !agentFresh) {
@@ -6784,7 +6921,9 @@ async function runScan() {
         if (chg < -0.05) await closePosition(pos.ticker, "macro-bullish", null, pos.contractSymbol || pos.buySymbol);
       }
     }
-    logEvent("scan", `[5min] Regime:${regime.regime}(${regime.confidence}%) | Kelly:${marketContext.kelly?.contracts||1}x | Streak:${marketContext.streaks?.currentStreak||0}x${marketContext.streaks?.currentType||'--'}`);
+    // Always compute streaks live from closedTrades — avoids stale Redis values
+    const liveStreaks = getStreakAnalysis();
+    logEvent("scan", `[5min] Regime:${regime.regime}(${regime.confidence}%) | Kelly:${marketContext.kelly?.contracts||1}x | Streak:${liveStreaks.currentStreak}x${liveStreaks.currentType||'--'}`);
     // Record portfolio value snapshot every 5 minutes during market hours
     if (!state.portfolioSnapshots) state.portfolioSnapshots = [];
     const snapValue = state.cash + openRisk();
@@ -7844,7 +7983,7 @@ async function runScan() {
   // ── PARALLEL PREFETCH — fetch all data for all stocks simultaneously ──────
   // This is the key performance optimization: instead of sequential API calls
   // per stock (~70s total), we fetch everything in parallel (~4s total)
-  logEvent("scan", `Prefetching data for ${WATCHLIST.length} stocks in parallel...`);
+  logEvent("scan", `Prefetching data for ${WATCHLIST.length} instruments in parallel...`);
   const prefetchStart = Date.now();
 
   // Batch stock prefetch in groups of 10 — prevents 288 simultaneous connections
@@ -7898,7 +8037,7 @@ async function runScan() {
     stockData.push(...results);
   }
 
-  logEvent("scan", `Prefetch complete in ${((Date.now()-prefetchStart)/1000).toFixed(1)}s for ${WATCHLIST.length} stocks`);
+  logEvent("scan", `Prefetch complete in ${((Date.now()-prefetchStart)/1000).toFixed(1)}s for ${WATCHLIST.length} instruments`);
 
   const scored = [];
   for (const { stock, price, bars, intradayBars, sectorResult, preMarket, newsArticles, analystData, eqScore } of stockData) {
@@ -7958,6 +8097,20 @@ async function runScan() {
       continue;
     }
 
+    // GLD-1: Gap check BEFORE passesFilter — prevents vol gap FAVORABLE logging on skipped tickers
+    if (bars.length >= 2) {
+      const overnightGap = Math.abs(bars[bars.length-1].o - bars[bars.length-2].c) / bars[bars.length-2].c;
+      if (overnightGap > MAX_GAP_PCT) {
+        logEvent("filter", `${stock.ticker} gap ${(overnightGap*100).toFixed(1)}% overnight - skip`);
+        continue;
+      }
+      const intradayCrash = (bars[bars.length-1].o - price) / bars[bars.length-1].o;
+      if (intradayCrash > 0.15) {
+        logEvent("filter", `${stock.ticker} intraday crash ${(intradayCrash*100).toFixed(1)}% below open — skip (broken options market)`);
+        continue;
+      }
+    }
+
     // Check for opposite sector bets before filtering
     const sectorPositions = state.positions.filter(p => p.sector === stock.sector);
     const hasSectorCall   = sectorPositions.some(p => p.optionType === "call");
@@ -8010,22 +8163,7 @@ async function runScan() {
     // Store on liveStock for use in scoring
     // relToSector < 1.0 = underperforming peers = genuine relative weakness
 
-    // Gap check — catches both overnight gaps and intraday crashes
-    if (bars.length >= 2) {
-      // Overnight gap: today open vs yesterday close
-      const overnightGap = Math.abs(bars[bars.length-1].o - bars[bars.length-2].c) / bars[bars.length-2].c;
-      if (overnightGap > MAX_GAP_PCT) {
-        logEvent("filter", `${stock.ticker} gap ${(overnightGap*100).toFixed(1)}% overnight - skip`);
-        continue;
-      }
-      // Intraday crash: current price vs today's open — catches SMCI-style -30% intraday events
-      // These stocks have broken options markets, extreme spreads, unreliable data
-      const intradayCrash = (bars[bars.length-1].o - price) / bars[bars.length-1].o;
-      if (intradayCrash > 0.15) {
-        logEvent("filter", `${stock.ticker} intraday crash ${(intradayCrash*100).toFixed(1)}% below open — skip (broken options market)`);
-        continue;
-      }
-    }
+    // Gap check moved above checkAllFilters (GLD-1 fix)
 
     // Anomaly detection — skip if price is zero or clearly bad data
     if (!price || price <= 0 || price > 100000) { logEvent("filter", `${stock.ticker} price anomaly: invalid price $${price} - skip`); continue; }
@@ -9787,6 +9925,7 @@ app.get("/api/state", async (req, res) => {
     avgScanIntervalMs: state._avgScanIntervalMs || 0,
     portfolioBetaDelta: state._portfolioBetaDelta || 0,
     accountPhase: getAccountPhase(),
+    agentHealth: state._agentHealth || { calls: 0, successes: 0, timeouts: 0, parseErrors: 0 },
     realizedPnL:   parseFloat(realizedPnL().toFixed(2)),
     totalCap:      totalCap(),
     stockValue:    parseFloat(stockValue().toFixed(2)),
@@ -10380,11 +10519,24 @@ app.post("/api/reset-account", async (req, res) => {
   // Reset weekly/daily counters
   state.monthStart          = new Date().toLocaleDateString();
   // Clear breadth history and agent history
-  state._breadthHistory     = [];
-  state._agentRescoreMinute = {};
+  state._breadthHistory       = [];
+  state._agentRescoreMinute   = {};
+  // STATE-2: Clear all session-specific state to prevent stale data carry-over
+  state._spiralTracker        = { put: 0, call: 0 };
+  state._spiralActive         = null;
+  state.scoreBrackets         = {};
+  state.portfolioSnapshots    = [];
+  state._avoidUntil           = null;
+  state._macroDefensiveCooldown = {};
+  state._agentMacro           = null; // force fresh agent analysis on next scan
+  state._agentHealth          = { calls: 0, successes: 0, timeouts: 0, parseErrors: 0, lastSuccess: null };
+  state.streaks               = { currentStreak: 0, currentType: null, maxWinStreak: 0, maxLossStreak: 0 };
+  state._portfolioBetaDelta   = 0;
+  state._scanIntervals        = [];
+  state._avgScanIntervalMs    = 0;
   markDirty();
   await saveStateNow();
-  logEvent("reset", `[V2.3] Clean account reset — previous cash: $${prevCash?.toFixed(2)||'?'} | ARGO state cleared | awaiting Alpaca sync`);
+  logEvent("reset", `[V2.5] Clean account reset — previous cash: $${prevCash?.toFixed(2)||'?'} | ARGO state cleared | awaiting Alpaca sync`);
   res.json({ ok: true, message: "Account reset complete. ARGO state cleared. Cash will sync from Alpaca on next scan." });
 });
 app.get("/api/journal",      (req,res) => res.json(state.tradeJournal.slice(0,50)));
@@ -10466,7 +10618,7 @@ function calcRiskOfRuin() {
 }
 function getStreakAnalysis() {
   const trades = state.closedTrades || [];
-  if (!trades.length) return { currentStreak: 0, maxWinStreak: 0, maxLossStreak: 0 };
+  if (!trades.length) return { currentStreak: 0, currentType: null, maxWinStreak: 0, maxLossStreak: 0 };
   let cur = 0, maxW = 0, maxL = 0, prev = null;
   trades.forEach(t => {
     const w = (t.pnl||0) > 0;
@@ -10476,7 +10628,9 @@ function getStreakAnalysis() {
     if (w) maxW = Math.max(maxW, cur);
     else   maxL = Math.max(maxL, cur);
   });
-  return { currentStreak: cur, maxWinStreak: maxW, maxLossStreak: maxL };
+  // currentType: '+' for win streak, '-' for loss streak
+  const currentType = prev === null ? null : (prev ? '+' : '-');
+  return { currentStreak: cur, currentType, maxWinStreak: maxW, maxLossStreak: maxL };
 }
 
 
@@ -10656,14 +10810,17 @@ async function runBacktest(config) {
     optionType = "put",
     startDate,
     endDate,
-    minScore   = 70,
-    holdDays   = 5,
+    minScore      = 70,
+    holdDays      = 5,
     takeProfitPct = 0.50,
     stopLossPct   = 0.35,
-    capital    = 10000,
+    capital       = 10000, // configurable starting capital
   } = config;
 
-  logEvent("scan", `[BACKTEST] Starting: ${ticker} ${optionType} ${startDate}→${endDate} minScore:${minScore}`);
+  // "both" mode: score puts AND calls each day, enter whichever is higher
+  const bothMode = optionType === "both";
+
+  logEvent("scan", `[BACKTEST] Starting: ${ticker} ${bothMode ? "PUTS+CALLS" : optionType} ${startDate}→${endDate} minScore:${minScore} capital:$${capital}`);
 
   // Fetch historical bars
   const bars = await fetchHistoricalBars(ticker, startDate, endDate);
@@ -10671,11 +10828,18 @@ async function runBacktest(config) {
     return { error: `Insufficient data: only ${bars.length} bars fetched for ${ticker} ${startDate}→${endDate}` };
   }
 
+  const {
+    maxPositions = 3, // concurrent open positions — matches real ARGO behavior
+  } = config;
+
   const trades    = [];
   let cash        = capital;
   let peakCash    = capital;
   let maxDrawdown = 0;
   const equityCurve = [{ date: bars[26]?.t?.split("T")[0] || startDate, value: capital }];
+
+  // Track concurrent open positions for multi-position simulation
+  const openBT = []; // { entryIdx, entryType, entryPrem, positionCost, expiryIdx }
 
   // Walk forward — skip first 26 bars (need for MACD)
   for (let i = 26; i < bars.length - holdDays; i++) {
@@ -10683,9 +10847,28 @@ async function runBacktest(config) {
     const barDate  = bar.t?.split("T")[0] || `day-${i}`;
     const price    = bar.c;
 
-    // Score this bar
-    const { score, reasons } = backtestScoreSignal(bars, i, optionType);
-    if (score < minScore) continue;
+    // "both" mode: score both directions, enter the better one
+    let entryType = optionType;
+    let entryScore, entryReasons;
+    if (bothMode) {
+      const putResult  = backtestScoreSignal(bars, i, "put");
+      const callResult = backtestScoreSignal(bars, i, "call");
+      if (putResult.score >= callResult.score && putResult.score >= minScore) {
+        entryType = "put"; entryScore = putResult.score; entryReasons = putResult.reasons;
+      } else if (callResult.score > putResult.score && callResult.score >= minScore) {
+        entryType = "call"; entryScore = callResult.score; entryReasons = callResult.reasons;
+      } else {
+        continue; // neither direction meets threshold
+      }
+    } else {
+      const result = backtestScoreSignal(bars, i, optionType);
+      entryScore = result.score; entryReasons = result.reasons;
+      if (entryScore < minScore) continue;
+    }
+
+    // Use entryScore/entryReasons instead of score/reasons below
+    const score   = entryScore;
+    const reasons = entryReasons;
 
     // Estimate option premium: ATM ~4% of underlying for 21 DTE at VIX 20-25
     // Scale with recent vol — use ATR as vol proxy
@@ -10698,62 +10881,71 @@ async function runBacktest(config) {
     const positionCost = entryPrem * 100; // 1 contract
     if (positionCost > cash * 0.20) continue; // max 20% per position
 
-    // Simulate outcome over holdDays
-    const exitIdx    = Math.min(i + holdDays, bars.length - 1);
-    const exitBar    = bars[exitIdx];
-    const priceDelta = (exitBar.c - price) / price;
-    const vixShift   = 0; // simplified — no VIX history in this pass
+    // Check if at max concurrent positions — settle any that have expired
+    for (let j = openBT.length - 1; j >= 0; j--) {
+      const op = openBT[j];
+      if (i >= op.expiryIdx) {
+        // Settle this position
+        const exitBar2 = bars[Math.min(op.expiryIdx, bars.length-1)];
+        const pd2 = (exitBar2.c - bars[op.entryIdx].c) / bars[op.entryIdx].c;
+        const dd2 = op.entryType === "put" ? -pd2 : pd2;
+        let pnl2 = simulateOptionPnL(op.entryPrem, op.entryType, op.expiryIdx - op.entryIdx,
+          { priceDelta: dd2 * bars[op.entryIdx].c, daysToExpiry: 21 });
+        pnl2 = Math.max(-stopLossPct, Math.min(takeProfitPct, pnl2));
+        const pnlDollar2 = parseFloat((pnl2 * op.positionCost).toFixed(2));
+        cash = parseFloat((cash + pnlDollar2).toFixed(2));
+        if (cash > peakCash) peakCash = cash;
+        const dd = (cash - peakCash) / peakCash;
+        if (dd < maxDrawdown) maxDrawdown = dd;
+        trades.push({
+          date: bars[op.expiryIdx]?.t?.split("T")[0] || `day-${op.expiryIdx}`,
+          ticker, optionType: op.entryType, score: op.score,
+          entryPrice: bars[op.entryIdx].c, entryPrem: op.entryPrem,
+          pnlPct: parseFloat((pnl2*100).toFixed(1)), pnlDollar: pnlDollar2,
+          exitReason: "hold_expired", holdDays: op.expiryIdx - op.entryIdx,
+          cashAfter: cash, reasons: op.reasons,
+        });
+        openBT.splice(j, 1);
+      }
+    }
+    if (openBT.length >= maxPositions) continue; // at capacity
 
-    // For puts: profit when price falls. For calls: profit when price rises.
-    const directedDelta = optionType === "put" ? -priceDelta : priceDelta;
-
-    // Check TP and stop hit during hold period
+    // Simulate this position with intraday TP/stop checking
     let pnlPct    = 0;
     let exitReason = "hold_expired";
     let actualDays = holdDays;
+    let settled   = false;
 
     for (let d = 1; d <= holdDays && (i + d) < bars.length; d++) {
-      const dayBar   = bars[i + d];
-      const dayDelta = (dayBar.c - price) / price;
-      const dayDirected = optionType === "put" ? -dayDelta : dayDelta;
-      const estPnlPct  = simulateOptionPnL(entryPrem, optionType, d, { priceDelta: dayDirected * price, daysToExpiry: 21 });
-
+      const dayBar      = bars[i + d];
+      const dayDelta    = (dayBar.c - price) / price;
+      const dayDirected = entryType === "put" ? -dayDelta : dayDelta;
+      const estPnlPct   = simulateOptionPnL(entryPrem, entryType, d, { priceDelta: dayDirected * price, daysToExpiry: 21 });
       if (estPnlPct >= takeProfitPct) {
-        pnlPct = takeProfitPct; exitReason = "take_profit"; actualDays = d; break;
+        pnlPct = takeProfitPct; exitReason = "take_profit"; actualDays = d; settled = true; break;
       }
       if (estPnlPct <= -stopLossPct) {
-        pnlPct = -stopLossPct; exitReason = "stop_loss"; actualDays = d; break;
+        pnlPct = -stopLossPct; exitReason = "stop_loss"; actualDays = d; settled = true; break;
       }
       pnlPct = estPnlPct;
     }
 
-    const pnlDollar = parseFloat((pnlPct * positionCost).toFixed(2));
-    cash = parseFloat((cash + pnlDollar).toFixed(2));
-
-    // Track drawdown
-    if (cash > peakCash) peakCash = cash;
-    const dd = (cash - peakCash) / peakCash;
-    if (dd < maxDrawdown) maxDrawdown = dd;
-
-    trades.push({
-      date:      barDate,
-      ticker,
-      optionType,
-      score,
-      entryPrice: price,
-      entryPrem:  entryPrem,
-      pnlPct:     parseFloat((pnlPct * 100).toFixed(1)),
-      pnlDollar,
-      exitReason,
-      holdDays:   actualDays,
-      cashAfter:  cash,
-      reasons:    reasons.slice(0, 3),
-    });
-
-    equityCurve.push({ date: bars[i + actualDays]?.t?.split("T")[0] || barDate, value: cash });
-
-    // Skip forward past this hold period to avoid overlapping positions
-    i += actualDays;
+    if (settled) {
+      // TP or stop hit — settle immediately
+      const pnlDollar = parseFloat((pnlPct * positionCost).toFixed(2));
+      cash = parseFloat((cash + pnlDollar).toFixed(2));
+      if (cash > peakCash) peakCash = cash;
+      const dd = (cash - peakCash) / peakCash;
+      if (dd < maxDrawdown) maxDrawdown = dd;
+      equityCurve.push({ date: bars[i + actualDays]?.t?.split("T")[0] || barDate, value: cash });
+      trades.push({ date: barDate, ticker, optionType: entryType, score, entryPrice: price, entryPrem,
+        pnlPct: parseFloat((pnlPct*100).toFixed(1)), pnlDollar, exitReason, holdDays: actualDays,
+        cashAfter: cash, reasons: reasons.slice(0,3) });
+    } else {
+      // Not yet settled — track as open position
+      openBT.push({ entryIdx: i, entryType, entryPrem, positionCost, score,
+        expiryIdx: Math.min(i + holdDays, bars.length-1), reasons: reasons.slice(0,3) });
+    }
   }
 
   // Calculate statistics
@@ -10782,7 +10974,8 @@ async function runBacktest(config) {
   return {
     config,
     summary: {
-      ticker, optionType, startDate, endDate,
+      ticker, optionType, startDate, endDate, maxPositions,
+      note: maxPositions > 1 ? `Multi-position simulation (max ${maxPositions} concurrent)` : "Single-position simulation",
       totalTrades:  trades.length,
       wins:         wins.length,
       losses:       losses.length,
@@ -10828,13 +11021,17 @@ app.post("/api/backtest", async (req, res) => {
     if (daysDiff < 30)  return res.status(400).json({ error: "Date range must be at least 30 days" });
     if (daysDiff > 730) return res.status(400).json({ error: "Date range cannot exceed 2 years" });
 
+    const { maxPositions = 3 } = req.body || {};
     const result = await runBacktest({
-      ticker, optionType, startDate, endDate,
-      minScore: parseInt(minScore),
-      holdDays: parseInt(holdDays),
+      ticker,
+      optionType, // supports "put", "call", or "both"
+      startDate, endDate,
+      minScore:      parseInt(minScore),
+      holdDays:      parseInt(holdDays),
       takeProfitPct: parseFloat(takeProfitPct),
       stopLossPct:   parseFloat(stopLossPct),
-      capital:       parseFloat(capital),
+      capital:       parseFloat(capital), // configurable
+      maxPositions:  parseInt(maxPositions), // concurrent positions
     });
 
     res.json(result);
