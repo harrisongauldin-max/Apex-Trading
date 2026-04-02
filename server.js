@@ -5328,10 +5328,19 @@ async function executeSpreadTrade(stock, price, score, scoreReasons, vix, option
   else if (score >= 80) baseContracts = 2;
   else                  baseContracts = 1;
   // High risk day: halve sizing
-  const riskMult    = (state._dayPlan?.riskLevel === "high") ? 0.5 : 1.0;
+  // If _dayPlan is null (e.g. after mid-day reset), default to high risk (conservative)
+  // A missing day plan should never unlock full sizing — fail safe, not fail open
+  const riskMult = (!state._dayPlan || state._dayPlan.riskLevel === "high") ? 0.5 : 1.0;
   // AG-7: positionSizeMult from agent — continuous sizing vs binary riskLevel
-  const agentSizeMult = Math.min(1.5, Math.max(0.25, (state._agentMacro || {}).positionSizeMult || 1.0));
-  const contracts   = Math.max(1, Math.min(cashCap, Math.floor(baseContracts * riskMult * agentSizeMult)));
+  // Cap at 1.0 before 30 fills — agent amplification only unlocks on validated system
+  const rawAgentSizeMult = (state._agentMacro || {}).positionSizeMult || 1.0;
+  const agentSizeMult = (state.closedTrades||[]).length < 30
+    ? Math.min(1.0, Math.max(0.25, rawAgentSizeMult))  // capped at 1.0 pre-validation
+    : Math.min(1.5, Math.max(0.25, rawAgentSizeMult)); // full range post-validation
+  // Hard cap: before 30 fills, never exceed 3 contracts regardless of multipliers
+  // After 30 fills, trust the Kelly/sizing system — it's been validated
+  const preFillCap  = (state.closedTrades||[]).length < 30 ? 3 : 99;
+  const contracts   = Math.max(1, Math.min(cashCap, preFillCap, Math.floor(baseContracts * riskMult * agentSizeMult)));
 
   const actualSpreadWidth = Math.abs(buyContract.strike - sellContract.strike);
   const maxProfit = parseFloat((actualSpreadWidth - netDebit).toFixed(2));
