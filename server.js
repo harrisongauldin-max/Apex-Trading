@@ -726,7 +726,9 @@ async function runReconciliation() {
           if (used.has(j)) continue;
           const b = parsed[j];
           const sameTickerExp = a.ticker === b.ticker && a.expDate === b.expDate && a.optType === b.optType;
-          const widthOk = Math.abs(a.strike - b.strike) >= 8 && Math.abs(a.strike - b.strike) <= 12;
+          // Width cap raised to 25 — spread widths scale with VIX (up to $20 at VIX 35)
+          // Previous cap of 12 caused $14+ wide spreads to be reconciled as individual legs
+          const widthOk = Math.abs(a.strike - b.strike) >= 5 && Math.abs(a.strike - b.strike) <= 25;
           const oppDir  = (a.qty > 0 && b.qty < 0) || (a.qty < 0 && b.qty > 0);
           if (sameTickerExp && widthOk && oppDir) {
             const longLeg  = a.qty > 0 ? a : b;
@@ -5203,6 +5205,16 @@ async function executeCreditSpread(stock, price, score, scoreReasons, vix, optio
       return null;
     }
 
+    // BUG-3: Duplicate order guard — verify no existing position in same ticker+direction
+    // Prevents double-short scenario where two spread orders create asymmetric leg counts
+    const existingSameDir = state.positions.filter(p =>
+      p.ticker === stock.ticker && p.optionType === optionType
+    );
+    if (existingSameDir.length > 0) {
+      logEvent("filter", `[CREDIT SPREAD] Duplicate guard: ${stock.ticker} already has ${existingSameDir.length} ${optionType} position(s) — skipping to prevent asymmetric legs`);
+      return null;
+    }
+
     let shortOrderId = null, longOrderId = null;
     try {
       // ── MULTI-LEG ORDER for credit spread ───────────────────────────────
@@ -5282,6 +5294,17 @@ async function executeCreditSpread(stock, price, score, scoreReasons, vix, optio
 
 async function executeSpreadTrade(stock, price, score, scoreReasons, vix, optionType, buyContract, sellContract, isChoppyEntry = false) {
   if (!buyContract || !sellContract) return null;
+  // BUG-3: Duplicate order guard — same protection as credit spreads
+  // If Alpaca already has a short leg in this ticker+direction, don't add another long+short pair
+  if (!dryRunMode) {
+    const existingSameDir = state.positions.filter(p =>
+      p.ticker === stock.ticker && p.optionType === optionType
+    );
+    if (existingSameDir.length > 0) {
+      logEvent("filter", `[SPREAD] Duplicate guard: ${stock.ticker} already has ${existingSameDir.length} ${optionType} position(s) — skipping`);
+      return null;
+    }
+  }
 
   // ── Score-based contract sizing ──────────────────────────────────────
   // Before 30 fills (Kelly pre-activation): scale by conviction
@@ -5430,8 +5453,18 @@ async function confirmPendingOrder() {
     if (!fillResp) return;
 
     if (fillResp.status === "filled") {
-      // Order filled — record the position
+      // Order filled — verify legs before recording to catch double-fill anomalies
       const typeLabel = pending.isCreditSpread ? "CREDIT SPREAD" : "SPREAD";
+      // Sanity check: if mleg, verify filled legs don't show unexpected qty
+      if (fillResp.legs && fillResp.legs.length > 0) {
+        for (const leg of fillResp.legs) {
+          const legQty = Math.abs(parseFloat(leg.filled_qty || leg.qty || pending.contracts));
+          if (legQty > pending.contracts * 2) {
+            logEvent("warn", `[${typeLabel}] ANOMALY: leg ${leg.symbol} filled qty ${legQty} > expected ${pending.contracts} — possible double-fill, recording position but flagging`);
+            logEvent("warn", `[SPREAD ANOMALY] Check Alpaca manually — ${pending.ticker} may have duplicate legs`);
+          }
+        }
+      }
       logEvent("trade", `[${typeLabel}] Fill confirmed: ${pending.orderId} | age: ${age.toFixed(0)}s`);
 
       if (pending.isCreditSpread) {
