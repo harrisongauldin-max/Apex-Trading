@@ -127,7 +127,7 @@ input[type=text]:focus{border-color:var(--blue)}
       </svg>
     </div>
     <div class="logo-text">
-      <h1>ARGO V2.5</h1>
+      <h1>ARGO V2.5 <span id="account-phase-pill" style="font-size:9px;padding:2px 7px;border-radius:10px;letter-spacing:1px;vertical-align:middle;display:none"></span></h1>
       <p>PROFESSIONAL OPTIONS AGENT v2.0 · ALPACA PAPER</p>
     </div>
   </div>
@@ -181,6 +181,10 @@ input[type=text]:focus{border-color:var(--blue)}
     </div>
   </div>
 
+  <!-- Spiral Warning -->
+  <div id="spiral-warning" style="display:none;background:rgba(255,85,85,.1);border:1px solid rgba(255,85,85,.3);border-radius:8px;padding:10px 14px;margin-bottom:10px;font-size:11px;color:#ff5555">
+    ⚠ <strong>SPIRAL DETECTED</strong> — <span id="spiral-warning-text"></span>
+  </div>
   <!-- Agent Intelligence Panel -->
   <div class="card" style="margin-bottom:12px;padding:12px 16px">
     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
@@ -479,6 +483,11 @@ input[type=text]:focus{border-color:var(--blue)}
     <div class="greek-chip"><span class="greek-label">VEGA</span><span class="greek-val" id="g-vega">--</span></div>
     <div class="greek-chip"><span class="greek-label">BETA-Δ</span><span class="greek-val" id="g-betadelta">--</span></div>
     <div class="greek-chip"><span class="greek-label">MACRO CAL</span><span class="greek-val" id="g-macrocal" style="color:var(--gold)">--</span></div>
+    <div class="greek-chip"><span class="greek-label">PHASE</span><span class="greek-val" id="g-phase" style="color:var(--blue)">--</span></div>
+    <div class="greek-chip"><span class="greek-label">β-DELTA</span><span class="greek-val" id="g-betadelta2" style="color:var(--gold)">--</span></div>
+    <div class="greek-chip"><span class="greek-label">SPIRAL</span><span class="greek-val" id="g-spiral" style="color:var(--red)">--</span></div>
+    <div class="greek-chip"><span class="greek-label">SCAN AVG</span><span class="greek-val" id="g-scanavg" style="color:var(--muted)">--</span></div>
+    <div class="greek-chip"><span class="greek-label">ALPACA API</span><span class="greek-val" id="g-alpacacirc" style="color:var(--green)">OK</span></div>
   </div>
 
   <div class="section-title">Quick Actions</div>
@@ -604,6 +613,16 @@ input[type=text]:focus{border-color:var(--blue)}
 
 <!-- ═══════════════ THETA TAB ═══════════════ -->
 <div id="tab-theta" class="content">
+  <div class="grid4" style="margin-bottom:12px">
+    <div class="card"><div class="card-title">BETA-ADJ DELTA</div><div class="metric-sm" id="th-beta-delta">--</div><div class="sub">Portfolio directional exposure</div></div>
+    <div class="card"><div class="card-title">ACCOUNT PHASE</div><div class="metric-sm" id="th-acct-phase" style="color:#00c4ff">--</div><div class="sub">growth / transition / preservation</div></div>
+    <div class="card"><div class="card-title">ALPACA CIRCUIT</div><div class="metric-sm" id="th-circuit">✅ OK</div><div class="sub">Consecutive API failures</div></div>
+    <div class="card"><div class="card-title">SCAN INTERVAL</div><div class="metric-sm" id="th-scan-interval">--</div><div class="sub">Avg ms (target: &lt;10000)</div></div>
+  </div>
+  <div class="grid2" style="margin-bottom:12px">
+    <div class="card"><div class="card-title">AGENT HEALTH</div><div id="th-agent-health" style="font-size:11px;color:#8aaac8">Loading...</div></div>
+    <div class="card"><div class="card-title">SCORE BRACKETS (live)</div><div id="th-score-brackets" style="font-size:11px;color:#8aaac8">No trades yet</div></div>
+  </div>
   <div class="grid2" style="margin-bottom:12px">
     <div class="card">
       <div class="card-title">Total Daily Theta Burn</div>
@@ -632,6 +651,47 @@ input[type=text]:focus{border-color:var(--blue)}
   <div class="section-title">Correlation Groups</div>
   <div id="corr-wrap">
     <div class="no-data">Loading correlation data...</div>
+  </div>
+
+  <div class="section-title">V2.5 Risk Controls</div>
+  <div class="grid4" style="margin-bottom:12px">
+    <div class="card">
+      <div class="card-title">ACCOUNT PHASE</div>
+      <div class="metric-sm" id="theta-phase" style="color:var(--blue)">--</div>
+      <div class="sub" id="theta-phase-note">Loading...</div>
+    </div>
+    <div class="card">
+      <div class="card-title">BETA-ADJ DELTA</div>
+      <div class="metric-sm" id="theta-betadelta">--</div>
+      <div class="sub">max ±6 before block</div>
+    </div>
+    <div class="card">
+      <div class="card-title">SPIRAL STATUS</div>
+      <div class="metric-sm" id="theta-spiral" style="color:var(--green)">CLEAR</div>
+      <div class="sub" id="theta-spiral-note">put:0 call:0</div>
+    </div>
+    <div class="card">
+      <div class="card-title">SCORE BRACKETS</div>
+      <div id="theta-brackets" style="font-size:11px;line-height:1.8"></div>
+    </div>
+  </div>
+  <div class="grid2" style="margin-bottom:12px">
+    <div class="card">
+      <div class="card-title">ALPACA CIRCUIT</div>
+      <div style="display:flex;justify-content:space-between;align-items:center">
+        <div class="metric-sm" id="theta-alpacacirc" style="color:var(--green)">OK</div>
+        <div style="font-size:10px;color:var(--muted)" id="theta-alpacafails">0 consecutive failures</div>
+      </div>
+      <div class="sub">trips at 5 consecutive failures</div>
+    </div>
+    <div class="card">
+      <div class="card-title">SCAN FREQUENCY</div>
+      <div style="display:flex;justify-content:space-between;align-items:center">
+        <div class="metric-sm" id="theta-scanavg">--</div>
+        <div style="font-size:10px;color:var(--muted)">target: 10s</div>
+      </div>
+      <div class="sub">warns if avg &gt; 15s</div>
+    </div>
   </div>
 </div>
 
@@ -744,6 +804,7 @@ input[type=text]:focus{border-color:var(--blue)}
   <div style="margin-bottom:14px">
     <span style="font-size:13px;color:#00ff88;letter-spacing:2px;font-weight:700">⚙ BACKTEST ENGINE</span>
     <span style="font-size:10px;color:#336688;margin-left:10px">Walk-forward simulation · ARGO V2.5 scoring · Alpaca historical data</span>
+    <div style="font-size:10px;color:#4a6a8a;margin-top:4px">⚠ Conservative estimates — backtest enters one position at a time (walk-forward). Live ARGO holds multiple simultaneous positions, so live returns will typically exceed backtest figures.</div>
   </div>
 
   <!-- Config panel -->
@@ -756,7 +817,9 @@ input[type=text]:focus{border-color:var(--blue)}
       </select>
       <div style="margin-top:8px">
         <select id="bt-type" style="width:100%;background:#071020;color:#cce8ff;border:1px solid #0d3050;padding:6px;border-radius:4px;font-family:monospace">
-          <option value="put">PUT</option><option value="call">CALL</option>
+          <option value="put">PUT</option>
+          <option value="call">CALL</option>
+          <option value="both">BOTH (best signal each day)</option>
         </select>
       </div>
     </div>
@@ -773,11 +836,17 @@ input[type=text]:focus{border-color:var(--blue)}
         <div style="flex:1"><div style="font-size:9px;color:#336688;margin-bottom:2px">HOLD DAYS</div>
           <input id="bt-hold" type="number" value="5" min="1" max="21" style="width:100%;background:#071020;color:#cce8ff;border:1px solid #0d3050;padding:5px;border-radius:4px;font-family:monospace"></div>
       </div>
+      <div style="display:flex;gap:6px;margin-bottom:6px">
+        <div style="flex:1"><div style="font-size:9px;color:#336688;margin-bottom:2px">CAPITAL $</div>
+          <input id="bt-capital" type="number" value="10000" min="1000" max="100000" step="1000" style="width:100%;background:#071020;color:#cce8ff;border:1px solid #0d3050;padding:5px;border-radius:4px;font-family:monospace"></div>
+      </div>
       <div style="display:flex;gap:6px">
         <div style="flex:1"><div style="font-size:9px;color:#336688;margin-bottom:2px">TP %</div>
           <input id="bt-tp" type="number" value="50" min="10" max="100" style="width:100%;background:#071020;color:#cce8ff;border:1px solid #0d3050;padding:5px;border-radius:4px;font-family:monospace"></div>
         <div style="flex:1"><div style="font-size:9px;color:#336688;margin-bottom:2px">STOP %</div>
           <input id="bt-stop" type="number" value="35" min="10" max="80" style="width:100%;background:#071020;color:#cce8ff;border:1px solid #0d3050;padding:5px;border-radius:4px;font-family:monospace"></div>
+        <div style="flex:1"><div style="font-size:9px;color:#336688;margin-bottom:2px">MAX POS</div>
+          <input id="bt-maxpos" type="number" value="3" min="1" max="6" style="width:100%;background:#071020;color:#cce8ff;border:1px solid #0d3050;padding:5px;border-radius:4px;font-family:monospace"></div>
       </div>
     </div>
   </div>
@@ -1684,25 +1753,171 @@ function renderGreeks() {
   const positions = state.positions || [];
   if (!positions.length) {
     ['g-delta','g-theta','g-gamma','g-vega','g-betadelta'].forEach(id => {
-      document.getElementById(id).textContent = '--';
+      const el = document.getElementById(id); if (el) el.textContent = '--';
     });
-    return;
+  } else {
+    const tot = {delta:0,theta:0,gamma:0,vega:0,betaDelta:0};
+    positions.forEach(p => {
+      const g = p.greeks || {};
+      const mult = (p.contracts||1) * 100;
+      tot.delta     += (g.delta||0) * mult;
+      tot.theta     += (g.theta||0) * mult;
+      tot.gamma     += (g.gamma||0) * mult;
+      tot.vega      += (g.vega||0)  * mult;
+      tot.betaDelta += (g.delta||0) * (p.beta||1) * mult;
+    });
+    document.getElementById('g-delta').textContent     = tot.delta.toFixed(2);
+    document.getElementById('g-theta').textContent     = tot.theta.toFixed(2);
+    document.getElementById('g-gamma').textContent     = tot.gamma.toFixed(4);
+    document.getElementById('g-vega').textContent      = tot.vega.toFixed(2);
+    document.getElementById('g-betadelta').textContent = tot.betaDelta.toFixed(2);
   }
-  const tot = {delta:0,theta:0,gamma:0,vega:0,betaDelta:0};
-  positions.forEach(p => {
-    const g = p.greeks || {};
-    const mult = p.contracts * 100;
-    tot.delta     += (g.delta||0) * mult;
-    tot.theta     += (g.theta||0) * mult;
-    tot.gamma     += (g.gamma||0) * mult;
-    tot.vega      += (g.vega||0)  * mult;
-    tot.betaDelta += (g.delta||0) * (p.beta||1) * mult;
-  });
-  document.getElementById('g-delta').textContent     = tot.delta.toFixed(2);
-  document.getElementById('g-theta').textContent     = tot.theta.toFixed(2);
-  document.getElementById('g-gamma').textContent     = tot.gamma.toFixed(4);
-  document.getElementById('g-vega').textContent      = tot.vega.toFixed(2);
-  document.getElementById('g-betadelta').textContent = tot.betaDelta.toFixed(2);
+
+  // ── V2.5 system health metrics ─────────────────────────────────────────────
+  // Account phase
+  const phaseEl = document.getElementById('g-phase');
+  if (phaseEl) {
+    const phase = state.accountPhase || 'growth';
+    phaseEl.textContent = phase.toUpperCase();
+    phaseEl.style.color = phase === 'preservation' ? 'var(--red)' : phase === 'transition' ? 'var(--gold)' : 'var(--green)';
+  }
+
+  // DASH-1: Account phase pill in header
+  const phasePill = document.getElementById('account-phase-pill');
+  if (phasePill) {
+    const phase = state.accountPhase || 'growth';
+    phasePill.textContent = phase.toUpperCase();
+    phasePill.style.display = 'inline-block';
+    phasePill.style.background = phase === 'preservation' ? 'rgba(255,85,85,.2)' : phase === 'transition' ? 'rgba(255,215,0,.15)' : 'rgba(0,255,136,.12)';
+    phasePill.style.color = phase === 'preservation' ? 'var(--red)' : phase === 'transition' ? 'var(--gold)' : 'var(--green)';
+    phasePill.style.border = `1px solid ${phase === 'preservation' ? 'rgba(255,85,85,.3)' : phase === 'transition' ? 'rgba(255,215,0,.2)' : 'rgba(0,255,136,.2)'}`;
+  }
+
+  // DASH-2: Theta tab beta delta
+  const thBetaDelta = document.getElementById('th-beta-delta');
+  if (thBetaDelta) {
+    const bd = state.portfolioBetaDelta || 0;
+    thBetaDelta.textContent = (bd >= 0 ? '+' : '') + bd.toFixed(1);
+    thBetaDelta.style.color = Math.abs(bd) >= 5 ? 'var(--red)' : Math.abs(bd) >= 3 ? 'var(--gold)' : 'var(--green)';
+  }
+
+  // DASH-4: Theta tab circuit breaker
+  const thCircuit = document.getElementById('th-circuit');
+  if (thCircuit) {
+    const circ = state.alpacaCircuit || { open: false, consecFails: 0 };
+    thCircuit.textContent = circ.open ? '⚠ OPEN' : circ.consecFails > 0 ? circ.consecFails + ' fails' : '✅ OK';
+    thCircuit.style.color = circ.open ? 'var(--red)' : circ.consecFails > 0 ? 'var(--gold)' : 'var(--green)';
+  }
+
+  // DASH-5: Theta tab scan interval
+  const thScan = document.getElementById('th-scan-interval');
+  if (thScan) {
+    const avg = state.avgScanIntervalMs || 0;
+    thScan.textContent = avg > 0 ? avg.toFixed(0) + 'ms' : '--';
+    thScan.style.color = avg > 15000 ? 'var(--red)' : avg > 12000 ? 'var(--gold)' : 'var(--green)';
+  }
+
+  // DASH-1 phase in theta tab
+  const thPhase = document.getElementById('th-acct-phase');
+  if (thPhase) {
+    const phase = state.accountPhase || 'growth';
+    thPhase.textContent = phase;
+    thPhase.style.color = phase === 'preservation' ? 'var(--red)' : phase === 'transition' ? 'var(--gold)' : 'var(--blue)';
+  }
+
+  // DASH-3: Spiral warning banner
+  const spiralWarn = document.getElementById('spiral-warning');
+  const spiralText = document.getElementById('spiral-warning-text');
+  if (spiralWarn && spiralText) {
+    const spiral = state._spiralActive;
+    if (spiral) {
+      const count = (state._spiralTracker || {})[spiral] || 0;
+      spiralText.textContent = `${count} consecutive ${spiral} losses — ${spiral} entries blocked until a winning trade`;
+      spiralWarn.style.display = 'block';
+    } else {
+      spiralWarn.style.display = 'none';
+    }
+  }
+
+  // AG-8: Agent health in theta tab
+  const thHealth = document.getElementById('th-agent-health');
+  if (thHealth && state.agentHealth) {
+    const h = state.agentHealth;
+    const rate = h.calls > 0 ? (h.successes / h.calls * 100).toFixed(0) : 0;
+    const lastOk = h.lastSuccess ? new Date(h.lastSuccess).toLocaleTimeString('en-US',{timeZone:'America/New_York',hour:'2-digit',minute:'2-digit'}) : 'never';
+    thHealth.innerHTML = `
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:6px">
+        <div><span style="color:#336688">Calls:</span> <span style="color:${h.calls>0?'var(--green)':'var(--muted)'}">${h.calls}</span></div>
+        <div><span style="color:#336688">Success rate:</span> <span style="color:${rate>=90?'var(--green)':rate>=70?'var(--gold)':'var(--red)'}">${rate}%</span></div>
+        <div><span style="color:#336688">Timeouts:</span> <span style="color:${h.timeouts>0?'var(--gold)':'var(--green)'}">${h.timeouts}</span></div>
+        <div><span style="color:#336688">Parse errors:</span> <span style="color:${h.parseErrors>0?'var(--red)':'var(--green)'}">${h.parseErrors}</span></div>
+      </div>
+      <div style="margin-top:4px;font-size:10px;color:#336688">Last success: ${lastOk}</div>`;
+  }
+
+  // Score brackets in theta tab
+  const thBrackets = document.getElementById('th-score-brackets');
+  if (thBrackets && state.scoreBrackets) {
+    const b = state.scoreBrackets;
+    const rows = Object.entries(b).map(([br, v]) => {
+      const wr = v.winRate || 0;
+      const col = wr >= 55 ? 'var(--green)' : wr >= 45 ? 'var(--gold)' : 'var(--red)';
+      return `<div style="display:flex;justify-content:space-between;padding:4px 0;border-bottom:1px solid #0d3050;font-size:11px">
+        <span style="color:#336688">Score ${br}</span>
+        <span>${v.trades} trades</span>
+        <span style="color:${col};font-weight:700">${wr}% WR</span>
+        <span style="color:${(v.totalPnl||0)>=0?'var(--green)':'var(--red)'}">$${(v.totalPnl||0).toFixed(0)}</span>
+      </div>`;
+    });
+    thBrackets.innerHTML = rows.length ? rows.join('') : '<span style="color:#336688">No closed trades yet</span>';
+  }
+
+  // Beta-adjusted delta from state
+  const betaDelta2El = document.getElementById('g-betadelta2');
+  if (betaDelta2El) {
+    const bd = state.portfolioBetaDelta || 0;
+    betaDelta2El.textContent = (bd >= 0 ? '+' : '') + bd.toFixed(1);
+    betaDelta2El.style.color = Math.abs(bd) >= 5 ? 'var(--red)' : Math.abs(bd) >= 3 ? 'var(--gold)' : 'var(--green)';
+  }
+
+  // Spiral detection
+  const spiralEl = document.getElementById('g-spiral');
+  if (spiralEl) {
+    const spiral = state._spiralActive;
+    const tracker = state._spiralTracker || {};
+    if (spiral) {
+      spiralEl.textContent = spiral.toUpperCase() + ' ⚠';
+      spiralEl.style.color = 'var(--red)';
+    } else {
+      const maxLosses = Math.max(tracker.put||0, tracker.call||0);
+      spiralEl.textContent = maxLosses > 0 ? maxLosses + ' consec' : 'CLEAR';
+      spiralEl.style.color = maxLosses >= 3 ? 'var(--gold)' : 'var(--green)';
+    }
+  }
+
+  // Scan frequency
+  const scanEl = document.getElementById('g-scanavg');
+  if (scanEl) {
+    const avg = state.avgScanIntervalMs || 0;
+    scanEl.textContent = avg > 0 ? (avg/1000).toFixed(1) + 's' : '--';
+    scanEl.style.color = avg > 15000 ? 'var(--red)' : avg > 12000 ? 'var(--gold)' : 'var(--green)';
+  }
+
+  // Alpaca circuit breaker
+  const circEl = document.getElementById('g-alpacacirc');
+  if (circEl) {
+    const circ = state.alpacaCircuit || { open: false, consecFails: 0 };
+    if (circ.open) {
+      circEl.textContent = 'OPEN ⚠';
+      circEl.style.color = 'var(--red)';
+    } else if (circ.consecFails > 0) {
+      circEl.textContent = circ.consecFails + ' fail';
+      circEl.style.color = 'var(--gold)';
+    } else {
+      circEl.textContent = 'OK';
+      circEl.style.color = 'var(--green)';
+    }
+  }
 }
 
 function renderActivityLog() {
@@ -2300,9 +2515,11 @@ async function runBacktest() {
       holdDays:     parseInt(document.getElementById('bt-hold').value),
       takeProfitPct: parseFloat(document.getElementById('bt-tp').value) / 100,
       stopLossPct:  parseFloat(document.getElementById('bt-stop').value) / 100,
-      capital:      10000,
+      capital:      parseFloat(document.getElementById('bt-capital').value) || 10000,
+      maxPositions: parseInt(document.getElementById('bt-maxpos').value) || 3,
     };
-    document.getElementById('bt-loading-msg').textContent = `Replaying ARGO V2.5 scoring on ${body.ticker} ${body.startDate}→${body.endDate}...`;
+    const modeLabel = body.optionType === "both" ? "puts+calls (best direction daily)" : body.optionType + "s";
+    document.getElementById('bt-loading-msg').textContent = `Replaying ARGO V2.5 ${modeLabel} on ${body.ticker} ${body.startDate}→${body.endDate}...`;
     const res  = await fetch('/api/backtest', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body) });
     const data = await res.json();
     if (data.error) throw new Error(data.error);
@@ -2346,6 +2563,17 @@ async function runStressTest() {
 
 function renderBacktestResults(data) {
   const s = data.summary;
+  if (s.note) {
+    const noteEl = document.getElementById('bt-results');
+    const existingNote = noteEl.querySelector('.bt-note');
+    if (!existingNote) {
+      const note = document.createElement('div');
+      note.className = 'bt-note';
+      note.style.cssText = 'font-size:10px;color:#336688;margin-bottom:8px;padding:4px 8px;background:#0d1825;border-radius:4px;border:1px solid #0d3050';
+      note.textContent = s.note;
+      noteEl.prepend(note);
+    }
+  }
   const pnlColor = s.totalPnL >= 0 ? '#00ff88' : '#ff5555';
   const pfColor  = s.profitFactor >= 1.5 ? '#00ff88' : s.profitFactor >= 1.0 ? '#ffd700' : '#ff5555';
 
@@ -2435,6 +2663,76 @@ function renderStressResults(data) {
     </tr>`;
   }).join('');
   document.getElementById('bt-stress-results').style.display = 'block';
+}
+
+function loadTheta() {
+  if (!state) return;
+
+  // Drawdown
+  const peak    = state.peakCash || 10000;
+  const cash    = state.cash || 0;
+  const ddPct   = peak > 0 ? ((cash - peak) / peak * 100) : 0;
+  const ddEl    = document.getElementById('dd-pct');
+  const ddMode  = document.getElementById('dd-mode');
+  const ddPeak  = document.getElementById('dd-peak');
+  const ddCurr  = document.getElementById('dd-current');
+  const ddRed   = document.getElementById('dd-reduction');
+  if (ddEl) { ddEl.textContent = ddPct.toFixed(2) + '%'; ddEl.style.color = ddPct < -10 ? 'var(--red)' : ddPct < -5 ? 'var(--gold)' : 'var(--green)'; }
+  if (ddMode) ddMode.textContent = ddPct <= -20 ? 'ENTRIES PAUSED' : ddPct <= -15 ? 'SEVERE — 25% size' : ddPct <= -10 ? 'CAUTION — 50% size' : ddPct <= -5 ? 'WATCH — 75% size' : 'Normal sizing';
+  if (ddPeak) ddPeak.textContent = '$' + peak.toFixed(2);
+  if (ddCurr) ddCurr.textContent = '$' + cash.toFixed(2);
+  if (ddRed)  ddRed.textContent  = ddPct <= -20 ? 'PAUSED' : ddPct <= -15 ? '75% reduction' : ddPct <= -10 ? '50% reduction' : ddPct <= -5 ? '25% reduction' : 'None';
+
+  // Theta
+  const positions = state.positions || [];
+  let totalTheta = 0;
+  positions.forEach(p => { const g = p.greeks || {}; totalTheta += (g.theta||0) * (p.contracts||1) * 100; });
+  const thetaEl = document.getElementById('theta-total');
+  if (thetaEl) { thetaEl.textContent = '$' + totalTheta.toFixed(2); }
+
+  // V2.5 — Account phase
+  const phase = state.accountPhase || 'growth';
+  const phaseEl   = document.getElementById('theta-phase');
+  const phaseNote = document.getElementById('theta-phase-note');
+  if (phaseEl) { phaseEl.textContent = phase.toUpperCase(); phaseEl.style.color = phase === 'preservation' ? 'var(--red)' : phase === 'transition' ? 'var(--gold)' : 'var(--green)'; }
+  if (phaseNote) phaseNote.textContent = phase === 'preservation' ? 'Heat cap 30-40% — protect capital' : phase === 'transition' ? 'Heat cap 45-50% — moderate risk' : 'Heat cap 50-60% — full growth mode';
+
+  // V2.5 — Beta-adjusted delta
+  const bd = state.portfolioBetaDelta || 0;
+  const bdEl = document.getElementById('theta-betadelta');
+  if (bdEl) { bdEl.textContent = (bd >= 0 ? '+' : '') + bd.toFixed(1); bdEl.style.color = Math.abs(bd) >= 5 ? 'var(--red)' : Math.abs(bd) >= 3 ? 'var(--gold)' : 'var(--green)'; }
+
+  // V2.5 — Spiral detection
+  const spiral  = state._spiralActive;
+  const tracker = state._spiralTracker || {};
+  const spiralEl   = document.getElementById('theta-spiral');
+  const spiralNote = document.getElementById('theta-spiral-note');
+  if (spiralEl)   { spiralEl.textContent = spiral ? spiral.toUpperCase() + ' SPIRAL ⚠' : 'CLEAR'; spiralEl.style.color = spiral ? 'var(--red)' : 'var(--green)'; }
+  if (spiralNote) spiralNote.textContent = `put:${tracker.put||0} call:${tracker.call||0} consecutive losses`;
+
+  // V2.5 — Score brackets
+  const brackets = state.scoreBrackets || {};
+  const brEl = document.getElementById('theta-brackets');
+  if (brEl) {
+    if (!Object.keys(brackets).length) { brEl.innerHTML = '<span style="color:var(--muted)">No trades yet</span>'; }
+    else brEl.innerHTML = Object.entries(brackets).map(([b,v]) => {
+      const wr = v.winRate || 0;
+      const col = wr >= 55 ? 'var(--green)' : wr >= 45 ? 'var(--gold)' : 'var(--red)';
+      return `<div style="display:flex;justify-content:space-between"><span style="color:var(--muted)">${b}:</span><span style="color:${col}">${v.trades}t ${wr}% WR</span></div>`;
+    }).join('');
+  }
+
+  // V2.5 — Alpaca circuit
+  const circ = state.alpacaCircuit || { open: false, consecFails: 0 };
+  const circEl    = document.getElementById('theta-alpacacirc');
+  const circFails = document.getElementById('theta-alpacafails');
+  if (circEl)    { circEl.textContent = circ.open ? 'CIRCUIT OPEN ⚠' : 'OK'; circEl.style.color = circ.open ? 'var(--red)' : 'var(--green)'; }
+  if (circFails) circFails.textContent = circ.consecFails + ' consecutive failures';
+
+  // V2.5 — Scan frequency
+  const avgMs = state.avgScanIntervalMs || 0;
+  const scanEl = document.getElementById('theta-scanavg');
+  if (scanEl) { scanEl.textContent = avgMs > 0 ? (avgMs/1000).toFixed(1) + 's avg' : '--'; scanEl.style.color = avgMs > 15000 ? 'var(--red)' : avgMs > 12000 ? 'var(--gold)' : 'var(--green)'; }
 }
 
 function switchTab(name) {
