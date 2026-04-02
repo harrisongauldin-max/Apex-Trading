@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8"/>
 <meta name="viewport" content="width=device-width,initial-scale=1"/>
-<title>ARGO V2.2 v2.0 — Professional Options Agent</title>
+<title>ARGO V2.5 — Professional Options Agent</title>
 <style>
 :root{
   --bg:#07101f;--panel:#0a1628;--border:#0d3050;--text:#cce8ff;--muted:#336688;
@@ -127,7 +127,7 @@ input[type=text]:focus{border-color:var(--blue)}
       </svg>
     </div>
     <div class="logo-text">
-      <h1>ARGO V2.2</h1>
+      <h1>ARGO V2.5</h1>
       <p>PROFESSIONAL OPTIONS AGENT v2.0 · ALPACA PAPER</p>
     </div>
   </div>
@@ -148,6 +148,7 @@ input[type=text]:focus{border-color:var(--blue)}
   <div class="tab" onclick="switchTab('journal')">JOURNAL</div>
   <div class="tab" onclick="switchTab('stocks')">STOCKS</div>
   <div class="tab" onclick="switchTab('report')">REPORT</div>
+  <div class="tab" onclick="switchTab('backtest')">BACKTEST</div>
   <div class="tab" onclick="switchTab('log')">SERVER LOG</div>
 </div>
 
@@ -467,7 +468,7 @@ input[type=text]:focus{border-color:var(--blue)}
 
   <div class="section-title">Open Positions</div>
   <div id="positions-wrap">
-    <div class="no-data">No open positions. ARGO V2.2 will enter trades during market hours (Puts 9:45AM / Calls 10AM–3:30PM ET).</div>
+    <div class="no-data">No open positions. ARGO V2.5 will enter trades during market hours (Puts 9:45AM / Calls 10AM–3:30PM ET).</div>
   </div>
 
   <div class="section-title">Portfolio Greeks</div>
@@ -689,7 +690,7 @@ input[type=text]:focus{border-color:var(--blue)}
 <div id="tab-journal" class="content">
   <div class="section-title" style="margin-top:0">Trade Journal — Entry Reasoning</div>
   <div id="journal-wrap">
-    <div class="no-data">No journal entries yet. ARGO V2.2 logs detailed reasoning for every trade.</div>
+    <div class="no-data">No journal entries yet. ARGO V2.5 logs detailed reasoning for every trade.</div>
   </div>
 </div>
 
@@ -714,7 +715,7 @@ input[type=text]:focus{border-color:var(--blue)}
   </div>
 
   <div class="alert alert-orange" style="margin-bottom:12px">
-    ARGO V2.2 auto-buys stocks when monthly options profit exceeds $1,000. 20% of profits above threshold are allocated to high-scoring stocks (85+). Stop loss: -15% from entry.
+    ARGO V2.5 auto-buys stocks when monthly options profit exceeds $1,000. 20% of profits above threshold are allocated to high-scoring stocks (85+). Stop loss: -15% from entry.
   </div>
 
   <div class="section-title">Stock Holdings</div>
@@ -738,6 +739,94 @@ input[type=text]:focus{border-color:var(--blue)}
 </div>
 
 <!-- ═══════════════ LOG TAB ═══════════════ -->
+<!-- ═══════════════ BACKTEST TAB ═══════════════ -->
+<div id="tab-backtest" class="content">
+  <div style="margin-bottom:14px">
+    <span style="font-size:13px;color:#00ff88;letter-spacing:2px;font-weight:700">⚙ BACKTEST ENGINE</span>
+    <span style="font-size:10px;color:#336688;margin-left:10px">Walk-forward simulation · ARGO V2.5 scoring · Alpaca historical data</span>
+  </div>
+
+  <!-- Config panel -->
+  <div class="grid3" style="margin-bottom:12px">
+    <div class="card">
+      <div class="card-title">INSTRUMENT</div>
+      <select id="bt-ticker" style="width:100%;background:#071020;color:#cce8ff;border:1px solid #0d3050;padding:6px;border-radius:4px;font-family:monospace">
+        <option value="SPY">SPY</option><option value="QQQ">QQQ</option>
+        <option value="IWM">IWM</option><option value="GLD">GLD</option>
+      </select>
+      <div style="margin-top:8px">
+        <select id="bt-type" style="width:100%;background:#071020;color:#cce8ff;border:1px solid #0d3050;padding:6px;border-radius:4px;font-family:monospace">
+          <option value="put">PUT</option><option value="call">CALL</option>
+        </select>
+      </div>
+    </div>
+    <div class="card">
+      <div class="card-title">DATE RANGE</div>
+      <input id="bt-start" type="date" value="2024-01-01" style="width:100%;background:#071020;color:#cce8ff;border:1px solid #0d3050;padding:6px;border-radius:4px;font-family:monospace;margin-bottom:6px">
+      <input id="bt-end"   type="date" value="2024-12-31" style="width:100%;background:#071020;color:#cce8ff;border:1px solid #0d3050;padding:6px;border-radius:4px;font-family:monospace">
+    </div>
+    <div class="card">
+      <div class="card-title">PARAMETERS</div>
+      <div style="display:flex;gap:6px;margin-bottom:6px">
+        <div style="flex:1"><div style="font-size:9px;color:#336688;margin-bottom:2px">MIN SCORE</div>
+          <input id="bt-minscore" type="number" value="70" min="60" max="95" style="width:100%;background:#071020;color:#cce8ff;border:1px solid #0d3050;padding:5px;border-radius:4px;font-family:monospace"></div>
+        <div style="flex:1"><div style="font-size:9px;color:#336688;margin-bottom:2px">HOLD DAYS</div>
+          <input id="bt-hold" type="number" value="5" min="1" max="21" style="width:100%;background:#071020;color:#cce8ff;border:1px solid #0d3050;padding:5px;border-radius:4px;font-family:monospace"></div>
+      </div>
+      <div style="display:flex;gap:6px">
+        <div style="flex:1"><div style="font-size:9px;color:#336688;margin-bottom:2px">TP %</div>
+          <input id="bt-tp" type="number" value="50" min="10" max="100" style="width:100%;background:#071020;color:#cce8ff;border:1px solid #0d3050;padding:5px;border-radius:4px;font-family:monospace"></div>
+        <div style="flex:1"><div style="font-size:9px;color:#336688;margin-bottom:2px">STOP %</div>
+          <input id="bt-stop" type="number" value="35" min="10" max="80" style="width:100%;background:#071020;color:#cce8ff;border:1px solid #0d3050;padding:5px;border-radius:4px;font-family:monospace"></div>
+      </div>
+    </div>
+  </div>
+
+  <div style="display:flex;gap:8px;margin-bottom:14px">
+    <button class="btn btn-green" onclick="runBacktest()" id="bt-run-btn">▶ RUN BACKTEST</button>
+    <button class="btn" style="background:#0a1f3a;border:1px solid #ffd700;color:#ffd700" onclick="runStressTest()" id="bt-stress-btn">⚡ STRESS TESTS</button>
+  </div>
+
+  <!-- Results -->
+  <div id="bt-results" style="display:none">
+    <div class="grid4" id="bt-summary-cards" style="margin-bottom:12px"></div>
+    <div class="grid2" style="margin-bottom:12px">
+      <div class="card">
+        <div class="card-title">SCORE BRACKET WIN RATES</div>
+        <div id="bt-brackets"></div>
+      </div>
+      <div class="card">
+        <div class="card-title">EQUITY CURVE</div>
+        <canvas id="bt-equity-chart" height="120"></canvas>
+      </div>
+    </div>
+    <div class="card">
+      <div class="card-title">TRADE LOG (last 50)</div>
+      <table id="bt-trade-table">
+        <thead><tr><th>DATE</th><th>SCORE</th><th>ENTRY</th><th>PREM</th><th>P&L%</th><th>P&L$</th><th>EXIT</th><th>DAYS</th><th>SIGNALS</th></tr></thead>
+        <tbody id="bt-trade-body"></tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- Stress test results -->
+  <div id="bt-stress-results" style="display:none">
+    <div class="card">
+      <div class="card-title">STRESS TEST RESULTS</div>
+      <table id="bt-stress-table">
+        <thead><tr><th>SCENARIO</th><th>TRADES</th><th>WIN%</th><th>P/F</th><th>RETURN%</th><th>MAX DD%</th></tr></thead>
+        <tbody id="bt-stress-body"></tbody>
+      </table>
+    </div>
+  </div>
+
+  <div id="bt-loading" style="display:none;text-align:center;padding:40px;color:#336688">
+    <div style="font-size:20px;margin-bottom:8px">⟳</div>
+    <div id="bt-loading-msg">Fetching historical data...</div>
+  </div>
+  <div id="bt-error" style="display:none;color:#ff5555;padding:12px;background:rgba(255,85,85,.07);border-radius:6px;border:1px solid rgba(255,85,85,.2)"></div>
+</div>
+
 <div id="tab-log" class="content">
   <!-- ── Stats bar ── -->
   <div style="display:flex;align-items:center;gap:10px;margin-bottom:10px;flex-wrap:wrap">
@@ -1095,7 +1184,7 @@ function renderMetrics() {
     document.getElementById('alpaca-cash').textContent = fmt(state.alpacaCash);
     const customBudget = state.customBudget && state.customBudget > 0 ? state.customBudget : null;
     document.getElementById('alpaca-cash-sub').textContent = customBudget
-      ? `ARGO V2.2 using ${fmt(customBudget)} of this`
+      ? `ARGO V2.5 using ${fmt(customBudget)} of this`
       : 'paper balance · synced on boot';
   }
   document.getElementById('heat').style.color = heat > 50 ? 'var(--red)' : heat > 35 ? 'var(--orange)' : 'var(--green)';
@@ -1227,7 +1316,7 @@ function renderMetrics() {
   if (alphaEl && bm) {
     alphaEl.textContent = (bm.alpha >= 0 ? "+" : "") + bm.alpha + "%";
     alphaEl.style.color = bm.alpha >= 0 ? "var(--green)" : "var(--red)";
-    document.getElementById("benchmark-sub").textContent = `ARGO V2.2:${bm.apexReturn >= 0 ? "+" : ""}${bm.apexReturn}% SPY:${bm.spyReturn >= 0 ? "+" : ""}${bm.spyReturn}%`;
+    document.getElementById("benchmark-sub").textContent = `ARGO V2.5:${bm.apexReturn >= 0 ? "+" : ""}${bm.apexReturn}% SPY:${bm.spyReturn >= 0 ? "+" : ""}${bm.spyReturn}%`;
   }
 
   // Drawdown protocol
@@ -1471,7 +1560,7 @@ function renderPositions() {
   const wrap = document.getElementById('positions-wrap');
   const positions = state.positions || [];
   if (!positions.length) {
-    wrap.innerHTML = '<div class="no-data">No open positions. ARGO V2.2 will enter trades during market hours (9:30AM–3:45PM ET). SPY/QQQ spreads primary.</div>';
+    wrap.innerHTML = '<div class="no-data">No open positions. ARGO V2.5 will enter trades during market hours (9:30AM–3:45PM ET). SPY/QQQ spreads primary.</div>';
     return;
   }
   wrap.innerHTML = positions.map(p => {
@@ -1910,7 +1999,7 @@ async function triggerDryRun() {
     const resp = await fetch('/api/dry-run-scan', {method:'POST'});
     const data = await resp.json();
     await fetchState();
-    alert('Dry run complete! Check the Server Log tab — look for [DRYRUN] entries showing what ARGO V2.2 would trade.');
+    alert('Dry run complete! Check the Server Log tab — look for [DRYRUN] entries showing what ARGO V2.5 would trade.');
   } catch(e) {
     alert('Dry run error: ' + e.message);
   } finally {
@@ -1957,10 +2046,10 @@ async function resetPDT() {
 }
 
 async function resetCircuit() {
-  if (!confirm('Reset circuit breaker? ARGO V2.2 will resume scanning and entering new trades.')) return;
+  if (!confirm('Reset circuit breaker? ARGO V2.5 will resume scanning and entering new trades.')) return;
   const resp = await fetch('/api/reset-circuit', {method:'POST'});
   const data = await resp.json();
-  alert('Circuit breaker reset. ARGO V2.2 is scanning again.');
+  alert('Circuit breaker reset. ARGO V2.5 is scanning again.');
   await fetchState();
 }
 
@@ -1969,7 +2058,7 @@ async function fullReset() {
   if (!confirm('This cannot be undone. Confirm full reset?')) return;
   const resp = await fetch('/api/full-reset', {method:'POST'});
   const data = await resp.json();
-  alert('Full reset complete. ARGO V2.2 restarted with $10,000.');
+  alert('Full reset complete. ARGO V2.5 restarted with $10,000.');
   location.reload();
 }
 
@@ -2072,13 +2161,13 @@ async function downloadDayReport() {
     const url  = URL.createObjectURL(blob);
     const a    = document.createElement('a');
     a.href     = url;
-    a.download = `ARGO V2.2_DayReport_${today}.json`;
+    a.download = `ARGO V2.5_DayReport_${today}.json`;
     a.click();
     URL.revokeObjectURL(url);
 
     // ── Also show quick summary in alert ─────────────────────────────────
     alert(
-      `ARGO V2.2 Day Report — ${today}\n\n` +
+      `ARGO V2.5 Day Report — ${today}\n\n` +
       `Trades: ${trades.length} | Win Rate: ${winRate}%\n` +
       `Total P&L: $${totalPnL.toFixed(2)}\n` +
       `Best: $${bigWin} | Worst: $${bigLoss}\n` +
@@ -2086,7 +2175,7 @@ async function downloadDayReport() {
       `Exit Reasons:\n` +
       Object.entries(byReason).map(([r,v]) => `  ${r}: ${v.count}x ($${v.pnl.toFixed(2)})`).join('\n') +
       `\n\nOpen Positions: ${openPos.length}\n` +
-      `Report saved as ARGO V2.2_DayReport_${today}.json`
+      `Report saved as ARGO V2.5_DayReport_${today}.json`
     );
   } catch(e) {
     alert('Error generating report: ' + e.message);
@@ -2190,6 +2279,163 @@ function startLogPolling() {
   _logTimer = setInterval(() => { if (_logLive) fetchLogs(true); }, 15000);
 }
 startLogPolling();
+
+// ── BACKTEST ENGINE JS ───────────────────────────────────────────────────────
+async function runBacktest() {
+  const btn = document.getElementById('bt-run-btn');
+  btn.disabled = true; btn.textContent = '⟳ RUNNING...';
+  document.getElementById('bt-results').style.display = 'none';
+  document.getElementById('bt-stress-results').style.display = 'none';
+  document.getElementById('bt-error').style.display = 'none';
+  document.getElementById('bt-loading').style.display = 'block';
+  document.getElementById('bt-loading-msg').textContent = 'Fetching historical bars from Alpaca...';
+
+  try {
+    const body = {
+      ticker:       document.getElementById('bt-ticker').value,
+      optionType:   document.getElementById('bt-type').value,
+      startDate:    document.getElementById('bt-start').value,
+      endDate:      document.getElementById('bt-end').value,
+      minScore:     parseInt(document.getElementById('bt-minscore').value),
+      holdDays:     parseInt(document.getElementById('bt-hold').value),
+      takeProfitPct: parseFloat(document.getElementById('bt-tp').value) / 100,
+      stopLossPct:  parseFloat(document.getElementById('bt-stop').value) / 100,
+      capital:      10000,
+    };
+    document.getElementById('bt-loading-msg').textContent = `Replaying ARGO V2.5 scoring on ${body.ticker} ${body.startDate}→${body.endDate}...`;
+    const res  = await fetch('/api/backtest', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body) });
+    const data = await res.json();
+    if (data.error) throw new Error(data.error);
+    renderBacktestResults(data);
+  } catch(e) {
+    document.getElementById('bt-error').textContent = 'Error: ' + e.message;
+    document.getElementById('bt-error').style.display = 'block';
+  } finally {
+    document.getElementById('bt-loading').style.display = 'none';
+    btn.disabled = false; btn.textContent = '▶ RUN BACKTEST';
+  }
+}
+
+async function runStressTest() {
+  const btn = document.getElementById('bt-stress-btn');
+  btn.disabled = true; btn.textContent = '⟳ RUNNING...';
+  document.getElementById('bt-results').style.display = 'none';
+  document.getElementById('bt-stress-results').style.display = 'none';
+  document.getElementById('bt-error').style.display = 'none';
+  document.getElementById('bt-loading').style.display = 'block';
+  document.getElementById('bt-loading-msg').textContent = 'Running 5 historical stress scenarios...';
+
+  try {
+    const body = {
+      ticker:     document.getElementById('bt-ticker').value,
+      optionType: document.getElementById('bt-type').value,
+      capital:    10000,
+    };
+    const res  = await fetch('/api/backtest/stress', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body) });
+    const data = await res.json();
+    if (data.error) throw new Error(data.error);
+    renderStressResults(data);
+  } catch(e) {
+    document.getElementById('bt-error').textContent = 'Error: ' + e.message;
+    document.getElementById('bt-error').style.display = 'block';
+  } finally {
+    document.getElementById('bt-loading').style.display = 'none';
+    btn.disabled = false; btn.textContent = '⚡ STRESS TESTS';
+  }
+}
+
+function renderBacktestResults(data) {
+  const s = data.summary;
+  const pnlColor = s.totalPnL >= 0 ? '#00ff88' : '#ff5555';
+  const pfColor  = s.profitFactor >= 1.5 ? '#00ff88' : s.profitFactor >= 1.0 ? '#ffd700' : '#ff5555';
+
+  // Summary cards
+  document.getElementById('bt-summary-cards').innerHTML = [
+    { label:'TOTAL TRADES', val: s.totalTrades, color:'#00c4ff' },
+    { label:'WIN RATE', val: s.winRate + '%', color: s.winRate >= 50 ? '#00ff88' : '#ff5555' },
+    { label:'PROFIT FACTOR', val: s.profitFactor, color: pfColor },
+    { label:'TOTAL RETURN', val: s.totalReturn + '%', color: pnlColor },
+    { label:'MAX DRAWDOWN', val: s.maxDrawdown + '%', color: s.maxDrawdown > 20 ? '#ff5555' : '#ffd700' },
+    { label:'TOTAL P&L', val: '$' + s.totalPnL.toFixed(0), color: pnlColor },
+    { label:'AVG WIN', val: '$' + s.avgWin.toFixed(0), color: '#00ff88' },
+    { label:'AVG LOSS', val: '$' + s.avgLoss.toFixed(0), color: '#ff5555' },
+  ].map(c => `<div class="card"><div class="card-title">${c.label}</div><div class="metric-sm" style="color:${c.color}">${c.val}</div></div>`).join('');
+
+  // Score brackets
+  const brackets = data.scoreBrackets;
+  document.getElementById('bt-brackets').innerHTML = Object.entries(brackets).map(([b,v]) => {
+    const wr = v.winRate || 0;
+    const col = wr >= 55 ? '#00ff88' : wr >= 45 ? '#ffd700' : '#ff5555';
+    return `<div style="display:flex;justify-content:space-between;align-items:center;padding:6px 0;border-bottom:1px solid #0d3050">
+      <span style="color:#336688;font-size:11px">Score ${b}</span>
+      <span style="font-size:10px;color:#336688">${v.trades} trades</span>
+      <span style="font-size:13px;font-weight:700;color:${col}">${wr}% WR</span>
+    </div>`;
+  }).join('');
+
+  // Equity curve — simple canvas chart
+  const canvas = document.getElementById('bt-equity-chart');
+  const ctx = canvas.getContext('2d');
+  const curve = data.equityCurve;
+  if (curve.length > 1) {
+    canvas.width = canvas.offsetWidth || 300;
+    const w = canvas.width, h = 120;
+    const vals = curve.map(p => p.value);
+    const minV = Math.min(...vals), maxV = Math.max(...vals);
+    const range = maxV - minV || 1;
+    ctx.clearRect(0, 0, w, h);
+    ctx.strokeStyle = s.totalPnL >= 0 ? '#00ff88' : '#ff5555';
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    curve.forEach((p, i) => {
+      const x = (i / (curve.length - 1)) * (w - 20) + 10;
+      const y = h - 10 - ((p.value - minV) / range) * (h - 20);
+      i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+    });
+    ctx.stroke();
+    // Zero line
+    const zeroY = h - 10 - ((10000 - minV) / range) * (h - 20);
+    ctx.strokeStyle = '#0d3050'; ctx.lineWidth = 0.5;
+    ctx.setLineDash([3,3]);
+    ctx.beginPath(); ctx.moveTo(10, zeroY); ctx.lineTo(w-10, zeroY); ctx.stroke();
+    ctx.setLineDash([]);
+  }
+
+  // Trade log
+  document.getElementById('bt-trade-body').innerHTML = (data.trades || []).slice().reverse().map(t => {
+    const pnlColor = t.pnlDollar >= 0 ? '#00ff88' : '#ff5555';
+    const exitBadge = t.exitReason === 'take_profit' ? '🎯 TP' : t.exitReason === 'stop_loss' ? '🛑 SL' : '⏱ EXP';
+    return `<tr>
+      <td style="color:#336688">${t.date}</td>
+      <td style="color:${t.score>=85?'#00ff88':t.score>=75?'#ffd700':'#ff9944'}">${t.score}</td>
+      <td>$${t.entryPrice?.toFixed(2)||'-'}</td>
+      <td>$${t.entryPrem?.toFixed(2)||'-'}</td>
+      <td style="color:${pnlColor}">${t.pnlPct >= 0 ? '+' : ''}${t.pnlPct}%</td>
+      <td style="color:${pnlColor}">${t.pnlDollar >= 0 ? '+' : ''}$${t.pnlDollar?.toFixed(0)||'-'}</td>
+      <td>${exitBadge}</td>
+      <td>${t.holdDays}d</td>
+      <td style="color:#336688;font-size:9px">${(t.reasons||[]).join(' | ')}</td>
+    </tr>`;
+  }).join('');
+
+  document.getElementById('bt-results').style.display = 'block';
+}
+
+function renderStressResults(data) {
+  document.getElementById('bt-stress-body').innerHTML = (data.stressTests || []).map(s => {
+    const retColor = s.totalReturn >= 0 ? '#00ff88' : '#ff5555';
+    const pfColor  = s.profitFactor >= 1.5 ? '#00ff88' : s.profitFactor >= 1.0 ? '#ffd700' : '#ff5555';
+    return `<tr>
+      <td style="color:#cce8ff">${s.scenario || '-'}</td>
+      <td>${s.totalTrades}</td>
+      <td style="color:${s.winRate >= 50 ? '#00ff88' : '#ff5555'}">${s.winRate}%</td>
+      <td style="color:${pfColor}">${s.profitFactor}</td>
+      <td style="color:${retColor}">${s.totalReturn >= 0 ? '+' : ''}${s.totalReturn}%</td>
+      <td style="color:${s.maxDrawdown > 20 ? '#ff5555' : '#ffd700'}">${s.maxDrawdown}%</td>
+    </tr>`;
+  }).join('');
+  document.getElementById('bt-stress-results').style.display = 'block';
+}
 
 function switchTab(name) {
   document.querySelectorAll('.tab').forEach(t=>t.classList.remove('active'));
