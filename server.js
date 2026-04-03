@@ -2777,25 +2777,37 @@ const AGENT_TOOLS = [
   }
 ];
 
-async function callClaudeAgent(systemPrompt, userPrompt, maxTokens = 800, useTools = false) {
+async function callClaudeAgent(systemPrompt, userPrompt, maxTokens = 800, useTools = false, enableCache = true) {
   if (!ANTHROPIC_API_KEY) return null;
   try {
     const messages = [{ role: "user", content: userPrompt }];
+
+    // Prompt caching — system prompt is identical per call type, cache it
+    // Cache writes: 125% of normal input price. Cache reads: 10% of normal input price.
+    // Break-even: ~2 reads. After that, ~90% savings on input tokens.
+    // getAgentMacroAnalysis runs ~80x/day — saves ~$1.50/day in input costs
+    const systemBlock = enableCache
+      ? [{ type: "text", text: systemPrompt, cache_control: { type: "ephemeral" } }]
+      : systemPrompt;
+
     const body = {
       model:      ANTHROPIC_MODEL,
       max_tokens: maxTokens,
-      system:     systemPrompt,
+      system:     systemBlock,
       messages,
     };
     if (useTools) body.tools = AGENT_TOOLS;
 
+    const headers = {
+      "x-api-key":         ANTHROPIC_API_KEY,
+      "anthropic-version": "2023-06-01",
+      "content-type":      "application/json",
+    };
+    if (enableCache) headers["anthropic-beta"] = "prompt-caching-2024-07-31";
+
     const res = await withTimeout(fetch("https://api.anthropic.com/v1/messages", {
       method:  "POST",
-      headers: {
-        "x-api-key":         ANTHROPIC_API_KEY,
-        "anthropic-version": "2023-06-01",
-        "content-type":      "application/json",
-      },
+      headers,
       body: JSON.stringify(body),
     }), 30000);
 
@@ -2826,14 +2838,16 @@ async function callClaudeAgent(systemPrompt, userPrompt, maxTokens = 800, useToo
         }
       ];
 
+      const followHeaders = {
+        "x-api-key":         ANTHROPIC_API_KEY,
+        "anthropic-version": "2023-06-01",
+        "content-type":      "application/json",
+      };
+      if (enableCache) followHeaders["anthropic-beta"] = "prompt-caching-2024-07-31";
       const followRes = await withTimeout(fetch("https://api.anthropic.com/v1/messages", {
         method:  "POST",
-        headers: {
-          "x-api-key":         ANTHROPIC_API_KEY,
-          "anthropic-version": "2023-06-01",
-          "content-type":      "application/json",
-        },
-        body: JSON.stringify({ model: ANTHROPIC_MODEL, max_tokens: maxTokens, system: systemPrompt, messages: followMessages }),
+        headers: followHeaders,
+        body: JSON.stringify({ model: ANTHROPIC_MODEL, max_tokens: maxTokens, system: systemBlock, messages: followMessages }),
       }), 30000);
 
       if (!followRes.ok) {
@@ -2846,6 +2860,16 @@ async function callClaudeAgent(systemPrompt, userPrompt, maxTokens = 800, useToo
       return text.replace(/^```json\s*/i, "").replace(/\s*```$/i, "").trim();
     }
 
+    // Log cache performance when available
+    if (enableCache && data.usage) {
+      const u = data.usage;
+      const cacheRead  = u.cache_read_input_tokens  || 0;
+      const cacheWrite = u.cache_creation_input_tokens || 0;
+      const uncached   = u.input_tokens || 0;
+      if (cacheRead > 0 || cacheWrite > 0) {
+        logEvent("scan", `[CACHE] read:${cacheRead} write:${cacheWrite} uncached:${uncached} — saved ~$${(cacheRead*3/1000000).toFixed(4)}`);
+      }
+    }
     // Normal text response
     const text = data.content?.find(b => b.type === "text")?.text || "";
     return text.replace(/^```json\s*/i, "").replace(/\s*```$/i, "").trim();
