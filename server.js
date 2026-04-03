@@ -10875,10 +10875,38 @@ function backtestScoreSignal(bars, idx, optionType) {
     score -= 10; reasons.push(`Move ${(todayMove*100).toFixed(1)}% > 2x ATR ${(atrPct*100).toFixed(1)}% — extended (-10)`);
   }
 
-  return { score: Math.max(0, Math.min(100, score)), reasons };
+  // BT-3: Agent score simulation — closes the 20-30pt gap between backtest and live scores
+  // Live ARGO gets +25-35 pts from Claude agent confirmation. Backtest approximates this
+  // using the same technical regime signals the agent would be reading.
+  // Regime derived from: SMA20 vs SMA50, momentum, ADX proxy (ATR-based)
+  const sma20 = slice.slice(-20).reduce((s,b) => s + b.c, 0) / 20;
+  const sma50 = slice.length >= 50 ? slice.slice(-50).reduce((s,b) => s + b.c, 0) / 50 : sma20;
+  const mom20 = slice.length >= 21 ? (price - slice[slice.length-21].c) / slice[slice.length-21].c * 100 : 0;
+  // Simplified ADX proxy: trend strength from directional consistency
+  const adxProxy = Math.abs(mom20) * 2 + (atrPct * 100); // rough trend strength
+  let agentBonus = 0;
+  let agentRegime = "neutral";
+  if (price < sma20 && sma20 < sma50 && mom20 < -2) {
+    agentRegime = "trending_bear";
+    agentBonus  = optionType === "put"  ? 20 : -20; // agent confirms puts, penalizes calls
+  } else if (price > sma20 && sma20 > sma50 && mom20 > 2) {
+    agentRegime = "trending_bull";
+    agentBonus  = optionType === "call" ? 20 : -20; // agent confirms calls, penalizes puts
+  } else if (Math.abs(mom20) < 1) {
+    agentRegime = "choppy";
+    agentBonus  = -10; // agent cautious in choppy — matches live choppy debit block
+  }
+  // Medium confidence approximation (not high) — live agent can be high/medium/low
+  // Using medium (not +35) to avoid over-optimism
+  if (agentBonus !== 0) {
+    score += agentBonus;
+    reasons.push(`~Agent ${agentRegime} simulation (${agentBonus > 0 ? '+' : ''}${agentBonus})`);
+  }
+
+  return { score: Math.max(0, Math.min(100, score)), reasons, agentRegime };
 }
 
-function simulateOptionPnL(entryPrice, optionType, holdDays, outcome) {
+function simulateOptionPnL(entryPrice, optionType, holdDays, outcome, ticker = "SPY", vixEst = 20) {
   // Simulate option P&L based on underlying price change
   // Uses realistic delta-based approximation with theta decay
   // outcome: { priceDelta (%), vixShift, daysToExpiry }
@@ -10895,7 +10923,29 @@ function simulateOptionPnL(entryPrice, optionType, holdDays, outcome) {
   // Vega shift: VIX up = calls hurt, puts benefit (simplified)
   const vegaImpact = vixShift * entryPrice * 0.05 * (optionType === "call" ? -1 : 1);
 
-  const pnlPct = (deltaValue - thetaLoss + vegaImpact) / entryPrice;
+  // BT-1: Slippage model — VIX-scaled realistic fill cost
+  // Based on observed live options spreads at different volatility regimes
+  // Applied at both entry AND exit (round-trip cost)
+  const slippagePct = vixEst >= 30 ? 0.07   // VIX 30+: wide spreads, chaotic markets
+                    : vixEst >= 20 ? 0.04   // VIX 20-30: moderate spread widening
+                    :                0.02;  // VIX < 20: tight spreads, liquid
+  const slippageCost = entryPrice * slippagePct; // applied as $ reduction to entry premium
+
+  // BT-2: Bid-ask spread cost — instrument-specific, applied at entry
+  // Based on typical SPY/QQQ/IWM/GLD options market width
+  const spreadCost = ticker === "GLD" ? 0.20
+                   : ticker === "IWM" ? 0.15
+                   : ticker === "QQQ" ? 0.12
+                   :                   0.08; // SPY — most liquid
+
+  // Total transaction cost: slippage + half bid-ask spread (we pay on entry, receive on exit)
+  // Round-trip: slippage × 2 (entry + exit), spread × 1 (net cost of crossing spread)
+  const totalTxCost = (slippageCost * 2) + spreadCost;
+
+  const pnlRaw = (deltaValue - thetaLoss + vegaImpact);
+  const pnlNet = pnlRaw - totalTxCost; // deduct realistic transaction costs
+  const pnlPct = pnlNet / entryPrice;
+
   return Math.max(-0.95, Math.min(2.0, pnlPct)); // cap at -95% to +200%
 }
 
@@ -10936,6 +10986,13 @@ async function runBacktest(config) {
   // Track concurrent open positions for multi-position simulation
   const openBT = []; // { entryIdx, entryType, entryPrem, positionCost, expiryIdx }
 
+  // BT-7: Spiral detection — mirrors live ARGO behavior
+  // After 5 consecutive losses of same type, block that direction until a win
+  const btSpiral = { put: 0, call: 0 }; // consecutive loss counters
+  let btSpiralBlocked = null; // "put" | "call" | null
+  const SPIRAL_THRESHOLD = 5;
+  let spiralBlockCount = 0; // track how many entries were blocked
+
   // Walk forward — skip first 26 bars (need for MACD)
   for (let i = 26; i < bars.length - holdDays; i++) {
     const bar      = bars[i];
@@ -10965,6 +11022,9 @@ async function runBacktest(config) {
     const score   = entryScore;
     const reasons = entryReasons;
 
+    // BT-7: Spiral block check — skip if this direction is in spiral
+    if (btSpiralBlocked === entryType) { spiralBlockCount++; continue; }
+
     // Estimate option premium: ATM ~4% of underlying for 21 DTE at VIX 20-25
     // Scale with recent vol — use ATR as vol proxy
     const atr    = calcATR(bars.slice(Math.max(0, i-14), i+1), 14) || price * 0.01;
@@ -10985,7 +11045,7 @@ async function runBacktest(config) {
         const pd2 = (exitBar2.c - bars[op.entryIdx].c) / bars[op.entryIdx].c;
         const dd2 = op.entryType === "put" ? -pd2 : pd2;
         let pnl2 = simulateOptionPnL(op.entryPrem, op.entryType, op.expiryIdx - op.entryIdx,
-          { priceDelta: dd2 * bars[op.entryIdx].c, daysToExpiry: 21 });
+          { priceDelta: dd2 * bars[op.entryIdx].c, daysToExpiry: 21 }, ticker, op.vixEst || 20);
         pnl2 = Math.max(-stopLossPct, Math.min(takeProfitPct, pnl2));
         const pnlDollar2 = parseFloat((pnl2 * op.positionCost).toFixed(2));
         cash = parseFloat((cash + pnlDollar2).toFixed(2));
@@ -11015,7 +11075,7 @@ async function runBacktest(config) {
       const dayBar      = bars[i + d];
       const dayDelta    = (dayBar.c - price) / price;
       const dayDirected = entryType === "put" ? -dayDelta : dayDelta;
-      const estPnlPct   = simulateOptionPnL(entryPrem, entryType, d, { priceDelta: dayDirected * price, daysToExpiry: 21 });
+      const estPnlPct   = simulateOptionPnL(entryPrem, entryType, d, { priceDelta: dayDirected * price, daysToExpiry: 21 }, ticker, vixEst);
       if (estPnlPct >= takeProfitPct) {
         pnlPct = takeProfitPct; exitReason = "take_profit"; actualDays = d; settled = true; break;
       }
@@ -11033,13 +11093,25 @@ async function runBacktest(config) {
       const dd = (cash - peakCash) / peakCash;
       if (dd < maxDrawdown) maxDrawdown = dd;
       equityCurve.push({ date: bars[i + actualDays]?.t?.split("T")[0] || barDate, value: cash });
+
+      // BT-7: Update spiral counters
+      if (pnlDollar > 0) {
+        btSpiral[entryType] = 0; // win resets counter
+        btSpiralBlocked = null;  // clears block
+      } else {
+        btSpiral[entryType]++;
+        if (btSpiral[entryType] >= SPIRAL_THRESHOLD) {
+          btSpiralBlocked = entryType;
+        }
+      }
+
       trades.push({ date: barDate, ticker, optionType: entryType, score, entryPrice: price, entryPrem,
         pnlPct: parseFloat((pnlPct*100).toFixed(1)), pnlDollar, exitReason, holdDays: actualDays,
         cashAfter: cash, reasons: reasons.slice(0,3) });
     } else {
       // Not yet settled — track as open position
       openBT.push({ entryIdx: i, entryType, entryPrem, positionCost, score,
-        expiryIdx: Math.min(i + holdDays, bars.length-1), reasons: reasons.slice(0,3) });
+        expiryIdx: Math.min(i + holdDays, bars.length-1), reasons: reasons.slice(0,3), vixEst });
     }
   }
 
@@ -11064,13 +11136,15 @@ async function runBacktest(config) {
     brackets[b].winRate = brackets[b].trades > 0 ? parseFloat((brackets[b].wins / brackets[b].trades * 100).toFixed(1)) : 0;
   });
 
-  logEvent("scan", `[BACKTEST] Complete: ${trades.length} trades, ${winRate.toFixed(0)}% win rate, PF:${profitFactor.toFixed(2)}, return:${totalReturn.toFixed(1)}%`);
+  logEvent("scan", `[BACKTEST] Complete: ${trades.length} trades, ${winRate.toFixed(0)}% win rate, PF:${profitFactor.toFixed(2)}, return:${totalReturn.toFixed(1)}% | spiral blocked:${spiralBlockCount} entries`);
 
   return {
     config,
     summary: {
       ticker, optionType, startDate, endDate, maxPositions,
       note: maxPositions > 1 ? `Multi-position simulation (max ${maxPositions} concurrent)` : "Single-position simulation",
+      modelVersion: "v2 — includes slippage, bid-ask, agent simulation, spiral detection",
+      spiralBlockCount,
       totalTrades:  trades.length,
       wins:         wins.length,
       losses:       losses.length,
