@@ -4054,14 +4054,17 @@ async function getYieldCurve() {
 // GLD calls: only when dollar not strengthening + equities stressed + VIX elevated
 // GLD puts:  only when GLD overbought (RSI>68) + DXY not rising (rare/high conviction)
 // Panel removed seasonal filter — DXY gate is causally grounded vs 3yr sample artifact
-function isGLDEntryAllowed(optionType, dxy, spyReturn5d, vix, gldRSI) {
+function isGLDEntryAllowed(optionType, dxy, spyReturn5d, vix, gldRSI, gldPrice, gldMA20) {
   if (optionType === "call") {
-    const dxyStrengthening = dxy && dxy.change > 0.8;      // dollar up >0.8% in 5d
-    const spyRecovering    = spyReturn5d > 0.015;           // SPY up >1.5% in 5d
-    const vixTooLow        = vix < 20;                      // no stress, no safe haven bid
-    if (dxyStrengthening) return { allowed: false, reason: `GLD call blocked — DXY strengthening (+${dxy.change}% 5d, dollar headwind for gold)` };
-    if (spyRecovering)    return { allowed: false, reason: `GLD call blocked — SPY up ${(spyReturn5d*100).toFixed(1)}% 5d, no equity stress for safe haven` };
-    if (vixTooLow)        return { allowed: false, reason: `GLD call blocked — VIX ${vix.toFixed(1)} below 20, insufficient fear for gold rally` };
+    // Panel decision (8/8): remove SPY 5d momentum gate — too restrictive
+    // Gold rallies on dollar weakness + uncertainty, not only equity stress
+    // Replacement: GLD above its own 20MA (Quant + Technical Analyst, 3/8)
+    const dxyStrengthening = dxy && dxy.change > 0.8;  // dollar up >0.8% in 5d
+    const vixTooLow        = vix < 20;                 // no uncertainty, no gold bid
+    const gldDowntrend     = gldMA20 > 0 && gldPrice > 0 && gldPrice < gldMA20; // gold below 20MA = downtrend
+    if (dxyStrengthening) return { allowed: false, reason: `GLD call blocked — DXY strengthening (+${dxy.change.toFixed(2)}% 5d, dollar headwind for gold)` };
+    if (vixTooLow)        return { allowed: false, reason: `GLD call blocked — VIX ${vix.toFixed(1)} below 20, insufficient uncertainty for gold rally` };
+    if (gldDowntrend)     return { allowed: false, reason: `GLD call blocked — GLD $${gldPrice.toFixed(2)} below 20MA $${gldMA20.toFixed(2)}, don't buy calls in downtrend` };
     return { allowed: true };
   } else {
     // GLD puts: only when gold is genuinely overbought
@@ -4076,15 +4079,21 @@ function isGLDEntryAllowed(optionType, dxy, spyReturn5d, vix, gldRSI) {
 // ── TLT Entry Gate — bonds rally when equities fall ────────────────────────
 // TLT calls: when SPY is below its 50MA (equity weakness thesis)
 // TLT puts:  when SPY recovering strongly above 50MA (rates rising = bonds fall)
-function isTLTEntryAllowed(optionType, spyPrice, spyMA50, spyReturn5d) {
+function isTLTEntryAllowed(optionType, spyPrice, spyMA50, spyReturn5d, spyMA200) {
   if (!spyMA50 || spyMA50 === 0) return { allowed: true }; // no data, don't block
-  const spyBelow50MA = spyPrice < spyMA50;
+  // Panel decision (5/8): SPY below 50MA OR below 200MA allows TLT calls
+  // In 2022, bonds fell while SPY was still above 50MA (both fell on rate hikes)
+  // Adding 200MA catch handles sustained bear market where SPY/bonds decorrelate differently
+  const spyBelow50MA  = spyPrice < spyMA50;
+  const spyBelow200MA = spyMA200 && spyMA200 > 0 && spyPrice < spyMA200;
+  const spyWeak       = spyBelow50MA || spyBelow200MA;
   if (optionType === "call") {
-    if (!spyBelow50MA) return { allowed: false, reason: `TLT call blocked — SPY $${spyPrice.toFixed(2)} above 50MA $${spyMA50.toFixed(2)}, no equity stress for bond rally` };
-    return { allowed: true };
+    if (!spyWeak) return { allowed: false, reason: `TLT call blocked — SPY $${spyPrice.toFixed(2)} above both 50MA $${spyMA50.toFixed(2)} and 200MA, no equity weakness for bond rally` };
+    const maLabel = spyBelow200MA ? "200MA" : "50MA";
+    return { allowed: true, reason: `TLT call allowed — SPY below ${maLabel}` };
   } else {
-    // TLT puts: bonds falling = rates rising = SPY recovering
-    if (spyBelow50MA) return { allowed: false, reason: `TLT put blocked — SPY below 50MA, bonds likely rallying not falling` };
+    // TLT puts: bonds falling = rates rising = SPY recovering above both MAs
+    if (spyWeak) return { allowed: false, reason: `TLT put blocked — SPY below MA, bonds likely rallying not falling` };
     if (spyReturn5d < 0.01) return { allowed: false, reason: `TLT put blocked — SPY not recovering strongly enough (${(spyReturn5d*100).toFixed(1)}% 5d)` };
     return { allowed: true };
   }
@@ -8414,8 +8423,12 @@ async function runScan() {
       if (stock.ticker === "GLD") {
         const dxy5d       = marketContext.dxy || { trend: "neutral", change: 0 };
         const spy5dReturn = spyBars.length >= 5 ? (spyBars[spyBars.length-1].c - spyBars[0].c) / spyBars[0].c : 0;
-        const gldCallGate = isGLDEntryAllowed("call", dxy5d, spy5dReturn, state.vix, liveStock.rsi);
-        const gldPutGate  = isGLDEntryAllowed("put",  dxy5d, spy5dReturn, state.vix, liveStock.rsi);
+        // Compute GLD 20MA for trend gate (needs recent GLD bars — use cached price as fallback)
+        const gldMA20Live = (state._gldBars && state._gldBars.length >= 20)
+          ? state._gldBars.slice(-20).reduce((s,b) => s + b.c, 0) / 20
+          : 0;
+        const gldCallGate = isGLDEntryAllowed("call", dxy5d, spy5dReturn, state.vix, liveStock.rsi, liveStock.price || 0, gldMA20Live);
+        const gldPutGate  = isGLDEntryAllowed("put",  dxy5d, spy5dReturn, state.vix, liveStock.rsi, liveStock.price || 0, gldMA20Live);
         if (!gldCallGate.allowed) { callSetup.score = 0; logEvent("filter", gldCallGate.reason); }
         if (!gldPutGate.allowed)  { putSetup.score  = 0; logEvent("filter", gldPutGate.reason);  }
         // GLD min score 80 (panel consensus — higher bar for hedge instrument)
@@ -8428,8 +8441,8 @@ async function runScan() {
         const spy5dReturn = spyBars.length >= 5 ? (spyBars[spyBars.length-1].c - spyBars[0].c) / spyBars[0].c : 0;
         const spyPriceNow = spyBars.length ? spyBars[spyBars.length-1].c : 0;
         // Compute SPY 50MA from agent bars (already fetched for agent context)
-        const tltCallGate = isTLTEntryAllowed("call", spyPriceNow, state._spyMA50 || 0, spy5dReturn);
-        const tltPutGate  = isTLTEntryAllowed("put",  spyPriceNow, state._spyMA50 || 0, spy5dReturn);
+        const tltCallGate = isTLTEntryAllowed("call", spyPriceNow, state._spyMA50 || 0, spy5dReturn, state._spyMA200 || 0);
+        const tltPutGate  = isTLTEntryAllowed("put",  spyPriceNow, state._spyMA50 || 0, spy5dReturn, state._spyMA200 || 0);
         if (!tltCallGate.allowed) { callSetup.score = 0; logEvent("filter", tltCallGate.reason); }
         if (!tltPutGate.allowed)  { putSetup.score  = 0; logEvent("filter", tltPutGate.reason);  }
       }
@@ -11149,7 +11162,11 @@ async function runBacktest(config) {
     const vixEst    = Math.min(50, Math.max(15, (atrEarly / price) * 100 * 16));
 
     if (ticker === "GLD") {
-      const gldGate = isGLDEntryAllowed(entryType, dxyProxy, spy5d, vixEst, btRSI);
+      // Compute GLD 20MA for backtest gate
+      const gldMA20bt = bars.length >= 20
+        ? bars.slice(Math.max(0,i-19), i+1).reduce((s,b) => s + b.c, 0) / Math.min(20, i+1)
+        : 0;
+      const gldGate = isGLDEntryAllowed(entryType, dxyProxy, spy5d, vixEst, btRSI, price, gldMA20bt);
       if (!gldGate.allowed) {
         if (dxyProxy.trend === "strengthening") gateSkips.dxy++;
         else if (spy5d > 0.015) gateSkips.spy5d++;
@@ -11162,7 +11179,11 @@ async function runBacktest(config) {
       if (score < 80) continue;
     }
     if (ticker === "TLT") {
-      const tltGate = isTLTEntryAllowed(entryType, spyPrice, spy50MA, spy5d);
+      // Compute SPY 200MA for TLT gate
+      const spy200MAbt = spySlice.length >= 200
+        ? spySlice.slice(-200).reduce((s,b) => s + b.c, 0) / 200
+        : 0;
+      const tltGate = isTLTEntryAllowed(entryType, spyPrice, spy50MA, spy5d, spy200MAbt);
       if (!tltGate.allowed) { gateSkips.tltSpy50++; continue; }
     }
 
