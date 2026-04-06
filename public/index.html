@@ -847,6 +847,8 @@ input[type=text]:focus{border-color:var(--blue)}
           <input id="bt-stop" type="number" value="35" min="10" max="80" style="width:100%;background:#071020;color:#cce8ff;border:1px solid #0d3050;padding:5px;border-radius:4px;font-family:monospace"></div>
         <div style="flex:1"><div style="font-size:9px;color:#336688;margin-bottom:2px">MAX POS</div>
           <input id="bt-maxpos" type="number" value="3" min="1" max="6" style="width:100%;background:#071020;color:#cce8ff;border:1px solid #0d3050;padding:5px;border-radius:4px;font-family:monospace"></div>
+        <div style="flex:1"><div style="font-size:9px;color:#336688;margin-bottom:2px">CALL SIZE</div>
+          <input id="bt-callsize" type="number" value="1.0" min="0" max="1" step="0.1" title="Call position size multiplier (1.0=full, 0.5=half, 0=puts only)" style="width:100%;background:#071020;color:#cce8ff;border:1px solid #0d3050;padding:5px;border-radius:4px;font-family:monospace"></div>
       </div>
     </div>
   </div>
@@ -2574,7 +2576,10 @@ async function runFullMatrix() {
           method: 'POST',
           headers: {'Content-Type':'application/json'},
           body: JSON.stringify({ ticker, optionType:'both', startDate, endDate,
-            minScore, holdDays, takeProfitPct:tp, stopLossPct:stop, capital, maxPositions })
+            minScore, holdDays, takeProfitPct:tp, stopLossPct:stop, capital, maxPositions,
+            callSizeMult: parseFloat(document.getElementById('bt-callsize')?.value || 1.0),
+            putOnly: parseFloat(document.getElementById('bt-callsize')?.value || 1.0) === 0,
+          })
         })
         .then(r => r.json())
         .then(data => {
@@ -2839,6 +2844,7 @@ async function runBacktest() {
   document.getElementById('bt-loading-msg').textContent = 'Fetching historical bars from Alpaca...';
 
   try {
+    const btCallSize = parseFloat(document.getElementById('bt-callsize')?.value || 1.0);
     const body = {
       ticker:       document.getElementById('bt-ticker').value,
       optionType:   document.getElementById('bt-type').value,
@@ -2850,6 +2856,8 @@ async function runBacktest() {
       stopLossPct:  parseFloat(document.getElementById('bt-stop').value) / 100,
       capital:      parseFloat(document.getElementById('bt-capital').value) || 10000,
       maxPositions: parseInt(document.getElementById('bt-maxpos').value) || 3,
+      callSizeMult: btCallSize,
+      putOnly:      btCallSize === 0,
     };
     const modeLabel = body.optionType === "both" ? "puts+calls (best direction daily)" : body.optionType + "s";
     document.getElementById('bt-loading-msg').textContent = `Replaying ARGO V2.5 ${modeLabel} on ${body.ticker} ${body.startDate}→${body.endDate}...`;
@@ -3008,11 +3016,11 @@ function renderBacktestResults(data) {
     ctx.setLineDash([]);
   }
 
-  // Trade log — store all trades for filtering
+  // Trade log — store all trades for filtering, called after results visible
   window._btTrades = (data.trades || []).slice();
-  filterBtTradeLog();
 
   document.getElementById('bt-results').style.display = 'block';
+  filterBtTradeLog(); // must run after display:block so scroll container heights compute
 
   // Add copy template button if not already there
   const resultsEl = document.getElementById('bt-results');
