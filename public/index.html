@@ -2700,11 +2700,91 @@ function copyMatrixTemplate() {
         acc.trades += d.summary.totalTrades || 0;
         acc.wins   += d.summary.wins || 0;
         acc.spiral += d.summary.spiralBlockCount || 0;
+        acc.gates  += d.summary.totalGateSkips || 0;
       }
       return acc;
-    }, {pnl:0, trades:0, wins:0, spiral:0});
+    }, {pnl:0, trades:0, wins:0, spiral:0, gates:0});
     const wr = combined.trades > 0 ? (combined.wins/combined.trades*100).toFixed(1) : '-';
-    out += 'Score ' + score + '+: ' + combined.trades + ' trades | ' + wr + '% WR | $' + combined.pnl.toFixed(0) + ' | ' + combined.spiral + ' spiral blocks' + NL;
+    out += 'Score ' + score + '+: ' + combined.trades + ' trades | ' + wr + '% WR | $' + combined.pnl.toFixed(0) + ' | spiral:' + combined.spiral + ' gate:' + combined.gates + NL;
+  }
+  out += NL;
+
+  // Phase 3: Additional metrics at score 75
+  out += '── METRICS (score 75) ────────────────────────' + NL;
+  for (const inst of instruments) {
+    const d75 = data[inst + '-75'];
+    if (!d75 || d75.error || !d75.summary) continue;
+    const s  = d75.summary;
+    const ds = d75.directionSplit || {};
+    const vb = d75.vixWinRates || {};
+    const si = s.streakInfo || {};
+    const gs = s.gateSkips || {};
+
+    out += NL + inst + ' METRICS:' + NL;
+    out += '  Expectancy: $' + (s.expectancy||0).toFixed(2) + '/trade | Calmar: ' + (s.calmar||0).toFixed(2) + ' | Avg hold: ' + (s.avgHoldDuration||0).toFixed(1) + 'd' + NL;
+
+    // Direction split
+    if (ds.put && ds.call) {
+      out += '  Direction: ' +
+        'PUTS '  + ds.put.trades  + 't ' + ds.put.winRate  + '% WR $' + (ds.put.pnl||0).toFixed(0)  + ' | ' +
+        'CALLS ' + ds.call.trades + 't ' + ds.call.winRate + '% WR $' + (ds.call.pnl||0).toFixed(0) + NL;
+    }
+
+    // Losing streak
+    if (si.put  && si.put.max  > 0) out += '  Worst put  streak: ' + si.put.max  + ' losses (' + (si.put.startDate||'?')  + ' → ' + (si.put.endDate||'?')  + ')' + NL;
+    if (si.call && si.call.max > 0) out += '  Worst call streak: ' + si.call.max + ' losses (' + (si.call.startDate||'?') + ' → ' + (si.call.endDate||'?') + ')' + NL;
+
+    // VIX buckets
+    const vixLabels = { low:'VIX<18', medium:'VIX18-25', high:'VIX25-35', extreme:'VIX35+' };
+    const vixLine = Object.entries(vb).filter(function(e){return e[1].trades>0;}).map(function(e){
+      return (vixLabels[e[0]]||e[0]) + ':' + e[1].trades + 't/' + e[1].winRate + '%';
+    }).join(' | ');
+    if (vixLine) out += '  VIX buckets: ' + vixLine + NL;
+
+    // Gate skips
+    if (s.totalGateSkips > 0) {
+      const gsParts = [];
+      if (gs.dxy > 0)       gsParts.push('DXY:' + gs.dxy);
+      if (gs.spy5d > 0)     gsParts.push('SPY5d:' + gs.spy5d);
+      if (gs.vix > 0)       gsParts.push('VIX:' + gs.vix);
+      if (gs.tltSpy50 > 0)  gsParts.push('TLT50MA:' + gs.tltSpy50);
+      if (gs.gldRSI > 0)    gsParts.push('GLDRSI:' + gs.gldRSI);
+      if (gs.gldPutDxy > 0) gsParts.push('GLDputDXY:' + gs.gldPutDxy);
+      out += '  Gates blocked: ' + s.totalGateSkips + ' total (' + gsParts.join(', ') + ')' + NL;
+    }
+  }
+  out += NL;
+
+  // Phase 3: Trade log — worst 5 + best 5 per instrument at score 75
+  out += '── TRADE LOG (score 75 — worst 5 / best 5) ──' + NL;
+  for (const inst of instruments) {
+    const d75 = data[inst + '-75'];
+    if (!d75 || d75.error || !d75.trades || !d75.trades.length) continue;
+    const allTrades = d75.trades;
+    const sorted = allTrades.slice().sort(function(a,b){ return a.pnlDollar - b.pnlDollar; });
+    const worst5  = sorted.slice(0, 5);
+    const best5   = sorted.slice(-5).reverse();
+    out += NL + inst + ' WORST 5:' + NL;
+    out += '  Date       Dir   Score  Entry   P&L     Exit    Regime' + NL;
+    worst5.forEach(function(t) {
+      out += '  ' + (t.date||'').padEnd(10) + ' ' +
+        (t.optionType||'').toUpperCase().padEnd(5) + ' ' +
+        String(t.score||0).padEnd(6) + ' ' +
+        ('$'+(t.entryPrice||0).toFixed(0)).padEnd(7) + ' ' +
+        ('$'+(t.pnlDollar||0).toFixed(0)).padEnd(7) + ' ' +
+        (t.exitReason||'').replace('_',' ').padEnd(7) + ' ' +
+        (t.agentRegime||'n/a') + NL;
+    });
+    out += inst + ' BEST 5:' + NL;
+    best5.forEach(function(t) {
+      out += '  ' + (t.date||'').padEnd(10) + ' ' +
+        (t.optionType||'').toUpperCase().padEnd(5) + ' ' +
+        String(t.score||0).padEnd(6) + ' ' +
+        ('$'+(t.entryPrice||0).toFixed(0)).padEnd(7) + ' ' +
+        ('$'+(t.pnlDollar||0).toFixed(0)).padEnd(7) + ' ' +
+        (t.exitReason||'').replace('_',' ').padEnd(7) + ' ' +
+        (t.agentRegime||'n/a') + NL;
+    });
   }
   out += DIV;
 
@@ -2921,6 +3001,7 @@ DIRECTION:  ${s.optionType?.toUpperCase()}
 PERIOD:     ${s.startDate} → ${s.endDate}
 MIN SCORE:  ${s.minScore || '-'} | HOLD: ${s.holdDays || '-'}d | MAX POS: ${s.maxPositions || '-'}
 MODEL:      ${s.modelVersion || 'v1'}
+GATES:      ${(s.gatesApplied||[]).join(', ') || 'none'}
 ════════════════════════════════════════
 
 SUMMARY
@@ -2932,8 +3013,14 @@ SUMMARY
   Avg win:        $${s.avgWin?.toFixed(0)}
   Avg loss:       $${s.avgLoss?.toFixed(0)}
   Profit factor:  ${s.profitFactor}
+  Expectancy:     $${s.expectancy?.toFixed(2) ?? '-'}/trade
+  Calmar ratio:   ${s.calmar ?? '-'}
+  Avg hold:       ${s.avgHoldDuration ?? '-'}d
+  Max consec loss: put:${s.maxConsecLosses?.put??'-'} call:${s.maxConsecLosses?.call??'-'}
   Max drawdown:   ${s.maxDrawdown}%
+  DD duration:    ${s.maxDrawdownDuration ?? '-'} bars
   Spiral blocked: ${s.spiralBlockCount ?? '-'} entries
+  Gate blocked:   ${s.totalGateSkips ?? '-'} entries
 
 SCORE BRACKETS
 ${brackets}
