@@ -179,22 +179,11 @@ const WATCHLIST = [
     isIndex:   true,
     isPrimary: false,
   },
-  // ── TERTIARY: IWM — small caps, lower correlation to SPY/QQQ ────────────
-  {
-    ticker:    "IWM",
-    sector:    "Index",
-    momentum:  "steady",
-    rsi:       50,
-    macd:      "neutral",
-    catalyst:  "Small cap macro regime",
-    ivr:       35,
-    beta:      1.3,
-    earningsDate: null,
-    isIndex:   true,
-    isPrimary: false,
-  },
-  // ── HEDGE: GLD — gold ETF, inverse correlation in risk-off environments ─
-  // Use CALL spreads on GLD when equity panic pushes gold higher
+  // IWM REMOVED — 3-year backtest confirmed net loser at all score thresholds
+  // 2022: -$1,826 | 2023: -$985 | 2024: -$985 | 3yr @ 75: -$1,305
+  // Panel unanimous 8/8: instrument not compatible with mean-reversion scoring
+  // ── HEDGE 1: GLD — gold ETF, inverse correlation in risk-off environments ─
+  // Entry gated by: DXY not strengthening + SPY stressed + VIX>20 + Score 80+
   {
     ticker:    "GLD",
     sector:    "Commodity",
@@ -206,6 +195,23 @@ const WATCHLIST = [
     beta:      -0.1,  // negative beta = hedge against equity drawdown
     earningsDate: null,
     isIndex:   true,  // treated as index for liquidity/OI purposes
+    isPrimary: false,
+  },
+  // ── HEDGE 2: TLT — 20yr Treasury Bond ETF ─────────────────────────────────
+  // Panel unanimous (8/8): best portfolio hedge for equity stress
+  // Negative correlation to SPY (-0.50 in stress), RSI/MACD signals work cleanly
+  // Entry gated by: SPY below 50MA + score 75+ + direction-aware
+  {
+    ticker:    "TLT",
+    sector:    "Bonds",
+    momentum:  "steady",
+    rsi:       50,
+    macd:      "neutral",
+    catalyst:  "Rate/recession hedge — bonds rally when equities fall",
+    ivr:       20,
+    beta:      -0.5,  // strong negative beta = best equity stress hedge
+    earningsDate: null,
+    isIndex:   true,
     isPrimary: false,
   },
 ];
@@ -3078,6 +3084,7 @@ Rules: regime=what SPY does next 3-10 days. entryBias: puts_on_bounces=bearish t
 
   // ── AG-2: SPY 50MA/200MA injection ────────────────────────────────────────
   let spyMA50 = null, spyMA200 = null, spyMA50Slope = null;
+  // Also stored in state._spyMA50 so TLT gate can access it in scan loop
   if (spyBarsForAgent.length >= 50) {
     const closes50  = spyBarsForAgent.slice(-50).map(b => b.c);
     spyMA50  = parseFloat((closes50.reduce((s,c)=>s+c,0)/50).toFixed(2));
@@ -3092,6 +3099,9 @@ Rules: regime=what SPY does next 3-10 days. entryBias: puts_on_bounces=bearish t
   const spyPrice = mktStatus.spy?.price || state._liveSPY || 0;
   const spyVsMA50  = spyMA50  ? ((spyPrice - spyMA50)  / spyMA50  * 100).toFixed(1) : null;
   const spyVsMA200 = spyMA200 ? ((spyPrice - spyMA200) / spyMA200 * 100).toFixed(1) : null;
+  // Persist SPY 50MA for TLT gate and 200MA regime filter
+  if (spyMA50)  state._spyMA50  = spyMA50;
+  if (spyMA200) state._spyMA200 = spyMA200;
 
   // ── AG-3: Account drawdown context ────────────────────────────────────────
   const acctBaseline = state.accountBaseline || state.peakCash || 10000;
@@ -4040,6 +4050,46 @@ async function getYieldCurve() {
   } catch(e) { return { signal: "normal" }; }
 }
 
+// ── GLD Entry Gate — panel-validated (DXY + SPY momentum + VIX) ──────────────
+// GLD calls: only when dollar not strengthening + equities stressed + VIX elevated
+// GLD puts:  only when GLD overbought (RSI>68) + DXY not rising (rare/high conviction)
+// Panel removed seasonal filter — DXY gate is causally grounded vs 3yr sample artifact
+function isGLDEntryAllowed(optionType, dxy, spyReturn5d, vix, gldRSI) {
+  if (optionType === "call") {
+    const dxyStrengthening = dxy && dxy.change > 0.8;      // dollar up >0.8% in 5d
+    const spyRecovering    = spyReturn5d > 0.015;           // SPY up >1.5% in 5d
+    const vixTooLow        = vix < 20;                      // no stress, no safe haven bid
+    if (dxyStrengthening) return { allowed: false, reason: `GLD call blocked — DXY strengthening (+${dxy.change}% 5d, dollar headwind for gold)` };
+    if (spyRecovering)    return { allowed: false, reason: `GLD call blocked — SPY up ${(spyReturn5d*100).toFixed(1)}% 5d, no equity stress for safe haven` };
+    if (vixTooLow)        return { allowed: false, reason: `GLD call blocked — VIX ${vix.toFixed(1)} below 20, insufficient fear for gold rally` };
+    return { allowed: true };
+  } else {
+    // GLD puts: only when gold is genuinely overbought
+    const gldOverbought = gldRSI >= 68;
+    const dxyRising     = dxy && dxy.change > 0;
+    if (!gldOverbought) return { allowed: false, reason: `GLD put blocked — RSI ${gldRSI?.toFixed(0)||'?'} not overbought (need >68 for put thesis)` };
+    if (dxyRising)      return { allowed: false, reason: `GLD put blocked — DXY rising (+${dxy?.change||0}%), dollar strength supports gold` };
+    return { allowed: true };
+  }
+}
+
+// ── TLT Entry Gate — bonds rally when equities fall ────────────────────────
+// TLT calls: when SPY is below its 50MA (equity weakness thesis)
+// TLT puts:  when SPY recovering strongly above 50MA (rates rising = bonds fall)
+function isTLTEntryAllowed(optionType, spyPrice, spyMA50, spyReturn5d) {
+  if (!spyMA50 || spyMA50 === 0) return { allowed: true }; // no data, don't block
+  const spyBelow50MA = spyPrice < spyMA50;
+  if (optionType === "call") {
+    if (!spyBelow50MA) return { allowed: false, reason: `TLT call blocked — SPY $${spyPrice.toFixed(2)} above 50MA $${spyMA50.toFixed(2)}, no equity stress for bond rally` };
+    return { allowed: true };
+  } else {
+    // TLT puts: bonds falling = rates rising = SPY recovering
+    if (spyBelow50MA) return { allowed: false, reason: `TLT put blocked — SPY below 50MA, bonds likely rallying not falling` };
+    if (spyReturn5d < 0.01) return { allowed: false, reason: `TLT put blocked — SPY not recovering strongly enough (${(spyReturn5d*100).toFixed(1)}% 5d)` };
+    return { allowed: true };
+  }
+}
+
 // - VWAP -
 function calcVWAP(bars) {
   if (!bars || !bars.length) return 0;
@@ -4234,7 +4284,7 @@ async function getRealOptionsContract(ticker, price, optionType, score, vix, ear
       // Liquidity (15%) — OI as proxy, unknown OI gets neutral score
       // SPY/QQQ index instruments: always liquid regardless of single-strike OI
       // Monthly expirations have lower OI per strike but the market is deep
-      const isIndexTicker = ["SPY","QQQ","IWM","DIA","GLD"].includes(ticker);
+      const isIndexTicker = ["SPY","QQQ","GLD","TLT","DIA"].includes(ticker);
       const liquidScore  = isIndexTicker && contractDTE > 14 ? 0.8  // index monthly = liquid
                          : oi === 0 ? 0.5                    // unknown = neutral
                          : oi < 10  ? 0.02                   // essentially no market
@@ -5354,7 +5404,9 @@ async function executeSpreadTrade(stock, price, score, scoreReasons, vix, option
   // High risk day: halve sizing
   // If _dayPlan is null (e.g. after mid-day reset), default to high risk (conservative)
   // A missing day plan should never unlock full sizing — fail safe, not fail open
-  const riskMult = (!state._dayPlan || state._dayPlan.riskLevel === "high") ? 0.5 : 1.0;
+  // 200MA bear regime: additional 50% size reduction (stacks with other multipliers)
+  const below200MAMult = spyBelow200MA ? 0.5 : 1.0;
+  const riskMult = ((!state._dayPlan || state._dayPlan.riskLevel === "high") ? 0.5 : 1.0) * below200MAMult;
   // AG-7: positionSizeMult from agent — continuous sizing vs binary riskLevel
   // Cap at 1.0 before 30 fills — agent amplification only unlocks on validated system
   const rawAgentSizeMult = (state._agentMacro || {}).positionSizeMult || 1.0;
@@ -7676,6 +7728,15 @@ async function runScan() {
   // spyAlreadyDown: removed — agent scores this into individual stock signals already
   const spyAlreadyDown = false; // disabled — agent macro signal replaces this
 
+  // ── SPY 200MA REGIME FILTER — panel consensus (6/8) ───────────────────────
+  // When SPY is below its 200MA, market is in bearish regime
+  // Block calls entirely + require score 80+ for puts + 50% size reduction
+  // Addresses 2022 knife-catching problem: RSI "oversold" signals in prolonged downtrend
+  const spyBelow200MA = state._spyMA200 && state._liveSPY && state._liveSPY < state._spyMA200;
+  if (spyBelow200MA && !dryRunMode) {
+    logEvent("filter", `[200MA] SPY $${state._liveSPY?.toFixed(2)} below 200MA $${state._spyMA200?.toFixed(2)} — bear regime: calls blocked, puts need 80+ score, 50% size`);
+  }
+
   // ── FINAL HOUR BLOCK — no new entries after 3:45pm ──────────────────
   const etHourEntry    = scanET.getHours() + scanET.getMinutes() / 60;
   const finalHourBlock = etHourEntry >= 15.75 && !dryRunMode; // 3:45pm
@@ -7851,7 +7912,9 @@ async function runScan() {
   // MR calls bypass choppy block — extreme oversold in high-VIX IS the ideal MR call setup
   const spyRSIForMR   = (marketContext.spySignals && marketContext.spySignals.rsi) || state._lastSpyRSI || 50;
   const isMRCondition = spyRSIForMR <= 35 && state.vix >= 25;
-  const callsAllowed  = (isEntryWindow("call", true) && !finalHourBlock && !suppressBlock && (!choppyDebitBlock || isMRCondition) && !avoidHoldActive) || dryRunMode;
+  // 200MA bear regime: calls blocked entirely
+  const below200MACallBlock = spyBelow200MA && !dryRunMode;
+  const callsAllowed  = (isEntryWindow("call", true) && !finalHourBlock && !suppressBlock && !below200MACallBlock && (!choppyDebitBlock || isMRCondition) && !avoidHoldActive) || dryRunMode;
   if (isMRCondition && choppyDebitBlock) logEvent("filter", `MR call allowed in choppy — SPY RSI ${spyRSIForMR.toFixed(1)} extreme oversold + VIX ${state.vix}`);
   const putsAllowed   = (isEntryWindow("put",  true) && !vixFallingPause && !spyGapUp && !postReversalBlock && !finalHourBlock && !suppressBlock && !macroBullish && !choppyDebitBlock && !avoidHoldActive) || dryRunMode;
   // Credit spreads allowed even in choppy regime — that's the point of credit mode
@@ -8341,13 +8404,34 @@ async function runScan() {
       callSetup = { score: callResult.score, reasons: callResult.reasons, tradeType: callResult.tradeType || "spread", isMeanReversion: false };
       // Correlation suppression: QQQ and IWM both correlated to SPY (>0.90)
       // If SPY already has a position in the same direction, suppress correlated duplicate
-      if (stock.ticker === "QQQ" || stock.ticker === "IWM") {
+      if (stock.ticker === "QQQ") {
+        // QQQ correlated to SPY — suppress if SPY already has a position
         if (state.positions.some(p => p.ticker === "SPY" && p.optionType === "put"))  putSetup.score  = Math.min(putSetup.score,  30);
         if (state.positions.some(p => p.ticker === "SPY" && p.optionType === "call")) callSetup.score = Math.min(callSetup.score, 30);
-        // Also suppress if the OTHER correlated ticker already has a position
-        const otherTicker = stock.ticker === "QQQ" ? "IWM" : "QQQ";
-        if (state.positions.some(p => p.ticker === otherTicker && p.optionType === "put"))  putSetup.score  = Math.min(putSetup.score,  45);
-        if (state.positions.some(p => p.ticker === otherTicker && p.optionType === "call")) callSetup.score = Math.min(callSetup.score, 45);
+      }
+
+      // ── GLD entry gate — DXY + SPY momentum + VIX (panel-validated) ────────
+      if (stock.ticker === "GLD") {
+        const dxy5d       = marketContext.dxy || { trend: "neutral", change: 0 };
+        const spy5dReturn = spyBars.length >= 5 ? (spyBars[spyBars.length-1].c - spyBars[0].c) / spyBars[0].c : 0;
+        const gldCallGate = isGLDEntryAllowed("call", dxy5d, spy5dReturn, state.vix, liveStock.rsi);
+        const gldPutGate  = isGLDEntryAllowed("put",  dxy5d, spy5dReturn, state.vix, liveStock.rsi);
+        if (!gldCallGate.allowed) { callSetup.score = 0; logEvent("filter", gldCallGate.reason); }
+        if (!gldPutGate.allowed)  { putSetup.score  = 0; logEvent("filter", gldPutGate.reason);  }
+        // GLD min score 80 (panel consensus — higher bar for hedge instrument)
+        if (callSetup.score > 0 && callSetup.score < 80) { callSetup.score = 0; logEvent("filter", `GLD call score ${callSetup.score} below 80 minimum — hedge instrument requires high conviction`); }
+        if (putSetup.score > 0  && putSetup.score  < 80) { putSetup.score  = 0; logEvent("filter", `GLD put score ${putSetup.score} below 80 minimum`); }
+      }
+
+      // ── TLT entry gate — SPY 50MA direction awareness ──────────────────────
+      if (stock.ticker === "TLT") {
+        const spy5dReturn = spyBars.length >= 5 ? (spyBars[spyBars.length-1].c - spyBars[0].c) / spyBars[0].c : 0;
+        const spyPriceNow = spyBars.length ? spyBars[spyBars.length-1].c : 0;
+        // Compute SPY 50MA from agent bars (already fetched for agent context)
+        const tltCallGate = isTLTEntryAllowed("call", spyPriceNow, state._spyMA50 || 0, spy5dReturn);
+        const tltPutGate  = isTLTEntryAllowed("put",  spyPriceNow, state._spyMA50 || 0, spy5dReturn);
+        if (!tltCallGate.allowed) { callSetup.score = 0; logEvent("filter", tltCallGate.reason); }
+        if (!tltPutGate.allowed)  { putSetup.score  = 0; logEvent("filter", tltPutGate.reason);  }
       }
     } else {
       // Individual stocks: use scorePutSetup/scoreCallSetup
@@ -8650,13 +8734,11 @@ async function runScan() {
     const isBearishHigh    = ["bearish","strongly bearish"].includes(agentSig) && agentConf === "high" && !agentStale;
     const isLowConfidence  = agentConf === "low" || agentStale;
     const agentMinScore    = isBearishHigh ? 65 : isLowConfidence ? 80 : MIN_SCORE;
-    // ── Backtest-validated instrument-specific min scores ───────────────────
-    // Derived from 2024 full-year walk-forward backtest (149 trades, 3 instruments)
-    // IWM 70-79 bracket: 39% WR, $-199 net — no edge below 80. Raised floor to 80.
-    // QQQ 70-79 bracket: 57% WR, $+4,941 — edge exists at 70+, keep at MIN_SCORE.
-    // SPY 70-79 bracket: 46% WR, $+1,088 — marginal edge, keep at MIN_SCORE.
-    const instrumentMinScore = stock.ticker === "IWM" ? 80 : MIN_SCORE;
-    const effectiveMinScore = Math.max(ddProtocol.minScore || MIN_SCORE, regimeMinScore, agentMinScore, instrumentMinScore);
+    // Instrument-specific min scores — IWM removed (3yr net loser)
+    // GLD uses 80+ with DXY/SPY gates applied upstream
+    // 200MA bear regime: require 80+ for puts (prevents knife-catching in sustained downtrend)
+    const below200MAPutMin = spyBelow200MA ? 80 : MIN_SCORE;
+    const effectiveMinScore = Math.max(ddProtocol.minScore || MIN_SCORE, regimeMinScore, agentMinScore, below200MAPutMin);
     // QS-C2: In choppy regime, effectiveMinScore=90 + choppy score penalty (-10) means
     // a position needs 100 base score to clear the bar. Log this near-lockout for visibility.
     if (effectiveMinScore >= 90 && isChoppyRegime) {
@@ -10614,6 +10696,8 @@ app.post("/api/reset-account", async (req, res) => {
   // Reset weekly/daily counters
   state.monthStart          = new Date().toLocaleDateString();
   // Clear breadth history and agent history
+  // Note: IWM removed from watchlist (panel decision — 3yr net loser)
+  // TLT added as bond hedge (panel unanimous)
   state._breadthHistory       = [];
   state._agentRescoreMinute   = {};
   // STATE-2: Clear all session-specific state to prevent stale data carry-over
@@ -10934,7 +11018,7 @@ function simulateOptionPnL(entryPrice, optionType, holdDays, outcome, ticker = "
   // BT-2: Bid-ask spread cost — instrument-specific, applied at entry
   // Based on typical SPY/QQQ/IWM/GLD options market width
   const spreadCost = ticker === "GLD" ? 0.20
-                   : ticker === "IWM" ? 0.15
+                   : ticker === "TLT" ? 0.18  // bond ETF — moderate liquidity
                    : ticker === "QQQ" ? 0.12
                    :                   0.08; // SPY — most liquid
 
@@ -10987,11 +11071,12 @@ async function runBacktest(config) {
   const openBT = []; // { entryIdx, entryType, entryPrem, positionCost, expiryIdx }
 
   // BT-7: Spiral detection — mirrors live ARGO behavior
-  // After 5 consecutive losses of same type, block that direction until a win
-  const btSpiral = { put: 0, call: 0 }; // consecutive loss counters
-  let btSpiralBlocked = null; // "put" | "call" | null
+  // Each direction tracked independently — puts losing doesn't block calls
+  // Fixed: previously shared counter caused calls to be blocked by put losses
+  const btSpiral = { put: 0, call: 0 }; // independent counters per direction
+  const btSpiralBlocked = { put: false, call: false }; // independent blocks
   const SPIRAL_THRESHOLD = 5;
-  let spiralBlockCount = 0; // track how many entries were blocked
+  let spiralBlockCount = 0;
 
   // Walk forward — skip first 26 bars (need for MACD)
   for (let i = 26; i < bars.length - holdDays; i++) {
@@ -11022,8 +11107,8 @@ async function runBacktest(config) {
     const score   = entryScore;
     const reasons = entryReasons;
 
-    // BT-7: Spiral block check — skip if this direction is in spiral
-    if (btSpiralBlocked === entryType) { spiralBlockCount++; continue; }
+    // BT-7: Spiral block check — independent per direction
+    if (btSpiralBlocked[entryType]) { spiralBlockCount++; continue; }
 
     // Estimate option premium: ATM ~4% of underlying for 21 DTE at VIX 20-25
     // Scale with recent vol — use ATR as vol proxy
@@ -11094,14 +11179,14 @@ async function runBacktest(config) {
       if (dd < maxDrawdown) maxDrawdown = dd;
       equityCurve.push({ date: bars[i + actualDays]?.t?.split("T")[0] || barDate, value: cash });
 
-      // BT-7: Update spiral counters
+      // BT-7: Update spiral counters — independent per direction
       if (pnlDollar > 0) {
-        btSpiral[entryType] = 0; // win resets counter
-        btSpiralBlocked = null;  // clears block
+        btSpiral[entryType] = 0;          // win resets only this direction
+        btSpiralBlocked[entryType] = false; // clears only this direction
       } else {
         btSpiral[entryType]++;
         if (btSpiral[entryType] >= SPIRAL_THRESHOLD) {
-          btSpiralBlocked = entryType;
+          btSpiralBlocked[entryType] = true; // blocks only this direction
         }
       }
 
