@@ -2647,6 +2647,106 @@ function renderBacktestResults(data) {
   }).join('');
 
   document.getElementById('bt-results').style.display = 'block';
+
+  // Add copy template button if not already there
+  const resultsEl = document.getElementById('bt-results');
+  if (!resultsEl.querySelector('#bt-copy-btn')) {
+    const copyBtn = document.createElement('div');
+    copyBtn.style.cssText = 'margin-top:12px;text-align:right';
+    copyBtn.innerHTML = `<button id="bt-copy-btn" onclick="copyBacktestTemplate()" style="background:#071828;border:1px solid #00c4ff;color:#00c4ff;padding:6px 16px;border-radius:4px;cursor:pointer;font-size:10px;letter-spacing:1px">📋 COPY TEMPLATE FOR ANALYSIS</button>`;
+    resultsEl.appendChild(copyBtn);
+  }
+
+  // Store last result for template generation
+  window._lastBtResult = data;
+}
+
+function copyBacktestTemplate() {
+  const data = window._lastBtResult;
+  if (!data) return;
+  const s = data.summary;
+  const b = data.scoreBrackets || {};
+
+  const brackets = Object.entries(b).map(([range, v]) =>
+    `  ${range}: ${v.trades} trades | ${v.winRate}% WR | $${(v.totalPnl||0).toFixed(0)}`
+  ).join('\n');
+
+  // Quarterly breakdown from trade log
+  const quarters = {};
+  (data.trades || []).forEach(t => {
+    if (!t.date) return;
+    const m = parseInt(t.date.split('-')[1]);
+    const q = `Q${Math.ceil(m/3)}`;
+    if (!quarters[q]) quarters[q] = { trades: 0, wins: 0, pnl: 0 };
+    quarters[q].trades++;
+    if (t.pnlDollar > 0) quarters[q].wins++;
+    quarters[q].pnl += t.pnlDollar || 0;
+  });
+  const qLines = Object.entries(quarters).sort().map(([q, v]) =>
+    `  ${q}: ${v.trades} trades | ${v.trades > 0 ? (v.wins/v.trades*100).toFixed(0) : 0}% WR | $${v.pnl.toFixed(0)}`
+  ).join('\n');
+
+  const exitBreakdown = {};
+  (data.trades || []).forEach(t => {
+    const r = t.exitReason || 'unknown';
+    if (!exitBreakdown[r]) exitBreakdown[r] = 0;
+    exitBreakdown[r]++;
+  });
+  const exitLines = Object.entries(exitBreakdown).map(([r,c]) =>
+    `  ${r}: ${c} (${(c/s.totalTrades*100).toFixed(0)}%)`
+  ).join('\n');
+
+  const template = `BACKTEST RESULT — ARGO V2.5
+════════════════════════════════════════
+INSTRUMENT: ${s.ticker}
+DIRECTION:  ${s.optionType?.toUpperCase()}
+PERIOD:     ${s.startDate} → ${s.endDate}
+MIN SCORE:  ${s.minScore || '-'} | HOLD: ${s.holdDays || '-'}d | MAX POS: ${s.maxPositions || '-'}
+MODEL:      ${s.modelVersion || 'v1'}
+════════════════════════════════════════
+
+SUMMARY
+  Total trades:   ${s.totalTrades}
+  Wins / Losses:  ${s.wins} / ${s.losses}
+  Win rate:       ${s.winRate}%
+  Total P&L:      $${s.totalPnL?.toFixed(0)}
+  Total return:   ${s.totalReturn}%
+  Avg win:        $${s.avgWin?.toFixed(0)}
+  Avg loss:       $${s.avgLoss?.toFixed(0)}
+  Profit factor:  ${s.profitFactor}
+  Max drawdown:   ${s.maxDrawdown}%
+  Spiral blocked: ${s.spiralBlockCount ?? '-'} entries
+
+SCORE BRACKETS
+${brackets}
+
+QUARTERLY
+${qLines}
+
+EXIT BREAKDOWN
+${exitLines}
+════════════════════════════════════════`;
+
+  navigator.clipboard.writeText(template).then(() => {
+    const btn = document.getElementById('bt-copy-btn');
+    btn.textContent = '✅ COPIED';
+    btn.style.color = '#00ff88';
+    btn.style.borderColor = '#00ff88';
+    setTimeout(() => {
+      btn.textContent = '📋 COPY TEMPLATE FOR ANALYSIS';
+      btn.style.color = '#00c4ff';
+      btn.style.borderColor = '#00c4ff';
+    }, 2000);
+  }).catch(() => {
+    // Fallback for older browsers
+    const ta = document.createElement('textarea');
+    ta.value = template;
+    document.body.appendChild(ta);
+    ta.select();
+    document.execCommand('copy');
+    document.body.removeChild(ta);
+    document.getElementById('bt-copy-btn').textContent = '✅ COPIED';
+  });
 }
 
 function renderStressResults(data) {
