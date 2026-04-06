@@ -428,7 +428,7 @@ input[type=text]:focus{border-color:var(--blue)}
     <div class="card">
       <div class="card-title">Global Market</div>
       <div class="metric-sm" style="font-size:13px" id="global-signal">--</div>
-      <div class="sub" id="global-detail">QQQ/IWM/EEM</div>
+      <div class="sub" id="global-detail">QQQ/TLT/GLD</div>
     </div>
   </div>
 
@@ -813,7 +813,7 @@ input[type=text]:focus{border-color:var(--blue)}
       <div class="card-title">INSTRUMENT</div>
       <select id="bt-ticker" style="width:100%;background:#071020;color:#cce8ff;border:1px solid #0d3050;padding:6px;border-radius:4px;font-family:monospace">
         <option value="SPY">SPY</option><option value="QQQ">QQQ</option>
-        <option value="IWM">IWM</option><option value="GLD">GLD</option>
+        <option value="TLT">TLT</option><option value="GLD">GLD</option>
       </select>
       <div style="margin-top:8px">
         <select id="bt-type" style="width:100%;background:#071020;color:#cce8ff;border:1px solid #0d3050;padding:6px;border-radius:4px;font-family:monospace">
@@ -1457,7 +1457,7 @@ function renderMetrics() {
   const gmEl = document.getElementById("global-signal");
   if (gmEl) { gmEl.textContent = (gm.signal||"neutral").toUpperCase(); gmEl.style.color = gm.signal === "risk-on" ? "var(--green)" : gm.signal === "risk-off" ? "var(--red)" : "var(--muted)"; }
   const gmDet = document.getElementById("global-detail");
-  if (gmDet) gmDet.textContent = `QQQ:${gm.qqqChg>=0?"+":""}${gm.qqqChg}% IWM:${gm.iwmChg>=0?"+":""}${gm.iwmChg}%`;
+  if (gmDet) gmDet.textContent = `QQQ:${gm.qqqChg>=0?"+":""}${gm.qqqChg}% TLT:${gm.tltChg>=0?"+":""}${(gm.tltChg||0)}%`;
 
   // Streaks
   const str = state.streaks || { currentStreak: 0, currentType: null, maxWinStreak: 0, maxLossStreak: 0 };
@@ -2521,7 +2521,7 @@ async function runFullMatrix() {
   const capital     = parseFloat(document.getElementById('bt-capital').value) || 10000;
   const maxPositions= parseInt(document.getElementById('bt-maxpos').value) || 3;
 
-  const instruments = ['SPY','QQQ','IWM','GLD'];
+  const instruments = ['SPY','QQQ','TLT','GLD'];
   const scores      = [70, 75, 80];
   const total       = instruments.length * scores.length;
   let completed     = 0;
