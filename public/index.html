@@ -851,9 +851,19 @@ input[type=text]:focus{border-color:var(--blue)}
     </div>
   </div>
 
-  <div style="display:flex;gap:8px;margin-bottom:14px">
+  <div style="display:flex;gap:8px;margin-bottom:14px;flex-wrap:wrap">
     <button class="btn btn-green" onclick="runBacktest()" id="bt-run-btn">▶ RUN BACKTEST</button>
     <button class="btn" style="background:#0a1f3a;border:1px solid #ffd700;color:#ffd700" onclick="runStressTest()" id="bt-stress-btn">⚡ STRESS TESTS</button>
+    <button class="btn" style="background:#0a1f3a;border:1px solid #00c4ff;color:#00c4ff" onclick="runFullMatrix()" id="bt-matrix-btn">⚡ RUN FULL MATRIX (All 4 × 3 Scores)</button>
+  </div>
+  <!-- Matrix results area -->
+  <div id="bt-matrix-results" style="display:none;margin-bottom:14px">
+    <div style="font-size:10px;color:#00c4ff;letter-spacing:1px;margin-bottom:8px">FULL MATRIX RESULTS</div>
+    <div id="bt-matrix-progress" style="font-size:10px;color:#336688;margin-bottom:8px"></div>
+    <div id="bt-matrix-table"></div>
+    <div style="margin-top:10px;text-align:right">
+      <button onclick="copyMatrixTemplate()" style="background:#071828;border:1px solid #00c4ff;color:#00c4ff;padding:6px 16px;border-radius:4px;cursor:pointer;font-size:10px;letter-spacing:1px">📋 COPY MATRIX TEMPLATE</button>
+    </div>
   </div>
 
   <!-- Results -->
@@ -2496,6 +2506,214 @@ function startLogPolling() {
 startLogPolling();
 
 // ── BACKTEST ENGINE JS ───────────────────────────────────────────────────────
+async function runFullMatrix() {
+  const btn = document.getElementById('bt-matrix-btn');
+  btn.disabled = true; btn.textContent = '⟳ RUNNING MATRIX...';
+  document.getElementById('bt-matrix-results').style.display = 'block';
+  document.getElementById('bt-results').style.display = 'none';
+  document.getElementById('bt-error').style.display = 'none';
+
+  const startDate   = document.getElementById('bt-start').value;
+  const endDate     = document.getElementById('bt-end').value;
+  const holdDays    = parseInt(document.getElementById('bt-hold').value) || 5;
+  const tp          = parseFloat(document.getElementById('bt-tp').value) / 100 || 0.5;
+  const stop        = parseFloat(document.getElementById('bt-stop').value) / 100 || 0.35;
+  const capital     = parseFloat(document.getElementById('bt-capital').value) || 10000;
+  const maxPositions= parseInt(document.getElementById('bt-maxpos').value) || 3;
+
+  const instruments = ['SPY','QQQ','IWM','GLD'];
+  const scores      = [70, 75, 80];
+  const total       = instruments.length * scores.length;
+  let completed     = 0;
+  const matrixData  = {}; // keyed by "TICKER-SCORE"
+
+  const progress = document.getElementById('bt-matrix-progress');
+  const tableEl  = document.getElementById('bt-matrix-table');
+
+  // Run all combinations in parallel — 12 concurrent requests
+  const tasks = [];
+  for (const ticker of instruments) {
+    for (const minScore of scores) {
+      tasks.push(
+        fetch('/api/backtest', {
+          method: 'POST',
+          headers: {'Content-Type':'application/json'},
+          body: JSON.stringify({ ticker, optionType:'both', startDate, endDate,
+            minScore, holdDays, takeProfitPct:tp, stopLossPct:stop, capital, maxPositions })
+        })
+        .then(r => r.json())
+        .then(data => {
+          completed++;
+          progress.textContent = `Running ${completed}/${total} complete — ${ticker} @ ${minScore}+ done`;
+          matrixData[`${ticker}-${minScore}`] = data;
+          renderMatrixTable(matrixData, instruments, scores, capital);
+        })
+        .catch(err => {
+          completed++;
+          matrixData[`${ticker}-${minScore}`] = { error: err.message };
+        })
+      );
+    }
+  }
+
+  await Promise.all(tasks);
+  progress.textContent = `✅ All ${total} runs complete`;
+  window._matrixData  = matrixData;
+  window._matrixMeta  = { instruments, scores, startDate, endDate, holdDays, capital, maxPositions, tp, stop };
+  btn.disabled = false; btn.textContent = '⚡ RUN FULL MATRIX (All 4 × 3 Scores)';
+}
+
+function renderMatrixTable(data, instruments, scores, capital) {
+  const tableEl = document.getElementById('bt-matrix-table');
+  const cols = ['Instrument', ...scores.map(s => `Score ${s}+ WR%`), ...scores.map(s => `Score ${s}+ P&L`), 'Best Score'];
+  let html = `<table style="width:100%;border-collapse:collapse;font-size:10px;font-family:monospace">
+    <tr style="color:#336688;border-bottom:1px solid #0d3050">
+      <th style="text-align:left;padding:4px 8px">INSTRUMENT</th>
+      ${scores.map(s => `<th style="text-align:right;padding:4px 8px">SCORE ${s}+</th>`).join('')}
+    </tr>`;
+
+  // Subheader
+  html += `<tr style="color:#1a3a5c;font-size:9px">
+    <th></th>
+    ${scores.map(() => `<th style="text-align:right;padding:2px 8px">WR% / P&L / Trades</th>`).join('')}
+  </tr>`;
+
+  for (const ticker of instruments) {
+    html += `<tr style="border-bottom:1px solid #071020">
+      <td style="padding:5px 8px;color:#cce8ff;font-weight:700">${ticker}</td>`;
+    for (const score of scores) {
+      const key = `${ticker}-${score}`;
+      const d = data[key];
+      if (!d || d.error) {
+        html += `<td style="text-align:right;padding:5px 8px;color:#336688">⟳</td>`;
+      } else {
+        const s = d.summary || {};
+        const pnlColor = (s.totalPnL||0) >= 0 ? '#00ff88' : '#ff5555';
+        const wrColor  = (s.winRate||0) >= 50 ? '#00ff88' : (s.winRate||0) >= 45 ? '#ffd700' : '#ff5555';
+        html += `<td style="text-align:right;padding:5px 8px">
+          <span style="color:${wrColor}">${s.winRate||0}%</span>
+          <span style="color:#336688"> / </span>
+          <span style="color:${pnlColor}">$${(s.totalPnL||0).toFixed(0)}</span>
+          <span style="color:#336688"> / </span>
+          <span style="color:#8aaac8">${s.totalTrades||0}t</span>
+        </td>`;
+      }
+    }
+    html += '</tr>';
+  }
+
+  // Combined row
+  html += `<tr style="border-top:2px solid #0d3050;color:#ffd700">
+    <td style="padding:5px 8px;font-weight:700">COMBINED</td>`;
+  for (const score of scores) {
+    const combined = instruments.reduce((acc, ticker) => {
+      const d = data[`${ticker}-${score}`];
+      if (d && !d.error && d.summary) {
+        acc.pnl += d.summary.totalPnL || 0;
+        acc.trades += d.summary.totalTrades || 0;
+        acc.wins += d.summary.wins || 0;
+      }
+      return acc;
+    }, {pnl:0, trades:0, wins:0});
+    const wr = combined.trades > 0 ? (combined.wins/combined.trades*100).toFixed(1) : '-';
+    const pnlColor = combined.pnl >= 0 ? '#00ff88' : '#ff5555';
+    html += `<td style="text-align:right;padding:5px 8px">
+      <span style="color:${wr>=50?'#00ff88':'#ff5555'}">${wr}%</span>
+      <span style="color:#336688"> / </span>
+      <span style="color:${pnlColor};font-weight:700">$${combined.pnl.toFixed(0)}</span>
+      <span style="color:#336688"> / </span>
+      <span style="color:#8aaac8">${combined.trades}t</span>
+    </td>`;
+  }
+  html += '</tr></table>';
+  tableEl.innerHTML = html;
+}
+
+function copyMatrixTemplate() {
+  const data = window._matrixData;
+  const meta = window._matrixMeta;
+  if (!data || !meta) return;
+
+  const { instruments, scores, startDate, endDate, holdDays, capital, maxPositions } = meta;
+
+  let out = `BACKTEST MATRIX — ARGO V2.5
+════════════════════════════════════════
+PERIOD:    ${startDate} → ${endDate}
+HOLD:      ${holdDays}d | MAX POS: ${maxPositions} | CAPITAL: $${capital}
+DIRECTION: BOTH (best signal each day)
+MODEL:     v2 — slippage, bid-ask, agent simulation, spiral detection
+════════════════════════════════════════
+
+`;
+
+  for (const ticker of instruments) {
+    out += `── ${ticker} ─────────────────────────────────
+`;
+    out += `${'Score':<8} ${'Trades':<8} ${'WR%':<7} ${'P&L':<10} ${'Ret%':<8} ${'PF':<6} ${'DD%':<7} ${'Spiral'}
+`;
+    out += `${'─'.repeat(65)}
+`;
+    for (const score of scores) {
+      const d = data[`${ticker}-${score}`];
+      if (!d || d.error) { out += `${score}+       ERROR
+`; continue; }
+      const s = d.summary || {};
+      out += `${String(score+'+').padEnd(8)} ${String(s.totalTrades||0).padEnd(8)} ${String((s.winRate||0)+'%').padEnd(7)} ${('$'+(s.totalPnL||0).toFixed(0)).padEnd(10)} ${String((s.totalReturn||0)+'%').padEnd(8)} ${String(s.profitFactor||0).padEnd(6)} ${String((s.maxDrawdown||0)+'%').padEnd(7)} ${s.spiralBlockCount??'-'}
+`;
+    }
+
+    // Quarterly breakdown for score 75
+    const d75 = data[`${ticker}-75`];
+    if (d75 && !d75.error && d75.trades) {
+      const quarters = {};
+      (d75.trades||[]).forEach(t => {
+        if (!t.date) return;
+        const m = parseInt(t.date.split('-')[1]);
+        const q = `Q${Math.ceil(m/3)}`;
+        if (!quarters[q]) quarters[q] = {trades:0,wins:0,pnl:0};
+        quarters[q].trades++;
+        if (t.pnlDollar > 0) quarters[q].wins++;
+        quarters[q].pnl += t.pnlDollar || 0;
+      });
+      out += `  Quarterly (score 75):
+`;
+      Object.entries(quarters).sort().forEach(([q,v]) => {
+        const wr = v.trades > 0 ? (v.wins/v.trades*100).toFixed(0) : 0;
+        out += `    ${q}: ${v.trades} trades | ${wr}% WR | $${v.pnl.toFixed(0)}
+`;
+      });
+    }
+    out += '
+';
+  }
+
+  // Combined summary
+  out += `── COMBINED ALL INSTRUMENTS ──────────────────
+`;
+  for (const score of scores) {
+    const combined = instruments.reduce((acc, ticker) => {
+      const d = data[`${ticker}-${score}`];
+      if (d && !d.error && d.summary) {
+        acc.pnl += d.summary.totalPnL || 0;
+        acc.trades += d.summary.totalTrades || 0;
+        acc.wins += d.summary.wins || 0;
+        acc.spiral += d.summary.spiralBlockCount || 0;
+      }
+      return acc;
+    }, {pnl:0, trades:0, wins:0, spiral:0});
+    const wr = combined.trades > 0 ? (combined.wins/combined.trades*100).toFixed(1) : '-';
+    out += `Score ${score}+: ${combined.trades} trades | ${wr}% WR | $${combined.pnl.toFixed(0)} | ${combined.spiral} spiral blocks
+`;
+  }
+  out += '════════════════════════════════════════';
+
+  navigator.clipboard.writeText(out).then(() => {
+    const btn = event.target;
+    btn.textContent = '✅ COPIED';
+    setTimeout(() => btn.textContent = '📋 COPY MATRIX TEMPLATE', 2000);
+  });
+}
+
 async function runBacktest() {
   const btn = document.getElementById('bt-run-btn');
   btn.disabled = true; btn.textContent = '⟳ RUNNING...';
