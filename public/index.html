@@ -2635,82 +2635,82 @@ function copyMatrixTemplate() {
   if (!data || !meta) return;
 
   const { instruments, scores, startDate, endDate, holdDays, capital, maxPositions } = meta;
+  const NL = '\n';
+  const DIV = '════════════════════════════════════════';
 
-  let out = `BACKTEST MATRIX — ARGO V2.5
-════════════════════════════════════════
-PERIOD:    ${startDate} → ${endDate}
-HOLD:      ${holdDays}d | MAX POS: ${maxPositions} | CAPITAL: $${capital}
-DIRECTION: BOTH (best signal each day)
-MODEL:     v2 — slippage, bid-ask, agent simulation, spiral detection
-════════════════════════════════════════
-
-`;
+  let out = 'BACKTEST MATRIX — ARGO V2.5' + NL;
+  out += DIV + NL;
+  out += 'PERIOD:    ' + startDate + ' → ' + endDate + NL;
+  out += 'HOLD:      ' + holdDays + 'd | MAX POS: ' + maxPositions + ' | CAPITAL: $' + capital + NL;
+  out += 'DIRECTION: BOTH (best signal each day)' + NL;
+  out += 'MODEL:     v2 — slippage, bid-ask, agent simulation, spiral detection' + NL;
+  out += DIV + NL + NL;
 
   for (const ticker of instruments) {
-    out += `── ${ticker} ─────────────────────────────────
-`;
-    out += `${'Score':<8} ${'Trades':<8} ${'WR%':<7} ${'P&L':<10} ${'Ret%':<8} ${'PF':<6} ${'DD%':<7} ${'Spiral'}
-`;
-    out += `${'─'.repeat(65)}
-`;
+    out += '── ' + ticker + ' ─────────────────────────────────' + NL;
+    out += 'Score    Trades   WR%     P&L        Ret%     PF     DD%     Spiral' + NL;
+    out += '─'.repeat(65) + NL;
     for (const score of scores) {
-      const d = data[`${ticker}-${score}`];
-      if (!d || d.error) { out += `${score}+       ERROR
-`; continue; }
+      const key = ticker + '-' + score;
+      const d = data[key];
+      if (!d || d.error) { out += (score + '+       ERROR') + NL; continue; }
       const s = d.summary || {};
-      out += `${String(score+'+').padEnd(8)} ${String(s.totalTrades||0).padEnd(8)} ${String((s.winRate||0)+'%').padEnd(7)} ${('$'+(s.totalPnL||0).toFixed(0)).padEnd(10)} ${String((s.totalReturn||0)+'%').padEnd(8)} ${String(s.profitFactor||0).padEnd(6)} ${String((s.maxDrawdown||0)+'%').padEnd(7)} ${s.spiralBlockCount??'-'}
-`;
+      out += [
+        (score + '+').padEnd(8),
+        String(s.totalTrades||0).padEnd(8),
+        ((s.winRate||0) + '%').padEnd(7),
+        ('$' + (s.totalPnL||0).toFixed(0)).padEnd(10),
+        ((s.totalReturn||0) + '%').padEnd(8),
+        String(s.profitFactor||0).padEnd(6),
+        ((s.maxDrawdown||0) + '%').padEnd(7),
+        String(s.spiralBlockCount != null ? s.spiralBlockCount : '-'),
+      ].join(' ') + NL;
     }
 
     // Quarterly breakdown for score 75
-    const d75 = data[`${ticker}-75`];
+    const d75 = data[ticker + '-75'];
     if (d75 && !d75.error && d75.trades) {
       const quarters = {};
-      (d75.trades||[]).forEach(t => {
+      (d75.trades||[]).forEach(function(t) {
         if (!t.date) return;
         const m = parseInt(t.date.split('-')[1]);
-        const q = `Q${Math.ceil(m/3)}`;
+        const q = 'Q' + Math.ceil(m/3);
         if (!quarters[q]) quarters[q] = {trades:0,wins:0,pnl:0};
         quarters[q].trades++;
         if (t.pnlDollar > 0) quarters[q].wins++;
         quarters[q].pnl += t.pnlDollar || 0;
       });
-      out += `  Quarterly (score 75):
-`;
-      Object.entries(quarters).sort().forEach(([q,v]) => {
+      out += '  Quarterly (score 75):' + NL;
+      Object.entries(quarters).sort().forEach(function(entry) {
+        const q = entry[0], v = entry[1];
         const wr = v.trades > 0 ? (v.wins/v.trades*100).toFixed(0) : 0;
-        out += `    ${q}: ${v.trades} trades | ${wr}% WR | $${v.pnl.toFixed(0)}
-`;
+        out += '    ' + q + ': ' + v.trades + ' trades | ' + wr + '% WR | $' + v.pnl.toFixed(0) + NL;
       });
     }
-    out += '
-';
+    out += NL;
   }
 
   // Combined summary
-  out += `── COMBINED ALL INSTRUMENTS ──────────────────
-`;
+  out += '── COMBINED ALL INSTRUMENTS ──────────────────' + NL;
   for (const score of scores) {
-    const combined = instruments.reduce((acc, ticker) => {
-      const d = data[`${ticker}-${score}`];
+    const combined = instruments.reduce(function(acc, t) {
+      const d = data[t + '-' + score];
       if (d && !d.error && d.summary) {
-        acc.pnl += d.summary.totalPnL || 0;
+        acc.pnl    += d.summary.totalPnL || 0;
         acc.trades += d.summary.totalTrades || 0;
-        acc.wins += d.summary.wins || 0;
+        acc.wins   += d.summary.wins || 0;
         acc.spiral += d.summary.spiralBlockCount || 0;
       }
       return acc;
     }, {pnl:0, trades:0, wins:0, spiral:0});
     const wr = combined.trades > 0 ? (combined.wins/combined.trades*100).toFixed(1) : '-';
-    out += `Score ${score}+: ${combined.trades} trades | ${wr}% WR | $${combined.pnl.toFixed(0)} | ${combined.spiral} spiral blocks
-`;
+    out += 'Score ' + score + '+: ' + combined.trades + ' trades | ' + wr + '% WR | $' + combined.pnl.toFixed(0) + ' | ' + combined.spiral + ' spiral blocks' + NL;
   }
-  out += '════════════════════════════════════════';
+  out += DIV;
 
-  navigator.clipboard.writeText(out).then(() => {
-    const btn = event.target;
-    btn.textContent = '✅ COPIED';
-    setTimeout(() => btn.textContent = '📋 COPY MATRIX TEMPLATE', 2000);
+  navigator.clipboard.writeText(out).then(function() {
+    const btn = document.querySelector('#bt-matrix-results button');
+    if (btn) { btn.textContent = '✅ COPIED'; setTimeout(function() { btn.textContent = '📋 COPY MATRIX TEMPLATE'; }, 2000); }
   });
 }
 
