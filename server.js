@@ -11043,46 +11043,80 @@ async function runBacktest(config) {
     holdDays      = 5,
     takeProfitPct = 0.50,
     stopLossPct   = 0.35,
-    capital       = 10000, // configurable starting capital
+    capital       = 10000,
   } = config;
 
-  // "both" mode: score puts AND calls each day, enter whichever is higher
   const bothMode = optionType === "both";
-
   logEvent("scan", `[BACKTEST] Starting: ${ticker} ${bothMode ? "PUTS+CALLS" : optionType} ${startDate}→${endDate} minScore:${minScore} capital:$${capital}`);
 
-  // Fetch historical bars
-  const bars = await fetchHistoricalBars(ticker, startDate, endDate);
+  // Fetch primary + auxiliary bars (SPY + UUP for gate simulation)
+  // SPY bars needed for TLT gate (50MA) and GLD gate (5d return)
+  // UUP bars needed for GLD DXY gate (dollar strength)
+  const [bars, spyAux, uupAux] = await Promise.all([
+    fetchHistoricalBars(ticker, startDate, endDate),
+    (ticker !== "SPY") ? fetchHistoricalBars("SPY", startDate, endDate) : Promise.resolve([]),
+    (ticker === "GLD") ? fetchHistoricalBars("UUP", startDate, endDate) : Promise.resolve([]),
+  ]);
+  const spyBarsAux = ticker === "SPY" ? bars : spyAux; // reuse primary bars for SPY
+
   if (bars.length < 30) {
     return { error: `Insufficient data: only ${bars.length} bars fetched for ${ticker} ${startDate}→${endDate}` };
   }
 
-  const {
-    maxPositions = 3, // concurrent open positions — matches real ARGO behavior
-  } = config;
+  const { maxPositions = 3 } = config;
 
   const trades    = [];
   let cash        = capital;
   let peakCash    = capital;
   let maxDrawdown = 0;
+  let maxDrawdownDuration = 0; // days in drawdown — behavioral context
+  let drawdownStartDay = -1;
   const equityCurve = [{ date: bars[26]?.t?.split("T")[0] || startDate, value: capital }];
+  const openBT = [];
 
-  // Track concurrent open positions for multi-position simulation
-  const openBT = []; // { entryIdx, entryType, entryPrem, positionCost, expiryIdx }
-
-  // BT-7: Spiral detection — mirrors live ARGO behavior
-  // Each direction tracked independently — puts losing doesn't block calls
-  // Fixed: previously shared counter caused calls to be blocked by put losses
-  const btSpiral = { put: 0, call: 0 }; // independent counters per direction
-  const btSpiralBlocked = { put: false, call: false }; // independent blocks
+  // BT-7: Spiral — independent per direction
+  const btSpiral = { put: 0, call: 0 };
+  const btSpiralBlocked = { put: false, call: false };
   const SPIRAL_THRESHOLD = 5;
   let spiralBlockCount = 0;
+
+  // Phase 1: Gate skip tracking
+  const gateSkips = { dxy: 0, spy5d: 0, vix: 0, tltSpy50: 0, gldRSI: 0, gldPutDxy: 0 };
+
+  // Phase 2: Additional metrics
+  let maxConsecLosses = { put: 0, call: 0 };
+  let currentConsec   = { put: 0, call: 0 };
+  const monthlyPnL    = {}; // "YYYY-MM" → pnl
+  let totalHoldDays   = 0;
+  let vixBuckets      = { low: {t:0,w:0}, medium: {t:0,w:0}, high: {t:0,w:0}, extreme: {t:0,w:0} };
 
   // Walk forward — skip first 26 bars (need for MACD)
   for (let i = 26; i < bars.length - holdDays; i++) {
     const bar      = bars[i];
     const barDate  = bar.t?.split("T")[0] || `day-${i}`;
     const price    = bar.c;
+
+    // ── Phase 1: Compute gate inputs from auxiliary bars at this index ──────
+    // SPY 5-day return and 50MA for TLT gate and GLD gate
+    const spySlice = spyBarsAux.slice(0, Math.min(i + 1, spyBarsAux.length));
+    const spy5d    = spySlice.length >= 5
+      ? (spySlice[spySlice.length-1].c - spySlice[spySlice.length-5].c) / spySlice[spySlice.length-5].c
+      : 0;
+    const spy50MA  = spySlice.length >= 50
+      ? spySlice.slice(-50).reduce((s,b) => s + b.c, 0) / 50
+      : 0;
+    const spyPrice = spySlice.length ? spySlice[spySlice.length-1].c : 0;
+
+    // UUP (DXY proxy) 5-day return for GLD gate
+    const uupSlice = uupAux.slice(0, Math.min(i + 1, uupAux.length));
+    const uup5d    = uupSlice.length >= 5
+      ? (uupSlice[uupSlice.length-1].c - uupSlice[uupSlice.length-5].c) / uupSlice[uupSlice.length-5].c * 100
+      : 0;
+    // UUP moves ~65% of DXY — adjust threshold proportionally (0.8% DXY → 0.5% UUP)
+    const dxyProxy = { change: uup5d, trend: uup5d > 0.5 ? "strengthening" : uup5d < -0.5 ? "weakening" : "neutral" };
+
+    // GLD RSI at this bar for put gate
+    const btRSI = calcRSI(bars.slice(0, i + 1));
 
     // "both" mode: score both directions, enter the better one
     let entryType = optionType;
@@ -11095,7 +11129,7 @@ async function runBacktest(config) {
       } else if (callResult.score > putResult.score && callResult.score >= minScore) {
         entryType = "call"; entryScore = callResult.score; entryReasons = callResult.reasons;
       } else {
-        continue; // neither direction meets threshold
+        continue;
       }
     } else {
       const result = backtestScoreSignal(bars, i, optionType);
@@ -11103,17 +11137,36 @@ async function runBacktest(config) {
       if (entryScore < minScore) continue;
     }
 
-    // Use entryScore/entryReasons instead of score/reasons below
     const score   = entryScore;
     const reasons = entryReasons;
 
-    // BT-7: Spiral block check — independent per direction
+    // BT-7: Spiral block
     if (btSpiralBlocked[entryType]) { spiralBlockCount++; continue; }
 
-    // Estimate option premium: ATM ~4% of underlying for 21 DTE at VIX 20-25
-    // Scale with recent vol — use ATR as vol proxy
-    const atr    = calcATR(bars.slice(Math.max(0, i-14), i+1), 14) || price * 0.01;
-    const vixEst = Math.min(50, Math.max(15, (atr / price) * 100 * 16)); // annualized vol estimate
+    // ── Phase 1: Apply instrument-specific entry gates ────────────────────
+    // vixEst needed here for GLD VIX gate — compute early from ATR
+    const atrEarly  = calcATR(bars.slice(Math.max(0, i-14), i+1), 14) || price * 0.01;
+    const vixEst    = Math.min(50, Math.max(15, (atrEarly / price) * 100 * 16));
+
+    if (ticker === "GLD") {
+      const gldGate = isGLDEntryAllowed(entryType, dxyProxy, spy5d, vixEst, btRSI);
+      if (!gldGate.allowed) {
+        if (dxyProxy.trend === "strengthening") gateSkips.dxy++;
+        else if (spy5d > 0.015) gateSkips.spy5d++;
+        else if (vixEst < 20) gateSkips.vix++;
+        else if (btRSI < 68 && entryType === "put") gateSkips.gldRSI++;
+        else gateSkips.gldPutDxy++;
+        continue;
+      }
+      // GLD min score 80
+      if (score < 80) continue;
+    }
+    if (ticker === "TLT") {
+      const tltGate = isTLTEntryAllowed(entryType, spyPrice, spy50MA, spy5d);
+      if (!tltGate.allowed) { gateSkips.tltSpy50++; continue; }
+    }
+
+    // Estimate option premium using already-computed vixEst from gate section above
     const premiumPct = (vixEst / 100) * Math.sqrt(holdDays / 252) * 0.8; // simplified BSM
     const entryPrem  = parseFloat((price * premiumPct).toFixed(2));
     if (entryPrem < 0.30) continue; // too cheap to trade
@@ -11190,9 +11243,32 @@ async function runBacktest(config) {
         }
       }
 
+      // Phase 2: additional metrics tracking
+      totalHoldDays += actualDays;
+      const month = barDate.slice(0,7);
+      monthlyPnL[month] = parseFloat(((monthlyPnL[month] || 0) + pnlDollar).toFixed(2));
+      const vixBucket = vixEst >= 35 ? "extreme" : vixEst >= 25 ? "high" : vixEst >= 18 ? "medium" : "low";
+      vixBuckets[vixBucket].t++;
+      if (pnlDollar > 0) { vixBuckets[vixBucket].w++; currentConsec[entryType] = 0; }
+      else {
+        currentConsec[entryType]++;
+        if (currentConsec[entryType] > maxConsecLosses[entryType]) maxConsecLosses[entryType] = currentConsec[entryType];
+      }
+      // Drawdown duration tracking
+      if (cash < peakCash) {
+        if (drawdownStartDay < 0) drawdownStartDay = i;
+        const durDays = i - drawdownStartDay;
+        if (durDays > maxDrawdownDuration) maxDrawdownDuration = durDays;
+      } else {
+        drawdownStartDay = -1;
+      }
+      const agentRegimeFull = reasons.find(r => r.includes("Agent")) || "";
+      const agentRegime = agentRegimeFull.includes("trending_bear") ? "trending_bear"
+        : agentRegimeFull.includes("trending_bull") ? "trending_bull"
+        : agentRegimeFull.includes("choppy") ? "choppy" : "neutral";
       trades.push({ date: barDate, ticker, optionType: entryType, score, entryPrice: price, entryPrem,
         pnlPct: parseFloat((pnlPct*100).toFixed(1)), pnlDollar, exitReason, holdDays: actualDays,
-        cashAfter: cash, reasons: reasons.slice(0,3) });
+        cashAfter: cash, reasons: reasons.slice(0,3), vixEst: parseFloat(vixEst.toFixed(1)), agentRegime });
     } else {
       // Not yet settled — track as open position
       openBT.push({ entryIdx: i, entryType, entryPrem, positionCost, score,
@@ -11221,31 +11297,95 @@ async function runBacktest(config) {
     brackets[b].winRate = brackets[b].trades > 0 ? parseFloat((brackets[b].wins / brackets[b].trades * 100).toFixed(1)) : 0;
   });
 
-  logEvent("scan", `[BACKTEST] Complete: ${trades.length} trades, ${winRate.toFixed(0)}% win rate, PF:${profitFactor.toFixed(2)}, return:${totalReturn.toFixed(1)}% | spiral blocked:${spiralBlockCount} entries`);
+  // Phase 2: compute additional metrics
+  const expectancy      = parseFloat(((winRate/100 * avgWin) + ((1 - winRate/100) * avgLoss)).toFixed(2));
+  const calmar          = maxDrawdown !== 0 ? parseFloat((totalReturn / Math.abs(maxDrawdown * 100)).toFixed(2)) : 0;
+  const avgHoldDuration = trades.length > 0 ? parseFloat((totalHoldDays / trades.length).toFixed(1)) : 0;
+  const vixWinRates     = {};
+  Object.entries(vixBuckets).forEach(([k,v]) => {
+    vixWinRates[k] = { trades: v.t, winRate: v.t > 0 ? parseFloat((v.w/v.t*100).toFixed(1)) : 0 };
+  });
+  const totalGateSkips  = Object.values(gateSkips).reduce((s,v) => s+v, 0);
+  const minScore_used   = config.minScore || 70;
+
+  logEvent("scan", `[BACKTEST] Complete: ${trades.length} trades, ${winRate.toFixed(0)}% WR, expectancy $${expectancy}/trade, Calmar ${calmar}, spiral blocked:${spiralBlockCount}, gates blocked:${totalGateSkips}`);
+
+  // Direction split — put WR vs call WR independently
+  const putTrades  = trades.filter(t => t.optionType === "put");
+  const callTrades = trades.filter(t => t.optionType === "call");
+  const putWins    = putTrades.filter(t => t.pnlDollar > 0);
+  const callWins   = callTrades.filter(t => t.pnlDollar > 0);
+  const directionSplit = {
+    put:  { trades: putTrades.length,  wins: putWins.length,
+            winRate: putTrades.length  ? parseFloat((putWins.length/putTrades.length*100).toFixed(1))  : 0,
+            pnl: parseFloat(putTrades.reduce((s,t)=>s+t.pnlDollar,0).toFixed(2)) },
+    call: { trades: callTrades.length, wins: callWins.length,
+            winRate: callTrades.length ? parseFloat((callWins.length/callTrades.length*100).toFixed(1)) : 0,
+            pnl: parseFloat(callTrades.reduce((s,t)=>s+t.pnlDollar,0).toFixed(2)) },
+  };
+
+  // Losing streak tracking with dates
+  let streakInfo = { put: { max: 0, startDate: null, endDate: null }, call: { max: 0, startDate: null, endDate: null } };
+  const streakCur = { put: 0, call: 0 };
+  const streakStart = { put: null, call: null };
+  trades.slice().sort((a,b) => a.date < b.date ? -1 : 1).forEach(t => {
+    const type = t.optionType;
+    if (t.pnlDollar <= 0) {
+      if (streakCur[type] === 0) streakStart[type] = t.date;
+      streakCur[type]++;
+      if (streakCur[type] > streakInfo[type].max) {
+        streakInfo[type] = { max: streakCur[type], startDate: streakStart[type], endDate: t.date };
+      }
+    } else {
+      streakCur[type] = 0;
+      streakStart[type] = null;
+    }
+  });
+
+  // Exit reason breakdown
+  const exitBreakdown = {};
+  trades.forEach(t => {
+    if (!exitBreakdown[t.exitReason]) exitBreakdown[t.exitReason] = { count: 0, wins: 0, pnl: 0 };
+    exitBreakdown[t.exitReason].count++;
+    if (t.pnlDollar > 0) exitBreakdown[t.exitReason].wins++;
+    exitBreakdown[t.exitReason].pnl = parseFloat((exitBreakdown[t.exitReason].pnl + t.pnlDollar).toFixed(2));
+  });
 
   return {
     config,
     summary: {
-      ticker, optionType, startDate, endDate, maxPositions,
+      ticker, optionType, startDate, endDate, maxPositions, minScore: minScore_used,
       note: maxPositions > 1 ? `Multi-position simulation (max ${maxPositions} concurrent)` : "Single-position simulation",
-      modelVersion: "v2 — includes slippage, bid-ask, agent simulation, spiral detection",
-      spiralBlockCount,
-      totalTrades:  trades.length,
-      wins:         wins.length,
-      losses:       losses.length,
-      winRate:      parseFloat(winRate.toFixed(1)),
-      avgWin:       parseFloat(avgWin.toFixed(2)),
-      avgLoss:      parseFloat(avgLoss.toFixed(2)),
-      profitFactor: parseFloat(profitFactor.toFixed(2)),
-      totalPnL:     parseFloat(totalPnL.toFixed(2)),
-      totalReturn:  parseFloat(totalReturn.toFixed(1)),
-      maxDrawdown:  parseFloat((maxDrawdown * 100).toFixed(1)),
-      finalCash:    parseFloat(cash.toFixed(2)),
-      barsAnalyzed: bars.length,
+      modelVersion: "v2 — slippage, bid-ask, agent sim, spiral fix, instrument gates",
+      gatesApplied: ticker === "GLD" ? ["GLD-DXY","GLD-SPY5d","GLD-VIX","GLD-RSI","GLD-min80"]
+                  : ticker === "TLT" ? ["TLT-SPY50MA"] : [],
+      spiralBlockCount, gateSkips, totalGateSkips,
+      totalTrades:     trades.length,
+      wins:            wins.length,
+      losses:          losses.length,
+      winRate:         parseFloat(winRate.toFixed(1)),
+      avgWin:          parseFloat(avgWin.toFixed(2)),
+      avgLoss:         parseFloat(avgLoss.toFixed(2)),
+      profitFactor:    parseFloat(profitFactor.toFixed(2)),
+      expectancy,
+      calmar,
+      avgHoldDuration,
+      maxConsecLosses,
+      streakInfo,
+      maxDrawdownDuration,
+      totalPnL:        parseFloat(totalPnL.toFixed(2)),
+      totalReturn:     parseFloat(totalReturn.toFixed(1)),
+      maxDrawdown:     parseFloat((maxDrawdown * 100).toFixed(1)),
+      finalCash:       parseFloat(cash.toFixed(2)),
+      barsAnalyzed:    bars.length,
     },
-    scoreBrackets: brackets,
+    directionSplit,
+    exitBreakdown,
+    scoreBrackets:  brackets,
+    monthlyPnL,
+    vixWinRates,
     equityCurve,
-    trades: trades.slice(-50), // last 50 trades for display
+    trades,  // full trade list — matrix template uses worst/best 10
   };
 }
 
