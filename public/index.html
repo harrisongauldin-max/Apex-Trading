@@ -880,11 +880,46 @@ input[type=text]:focus{border-color:var(--blue)}
       </div>
     </div>
     <div class="card">
-      <div class="card-title">TRADE LOG (last 50)</div>
-      <table id="bt-trade-table">
-        <thead><tr><th>DATE</th><th>SCORE</th><th>ENTRY</th><th>PREM</th><th>P&L%</th><th>P&L$</th><th>EXIT</th><th>DAYS</th><th>SIGNALS</th></tr></thead>
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
+        <div class="card-title" style="margin:0">TRADE LOG</div>
+        <div style="display:flex;gap:6px;align-items:center">
+          <select id="bt-log-filter" onchange="filterBtTradeLog()" style="background:#071020;color:#8aaac8;border:1px solid #0d3050;padding:3px 6px;border-radius:4px;font-size:10px">
+            <option value="all">All trades</option>
+            <option value="put">Puts only</option>
+            <option value="call">Calls only</option>
+            <option value="win">Winners only</option>
+            <option value="loss">Losers only</option>
+            <option value="tp">Take profits</option>
+            <option value="sl">Stop losses</option>
+          </select>
+          <select id="bt-log-sort" onchange="filterBtTradeLog()" style="background:#071020;color:#8aaac8;border:1px solid #0d3050;padding:3px 6px;border-radius:4px;font-size:10px">
+            <option value="date_desc">Date ↓</option>
+            <option value="date_asc">Date ↑</option>
+            <option value="pnl_asc">Worst first</option>
+            <option value="pnl_desc">Best first</option>
+            <option value="score_desc">Score ↓</option>
+          </select>
+          <span id="bt-log-count" style="font-size:10px;color:#336688"></span>
+        </div>
+      </div>
+      <div style="overflow-x:auto;max-height:320px;overflow-y:auto">
+      <table id="bt-trade-table" style="width:100%;font-size:10px">
+        <thead style="position:sticky;top:0;background:#071828;z-index:1"><tr>
+          <th style="text-align:left;padding:4px 6px;color:#336688;white-space:nowrap">DATE</th>
+          <th style="padding:4px 6px;color:#336688">DIR</th>
+          <th style="padding:4px 6px;color:#336688">SCORE</th>
+          <th style="padding:4px 6px;color:#336688">REGIME</th>
+          <th style="padding:4px 6px;color:#336688">ENTRY$</th>
+          <th style="padding:4px 6px;color:#336688">PREM</th>
+          <th style="padding:4px 6px;color:#336688">P&L%</th>
+          <th style="padding:4px 6px;color:#336688">P&L$</th>
+          <th style="padding:4px 6px;color:#336688">EXIT</th>
+          <th style="padding:4px 6px;color:#336688">DAYS</th>
+          <th style="padding:4px 6px;color:#336688;font-size:9px">VIX</th>
+        </tr></thead>
         <tbody id="bt-trade-body"></tbody>
       </table>
+      </div>
     </div>
   </div>
 
@@ -2859,6 +2894,52 @@ async function runStressTest() {
   }
 }
 
+function filterBtTradeLog() {
+  const trades = window._btTrades || [];
+  const filter = (document.getElementById('bt-log-filter') || {}).value || 'all';
+  const sort   = (document.getElementById('bt-log-sort')   || {}).value || 'date_desc';
+
+  let filtered = trades.slice();
+  if (filter === 'put')   filtered = filtered.filter(t => t.optionType === 'put');
+  if (filter === 'call')  filtered = filtered.filter(t => t.optionType === 'call');
+  if (filter === 'win')   filtered = filtered.filter(t => t.pnlDollar > 0);
+  if (filter === 'loss')  filtered = filtered.filter(t => t.pnlDollar <= 0);
+  if (filter === 'tp')    filtered = filtered.filter(t => t.exitReason === 'take_profit');
+  if (filter === 'sl')    filtered = filtered.filter(t => t.exitReason === 'stop_loss');
+
+  if (sort === 'date_desc')  filtered.sort((a,b) => b.date > a.date ? 1 : -1);
+  if (sort === 'date_asc')   filtered.sort((a,b) => a.date > b.date ? 1 : -1);
+  if (sort === 'pnl_asc')    filtered.sort((a,b) => (a.pnlDollar||0) - (b.pnlDollar||0));
+  if (sort === 'pnl_desc')   filtered.sort((a,b) => (b.pnlDollar||0) - (a.pnlDollar||0));
+  if (sort === 'score_desc') filtered.sort((a,b) => (b.score||0) - (a.score||0));
+
+  const countEl = document.getElementById('bt-log-count');
+  if (countEl) countEl.textContent = filtered.length + ' / ' + trades.length + ' trades';
+
+  const regimeColor = r => r === 'trending_bear' ? '#00ff88' : r === 'trending_bull' ? '#ff5555' : r === 'choppy' ? '#ffd700' : '#336688';
+  const dirColor    = t => t === 'put' ? '#ff9944' : '#00c4ff';
+
+  document.getElementById('bt-trade-body').innerHTML = filtered.map(t => {
+    const pnlColor  = (t.pnlDollar||0) >= 0 ? '#00ff88' : '#ff5555';
+    const exitBadge = t.exitReason === 'take_profit' ? '🎯' : t.exitReason === 'stop_loss' ? '🛑' : '⏱';
+    const scoreCol  = (t.score||0) >= 85 ? '#00ff88' : (t.score||0) >= 75 ? '#ffd700' : '#ff9944';
+    const regime    = t.agentRegime || 'n/a';
+    return '<tr style="border-bottom:1px solid #071020">' +
+      '<td style="padding:4px 6px;color:#336688;white-space:nowrap">' + (t.date||'-') + '</td>' +
+      '<td style="padding:4px 6px;text-align:center;color:' + dirColor(t.optionType) + ';font-weight:700">' + (t.optionType||'?').toUpperCase().slice(0,1) + '</td>' +
+      '<td style="padding:4px 6px;text-align:center;color:' + scoreCol + '">' + (t.score||'-') + '</td>' +
+      '<td style="padding:4px 6px;color:' + regimeColor(regime) + ';font-size:9px">' + regime + '</td>' +
+      '<td style="padding:4px 6px;text-align:right">$' + (t.entryPrice||0).toFixed(0) + '</td>' +
+      '<td style="padding:4px 6px;text-align:right">$' + (t.entryPrem||0).toFixed(2) + '</td>' +
+      '<td style="padding:4px 6px;text-align:right;color:' + pnlColor + '">' + ((t.pnlPct||0)>=0?'+':'') + (t.pnlPct||0) + '%</td>' +
+      '<td style="padding:4px 6px;text-align:right;color:' + pnlColor + ';font-weight:700">' + ((t.pnlDollar||0)>=0?'+$':'$') + (t.pnlDollar||0).toFixed(0) + '</td>' +
+      '<td style="padding:4px 6px;text-align:center">' + exitBadge + '</td>' +
+      '<td style="padding:4px 6px;text-align:center;color:#336688">' + (t.holdDays||0) + 'd</td>' +
+      '<td style="padding:4px 6px;text-align:center;color:#8aaac8;font-size:9px">' + (t.vixEst||'-') + '</td>' +
+    '</tr>';
+  }).join('');
+}
+
 function renderBacktestResults(data) {
   const s = data.summary;
   if (s.note) {
@@ -2927,22 +3008,9 @@ function renderBacktestResults(data) {
     ctx.setLineDash([]);
   }
 
-  // Trade log
-  document.getElementById('bt-trade-body').innerHTML = (data.trades || []).slice().reverse().map(t => {
-    const pnlColor = t.pnlDollar >= 0 ? '#00ff88' : '#ff5555';
-    const exitBadge = t.exitReason === 'take_profit' ? '🎯 TP' : t.exitReason === 'stop_loss' ? '🛑 SL' : '⏱ EXP';
-    return `<tr>
-      <td style="color:#336688">${t.date}</td>
-      <td style="color:${t.score>=85?'#00ff88':t.score>=75?'#ffd700':'#ff9944'}">${t.score}</td>
-      <td>$${t.entryPrice?.toFixed(2)||'-'}</td>
-      <td>$${t.entryPrem?.toFixed(2)||'-'}</td>
-      <td style="color:${pnlColor}">${t.pnlPct >= 0 ? '+' : ''}${t.pnlPct}%</td>
-      <td style="color:${pnlColor}">${t.pnlDollar >= 0 ? '+' : ''}$${t.pnlDollar?.toFixed(0)||'-'}</td>
-      <td>${exitBadge}</td>
-      <td>${t.holdDays}d</td>
-      <td style="color:#336688;font-size:9px">${(t.reasons||[]).join(' | ')}</td>
-    </tr>`;
-  }).join('');
+  // Trade log — store all trades for filtering
+  window._btTrades = (data.trades || []).slice();
+  filterBtTradeLog();
 
   document.getElementById('bt-results').style.display = 'block';
 
