@@ -4060,10 +4060,12 @@ function isGLDEntryAllowed(optionType, dxy, spyReturn5d, vix, gldRSI, gldPrice, 
     // Gold rallies on dollar weakness + uncertainty, not only equity stress
     // Replacement: GLD above its own 20MA (Quant + Technical Analyst, 3/8)
     const dxyStrengthening = dxy && dxy.change > 0.8;  // dollar up >0.8% in 5d
-    const vixTooLow        = vix < 20;                 // no uncertainty, no gold bid
+    // VIX gate lowered 20→16: Q1/Q4 gold rallies happen on inflation/dollar weakness
+    // even when VIX is calm. DXY + GLD 20MA now do the heavy filtering.
+    const vixTooLow        = vix < 16;                 // only block truly dead-calm markets
     const gldDowntrend     = gldMA20 > 0 && gldPrice > 0 && gldPrice < gldMA20; // gold below 20MA = downtrend
     if (dxyStrengthening) return { allowed: false, reason: `GLD call blocked — DXY strengthening (+${dxy.change.toFixed(2)}% 5d, dollar headwind for gold)` };
-    if (vixTooLow)        return { allowed: false, reason: `GLD call blocked — VIX ${vix.toFixed(1)} below 20, insufficient uncertainty for gold rally` };
+    if (vixTooLow)        return { allowed: false, reason: `GLD call blocked — VIX ${vix.toFixed(1)} below 16, market too calm for gold catalyst` };
     if (gldDowntrend)     return { allowed: false, reason: `GLD call blocked — GLD $${gldPrice.toFixed(2)} below 20MA $${gldMA20.toFixed(2)}, don't buy calls in downtrend` };
     return { allowed: true };
   } else {
@@ -11057,10 +11059,13 @@ async function runBacktest(config) {
     takeProfitPct = 0.50,
     stopLossPct   = 0.35,
     capital       = 10000,
+    putOnly       = false, // puts-only mode — blocks all call entries
+    callSizeMult  = 1.0,   // asymmetric sizing: calls at reduced fraction (e.g. 0.5 = half size)
   } = config;
 
   const bothMode = optionType === "both";
-  logEvent("scan", `[BACKTEST] Starting: ${ticker} ${bothMode ? "PUTS+CALLS" : optionType} ${startDate}→${endDate} minScore:${minScore} capital:$${capital}`);
+  const modeLabel = putOnly ? "PUTS-ONLY" : bothMode ? "PUTS+CALLS" : optionType;
+  logEvent("scan", `[BACKTEST] Starting: ${ticker} ${modeLabel} ${startDate}→${endDate} minScore:${minScore} capital:$${capital}${callSizeMult < 1 ? ` callSize:${callSizeMult}x` : ""}`);
 
   // Fetch primary + auxiliary bars (SPY + UUP for gate simulation)
   // SPY bars needed for TLT gate (50MA) and GLD gate (5d return)
@@ -11136,10 +11141,10 @@ async function runBacktest(config) {
     let entryScore, entryReasons;
     if (bothMode) {
       const putResult  = backtestScoreSignal(bars, i, "put");
-      const callResult = backtestScoreSignal(bars, i, "call");
+      const callResult = !putOnly ? backtestScoreSignal(bars, i, "call") : { score: 0, reasons: [] };
       if (putResult.score >= callResult.score && putResult.score >= minScore) {
         entryType = "put"; entryScore = putResult.score; entryReasons = putResult.reasons;
-      } else if (callResult.score > putResult.score && callResult.score >= minScore) {
+      } else if (!putOnly && callResult.score > putResult.score && callResult.score >= minScore) {
         entryType = "call"; entryScore = callResult.score; entryReasons = callResult.reasons;
       } else {
         continue;
@@ -11170,7 +11175,7 @@ async function runBacktest(config) {
       if (!gldGate.allowed) {
         if (dxyProxy.trend === "strengthening") gateSkips.dxy++;
         else if (spy5d > 0.015) gateSkips.spy5d++;
-        else if (vixEst < 20) gateSkips.vix++;
+        else if (vixEst < 16) gateSkips.vix++;
         else if (btRSI < 68 && entryType === "put") gateSkips.gldRSI++;
         else gateSkips.gldPutDxy++;
         continue;
@@ -11187,12 +11192,36 @@ async function runBacktest(config) {
       if (!tltGate.allowed) { gateSkips.tltSpy50++; continue; }
     }
 
+    // ── 200MA regime filter — mirrors live ARGO behavior ───────────────────
+    // When SPY is below its 200MA: block calls entirely, require 80+ for puts
+    // Panel identified this as highest-priority backtest gap — saves 2022 call losses
+    const spy200MAbt_regime = spySlice.length >= 200
+      ? spySlice.slice(-200).reduce((s,b) => s + b.c, 0) / 200
+      : 0;
+    const btSpyBelow200MA = spy200MAbt_regime > 0 && spyPrice < spy200MAbt_regime;
+    if (btSpyBelow200MA) {
+      if (entryType === "call") {
+        // Block calls entirely in bear regime — same as live system
+        if (!gateSkips["200maCall"]) gateSkips["200maCall"] = 0;
+        gateSkips["200maCall"]++;
+        continue;
+      }
+      // Puts need 80+ when below 200MA
+      if (score < 80) {
+        if (!gateSkips["200maPutMin"]) gateSkips["200maPutMin"] = 0;
+        gateSkips["200maPutMin"]++;
+        continue;
+      }
+    }
+
     // Estimate option premium using already-computed vixEst from gate section above
     const premiumPct = (vixEst / 100) * Math.sqrt(holdDays / 252) * 0.8; // simplified BSM
     const entryPrem  = parseFloat((price * premiumPct).toFixed(2));
     if (entryPrem < 0.30) continue; // too cheap to trade
 
-    const positionCost = entryPrem * 100; // 1 contract
+    // Asymmetric sizing — calls at reduced size (panel: put edge is stronger)
+    const sizeMult     = entryType === "call" ? callSizeMult : 1.0;
+    const positionCost = parseFloat((entryPrem * 100 * sizeMult).toFixed(2));
     if (positionCost > cash * 0.20) continue; // max 20% per position
 
     // Check if at max concurrent positions — settle any that have expired
@@ -11218,6 +11247,8 @@ async function runBacktest(config) {
           pnlPct: parseFloat((pnl2*100).toFixed(1)), pnlDollar: pnlDollar2,
           exitReason: "hold_expired", holdDays: op.expiryIdx - op.entryIdx,
           cashAfter: cash, reasons: op.reasons,
+          vixEst: parseFloat((op.vixEst || 20).toFixed(1)),
+          agentRegime: op.agentRegime || "neutral",
         });
         openBT.splice(j, 1);
       }
@@ -11293,7 +11324,7 @@ async function runBacktest(config) {
     } else {
       // Not yet settled — track as open position
       openBT.push({ entryIdx: i, entryType, entryPrem, positionCost, score,
-        expiryIdx: Math.min(i + holdDays, bars.length-1), reasons: reasons.slice(0,3), vixEst });
+        expiryIdx: Math.min(i + holdDays, bars.length-1), reasons: reasons.slice(0,3), vixEst, agentRegime });
     }
   }
 
@@ -11326,6 +11357,9 @@ async function runBacktest(config) {
   Object.entries(vixBuckets).forEach(([k,v]) => {
     vixWinRates[k] = { trades: v.t, winRate: v.t > 0 ? parseFloat((v.w/v.t*100).toFixed(1)) : 0 };
   });
+  // Ensure 200MA gate counters exist even if never triggered
+  if (!gateSkips["200maCall"])   gateSkips["200maCall"]   = 0;
+  if (!gateSkips["200maPutMin"]) gateSkips["200maPutMin"] = 0;
   const totalGateSkips  = Object.values(gateSkips).reduce((s,v) => s+v, 0);
   const minScore_used   = config.minScore || 70;
 
@@ -11377,7 +11411,9 @@ async function runBacktest(config) {
     summary: {
       ticker, optionType, startDate, endDate, maxPositions, minScore: minScore_used,
       note: maxPositions > 1 ? `Multi-position simulation (max ${maxPositions} concurrent)` : "Single-position simulation",
-      modelVersion: "v2 — slippage, bid-ask, agent sim, spiral fix, instrument gates",
+      modelVersion: "v2 — slippage, bid-ask, agent sim, spiral fix, instrument gates, 200MA filter",
+      putOnlyMode:  putOnly,
+      callSizeMult: callSizeMult,
       gatesApplied: ticker === "GLD" ? ["GLD-DXY","GLD-SPY5d","GLD-VIX","GLD-RSI","GLD-min80"]
                   : ticker === "TLT" ? ["TLT-SPY50MA"] : [],
       spiralBlockCount, gateSkips, totalGateSkips,
@@ -11436,7 +11472,7 @@ app.post("/api/backtest", async (req, res) => {
     if (daysDiff < 30)  return res.status(400).json({ error: "Date range must be at least 30 days" });
     if (daysDiff > 730) return res.status(400).json({ error: "Date range cannot exceed 2 years" });
 
-    const { maxPositions = 3 } = req.body || {};
+    const { maxPositions = 3, putOnly = false, callSizeMult = 1.0 } = req.body || {};
     const result = await runBacktest({
       ticker,
       optionType, // supports "put", "call", or "both"
@@ -11445,8 +11481,10 @@ app.post("/api/backtest", async (req, res) => {
       holdDays:      parseInt(holdDays),
       takeProfitPct: parseFloat(takeProfitPct),
       stopLossPct:   parseFloat(stopLossPct),
-      capital:       parseFloat(capital), // configurable
-      maxPositions:  parseInt(maxPositions), // concurrent positions
+      capital:       parseFloat(capital),
+      maxPositions:  parseInt(maxPositions),
+      putOnly:       Boolean(putOnly),        // puts-only mode
+      callSizeMult:  parseFloat(callSizeMult), // asymmetric call sizing
     });
 
     res.json(result);
