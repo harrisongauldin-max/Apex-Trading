@@ -4060,12 +4060,12 @@ function isGLDEntryAllowed(optionType, dxy, spyReturn5d, vix, gldRSI, gldPrice, 
     // Gold rallies on dollar weakness + uncertainty, not only equity stress
     // Replacement: GLD above its own 20MA (Quant + Technical Analyst, 3/8)
     const dxyStrengthening = dxy && dxy.change > 0.8;  // dollar up >0.8% in 5d
-    // VIX gate lowered 20→16: Q1/Q4 gold rallies happen on inflation/dollar weakness
-    // even when VIX is calm. DXY + GLD 20MA now do the heavy filtering.
-    const vixTooLow        = vix < 16;                 // only block truly dead-calm markets
+    // VIX gate restored to 20 — backtest data showed lowering to 16 admitted losing trades
+    // GLD 2023: 8→13 trades but WR dropped 37%→23% with extra entries — gate was right at 20
+    const vixTooLow        = vix < 20;                 // restored to 20
     const gldDowntrend     = gldMA20 > 0 && gldPrice > 0 && gldPrice < gldMA20; // gold below 20MA = downtrend
     if (dxyStrengthening) return { allowed: false, reason: `GLD call blocked — DXY strengthening (+${dxy.change.toFixed(2)}% 5d, dollar headwind for gold)` };
-    if (vixTooLow)        return { allowed: false, reason: `GLD call blocked — VIX ${vix.toFixed(1)} below 16, market too calm for gold catalyst` };
+    if (vixTooLow)        return { allowed: false, reason: `GLD call blocked — VIX ${vix.toFixed(1)} below 20, insufficient uncertainty for gold catalyst` };
     if (gldDowntrend)     return { allowed: false, reason: `GLD call blocked — GLD $${gldPrice.toFixed(2)} below 20MA $${gldMA20.toFixed(2)}, don't buy calls in downtrend` };
     return { allowed: true };
   } else {
@@ -11070,12 +11070,23 @@ async function runBacktest(config) {
   // Fetch primary + auxiliary bars (SPY + UUP for gate simulation)
   // SPY bars needed for TLT gate (50MA) and GLD gate (5d return)
   // UUP bars needed for GLD DXY gate (dollar strength)
+  // Fetch SPY/UUP with 300-day lookback so 200MA is valid from the start of the date range
+  // Without this, the first ~175 bars of any single-year run have no 200MA data
+  const extStartDate = new Date(startDate);
+  extStartDate.setDate(extStartDate.getDate() - 300);
+  const extStart = extStartDate.toISOString().split('T')[0];
+
   const [bars, spyAux, uupAux] = await Promise.all([
     fetchHistoricalBars(ticker, startDate, endDate),
-    (ticker !== "SPY") ? fetchHistoricalBars("SPY", startDate, endDate) : Promise.resolve([]),
-    (ticker === "GLD") ? fetchHistoricalBars("UUP", startDate, endDate) : Promise.resolve([]),
+    (ticker !== "SPY") ? fetchHistoricalBars("SPY", extStart, endDate) : Promise.resolve([]),
+    (ticker === "GLD") ? fetchHistoricalBars("UUP", extStart, endDate) : Promise.resolve([]),
   ]);
-  const spyBarsAux = ticker === "SPY" ? bars : spyAux; // reuse primary bars for SPY
+  // For SPY runs, also fetch extended history for 200MA gate
+  const spyBarsExtended = ticker === "SPY" ? await fetchHistoricalBars("SPY", extStart, endDate) : spyAux;
+  const spyBarsAux = spyBarsExtended;
+
+  // Calculate offset: how many bars in spyBarsAux correspond to pre-startDate history
+  const spyAuxOffset = spyBarsAux.length - (ticker === "SPY" ? bars.length : (spyAux.length - (spyBarsAux.length - spyAux.length)));
 
   if (bars.length < 30) {
     return { error: `Insufficient data: only ${bars.length} bars fetched for ${ticker} ${startDate}→${endDate}` };
@@ -11116,7 +11127,10 @@ async function runBacktest(config) {
 
     // ── Phase 1: Compute gate inputs from auxiliary bars at this index ──────
     // SPY 5-day return and 50MA for TLT gate and GLD gate
-    const spySlice = spyBarsAux.slice(0, Math.min(i + 1, spyBarsAux.length));
+    // spyBarsAux has pre-period history prepended; align index using offset
+    // spyAuxOffset = extra bars before startDate so 200MA works from day 1
+    const spyOffset = spyBarsAux.length - bars.length;
+    const spySlice = spyBarsAux.slice(0, Math.min(i + 1 + spyOffset, spyBarsAux.length));
     const spy5d    = spySlice.length >= 5
       ? (spySlice[spySlice.length-1].c - spySlice[spySlice.length-5].c) / spySlice[spySlice.length-5].c
       : 0;
@@ -11175,7 +11189,7 @@ async function runBacktest(config) {
       if (!gldGate.allowed) {
         if (dxyProxy.trend === "strengthening") gateSkips.dxy++;
         else if (spy5d > 0.015) gateSkips.spy5d++;
-        else if (vixEst < 16) gateSkips.vix++;
+        else if (vixEst < 20) gateSkips.vix++;
         else if (btRSI < 68 && entryType === "put") gateSkips.gldRSI++;
         else gateSkips.gldPutDxy++;
         continue;
@@ -11183,22 +11197,22 @@ async function runBacktest(config) {
       // GLD min score 80
       if (score < 80) continue;
     }
+    // Compute SPY 200MA once — used by both TLT gate and 200MA regime filter
+    // Need full 200-bar history; if insufficient, use available bars (rolling)
+    // For single-year runs (252 bars), we fetch auxiliary SPY bars back further
+    const spy200MAbt = spySlice.length >= 200
+      ? spySlice.slice(-200).reduce((s,b) => s + b.c, 0) / 200
+      : (spySlice.length >= 50 ? spySlice.reduce((s,b) => s + b.c, 0) / spySlice.length : 0);
+
     if (ticker === "TLT") {
-      // Compute SPY 200MA for TLT gate
-      const spy200MAbt = spySlice.length >= 200
-        ? spySlice.slice(-200).reduce((s,b) => s + b.c, 0) / 200
-        : 0;
       const tltGate = isTLTEntryAllowed(entryType, spyPrice, spy50MA, spy5d, spy200MAbt);
       if (!tltGate.allowed) { gateSkips.tltSpy50++; continue; }
     }
 
     // ── 200MA regime filter — mirrors live ARGO behavior ───────────────────
     // When SPY is below its 200MA: block calls entirely, require 80+ for puts
-    // Panel identified this as highest-priority backtest gap — saves 2022 call losses
-    const spy200MAbt_regime = spySlice.length >= 200
-      ? spySlice.slice(-200).reduce((s,b) => s + b.c, 0) / 200
-      : 0;
-    const btSpyBelow200MA = spy200MAbt_regime > 0 && spyPrice < spy200MAbt_regime;
+    // Uses the same spy200MAbt computed above — no duplicate computation
+    const btSpyBelow200MA = spy200MAbt > 0 && spyPrice < spy200MAbt;
     if (btSpyBelow200MA) {
       if (entryType === "call") {
         // Block calls entirely in bear regime — same as live system
