@@ -5596,7 +5596,14 @@ async function confirmPendingOrder() {
           expiryType: "monthly", dteLabel: "CREDIT-SPREAD-MONTHLY",
           partialClosed: false, isMeanReversion: false, trailStop: null,
           breakevenLocked: false, halfPosition: false,
-          takeProfitPct: 0.50, fastStopPct: 0.75,
+          // Panel unanimous (8/8): credit spread stop at 50% of max loss OR 2x credit
+          // Use MIN to take whichever is stricter
+          // Stop expressed as fraction of credit received for consistency with chg calculation
+          // chg = -(currentValue - credit) / credit, stop when chg <= -stopFraction
+          // 50% max loss: stopFraction = 0.50 * maxLoss / netCredit
+          // 2x credit:    stopFraction = 1.0 (spread value = 2x credit)
+          // Take minimum (stricter)
+          takeProfitPct: 0.50, fastStopPct: Math.min(1.0, parseFloat((0.50 * maxLoss / netCredit).toFixed(3))),
           _originalEntryScore: pending.score || 100, // baseline for dynamic TP scaling
           _creditHarvestExpiry: new Date(Date.now() + 7*86400000).toISOString(),
         };
@@ -7537,6 +7544,22 @@ async function runScan() {
       await closePosition(pos.ticker, "fast-stop"); continue;
     }
 
+    // 1b. CREDIT SPREAD MAX LOSS STOP — panel unanimous: 50% of max loss OR 2x credit
+    // Checks actual dollar loss against max loss rather than relying on fastStopPct alone
+    // This is the primary stop for credit spreads — more precise than percentage-based
+    if (pos.isCreditSpread && pos.maxLoss > 0 && curP > 0) {
+      const creditLossDollar = (curP - pos.premium) * 100 * (pos.contracts || 1); // $ lost so far
+      const halfMaxLoss      = pos.maxLoss * 0.50;  // 50% of defined max loss in dollars
+      const twiceCredit      = pos.premium * 2 * 100 * (pos.contracts || 1); // lose 2x what you could gain
+      const creditStopDollar = Math.min(halfMaxLoss, twiceCredit); // stricter of the two
+      if (creditLossDollar >= creditStopDollar && !pdtProtected) {
+        logEvent("warn", `[CREDIT STOP] ${pos.ticker} credit spread stop triggered — loss $${creditLossDollar.toFixed(0)} exceeds ${(creditStopDollar===halfMaxLoss?'50% max loss':'2x credit')} ($${creditStopDollar.toFixed(0)}) — closing`);
+        await closePosition(pos.ticker, "credit-stop"); continue;
+      } else if (creditLossDollar >= creditStopDollar && pdtProtected) {
+        logEvent("warn", `[CREDIT STOP] ${pos.ticker} credit spread stop triggered but PDT protected — loss $${creditLossDollar.toFixed(0)} vs limit $${creditStopDollar.toFixed(0)} — will close when PDT allows`);
+      }
+    }
+
     // 2. HARD STOP — -35% at any time
     if (chg <= -STOP_LOSS_PCT) {
       logEvent("scan", `${pos.ticker} stop-loss ${(chg*100).toFixed(0)}%`);
@@ -8413,12 +8436,29 @@ async function runScan() {
       const callResult = scoreIndexSetup(liveStock, "call", spyRSI, spyMACD, spyMomentum, breadthVal, state.vix, scoringMacro);
       putSetup  = { score: putResult.score,  reasons: putResult.reasons,  tradeType: putResult.tradeType  || "spread", isMeanReversion: false };
       callSetup = { score: callResult.score, reasons: callResult.reasons, tradeType: callResult.tradeType || "spread", isMeanReversion: false };
-      // Correlation suppression: QQQ and IWM both correlated to SPY (>0.90)
-      // If SPY already has a position in the same direction, suppress correlated duplicate
+      // Correlation suppression: QQQ correlated to SPY (0.90+)
+      // Panel decision (7/8): allow both simultaneously at score ≥80 same direction
+      // High conviction overrides correlation block — both signals are independently strong
+      // Keep block when: score <80 OR directions are opposite
+      // Combined heat cap enforced separately via heat % check
       if (stock.ticker === "QQQ") {
-        // QQQ correlated to SPY — suppress if SPY already has a position
-        if (state.positions.some(p => p.ticker === "SPY" && p.optionType === "put"))  putSetup.score  = Math.min(putSetup.score,  30);
-        if (state.positions.some(p => p.ticker === "SPY" && p.optionType === "call")) callSetup.score = Math.min(callSetup.score, 30);
+        const spyPutOpen  = state.positions.some(p => p.ticker === "SPY" && p.optionType === "put");
+        const spyCallOpen = state.positions.some(p => p.ticker === "SPY" && p.optionType === "call");
+        // Only suppress if score is below 80 — high conviction entries allowed through
+        if (spyPutOpen  && putSetup.score  < 80) { putSetup.score  = Math.min(putSetup.score,  30); logEvent("filter", `QQQ corr-block: SPY put open, QQQ put score ${putSetup.score}<80 suppressed`); }
+        if (spyCallOpen && callSetup.score < 80) { callSetup.score = Math.min(callSetup.score, 30); logEvent("filter", `QQQ corr-block: SPY call open, QQQ call score ${callSetup.score}<80 suppressed`); }
+        // Also suppress opposite directions (SPY put + QQQ call = contradictory thesis)
+        if (spyPutOpen  && callSetup.score > 0) { callSetup.score = Math.min(callSetup.score, 30); logEvent("filter", `QQQ corr-block: SPY put open, QQQ call contradicts direction`); }
+        if (spyCallOpen && putSetup.score  > 0) { putSetup.score  = Math.min(putSetup.score,  30); logEvent("filter", `QQQ corr-block: SPY call open, QQQ put contradicts direction`); }
+      }
+      // Symmetric: suppress SPY at <80 when QQQ is open in same direction
+      if (stock.ticker === "SPY") {
+        const qqqPutOpen  = state.positions.some(p => p.ticker === "QQQ" && p.optionType === "put");
+        const qqqCallOpen = state.positions.some(p => p.ticker === "QQQ" && p.optionType === "call");
+        if (qqqPutOpen  && putSetup.score  < 80) { putSetup.score  = Math.min(putSetup.score,  30); logEvent("filter", `SPY corr-block: QQQ put open, SPY put score <80 suppressed`); }
+        if (qqqCallOpen && callSetup.score < 80) { callSetup.score = Math.min(callSetup.score, 30); logEvent("filter", `SPY corr-block: QQQ call open, SPY call score <80 suppressed`); }
+        if (qqqPutOpen  && callSetup.score > 0) { callSetup.score = Math.min(callSetup.score, 30); }
+        if (qqqCallOpen && putSetup.score  > 0) { putSetup.score  = Math.min(putSetup.score,  30); }
       }
 
       // ── GLD entry gate — DXY + SPY momentum + VIX (panel-validated) ────────
@@ -9654,16 +9694,38 @@ async function updateAfterHoursContext() {
           const newStockPrice = underlying.price;
           const dte           = Math.max(1, Math.round((new Date(pos.expDate) - new Date()) / MS_PER_DAY));
           const iv            = pos.iv ? pos.iv / 100 : 0.30;
-          const strikeForCalc = pos.isSpread ? (pos.buyStrike || pos.strike) : pos.strike;
-          if (!strikeForCalc) continue; // skip if no strike available
-          const greeks        = calcGreeks(newStockPrice, strikeForCalc, dte, iv, pos.optionType);
-          // Delta-based estimate — most reliable approach without live options data
-          // How much the stock moved × option delta = estimated option price change
-          const priceDelta   = newStockPrice - (pos.price || newStockPrice);
-          const optionDelta  = parseFloat(pos.greeks?.delta || greeks.delta);
-          const estPrice     = parseFloat(Math.max(0.01, (pos.currentPrice || pos.premium) + (priceDelta * optionDelta)).toFixed(2));
-          const estPnl       = parseFloat(((estPrice - pos.premium) * 100 * (pos.contracts || 1)).toFixed(2));
-          const estPct       = parseFloat((((estPrice - pos.premium) / pos.premium) * 100).toFixed(1));
+
+          let estPrice, estPnl, estPct;
+
+          if (pos.isSpread && pos.buyStrike && pos.sellStrike) {
+            // Spread: compute delta of both legs and use net spread delta
+            // This is more accurate than single-leg delta for spread AH estimates
+            const buyGreeks  = calcGreeks(newStockPrice, pos.buyStrike,  dte, iv, pos.optionType);
+            const sellGreeks = calcGreeks(newStockPrice, pos.sellStrike, dte, iv, pos.optionType);
+            const netDelta   = (parseFloat(buyGreeks.delta) || 0) - (parseFloat(sellGreeks.delta) || 0);
+            const prevStockPrice = pos.price || newStockPrice;
+            const stockMove  = newStockPrice - prevStockPrice;
+            const curVal     = pos.currentPrice || pos.premium;
+            estPrice  = parseFloat(Math.max(0.01, curVal + (stockMove * netDelta)).toFixed(2));
+            if (pos.isCreditSpread) {
+              // Credit spread: profitable when value decreases (we sold premium)
+              estPnl = parseFloat(((pos.premium - estPrice) * 100 * (pos.contracts || 1)).toFixed(2));
+              estPct = parseFloat((((pos.premium - estPrice) / pos.premium) * 100).toFixed(1));
+            } else {
+              estPnl = parseFloat(((estPrice - pos.premium) * 100 * (pos.contracts || 1)).toFixed(2));
+              estPct = parseFloat((((estPrice - pos.premium) / pos.premium) * 100).toFixed(1));
+            }
+          } else {
+            // Single leg option
+            const strikeForCalc = pos.strike;
+            if (!strikeForCalc) continue;
+            const greeks       = calcGreeks(newStockPrice, strikeForCalc, dte, iv, pos.optionType);
+            const priceDelta   = newStockPrice - (pos.price || newStockPrice);
+            const optionDelta  = parseFloat(pos.greeks?.delta || greeks.delta);
+            estPrice = parseFloat(Math.max(0.01, (pos.currentPrice || pos.premium) + (priceDelta * optionDelta)).toFixed(2));
+            estPnl   = parseFloat(((estPrice - pos.premium) * 100 * (pos.contracts || 1)).toFixed(2));
+            estPct   = parseFloat((((estPrice - pos.premium) / pos.premium) * 100).toFixed(1));
+          }
 
           // Store as estimatedAH — separate from real currentPrice
           pos.estimatedAH = {
@@ -11082,11 +11144,17 @@ async function runBacktest(config) {
     (ticker === "GLD") ? fetchHistoricalBars("UUP", extStart, endDate) : Promise.resolve([]),
   ]);
   // For SPY runs, also fetch extended history for 200MA gate
+  // spyAux already has extended history for non-SPY tickers
   const spyBarsExtended = ticker === "SPY" ? await fetchHistoricalBars("SPY", extStart, endDate) : spyAux;
   const spyBarsAux = spyBarsExtended;
 
-  // Calculate offset: how many bars in spyBarsAux correspond to pre-startDate history
-  const spyAuxOffset = spyBarsAux.length - (ticker === "SPY" ? bars.length : (spyAux.length - (spyBarsAux.length - spyAux.length)));
+  // Calculate how many extra pre-period bars are in spyBarsAux
+  // These are used for 200MA lookback but NOT for aligning current-day SPY price
+  // spyBarsAux covers extStart→endDate; bars covers startDate→endDate
+  // The offset is how many SPY bars fall before startDate
+  const spyExtendedOffset = spyBarsAux.length - (ticker === "SPY" ? bars.length : bars.length);
+  // For non-SPY tickers: spyBarsAux has ~(bars.length + ~218 extended) bars
+  // We need to align so that spySlice[i] corresponds to the same calendar date as bars[i]
 
   if (bars.length < 30) {
     return { error: `Insufficient data: only ${bars.length} bars fetched for ${ticker} ${startDate}→${endDate}` };
@@ -11127,10 +11195,13 @@ async function runBacktest(config) {
 
     // ── Phase 1: Compute gate inputs from auxiliary bars at this index ──────
     // SPY 5-day return and 50MA for TLT gate and GLD gate
-    // spyBarsAux has pre-period history prepended; align index using offset
-    // spyAuxOffset = extra bars before startDate so 200MA works from day 1
-    const spyOffset = spyBarsAux.length - bars.length;
-    const spySlice = spyBarsAux.slice(0, Math.min(i + 1 + spyOffset, spyBarsAux.length));
+    // spyBarsAux has pre-period history prepended for 200MA computation
+    // For current SPY price/momentum we want the bar aligned with bars[i] by date
+    // Strategy: use the tail of spyBarsAux aligned to the end of the period
+    // spyBarsAux.length >= bars.length always; the extra bars are at the start
+    const spyTailOffset = spyBarsAux.length - bars.length; // extra pre-period bars
+    // Current-aligned slice: includes all pre-period bars up through current bar
+    const spySlice = spyBarsAux.slice(0, spyTailOffset + i + 1);
     const spy5d    = spySlice.length >= 5
       ? (spySlice[spySlice.length-1].c - spySlice[spySlice.length-5].c) / spySlice[spySlice.length-5].c
       : 0;
