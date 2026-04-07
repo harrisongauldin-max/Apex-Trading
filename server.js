@@ -11441,6 +11441,10 @@ async function runBacktest(config) {
   if (bars.length < 30) {
     return { error: `Insufficient data: only ${bars.length} bars fetched for ${ticker} ${startDate}→${endDate}` };
   }
+  // Warn if SPY auxiliary bars are fewer than primary bars (alignment assumption breaks)
+  if (spyBarsAux.length < bars.length) {
+    logEvent("warn", `[BACKTEST] SPY aux bars (${spyBarsAux.length}) < ${ticker} bars (${bars.length}) — SPY data gap, alignment may be off`);
+  }
 
   const { maxPositions = 3 } = config;
 
@@ -11481,8 +11485,8 @@ async function runBacktest(config) {
     // For current SPY price/momentum we want the bar aligned with bars[i] by date
     // Strategy: use the tail of spyBarsAux aligned to the end of the period
     // spyBarsAux.length >= bars.length always; the extra bars are at the start
-    const spyTailOffset = spyBarsAux.length - bars.length; // extra pre-period bars
-    // Current-aligned slice: includes all pre-period bars up through current bar
+      // Guard: spyBarsAux must be at least as long as bars. If not (data gap), skip offset.
+    const spyTailOffset = Math.max(0, spyBarsAux.length - bars.length);
     const spySlice = spyBarsAux.slice(0, spyTailOffset + i + 1);
     const spy5d    = spySlice.length >= 5
       ? (spySlice[spySlice.length-1].c - spySlice[spySlice.length-5].c) / spySlice[spySlice.length-5].c
@@ -11584,7 +11588,11 @@ async function runBacktest(config) {
     // Estimate option premium using already-computed vixEst from gate section above
     const premiumPct = (vixEst / 100) * Math.sqrt(holdDays / 252) * 0.8; // simplified BSM
     const entryPrem  = parseFloat((price * premiumPct).toFixed(2));
-    if (entryPrem < 0.30) continue; // too cheap to trade
+    // Minimum premium: 0.30% of underlying price (scales with ETF price)
+    // Flat $0.30 was filtering XLE ($90) and KRE ($55) at normal VIX
+    // $90 × 0.003 = $0.27 minimum | $55 × 0.003 = $0.165 minimum
+    const minPrem = Math.max(0.10, price * 0.003);
+    if (entryPrem < minPrem) continue; // too cheap to trade
 
     // Asymmetric sizing — calls at reduced size (panel: put edge is stronger)
     const sizeMult     = entryType === "call" ? callSizeMult : 1.0;
