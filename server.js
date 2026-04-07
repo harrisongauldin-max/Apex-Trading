@@ -9104,7 +9104,26 @@ async function runScan() {
     // GLD uses 80+ with DXY/SPY gates applied upstream
     // below200MAPutMin REMOVED — regimeProfile already handles this via trending_bear/crash minScore
     // Keeping it created a conflict where isBearishHigh (score 65) was silently overridden to 80
-    const effectiveMinScore = Math.max(ddProtocol.minScore || MIN_SCORE, regimeMinScore, agentMinScore);
+    // ── IVR floor gate — debit entries require elevated vol environment ────
+    // IVR < 15: options are historically cheap — buying premium has near-zero edge
+    //           seen in 2023 Q2 where VIX<18 had 0% win rate across all instruments
+    // IVR 15-25: options cheap — require higher conviction (80+ score) for debit entries
+    // IVR >= 25: normal operating range — no extra gate
+    // Credit spreads are EXEMPT — they benefit from selling in low-vol environments
+    const ivrNow       = ivRankNow; // already computed above
+    const ivrDebitFloor = 15;       // below this: debit entries blocked
+    const ivrDebitCaution = 25;     // below this: debit entries need 80+
+    const ivrMinScore  = !creditModeActive && !creditCallModeActive
+      ? (ivrNow < ivrDebitFloor   ? 999  // effectively blocked
+       : ivrNow < ivrDebitCaution ? 80   // caution — require higher conviction
+       : MIN_SCORE)                      // normal
+      : MIN_SCORE;                       // credit spreads exempt from IVR floor
+    if (ivrMinScore === 999 && !dryRunMode) {
+      logEvent("filter", `${stock.ticker} IVR ${ivrNow} below floor (${ivrDebitFloor}) — debit entry blocked (options too cheap)`);
+    } else if (ivrMinScore === 80 && !dryRunMode && ivrNow < ivrDebitCaution) {
+      logEvent("filter", `${stock.ticker} IVR ${ivrNow} low — debit requires 80+ score`);
+    }
+    const effectiveMinScore = Math.max(ddProtocol.minScore || MIN_SCORE, regimeMinScore, agentMinScore, ivrMinScore);
     // QS-C2: In choppy regime, effectiveMinScore=90 + choppy score penalty (-10) means
     // a position needs 100 base score to clear the bar. Log this near-lockout for visibility.
     if (effectiveMinScore >= 90 && isChoppyRegime) {
@@ -10549,6 +10568,8 @@ app.get("/api/state", async (req, res) => {
     orphanCount:        state.orphanCount || 0,
     lastReconcile:      state.lastReconcile || null,
     scanFailures:       state._scanFailures || 0,
+    ivrDebitBlocked:    (state._ivRank || 50) < 15,
+    ivrCaution:         (state._ivRank || 50) >= 15 && (state._ivRank || 50) < 25,
     macroCalendar:      marketContext.macroCalendar,
     upcomingEvents:     getUpcomingMacroEvents(7),
     regime:             marketContext.regime,
