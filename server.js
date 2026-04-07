@@ -4339,7 +4339,9 @@ async function getRealOptionsContract(ticker, price, optionType, score, vix, ear
       // Hard DTE floor — spreads need 21+ DTE for PDT accounts
       // PDT forces overnight holds — short DTE means theta destroys value before exit
       // MR calls can use 14 DTE (quick bounce play)
-      const minDTE = isMeanReversion ? 14 : 21;
+      // Index instruments (SPY/QQQ etc) have liquid weeklies at any DTE
+      // PDT 21 DTE floor only applies to single stocks where theta decay is a real risk
+      const minDTE = isIndexTicker ? 3 : isMeanReversion ? 14 : 21;
       if (contractDTE < minDTE) { skipped++; continue; }
 
       // ── CONTRACT SCORING — higher = better ──────────────────────────────
@@ -11443,6 +11445,7 @@ function simulateOptionPnL(entryPrice, optionType, holdDays, outcome, ticker = "
 }
 
 async function runBacktest(config) {
+  try {
   const {
     ticker     = "SPY",
     optionType = "put",
@@ -11525,6 +11528,7 @@ async function runBacktest(config) {
 
   // Walk forward — skip first 26 bars (need for MACD)
   for (let i = 26; i < bars.length - holdDays; i++) {
+    try {
     const bar      = bars[i];
     const barDate  = bar.t?.split("T")[0] || `day-${i}`;
     const price    = bar.c;
@@ -11751,6 +11755,10 @@ async function runBacktest(config) {
       openBT.push({ entryIdx: i, entryType, entryPrem, positionCost, score,
         expiryIdx: Math.min(i + holdDays, bars.length-1), reasons: reasons.slice(0,3), vixEst, agentRegime });
     }
+    } catch(loopErr) {
+      logEvent("error", `[BACKTEST] Loop crash at bar ${i} (${ticker} ${bars[i]?.t?.split("T")[0]}): ${loopErr.message}`);
+      // Continue — don't let one bad bar crash the entire backtest
+    }
   }
 
   // Calculate statistics
@@ -11788,7 +11796,7 @@ async function runBacktest(config) {
   const totalGateSkips  = Object.values(gateSkips).reduce((s,v) => s+v, 0);
   const minScore_used   = config.minScore || 70;
 
-  logEvent("scan", `[BACKTEST] Complete: ${trades.length} trades, ${winRate.toFixed(0)}% WR, expectancy $${expectancy}/trade, Calmar ${calmar}, spiral blocked:${spiralBlockCount}, gates blocked:${totalGateSkips}`);
+  logEvent("scan", `[BACKTEST] ${ticker} ${minScore}+: ${trades.length} trades, ${winRate.toFixed(0)}% WR, expectancy $${expectancy}/trade, Calmar ${calmar}, spiral:${spiralBlockCount}, gates:${totalGateSkips}`);
 
   // Direction split — put WR vs call WR independently
   const putTrades  = trades.filter(t => t.optionType === "put");
@@ -11869,6 +11877,11 @@ async function runBacktest(config) {
     equityCurve,
     trades,  // full trade list — matrix template uses worst/best 10
   };
+  } catch(e) {
+    const stackLine = (e.stack || "").split("\n")[1] || "";
+    logEvent("error", `[BACKTEST] runBacktest crashed for ${config?.ticker} minScore:${config?.minScore}: ${e.message} | ${stackLine.trim()}`);
+    return { error: e.message, ticker: config?.ticker, minScore: config?.minScore };
+  }
 }
 
 // ── Backtest API endpoint ─────────────────────────────────────────────────────
