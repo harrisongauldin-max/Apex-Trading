@@ -725,7 +725,7 @@ async function runReconciliation() {
         const expDate  = expM
           ? new Date(`20${expM[1]}-${expM[2]}-${expM[3]}`).toLocaleDateString('en-US', {month:'short',day:'2-digit',year:'numeric'})
           : '';
-        const expDays  = expDate ? Math.max(1, Math.round((new Date(expDate) - new Date()) / 86400000)) : 30;
+        const expDays  = expDate ? Math.max(1, Math.round((new Date(expDate) - new Date()) / MS_PER_DAY)) : 30;
         const qty      = parseInt(alpPos.qty || 1);
         const avgEntry = parseFloat(alpPos.avg_entry_price || 0);
         const mktVal   = parseFloat(alpPos.market_value || 0);
@@ -3014,7 +3014,7 @@ holdRecommendations: {ticker: "HOLD"|"MONITOR"|"EXIT_AT_OPEN"} for each open pos
   const positions = (state.positions || []).map(p => ({
     ticker: p.ticker, type: p.optionType, isSpread: p.isSpread,
     pnlPct: p.currentPrice && p.premium ? ((p.currentPrice - p.premium)/p.premium*100).toFixed(1) : '0',
-    daysOpen: ((Date.now() - new Date(p.openDate).getTime())/86400000).toFixed(1),
+    daysOpen: ((Date.now() - new Date(p.openDate).getTime())/MS_PER_DAY).toFixed(1),
     expDate: p.expDate,
   }));
 
@@ -3287,7 +3287,7 @@ Should ARGO-V2.5 enter this ${optionType} position?`;
 async function getAgentRescore(pos) {
   if (!ANTHROPIC_API_KEY) return null;
 
-  const daysOpen = ((Date.now() - new Date(pos.openDate).getTime()) / 86400000).toFixed(1);
+  const daysOpen = ((Date.now() - new Date(pos.openDate).getTime()) / MS_PER_DAY).toFixed(1);
   const chgPct   = pos.currentPrice && pos.premium
     ? ((pos.currentPrice - pos.premium) / pos.premium * 100).toFixed(1) : '0';
   const isProfit = parseFloat(chgPct) > 0;
@@ -3321,7 +3321,7 @@ Critical rules:
 - ${pos.ticker} ${pos.optionType.toUpperCase()} ${pos.isSpread ? `$${pos.buyStrike}/$${pos.sellStrike} SPREAD` : `$${pos.strike}`} exp ${pos.expDate}
 - Entry: $${pos.premium} | Current: $${pos.currentPrice || pos.premium} | P&L: ${chgPct}% ${isProfit ? '(PROFITABLE — do not recommend EXIT)' : ''}
 ${pos.isCreditSpread ? '- CREDIT SPREAD: profit = time decay, spread value DECREASING is GOOD. Only recommend EXIT if underlying moved strongly against short strike.' : ''}
-- Opened: ${daysOpen} days ago | DTE: ${Math.max(0, Math.round((new Date(pos.expDate)-new Date())/86400000))}d
+- Opened: ${daysOpen} days ago | DTE: ${Math.max(0, Math.round((new Date(pos.expDate)-new Date())/MS_PER_DAY))}d
 - Entry score: ${pos.score}/100 | Entry reasons: ${(pos.reasons||[]).slice(0,4).join('; ')}
 - Stock: $${pos.price || '--'} | Entry RSI: ${pos.entryRSI || '--'} | Entry MACD: ${pos.entryMACD || '--'}
 - Thesis integrity: ${thesisScore}/100 ${thesisTrend < 0 ? '(degrading ' + thesisTrend + ')' : thesisTrend > 0 ? '(improving +' + thesisTrend + ')' : '(stable)'}
@@ -3402,8 +3402,8 @@ async function agentTool_getPositionStatus(ticker) {
   const chgPct = pos.currentPrice && pos.premium
     ? ((pos.currentPrice - pos.premium) / pos.premium * 100).toFixed(1) : "0";
   const dteLeft = pos.expDate
-    ? Math.max(0, Math.round((new Date(pos.expDate) - new Date()) / 86400000)) : null;
-  const daysOpen = ((Date.now() - new Date(pos.openDate).getTime()) / 86400000).toFixed(1);
+    ? Math.max(0, Math.round((new Date(pos.expDate) - new Date()) / MS_PER_DAY)) : null;
+  const daysOpen = ((Date.now() - new Date(pos.openDate).getTime()) / MS_PER_DAY).toFixed(1);
   return {
     ticker, optionType: pos.optionType, strike: pos.isSpread ? `${pos.buyStrike}/${pos.sellStrike}` : pos.strike, expDate: pos.expDate,
     entryPrice: pos.premium, currentPrice: pos.currentPrice || pos.premium,
@@ -3428,7 +3428,7 @@ async function agentTool_getMarketStatus() {
       vix: state.vix,
       breadth: state._breadth || null,
       fearGreed: marketContext.fearGreed?.score || null,
-      pdtRemaining: Math.max(0, 3 - countRecentDayTrades()),
+      pdtRemaining: Math.max(0, PDT_LIMIT - countRecentDayTrades()),
       cash: parseFloat((state.cash||0).toFixed(2)),
       openPositions: (state.positions||[]).length,
     };
@@ -3471,7 +3471,7 @@ Keep the entire briefing under 200 words. Be specific with numbers.`;
 
   const positionList = positions.map(p =>
     p.ticker + ' ' + p.optionType.toUpperCase() + ' $' + p.strike +
-    ' | Entry $' + p.premium + ' | DTE ' + (p.expDate ? Math.max(0,Math.round((new Date(p.expDate)-new Date())/86400000)) : '?') + 'd'
+    ' | Entry $' + p.premium + ' | DTE ' + (p.expDate ? Math.max(0,Math.round((new Date(p.expDate)-new Date())/MS_PER_DAY)) : '?') + 'd'
   ).join('\n');
 
   const userPrompt = `Today is ${new Date().toLocaleDateString('en-US',{weekday:'long',month:'long',day:'numeric'})}.
@@ -3805,7 +3805,7 @@ async function getSyntheticPCR() {
 
     // Fetch SPY options chain — already have this infrastructure
     const today  = new Date().toISOString().split("T")[0];
-    const expiry = new Date(Date.now() + 45 * 86400000).toISOString().split("T")[0]; // 0-45 DTE full range
+    const expiry = new Date(Date.now() + 45 * MS_PER_DAY).toISOString().split("T")[0]; // 0-45 DTE full range
     const url    = `/options/snapshots/SPY?feed=indicative&limit=1000&expiration_date_gte=${today}&expiration_date_lte=${expiry}`;
     const data   = await alpacaGet(url, ALPACA_OPT_SNAP);
 
@@ -3858,8 +3858,8 @@ async function getVolTermStructure() {
     if (cached) return cached;
 
     const today     = new Date();
-    const nearExp   = new Date(today.getTime() + 20 * 86400000).toISOString().split("T")[0];
-    const farExp    = new Date(today.getTime() + 50 * 86400000).toISOString().split("T")[0];
+    const nearExp   = new Date(today.getTime() + 20 * MS_PER_DAY).toISOString().split("T")[0];
+    const farExp    = new Date(today.getTime() + 50 * MS_PER_DAY).toISOString().split("T")[0];
 
     // Fetch ATM options for near and far expiry to get IV
     // Use live SPY quote if state.spyPrice not yet populated
@@ -5758,7 +5758,7 @@ async function confirmPendingOrder() {
           // Take minimum (stricter)
           takeProfitPct: 0.50, fastStopPct: Math.min(1.0, parseFloat((0.50 * maxLoss / netCredit).toFixed(3))),
           _originalEntryScore: pending.score || 100, // baseline for dynamic TP scaling
-          _creditHarvestExpiry: new Date(Date.now() + 7*86400000).toISOString(),
+          _creditHarvestExpiry: new Date(Date.now() + 7 * MS_PER_DAY).toISOString(),
         };
         state.positions.push(position);
         state._pendingOrder = null;
@@ -6200,7 +6200,7 @@ function calcThesisIntegrity(pos, currentRSI, currentMACD, currentMomentum, curr
   const entryMACD     = pos.entryMACD     || "neutral";
   const entryMomentum = pos.entryMomentum || "steady";
   const entryMacro    = pos.entryMacro    || "neutral";
-  const daysOpen      = ((Date.now() - new Date(pos.openDate).getTime()) / 86400000);
+  const daysOpen      = ((Date.now() - new Date(pos.openDate).getTime()) / MS_PER_DAY);
 
   if (pos.optionType === "put") {
     // RSI drifted from overbought toward neutral/oversold
@@ -6243,7 +6243,7 @@ function calcThesisIntegrity(pos, currentRSI, currentMACD, currentMomentum, curr
 // As a position ages, the loss tolerance tightens
 // Flat positions especially — theta is working against you
 function getTimeAdjustedStop(pos) {
-  const daysOpen   = (Date.now() - new Date(pos.openDate).getTime()) / 86400000;
+  const daysOpen   = (Date.now() - new Date(pos.openDate).getTime()) / MS_PER_DAY;
   const chgPct     = pos.currentPrice && pos.premium
     ? (pos.currentPrice - pos.premium) / pos.premium : 0;
   const isFlat     = Math.abs(chgPct) < 0.05; // within 5% of entry
@@ -6470,10 +6470,10 @@ async function closePosition(ticker, reason, exitPremium = null, contractSym = n
     exitAgentSignal: (state._agentMacro || {}).signal || "unknown",
     exitRegime:    (state._agentMacro || {}).regime || "unknown",
     // Timing
-    daysHeld:    Math.round((Date.now() - new Date(pos.openDate).getTime()) / 86400000),
+    daysHeld:    Math.round((Date.now() - new Date(pos.openDate).getTime()) / MS_PER_DAY),
     maxAdverseExcursion: pos.maxAdverseExcursion || 0, // Chan: worst drawdown before close
     dteAtEntry:  pos.expDays || 0,
-    dteAtExit:   Math.max(0, Math.round((new Date(pos.expDate) - new Date()) / 86400000)),
+    dteAtExit:   Math.max(0, Math.round((new Date(pos.expDate) - new Date()) / MS_PER_DAY)),
     // Spread specifics
     spreadWidth:  pos.spreadWidth || 0,
     buyStrike:    pos.buyStrike || pos.strike || 0,
@@ -6843,7 +6843,7 @@ async function runAgentRescore() {
   const OVERNIGHT_INTERVAL  = 60 * 60 * 1000; // 60 minutes — overnight positions change slowly
 
   const toRescore = (state.positions || []).filter(p => {
-    const daysOpen  = (now - new Date(p.openDate).getTime()) / 86400000;
+    const daysOpen  = (now - new Date(p.openDate).getTime()) / MS_PER_DAY;
     const isOvernight = daysOpen >= 1;
     const interval  = isOvernight ? OVERNIGHT_INTERVAL : SAME_DAY_INTERVAL;
     const lastRescore = isOvernight
@@ -6879,7 +6879,7 @@ async function runAgentRescore() {
         logEvent("scan", `${pos.ticker} credit harvest window expired — target expanded to 50%`);
       }
     }
-    const dOpen = (Date.now() - new Date(pos.openDate).getTime()) / 86400000;
+    const dOpen = (Date.now() - new Date(pos.openDate).getTime()) / MS_PER_DAY;
     if (dOpen >= 5 && !pos.isMeanReversion && !pos.isCreditSpread && !pos._momentumDecayFlagged) {
       pos._momentumDecayFlagged = true;
       // Simon & Campasano: actually force rescore by resetting the rescore timer
@@ -6892,7 +6892,7 @@ async function runAgentRescore() {
   // Mark as rescored — stagger same-day positions by 3 minutes each
   // Prevents all positions hitting 30-min mark simultaneously next cycle
   needRescore.forEach((p, i) => {
-    const daysOpen = (now - new Date(p.openDate).getTime()) / 86400000;
+    const daysOpen = (now - new Date(p.openDate).getTime()) / MS_PER_DAY;
     if (daysOpen >= 1) {
       state._agentRescoreHour[p.ticker]   = currentHour;
     } else {
@@ -7148,7 +7148,7 @@ async function runScan() {
         }
       } else if (state._zweigThrust?.detected) {
         // Clear after 2 days — short-lived signal on small watchlist
-        const age = (now - new Date(state._zweigThrust.detectedAt).getTime()) / 86400000;
+        const age = (now - new Date(state._zweigThrust.detectedAt).getTime()) / MS_PER_DAY;
         if (age > 2) state._zweigThrust = { detected: false };
       }
     }
@@ -7624,7 +7624,7 @@ async function runScan() {
     // "Pin risk" = spread expires exactly at short strike = max risk scenario
     // Professional rule: close or roll when within $2 of short strike inside 5 DTE
     if (pos.isSpread && pos.sellStrike && !isDayTrade(pos)) {
-      const dteLeft   = Math.max(0, Math.round((new Date(pos.expDate) - new Date()) / 86400000));
+      const dteLeft   = Math.max(0, Math.round((new Date(pos.expDate) - new Date()) / MS_PER_DAY));
       const shortStrike = pos.sellStrike || pos.shortStrike || 0;
       const distToShort  = Math.abs(price - shortStrike);
       const pinThreshold = price * 0.005; // 0.5% of underlying — scales with instrument price
@@ -7639,7 +7639,7 @@ async function runScan() {
     // Short ITM options risk early assignment, especially near ex-dividend dates
     // For PDT accounts: early assignment creates a naked long/short = catastrophic
     if (pos.isCreditSpread && pos.sellStrike && !isDayTrade(pos)) {
-      const dteLeft    = Math.max(0, Math.round((new Date(pos.expDate) - new Date()) / 86400000));
+      const dteLeft    = Math.max(0, Math.round((new Date(pos.expDate) - new Date()) / MS_PER_DAY));
       const shortStr   = pos.sellStrike || pos.shortStrike || 0;
       const shortITM   = pos.optionType === "put"  ? price < shortStr  // put short ITM if price below
                        : pos.optionType === "call" ? price > shortStr  // call short ITM if price above
@@ -7665,7 +7665,7 @@ async function runScan() {
       currentExitParams.takeProfitPct = pos.takeProfitPct; // harvest window overrides DTE params
     }
     // Theta accelerates dramatically inside 10 DTE — take profit sooner
-    const dteLeft = Math.max(1, Math.round((new Date(pos.expDate) - new Date()) / 86400000));
+    const dteLeft = Math.max(1, Math.round((new Date(pos.expDate) - new Date()) / MS_PER_DAY));
     // Natenberg: theta decay is exponential not linear
     // DEBIT spreads: tighten targets as DTE drops — theta eating premium fast
     // CREDIT spreads: theta works FOR you — EXPAND targets at low DTE (let it expire worthless)
@@ -7769,7 +7769,7 @@ async function runScan() {
 
     // 0b. DTE EXPIRY URGENCY — close positions in danger near expiry
     // OT-W4: Calendar time stop misses options-specific expiry risk
-    const dteDaysLeft = pos.expDate ? Math.max(0, Math.round((new Date(pos.expDate) - new Date()) / 86400000)) : 30;
+    const dteDaysLeft = pos.expDate ? Math.max(0, Math.round((new Date(pos.expDate) - new Date()) / MS_PER_DAY)) : 30;
     if (pos.isSpread && dteDaysLeft <= 1) {
       logEvent("warn", `${pos.ticker} DTE=1 — closing spread to avoid pin/assignment risk`);
       await closePosition(pos.ticker, "expiry-close"); continue;
@@ -8355,7 +8355,7 @@ async function runScan() {
   const allPDTLocked = state.positions.length > 0 &&
     state.positions.every(p => {
       const alpacaBal = state.alpacaCash || state.cash || 0;
-      return alpacaBal < 25000 && ((Date.now() - new Date(p.openDate).getTime()) < 86400000);
+      return alpacaBal < 25000 && ((Date.now() - new Date(p.openDate).getTime()) < MS_PER_DAY);
     });
   // Natenberg: VIX-scaled vega cap — high VIX = more volatile IV = tighter cap
   // At VIX 37, a $2000 vega position loses $2000 on a 1pt VIX move — too much
@@ -9612,7 +9612,7 @@ async function sendMorningBriefing() {
 
     // ── Positions table ───────────────────────────────────────────────────
     const posRows = positions.length ? positions.map(p => {
-      const dteDays   = p.expDate ? Math.max(0, Math.round((new Date(p.expDate) - today) / 86400000)) : '?';
+      const dteDays   = p.expDate ? Math.max(0, Math.round((new Date(p.expDate) - today) / MS_PER_DAY)) : '?';
       // Use live price if available, fall back to after-hours estimate, then show entry
       const useAH     = !p.currentPrice && p.estimatedAH;
       const curPrice  = p.currentPrice || (useAH ? p.estimatedAH.price : null);
@@ -10553,7 +10553,6 @@ app.get("/api/state", async (req, res) => {
     alpacaDayTradesLeft: state._alpacaDayTradesLeft ?? null,
     pdtSource:          state._alpacaDayTradeCount !== undefined ? "alpaca" : "internal",
     pdtSource:          state._alpacaDayTradeCount !== undefined ? "alpaca" : "internal",
-    pdtRemaining:       Math.max(0, PDT_LIMIT - countRecentDayTrades()),
     patternDayTrader:   state._patternDayTrader || false,
 
     tickerBlacklist:    state.tickerBlacklist || [],
@@ -10615,7 +10614,7 @@ app.post("/api/test-thesis", (req, res) => {
     entryMacro: "bearish",
     premium: 5.00,
     currentPrice: 5.00,
-    openDate: new Date(Date.now() - mockDays * 86400000).toISOString(),
+    openDate: new Date(Date.now() - mockDays * MS_PER_DAY).toISOString(),
     entryThesisScore: 100,
     thesisHistory: [],
   };
@@ -10667,7 +10666,7 @@ app.post("/api/test-morning-review", async (req, res) => {
       results.push({
         ticker:         pos.ticker,
         optionType:     pos.optionType,
-        daysOpen:       ((Date.now() - new Date(pos.openDate).getTime()) / 86400000).toFixed(1),
+        daysOpen:       ((Date.now() - new Date(pos.openDate).getTime()) / MS_PER_DAY).toFixed(1),
         pnlPct:         pos.currentPrice && pos.premium ? ((pos.currentPrice - pos.premium) / pos.premium * 100).toFixed(1) + '%' : 'unknown',
         thesisScore:    pos.entryThesisScore || 100,
         agentRescore:   rescore || { error: "no response" },
