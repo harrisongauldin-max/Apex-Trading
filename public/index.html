@@ -813,7 +813,7 @@ input[type=text]:focus{border-color:var(--blue)}
       <div class="card-title">INSTRUMENT</div>
       <select id="bt-ticker" style="width:100%;background:#071020;color:#cce8ff;border:1px solid #0d3050;padding:6px;border-radius:4px;font-family:monospace">
         <option value="SPY">SPY</option><option value="QQQ">QQQ</option>
-        <option value="TLT">TLT</option><option value="GLD">GLD</option>
+        <option value="TLT">TLT</option><option value="GLD">GLD</option><option value="XLE">XLE</option><option value="KRE">KRE</option><option value="XOP">XOP</option>
       </select>
       <div style="margin-top:8px">
         <select id="bt-type" style="width:100%;background:#071020;color:#cce8ff;border:1px solid #0d3050;padding:6px;border-radius:4px;font-family:monospace">
@@ -856,7 +856,8 @@ input[type=text]:focus{border-color:var(--blue)}
   <div style="display:flex;gap:8px;margin-bottom:14px;flex-wrap:wrap">
     <button class="btn btn-green" onclick="runBacktest()" id="bt-run-btn">▶ RUN BACKTEST</button>
     <button class="btn" style="background:#0a1f3a;border:1px solid #ffd700;color:#ffd700" onclick="runStressTest()" id="bt-stress-btn">⚡ STRESS TESTS</button>
-    <button class="btn" style="background:#0a1f3a;border:1px solid #00c4ff;color:#00c4ff" onclick="runFullMatrix()" id="bt-matrix-btn">⚡ RUN FULL MATRIX (All 4 × 3 Scores)</button>
+    <button class="btn" style="background:#0a1f3a;border:1px solid #00c4ff;color:#00c4ff" onclick="runFullMatrix()" id="bt-matrix-btn">⚡ RUN FULL MATRIX (SPY/QQQ/TLT/GLD)</button>
+    <button class="btn" style="background:#0a1f3a;border:1px solid #ffd700;color:#ffd700" onclick="runMacroMatrix()" id="bt-macro-btn">⚡ MACRO ETF MATRIX (XLE/KRE/XOP)</button>
   </div>
   <!-- Matrix results area -->
   <div id="bt-matrix-results" style="display:none;margin-bottom:14px">
@@ -1750,6 +1751,7 @@ function renderPositions() {
         <div><div style="font-size:9px;color:var(--muted)">EXP DATE</div><div style="font-weight:700">${p.expDate}</div></div>
         <div><div style="font-size:9px;color:var(--muted)">PROB OF PROFIT</div><div style="font-weight:700;color:${p.probabilityOfProfit>=70?'var(--green)':p.probabilityOfProfit>=50?'var(--gold)':'var(--red)'}">${p.probabilityOfProfit!=null?p.probabilityOfProfit+'%':'--'}</div></div>
         <div><div style="font-size:9px;color:var(--muted)">BREAKEVEN</div><div style="font-weight:700">$${p.breakeven||'--'}</div></div>
+        <div><div style="font-size:9px;color:var(--muted)">${p.ticker} STOCK</div><div style="font-weight:700;color:var(--blue)">${p.price?'$'+p.price.toFixed(2):'--'}</div></div>
       </div>` : `
       <!-- Naked option position grid -->
       <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-bottom:10px">
@@ -2543,6 +2545,63 @@ function startLogPolling() {
 startLogPolling();
 
 // ── BACKTEST ENGINE JS ───────────────────────────────────────────────────────
+async function runMacroMatrix() {
+  const btn = document.getElementById('bt-macro-btn');
+  btn.disabled = true; btn.textContent = '⟳ RUNNING MACRO MATRIX...';
+  document.getElementById('bt-matrix-results').style.display = 'block';
+  document.getElementById('bt-results').style.display = 'none';
+  document.getElementById('bt-error').style.display = 'none';
+
+  const startDate    = document.getElementById('bt-start').value;
+  const endDate      = document.getElementById('bt-end').value;
+  const holdDays     = parseInt(document.getElementById('bt-hold').value) || 5;
+  const tp           = parseFloat(document.getElementById('bt-tp').value) / 100 || 0.5;
+  const stop         = parseFloat(document.getElementById('bt-stop').value) / 100 || 0.35;
+  const capital      = parseFloat(document.getElementById('bt-capital').value) || 10000;
+  const maxPositions = parseInt(document.getElementById('bt-maxpos').value) || 3;
+  const callSizeMult = parseFloat(document.getElementById('bt-callsize')?.value || 1.0);
+
+  const instruments = ['XLE','KRE','XOP'];
+  const scores      = [70, 75, 80];
+  const total       = instruments.length * scores.length;
+  let completed     = 0;
+  const matrixData  = {};
+
+  const progress = document.getElementById('bt-matrix-progress');
+  const tableEl  = document.getElementById('bt-matrix-table');
+  progress.textContent = 'Running Macro ETF Matrix (XLE/KRE/XOP)...';
+
+  const tasks = [];
+  for (const ticker of instruments) {
+    for (const minScore of scores) {
+      tasks.push(
+        fetch('/api/backtest', {
+          method: 'POST',
+          headers: {'Content-Type':'application/json'},
+          body: JSON.stringify({ ticker, optionType:'both', startDate, endDate,
+            minScore, holdDays, takeProfitPct:tp, stopLossPct:stop, capital, maxPositions,
+            callSizeMult, putOnly: callSizeMult === 0,
+          })
+        })
+        .then(r => r.json())
+        .then(data => {
+          completed++;
+          progress.textContent = 'Macro ETF Matrix: ' + completed + '/' + total + ' complete — ' + ticker + ' @ ' + minScore + '+ done';
+          matrixData[ticker + '-' + minScore] = data;
+          renderMatrixTable(matrixData, instruments, scores, capital);
+        })
+        .catch(err => { completed++; matrixData[ticker + '-' + minScore] = { error: err.message }; })
+      );
+    }
+  }
+
+  await Promise.all(tasks);
+  progress.textContent = '✅ Macro ETF Matrix complete (' + total + ' runs)';
+  window._matrixData = matrixData;
+  window._matrixMeta = { instruments, scores, startDate, endDate, holdDays, capital, maxPositions, tp, stop };
+  btn.disabled = false; btn.textContent = '⚡ MACRO ETF MATRIX (XLE/KRE/XOP)';
+}
+
 async function runFullMatrix() {
   const btn = document.getElementById('bt-matrix-btn');
   btn.disabled = true; btn.textContent = '⟳ RUNNING MATRIX...';
