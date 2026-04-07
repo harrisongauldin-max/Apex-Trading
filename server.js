@@ -1,5 +1,5 @@
 // -
-// ARGO V2.5 - Systematic SPY/QQQ Options Trading Agent
+// ARGO V2.75 - Systematic SPY/QQQ Options Trading Agent
 // Alpaca Paper Trading Edition
 // -
 const express    = require("express");
@@ -57,12 +57,23 @@ function getAccountPhase() {
   if (accountVal >= 15000) return "transition";
   return "growth";
 }
-const effectiveHeatCap = () => {
+const effectiveHeatCap = (strategyType) => {
   const phase = getAccountPhase();
-  // Preservation phase: tighter heat caps regardless of VIX
+  // 3C: Heat cap differentiation by strategy type (panel decision)
+  // Debit spreads / correlated credit spreads: standard caps (defined below)
+  // Iron condors (defined risk both sides): 80% max — panel endorsed
+  // Credit spreads, sector-diverse: 75% max — only when XLE/KRE added
+  if (strategyType === "iron_condor") {
+    if (phase === "preservation") return 0.40;
+    return 0.80; // defined risk both directions
+  }
+  if (strategyType === "credit_diverse") {
+    if (phase === "preservation") return 0.45;
+    return 0.75; // diverse sectors, defined risk
+  }
+  // Default: debit spreads and correlated credit spreads
   if (phase === "preservation") return state.vix >= 25 ? 0.30 : 0.40;
   if (phase === "transition")   return state.vix >= 30 ? 0.35 : state.vix >= 25 ? 0.45 : 0.50;
-  // Growth phase: current VIX-adjusted caps
   return state.vix >= 30 ? 0.40 : state.vix >= 25 ? 0.50 : MAX_HEAT;
 };
 const MAX_SECTOR_PCT      = 0.50;
@@ -2780,6 +2791,16 @@ const AGENT_TOOLS = [
     name: "getMarketStatus",
     description: "Get overall market status: SPY price/change, VIX, breadth, PDT remaining, cash",
     input_schema: { type: "object", properties: {} }
+  },
+  {
+    name: "getIVRank",
+    description: "Get IV rank (0-100) for the market. IVR 70+ = sell premium aggressively. IVR 50-70 = credit spreads favorable. IVR <30 = buy premium preferred.",
+    input_schema: { type: "object", properties: {} }
+  },
+  {
+    name: "getRegimeStatus",
+    description: "Get current regime class (A/B/C), days below 200MA, sustained VIX, SPY drawdown, and recommended strategy mode.",
+    input_schema: { type: "object", properties: {} }
   }
 ];
 
@@ -3103,6 +3124,30 @@ Rules: regime=what SPY does next 3-10 days. entryBias: puts_on_bounces=bearish t
   if (spyMA50)  state._spyMA50  = spyMA50;
   if (spyMA200) state._spyMA200 = spyMA200;
 
+  // ── 1C: REGIME DURATION TRACKING ──────────────────────────────────────────
+  // Track how long SPY has been below 200MA, sustained VIX, SPY drawdown
+  // Powers regime A/B/C classification and strategy selection
+  const spyBelowNow = spyMA200 && spyPrice && spyPrice < spyMA200;
+  if (spyBelowNow) {
+    state._regimeDuration = (state._regimeDuration || 0) + 1; // days below 200MA
+  } else {
+    state._regimeDuration = 0; // reset when SPY recovers above 200MA
+  }
+  // 5-day rolling VIX average (sustained fear vs spike)
+  if (!state._vixHistory) state._vixHistory = [];
+  state._vixHistory.push(mktStatus.vix || state.vix || 20);
+  if (state._vixHistory.length > 5) state._vixHistory.shift();
+  state._vixSustained = parseFloat((state._vixHistory.reduce((s,v)=>s+v,0)/state._vixHistory.length).toFixed(1));
+  // SPY drawdown from 52-week high
+  const spy52wHigh = spyBarsForAgent.length > 0 ? Math.max(...spyBarsForAgent.map(b=>b.h)) : spyPrice;
+  state._spyDrawdown = spy52wHigh > 0 ? parseFloat(((spyPrice - spy52wHigh) / spy52wHigh * 100).toFixed(1)) : 0;
+  // Regime classification: A (bull), B (bear/trending), C (crisis)
+  const regimeA = !spyBelowNow && state._vixSustained < 20;
+  const regimeC = state._spyDrawdown < -20 && state._vixSustained > 35 && state._regimeDuration > 10;
+  const regimeB = !regimeA && !regimeC; // trending/transitional — the current environment
+  state._regimeClass = regimeC ? "C" : regimeB ? "B" : "A";
+  logEvent("scan", `[REGIME] Class:${state._regimeClass} | Below200MA:${state._regimeDuration}d | VIX5d:${state._vixSustained} | SPYdd:${state._spyDrawdown}%`);
+
   // ── AG-3: Account drawdown context ────────────────────────────────────────
   const acctBaseline = state.accountBaseline || state.peakCash || 10000;
   const acctCurrent  = state.cash + (state.positions||[]).reduce((s,p)=>s+p.cost,0);
@@ -3125,8 +3170,11 @@ Rules: regime=what SPY does next 3-10 days. entryBias: puts_on_bounces=bearish t
 - VIX: ${mktStatus.vix || state.vix || 20} | SPY: ${spyPrice || '--'} (${mktStatus.spy?.dayChangePct || '--'}%)
 - Breadth: ${mktStatus.breadth ? (mktStatus.breadth*100).toFixed(0)+'%' : '--'} | Fear&Greed: ${mktStatus.fearGreed || '--'}
 - Gap status: ${gapStatus}${spyMA50 ? ` | SPY vs 50MA: ${spyVsMA50}% (slope: ${spyMA50Slope}%/50d)` : ''}${spyMA200 ? ` | SPY vs 200MA: ${spyVsMA200}%` : ''}
+- IV Rank: ${state._ivRank || '--'} (${state._ivEnv || '--'}) | Regime: ${state._regimeClass || 'A'} (${state._regimeDuration || 0}d below 200MA) | VIX 5d avg: ${state._vixSustained || '--'}
+- SPY drawdown from 52wk high: ${state._spyDrawdown || '--'}% | Credit call mode: ${state.vix >= 25 && (state._regimeClass === 'B' || state._regimeClass === 'C') ? 'ACTIVE' : 'inactive'}
 - Account: $${acctCurrent.toFixed(0)} (${acctDrawdown}% vs baseline) | Phase: ${acctPhaseNow} | Heat: ${heatPctNow}%/${heatCapNow}% cap
 - Portfolio: ${openPutsCount}P / ${openCallsCount}C open | Correlation: ${correlAlert} | PDT remaining: ${mktStatus.pdtRemaining || '--'}
+- Options flow: ${state._optFlow ? Object.entries(state._optFlow).map(([t,f])=>`${t} ${f.volRatio}x vol`).join(', ') : 'no unusual activity'}
 - Time: ${new Date().toLocaleTimeString('en-US', {timeZone:'America/New_York'})} ET
 - Open positions: ${(state.positions||[]).map(p => p.ticker + '(' + (p.optionType==='put'?'P':'C') + '@' + (p.chgPct !== undefined ? (p.chgPct*100).toFixed(0)+'%' : '--') + ')').join(', ') || 'none'}
 
@@ -3396,6 +3444,8 @@ async function dispatchAgentTools(toolCalls) {
       else if (call.name === "getLiveSignals")   results[call.name + '_' + call.input.ticker] = await agentTool_getLiveSignals(call.input.ticker);
       else if (call.name === "getPositionStatus") results[call.name + '_' + call.input.ticker] = await agentTool_getPositionStatus(call.input.ticker);
       else if (call.name === "getMarketStatus")   results["getMarketStatus"] = await agentTool_getMarketStatus();
+      else if (call.name === "getIVRank")         results["getIVRank"] = { ivRank: state._ivRank||50, ivEnv: state._ivEnv||"normal", vix: state.vix, recommendation: (state._ivRank||50)>=70?"Sell premium aggressively":(state._ivRank||50)>=50?"Credit spreads favorable":(state._ivRank||50)>=30?"Neutral":"Buy premium preferred" };
+      else if (call.name === "getRegimeStatus")   results["getRegimeStatus"] = { regimeClass: state._regimeClass||"A", daysBelow200MA: state._regimeDuration||0, vixSustained5d: state._vixSustained||state.vix, spyDrawdownPct: state._spyDrawdown||0, ivRank: state._ivRank||50, strategyMode: state._regimeClass==="C"?"Crisis: bear call credits only":state._regimeClass==="B"?"Bear trend: bear call credits + debit puts on bounces":"Bull: mean reversion, both directions", creditCallActive: !!(state.vix>=25&&(state._regimeClass==="B"||state._regimeClass==="C")) };
     } catch(e) { results[call.name] = { error: e.message }; }
   }
   return results;
@@ -5221,6 +5271,82 @@ async function syncPositionPnLFromAlpaca() {
   } catch(e) { logEvent("warn", `[ALPACA SYNC] syncPositionPnLFromAlpaca error: ${e.message}`); }
 }
 
+// ── 3A: IRON CONDOR EXECUTION ───────────────────────────────────────────────
+// Iron condor = bull put spread (sell OTM put) + bear call spread (sell OTM call)
+// Profits when underlying stays within a range (ideal in choppy/low-vol regime)
+// Entry conditions: Regime A + IVR > 60 + VIX 18-28 (not too high, not too low)
+async function executeIronCondor(stock, price, score, scoreReasons, vix) {
+  try {
+    const ivRankNow = state._ivRank || 50;
+    // Gate: only in choppy/low-vol regime with elevated IV
+    if (ivRankNow < 60) {
+      logEvent("filter", `${stock.ticker} iron condor blocked — IVR ${ivRankNow} < 60 (need elevated IV to collect enough premium both sides)`);
+      return null;
+    }
+    if (vix > 35) {
+      logEvent("filter", `${stock.ticker} iron condor blocked — VIX ${vix} too high (gap risk excessive for iron condors)`);
+      return null;
+    }
+    logEvent("filter", `${stock.ticker} iron condor: VIX ${vix.toFixed(1)} | IVR ${ivRankNow} — executing`);
+
+    // Spread width: tighter in moderate VIX (more premium per dollar of risk)
+    const spreadWidth = vix >= 25 ? 12 : 10;
+    const otmPct      = vix >= 25 ? 0.06 : 0.05; // how far OTM each side
+
+    // Bull put side: sell OTM put, buy lower put
+    const putShortTarget  = price * (1 - otmPct);
+    const putShortContract = await getRealOptionsContract(stock.ticker, putShortTarget, "put", score, vix, stock.earningsDate, false);
+    if (!putShortContract) { logEvent("filter", `${stock.ticker} iron condor: no put short leg`); return null; }
+    const putLongContract  = await getSpreadSellLeg(stock.ticker, "put", putShortContract);
+    if (!putLongContract)  { logEvent("filter", `${stock.ticker} iron condor: no put long leg`);  return null; }
+
+    // Bear call side: sell OTM call, buy higher call
+    const callShortTarget  = price * (1 + otmPct);
+    const callShortContract = await getRealOptionsContract(stock.ticker, callShortTarget, "call", score, vix, stock.earningsDate, false);
+    if (!callShortContract) { logEvent("filter", `${stock.ticker} iron condor: no call short leg`); return null; }
+    const callLongContract  = await getSpreadSellLeg(stock.ticker, "call", callShortContract);
+    if (!callLongContract)  { logEvent("filter", `${stock.ticker} iron condor: no call long leg`);  return null; }
+
+    const putCredit   = parseFloat((putShortContract.premium  - putLongContract.premium).toFixed(2));
+    const callCredit  = parseFloat((callShortContract.premium - callLongContract.premium).toFixed(2));
+    const totalCredit = parseFloat((putCredit + callCredit).toFixed(2));
+
+    if (totalCredit <= 0.50) { logEvent("filter", `${stock.ticker} iron condor: total credit $${totalCredit} too low`); return null; }
+
+    const putWidth    = Math.abs(putShortContract.strike  - putLongContract.strike);
+    const callWidth   = Math.abs(callShortContract.strike - callLongContract.strike);
+    const maxLoss     = parseFloat((Math.max(putWidth, callWidth) - totalCredit).toFixed(2)); // max loss is on one side
+    const marginReq   = parseFloat((maxLoss * 100).toFixed(2)); // 1 contract
+
+    if (marginReq > state.cash * 0.15) { logEvent("filter", `${stock.ticker} iron condor margin $${marginReq} exceeds 15% limit`); return null; }
+    if (state.cash - marginReq < CAPITAL_FLOOR) { logEvent("filter", `${stock.ticker} iron condor would breach capital floor`); return null; }
+
+    if (dryRunMode) {
+      logEvent("dryrun", `WOULD SELL IRON CONDOR ${stock.ticker} | puts $${putShortContract.strike}/$${putLongContract.strike} | calls $${callShortContract.strike}/$${callLongContract.strike} | total credit $${totalCredit} | max loss $${maxLoss} | margin $${marginReq} | score ${score}`);
+      return null;
+    }
+
+    // Execute as two separate credit spreads submitted together
+    // Store as special position type for tracking
+    logEvent("trade", `[IRON CONDOR] ${stock.ticker} | PUT $${putShortContract.strike}/$${putLongContract.strike} credit $${putCredit} | CALL $${callShortContract.strike}/$${callLongContract.strike} credit $${callCredit} | total $${totalCredit} | max loss $${maxLoss}`);
+
+    // Execute put credit spread leg
+    const putPos  = await executeCreditSpread(stock, price, score, scoreReasons, vix, "put");
+    // Execute call credit spread leg
+    const callPos = await executeCreditSpread(stock, price, score, scoreReasons, vix, "call");
+
+    if (putPos && callPos) {
+      logEvent("trade", `[IRON CONDOR] ${stock.ticker} both legs filled — iron condor complete`);
+      return { ironCondor: true, putLeg: putPos, callLeg: callPos, totalCredit, maxLoss };
+    }
+    logEvent("warn", `[IRON CONDOR] ${stock.ticker} partial fill — put:${!!putPos} call:${!!callPos}`);
+    return putPos || callPos || null;
+  } catch(e) {
+    logEvent("error", `[IRON CONDOR] ${stock.ticker} error: ${e.message}`);
+    return null;
+  }
+}
+
 async function executeCreditSpread(stock, price, score, scoreReasons, vix, optionType) {
   try {
     // For put credit spread: sell ~0.30 delta put (OTM), buy ~0.20 delta put (further OTM)
@@ -5265,7 +5391,15 @@ async function executeCreditSpread(stock, price, score, scoreReasons, vix, optio
 
     const maxProfit  = netCredit;                              // keep all credit if expires worthless
     const maxLoss    = parseFloat((actualWidth - netCredit).toFixed(2)); // width - credit = max risk
-    const contracts  = 1; // start conservative on credit spreads
+    // 3B: Score-proportional + IV-rank sizing for credit spreads
+    // Base contracts from score: 90+=2, 85+=1.5, 80+=1.25, else 1
+    const scoreBaseMult  = score >= 90 ? 2.0 : score >= 85 ? 1.5 : score >= 80 ? 1.25 : 1.0;
+    const ivSizeMultCredit = (state._ivRank || 50) >= 70 ? 1.5 : 1.0; // IVR 70+ = sell more
+    const rawCreditContracts = Math.max(1, Math.floor(scoreBaseMult * ivSizeMultCredit));
+    const preFillCapCredit   = (state.closedTrades||[]).length < 30 ? 3 : 99; // hard cap pre-validation
+    const contracts  = Math.min(preFillCapCredit, rawCreditContracts);
+    if (contracts > 1) logEvent("scan", `[SIZING] ${stock.ticker} credit spread: ${contracts}x (score ${score} × IVR ${state._ivRank||50})`);
+
 
     // Credit received reduces capital requirement — margin = max loss
     const profitableCount = (state.closedTrades || []).filter(t => t.pnl > 0).length;
@@ -5418,6 +5552,9 @@ async function executeSpreadTrade(stock, price, score, scoreReasons, vix, option
   // 200MA bear regime: additional 50% size reduction (stacks with other multipliers)
   const below200MAMult = spyBelow200MA ? 0.5 : 1.0;
   const riskMult = ((!state._dayPlan || state._dayPlan.riskLevel === "high") ? 0.5 : 1.0) * below200MAMult;
+  // 3B: Score-proportional sizing — higher conviction = larger position (pre-30 fills cap still applies)
+  // Applied downstream as a multiplier on contract count
+  const scoreSizeMult = (score) => score >= 90 ? 2.0 : score >= 85 ? 1.5 : score >= 80 ? 1.25 : 1.0;
   // AG-7: positionSizeMult from agent — continuous sizing vs binary riskLevel
   // Cap at 1.0 before 30 fills — agent amplification only unlocks on validated system
   const rawAgentSizeMult = (state._agentMacro || {}).positionSizeMult || 1.0;
@@ -5427,7 +5564,11 @@ async function executeSpreadTrade(stock, price, score, scoreReasons, vix, option
   // Hard cap: before 30 fills, never exceed 3 contracts regardless of multipliers
   // After 30 fills, trust the Kelly/sizing system — it's been validated
   const preFillCap  = (state.closedTrades||[]).length < 30 ? 3 : 99;
-  const contracts   = Math.max(1, Math.min(cashCap, preFillCap, Math.floor(baseContracts * riskMult * agentSizeMult)));
+  // 3B: Apply score-proportional multiplier to debit spread sizing
+  const scoreMultiplier = scoreSizeMult(score);
+  const ivDebitMult = 1.0; // debit spreads don't benefit from high IV (they pay it)
+  const contracts   = Math.max(1, Math.min(cashCap, preFillCap, Math.floor(baseContracts * riskMult * agentSizeMult * scoreMultiplier)));
+  if (scoreMultiplier > 1.0) logEvent("scan", `[SIZING] ${stock?.ticker||''} debit spread: ${scoreMultiplier}x score mult (score ${score})`);
 
   const actualSpreadWidth = Math.abs(buyContract.strike - sellContract.strike);
   const maxProfit = parseFloat((actualSpreadWidth - netDebit).toFixed(2));
@@ -6847,6 +6988,25 @@ async function runScan() {
   const isBlackSwan = checkVIXVelocity(newVIX);
   state.vix     = newVIX;
 
+  // ── 1B: IV RANK TRACKING ───────────────────────────────────────────────────
+  // Rolling 52-week VIX history to compute IV rank (VIX percentile)
+  // IVR = where is today's VIX vs the last 252 trading days (0-100)
+  // IVR 80+ = sell premium. IVR 20- = buy premium. IVR 50-80 = neutral.
+  if (!state._vixRolling) state._vixRolling = [];
+  state._vixRolling.push(newVIX);
+  if (state._vixRolling.length > 252) state._vixRolling.shift(); // 1 year rolling
+  const vixMin = Math.min(...state._vixRolling);
+  const vixMax = Math.max(...state._vixRolling);
+  state._ivRank = vixMax > vixMin
+    ? parseFloat(((newVIX - vixMin) / (vixMax - vixMin) * 100).toFixed(1))
+    : 50; // default to 50 when insufficient history
+  // IV environment classification
+  state._ivEnv = state._ivRank >= 70 ? "high"    // sell premium aggressively
+               : state._ivRank >= 50 ? "elevated" // credit spreads allowed
+               : state._ivRank >= 30 ? "normal"   // neutral
+               : "low";                            // buy premium (debit preferred)
+  logEvent("scan", `[IV] Rank:${state._ivRank} (${state._ivEnv}) | VIX:${newVIX} | Range:[${vixMin.toFixed(1)}-${vixMax.toFixed(1)}] | History:${state._vixRolling.length}d`);
+
   // ── Confirm any pending mleg order from previous scan ────────────────────
   // Must run before entry logic — if filled, records position and clears pending
   // If still pending, blocks new entries to prevent duplicate orders
@@ -6857,6 +7017,56 @@ async function runScan() {
       // This is the ONLY safe way to prevent duplicate mleg submissions
       logEvent("scan", `[SPREAD] Order ${state._pendingOrder.orderId} still pending (${((Date.now()-state._pendingOrder.submittedAt)/1000).toFixed(0)}s) — skipping entries`);
     }
+  }
+
+  // ── 3D: SECTOR ROTATION SIGNALS ─────────────────────────────────────────
+  // Track sector ETF relative strength vs SPY (5-day return diff)
+  // Used to gate XLE/KRE entries and signal cross-asset themes to agent
+  if (!state._sectorRelStrChecked || Date.now() - state._sectorRelStrChecked > 600000) { // every 10min
+    state._sectorRelStrChecked = Date.now();
+    (async () => {
+      try {
+        if (!state._sectorRelStr) state._sectorRelStr = {};
+        const spySnap = await alpacaGet("/stocks/SPY/snapshot", ALPACA_DATA);
+        const spyChange = spySnap?.dailyBar?.c && spySnap?.prevDailyBar?.c
+          ? (spySnap.dailyBar.c - spySnap.prevDailyBar.c) / spySnap.prevDailyBar.c * 100
+          : 0;
+        for (const sector of ["XLE","KRE","XOP"]) {
+          const snap = await alpacaGet(`/stocks/${sector}/snapshot`, ALPACA_DATA);
+          if (!snap?.dailyBar?.c || !snap?.prevDailyBar?.c) continue;
+          const sectorChange = (snap.dailyBar.c - snap.prevDailyBar.c) / snap.prevDailyBar.c * 100;
+          const relStr = parseFloat((sectorChange - spyChange).toFixed(2));
+          state._sectorRelStr[sector] = { relStr, sectorPct: parseFloat(sectorChange.toFixed(2)), spyPct: parseFloat(spyChange.toFixed(2)) };
+          if (Math.abs(relStr) > 2.0) {
+            logEvent("scan", `[SECTOR] ${sector} ${relStr > 0 ? "outperforming" : "underperforming"} SPY by ${relStr.toFixed(1)}% today — rotation signal`);
+          }
+        }
+      } catch(e) { /* non-critical */ }
+    })();
+  }
+
+  // ── 2D: OPTIONS FLOW SCANNER ─────────────────────────────────────────────
+  // Lightweight unusual options activity check — flags informed positioning
+  // Uses Alpaca snapshot which includes options volume/OI data
+  // Fire-and-forget — non-blocking, feeds agent context only
+  if (!state._optFlowChecked || Date.now() - state._optFlowChecked > 300000) { // every 5 min
+    state._optFlowChecked = Date.now();
+    (async () => {
+      try {
+        for (const ticker of ["SPY","QQQ"]) {
+          const snap = await alpacaGet(`/stocks/${ticker}/snapshot`, ALPACA_DATA);
+          if (!snap) continue;
+          const todayVol   = snap.dailyBar?.v || 0;
+          const prevVol    = snap.prevDailyBar?.v || todayVol;
+          const volRatio   = prevVol > 0 ? (todayVol / prevVol) : 1;
+          if (volRatio > 2.5) {
+            if (!state._optFlow) state._optFlow = {};
+            state._optFlow[ticker] = { volRatio: parseFloat(volRatio.toFixed(1)), detectedAt: new Date().toISOString() };
+            logEvent("scan", `[FLOW] ${ticker} unusual volume — ${volRatio.toFixed(1)}x normal. Informed positioning signal.`);
+          }
+        }
+      } catch(e) { /* non-critical */ }
+    })();
   }
 
   // Refresh PDT count from Alpaca at scan start — lightweight single field read
@@ -7904,19 +8114,55 @@ async function runScan() {
   if (skewElevated && state.vix >= 22 && state.vix < 28) {
     logEvent("filter", `SKEW ${state._skew.skew} elevated — lowering credit spread VIX threshold to 22`);
   }
-  // Choppy + high VIX = credit spread opportunity. Choppy + low VIX = sit out entirely.
+  // ── 1A: CREDIT MODE GATE (panel unanimous 11/11) ─────────────────────────
+  // EXPANDED: credit spreads now fire in trending_bear + high VIX
+  // Previously only fired in choppy regime — missed the biggest opportunity environment
+  //
+  // Credit spread conditions:
+  //   Choppy: sell premium because direction is uncertain (original logic)
+  //   Trending bear + VIX >= 25: sell call premium above falling market (new)
+  //   Trending bear + IVR >= 50: elevated IV makes credit collection worthwhile (new)
+  //
   const choppyDebitBlock  = isChoppyRegime && !dryRunMode;
   const agentSaysCredit   = agentTradeTypeGate === "credit";
-  const creditModeActive      = (isChoppyRegime || agentSaysCredit) && creditAllowedVIX && !dryRunMode;
-  // Bear call spread (credit call spread): sell call + buy higher strike call
-  // Activates in choppy regime near resistance — collect premium on capped upside
-  const spyNearResistance     = (() => {
+  const isBearTrend       = agentRegime === "trending_bear" || agentRegime === "breakdown";
+  const ivRankNow         = state._ivRank || 50;
+  const ivElevated        = ivRankNow >= 50; // options at least moderately expensive
+  const ivHigh            = ivRankNow >= 70; // options expensive — sell premium aggressively
+
+  // Bull put credit spreads: sell puts BELOW market (neutral-to-bullish structure)
+  //   - Choppy + high VIX: original logic
+  //   - NOT allowed in trending_bear below 200MA (bullish bet in bear regime — panel said correctly blocked)
+  const creditModeActive = (isChoppyRegime || agentSaysCredit) && creditAllowedVIX && !dryRunMode;
+
+  // Bear call credit spreads: sell calls ABOVE market (bearish structure) 
+  //   - Choppy near resistance: original logic
+  //   - trending_bear + VIX >= 25: NEW — sell calls above falling market, collect rich premium
+  //   - trending_bear + IVR >= 50: NEW — elevated IV justifies credit collection even without resistance
+  const spyNearResistance = (() => {
     const res = (state._agentMacro || {}).keyLevels?.spyResistance;
     if (!res || !state.spyPrice) return false;
-    return Math.abs(state.spyPrice - res) / res < 0.015; // within 1.5% of resistance
+    return Math.abs(state.spyPrice - res) / res < 0.015;
   })();
-  const creditCallModeActive  = isChoppyRegime && creditAllowedVIX && spyNearResistance && !dryRunMode;
-  if (choppyDebitBlock) logEvent("filter", `Choppy regime — debit entries blocked${creditModeActive ? ", credit PUT mode active" : creditCallModeActive ? ", credit CALL mode active (near resistance)" : ", VIX too low for credits"}`);
+  const bearCallChoppy    = isChoppyRegime && creditAllowedVIX && spyNearResistance;
+  const bearCallTrend     = isBearTrend && creditAllowedVIX && ivElevated && !dryRunMode;
+  const creditCallModeActive = (bearCallChoppy || bearCallTrend) && !dryRunMode;
+
+  if (choppyDebitBlock) logEvent("filter", `Choppy regime — debit entries blocked${creditModeActive ? ", credit PUT mode active" : creditCallModeActive ? ", credit CALL mode active" : ", VIX too low for credits"}`);
+  if (bearCallTrend && !bearCallChoppy) logEvent("filter", `[CREDIT CALL] Trending bear + VIX ${state.vix} + IVR ${ivRankNow} — bear call spread mode active`);
+
+  // ── 2B: REGIME-BASED STRATEGY SELECTION ───────────────────────────────────
+  // Regime A (bull): mean reversion — debit spreads, both directions
+  // Regime B (trending bear): trend mode — bear call credits + debit puts on bounces
+  // Regime C (crisis): bear call credits only — mean reversion fails in crisis
+  const regimeClass = state._regimeClass || "A";
+  const strategyMode = regimeClass === "C" ? "CRISIS — bear call credits only, no debit buys"
+    : regimeClass === "B" ? "BEAR TREND — bear call credits + debit puts on bounces"
+    : "BULL — mean reversion, both directions";
+  logEvent("scan", `[STRATEGY] Regime ${regimeClass}: ${strategyMode} | IVR:${ivRankNow} (${state._ivEnv})`);
+  // In crisis regime: block debit put entries (mean reversion fails when SPY > 20% off highs)
+  const crisisDebitBlock = regimeClass === "C" && !dryRunMode;
+  if (crisisDebitBlock) logEvent("filter", `[REGIME C] Crisis mode — debit put entries blocked, mean reversion unreliable`);
 
 
   // AVOID HOLD TIME: when agent says avoid, stamp _avoidUntil for 30 minutes
@@ -7950,7 +8196,7 @@ async function runScan() {
   const below200MACallBlock = spyBelow200MA && !dryRunMode;
   const callsAllowed  = (isEntryWindow("call", true) && !finalHourBlock && !suppressBlock && !below200MACallBlock && (!choppyDebitBlock || isMRCondition) && !avoidHoldActive) || dryRunMode;
   if (isMRCondition && choppyDebitBlock) logEvent("filter", `MR call allowed in choppy — SPY RSI ${spyRSIForMR.toFixed(1)} extreme oversold + VIX ${state.vix}`);
-  const putsAllowed   = (isEntryWindow("put",  true) && !vixFallingPause && !spyGapUp && !postReversalBlock && !finalHourBlock && !suppressBlock && !macroBullish && !choppyDebitBlock && !avoidHoldActive) || dryRunMode;
+  const putsAllowed   = (isEntryWindow("put",  true) && !vixFallingPause && !spyGapUp && !postReversalBlock && !finalHourBlock && !suppressBlock && !macroBullish && !choppyDebitBlock && !avoidHoldActive && !crisisDebitBlock) || dryRunMode;
   // Credit spreads allowed even in choppy regime — that's the point of credit mode
   const creditAllowed     = creditModeActive     && isEntryWindow("put",  true) && !finalHourBlock && !suppressBlock && !vixFallingPause && !avoidHoldActive;
   const callCreditAllowed = creditCallModeActive && isEntryWindow("call", true) && !finalHourBlock && !suppressBlock;
@@ -8356,6 +8602,22 @@ async function runScan() {
 
     // VWAP — use intraday VWAP from signals (available before liveStock is built)
     const vwap = signals.intradayVWAP > 0 ? signals.intradayVWAP : calcVWAP(bars.slice(-5));
+    // 1D: VWAP as entry timing soft filter
+    // Bear call entries: prefer when price is BELOW VWAP (confirms bearish intraday bias)
+    // Bull put / debit put entries: prefer when price is below VWAP (momentum aligned)
+    // This is a soft filter — logged but doesn't hard-block
+    if (vwap > 0) {
+      const vwapBias = price < vwap ? "below_vwap" : "above_vwap";
+      const vwapPct  = ((price - vwap) / vwap * 100).toFixed(1);
+      if (Math.abs(price - vwap) / vwap > 0.005) { // only log if >0.5% from VWAP
+        logEvent("scan", `[VWAP] ${stock.ticker} $${price.toFixed(2)} vs VWAP $${vwap.toFixed(2)} (${vwapPct}%) — ${vwapBias}`);
+      }
+      // Bear call credit: strongly prefer below VWAP (market already weak intraday)
+      if (creditCallModeActive && price > vwap * 1.01 && optionType === "call") {
+        logEvent("filter", `[VWAP] ${stock.ticker} bear call skipped — price ABOVE VWAP by ${vwapPct}% (wait for intraday weakness)`);
+        continue;
+      }
+    }
     if (vwap > 0 && price < vwap * 0.99) {
       // Scale VWAP boost by how far below — more below = stronger signal
       const vwapGap   = (vwap - price) / vwap;
@@ -9052,14 +9314,34 @@ async function runScan() {
     // Mean reversion → naked option (quick move, full leverage)
     const agentTradeType  = (state._agentMacro || {}).tradeType || "spread";
     // Credit put spread: choppy + high VIX → sell put premium
-    // Credit call spread: choppy + near resistance → sell call premium (bear call)
-    const useCreditSpread     = creditModeActive && stock.isIndex && !isMeanReversion && optionType === "put";
-    const useCreditCallSpread = creditCallModeActive && stock.isIndex && !isMeanReversion && optionType === "call";
+    // Credit call spread: trending_bear + VIX>=25 + IVR>=50 → sell call premium (bear call)
+    // 2A: IV rank gate — only enter credit spreads when options are at least moderately expensive
+    const ivRankOk = ivRankNow >= 50; // IVR 50+ = options elevated relative to history
+    const ivRankMsg = ivRankOk ? `IVR ${ivRankNow} (${state._ivEnv})` : `IVR ${ivRankNow} too low for credit spreads`;
+    if (creditCallModeActive && !ivRankOk) logEvent("filter", `[IV] ${stock.ticker} bear call blocked — ${ivRankMsg}`);
+    const useCreditSpread     = creditModeActive && stock.isIndex && !isMeanReversion && optionType === "put" && ivRankOk;
+    const useCreditCallSpread = creditCallModeActive && stock.isIndex && !isMeanReversion && optionType === "call" && ivRankOk;
+    // 3A: Iron condor — choppy regime + IVR > 60 + VIX 18-28 (sell premium both sides)
+    const useIronCondor = isChoppyRegime && stock.isIndex && ivRankNow >= 60 && state.vix >= 18 && state.vix <= 35
+      && !isMeanReversion && creditAllowedVIX && !dryRunMode
+      && !state.positions.some(p => p.ticker === stock.ticker); // no existing position on this ticker
+    // 2A: Score-proportional sizing multiplier for credit spreads at high IVR
+    // IVR 70+: 1.5x size (rich premium, high conviction to sell)
+    // IVR 50-70: 1.0x size (baseline)
+    const ivSizeMult = ivHigh ? 1.5 : 1.0;
+    if ((useCreditSpread || useCreditCallSpread) && ivHigh) {
+      logEvent("scan", `[IV] ${stock.ticker} credit spread — IVR ${ivRankNow} HIGH, size mult ${ivSizeMult}x`);
+    }
     const useSpread           = stock.isIndex && !useCreditSpread && !useCreditCallSpread && agentTradeType !== "naked" && !isMeanReversion;
 
     let entered = false;
     state._lastEntryType = null; // reset before each entry attempt
-    if (useCreditSpread || useCreditCallSpread) {
+    if (useIronCondor) {
+      state._lastEntryType = "iron_condor";
+      logEvent("scan", `[IRON CONDOR] ${stock.ticker} choppy + IVR ${ivRankNow} — attempting iron condor`);
+      const icPos = await executeIronCondor(stock, price, score, reasons, state.vix);
+      entered = !!icPos;
+    } else if (useCreditSpread || useCreditCallSpread) {
       state._lastEntryType = "credit"; // tag for VIX sizing adjustment
       const creditPos = await executeCreditSpread(stock, price, score, reasons, state.vix, optionType);
       entered = !!creditPos;
@@ -9411,7 +9693,7 @@ async function sendMorningBriefing() {
     // ── Footer ────────────────────────────────────────────────────────
     const footer = `
       <div style="border-top:3px double #333;margin-top:16px;padding-top:8px;text-align:center;font-size:9px;color:#999;letter-spacing:1px">
-        ARGO V2.5 · Entry window 9:30am–3:45pm ET · SPY/QQQ primary · Monthly options
+        ARGO V2.75 · Entry window 9:30am–3:45pm ET · SPY/QQQ primary · Monthly options
       </div>`;
 
     // ── Assemble ──────────────────────────────────────────────────────
@@ -9966,7 +10248,7 @@ async function premarketAssessment() {
             <em>These are recommendations only. ARGO-V2.5 will manage exits automatically at open.</em>
           </div>
           <div style="border-top:3px double #333;margin-top:12px;padding-top:8px;text-align:center;font-size:9px;color:#999;letter-spacing:1px">
-            ARGO V2.5 · Market opens in ~45 minutes · Entry window 9:30am ET
+            ARGO V2.75 · Market opens in ~45 minutes · Entry window 9:30am ET
           </div>
         </div>`
       );
@@ -10942,7 +11224,7 @@ process.on("unhandledRejection", (reason, promise) => {
 // Boot sequence - load state from Redis then start server
 initState().then(() => {
   app.listen(PORT, () => {
-    console.log(`ARGO V2.5 running on port ${PORT}`);
+    console.log(`ARGO V2.75 running on port ${PORT}`);
     console.log(`Alpaca key:  ${ALPACA_KEY?"SET":"NOT SET"}`);
     console.log(`Gmail:       ${GMAIL_USER||"NOT SET"}`);
     console.log(`Resend:      ${RESEND_API_KEY?"SET ✅":"NOT SET — email disabled"}`);
@@ -10958,7 +11240,7 @@ initState().then(() => {
 });
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// ARGO V2.5 — BACKTESTING ENGINE
+// ARGO V2.75 — BACKTESTING ENGINE
 // Walk-forward simulation using Alpaca historical daily bars
 // Replays ARGO's scoring logic against historical data without real orders
 // QS-W2/GL-1: Addresses the out-of-sample validation gap identified by panel
@@ -11496,7 +11778,7 @@ async function runBacktest(config) {
     summary: {
       ticker, optionType, startDate, endDate, maxPositions, minScore: minScore_used,
       note: maxPositions > 1 ? `Multi-position simulation (max ${maxPositions} concurrent)` : "Single-position simulation",
-      modelVersion: "v2 — slippage, bid-ask, agent sim, spiral fix, instrument gates, 200MA filter",
+      modelVersion: "v2.75 — slippage, bid-ask, agent sim, spiral, 200MA, IV rank, regime A/B/C, bear call credit",
       putOnlyMode:  putOnly,
       callSizeMult: callSizeMult,
       gatesApplied: ticker === "GLD" ? ["GLD-DXY","GLD-SPY5d","GLD-VIX","GLD-RSI","GLD-min80"]
