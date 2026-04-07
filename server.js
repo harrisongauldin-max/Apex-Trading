@@ -4205,10 +4205,17 @@ async function getRealOptionsContract(ticker, price, optionType, score, vix, ear
   // Expensive (>$400): 0.20-0.55 — wide range needed to find liquid OTM puts
     // In crash conditions (VIX > 35), delta range shifts higher — all contracts become ITM
     // Widen to 0.28-0.65 in crash mode to still find valid put entries
-    const inCrash  = (state.vix || 0) >= 35 && optionType === "put";
-    const crashMax = 0.65; // don't go above 0.65 even in crash — too deep ITM
-    const deltaMin = isLeaps ? 0.65 : (isPut && isExpensive ? 0.20 : TARGET_DELTA_MIN);
-    const deltaMax = isLeaps ? 0.85 : inCrash ? crashMax : (isPut && isCheap ? 0.50 : isPut && isExpensive ? 0.55 : TARGET_DELTA_MAX);
+    // Crash mode: VIX >= 30 in a put entry — chain shifts as market drops
+    // At VIX 34 with SPY down 15%, the entire delta distribution moves ITM
+    // Widen range aggressively so ARGO can find something tradeable
+    const inCrash  = (state.vix || 0) >= 30 && optionType === "put"; // lowered from 35 to 30
+    const crashMax = 0.72; // raised from 0.65 — deep drops push all puts ITM
+    const crashMin = 0.15; // allow more OTM when crash distorts the chain
+    // For CALLS: always use standard range (0.25-0.45 for bear call spread short leg)
+    // Calls don't suffer the crash chain dislocation problem — they go OTM as market drops
+    const isCall   = optionType === "call";
+    const deltaMin = isLeaps ? 0.65 : (inCrash && !isCall ? crashMin : isPut && isExpensive ? 0.20 : TARGET_DELTA_MIN);
+    const deltaMax = isLeaps ? 0.85 : (inCrash && !isCall ? crashMax : isPut && isCheap ? 0.50 : isPut && isExpensive ? 0.55 : TARGET_DELTA_MAX);
   const strikeRange = 0; // unused — delta now selects contracts, not strike range
 
     // Format date for API: YYYY-MM-DD
@@ -4310,7 +4317,7 @@ async function getRealOptionsContract(ticker, price, optionType, score, vix, ear
       const bid    = parseFloat(quote.bp || 0);
       const ask    = parseFloat(quote.ap || 0);
       const mid    = bid > 0 && ask > 0 ? (bid + ask) / 2 : 0;
-      const spread = ask > 0 ? (ask - bid) / ask : 1;
+      const spread = ask > 0 ? (ask - bid) / ask : (bid > 0 ? 0.5 : 1); // estimate spread if one-sided
       const oi     = parseInt(snap.openInterest || quote.as || 0); // use ask size as OI proxy if needed
       const vol    = parseInt(day.v || day.volume || 0);
 
@@ -4318,7 +4325,10 @@ async function getRealOptionsContract(ticker, price, optionType, score, vix, ear
       const contractDTE = Math.round((new Date(contract.expiration_date) - today) / MS_PER_DAY);
 
       // Only hard filter: contract must have a tradeable price
-      if (mid <= 0) { skipped++; continue; }
+      // In crash/high-VIX conditions, use ask alone if bid is stale (market making breaks down)
+      const effectiveMid = mid > 0 ? mid : (ask > 0 && vix >= 30 ? ask * 0.85 : 0); // 15% discount on ask-only fills
+      if (effectiveMid <= 0) { skipped++; continue; }
+      const priceToUse = effectiveMid;
       // Only hard filter on delta — everything else is a scoring factor not a gate
       if (delta < deltaMin || delta > deltaMax) {
         skipped++;
@@ -4375,7 +4385,7 @@ async function getRealOptionsContract(ticker, price, optionType, score, vix, ear
           expDate: new Date(contract.expiration_date).toLocaleDateString("en-US", {month:"short",day:"2-digit",year:"numeric"}),
           expDays: Math.round((new Date(contract.expiration_date) - today) / MS_PER_DAY),
           expiryType,
-          premium: parseFloat(mid.toFixed(2)),
+          premium: parseFloat((mid > 0 ? mid : effectiveMid).toFixed(2)),
           bid, ask, spread,
           greeks: {
             delta: parseFloat(greeks.delta || 0).toFixed(3),
@@ -7204,10 +7214,34 @@ async function runScan() {
     // Earnings plays removed — SPY/QQQ don't have earnings dates
 
     // Macro news on 5-min tier — catches breaking news within 5 minutes not 15
+    // AUTHORITY: agent is primary. Keywords are fallback when agent hasn't run yet.
     const macro = await getMacroNews();
-    marketContext.macro = macro;
-    if (macro.mode !== "normal") {
-      logEvent("macro", `[5min] Macro: ${macro.signal} (${macro.scoreModifier > 0 ? "+" : ""}${macro.scoreModifier}) | ${macro.triggers.slice(0,3).join(", ")}`);
+    const agentMacroForAuth = state._agentMacro;
+    const agentAuthAge = agentMacroForAuth && agentMacroForAuth.timestamp
+      ? (Date.now() - new Date(agentMacroForAuth.timestamp).getTime()) / 60000 : 999;
+    const agentAuthFresh = agentAuthAge < 10; // agent ran within 10 minutes = use it exclusively
+    if (agentAuthFresh && agentMacroForAuth) {
+      // Agent is fresh — use agent signal, merge in keyword triggers for context only
+      marketContext.macro = {
+        ...macro,
+        signal:        agentMacroForAuth.signal || macro.signal,
+        scoreModifier: agentMacroForAuth.scoreModifier || macro.scoreModifier || 0,
+        mode:          agentMacroForAuth.mode || macro.mode,
+        macroAuthority: "agent",
+        agentLastUpdated: agentMacroForAuth.timestamp,
+      };
+    } else {
+      // Agent stale — use keywords at 50% score modifier weight
+      marketContext.macro = {
+        ...macro,
+        scoreModifier: Math.round((macro.scoreModifier || 0) * 0.5),
+        macroAuthority: "keyword_fallback",
+        agentLastUpdated: agentMacroForAuth?.timestamp || null,
+      };
+      if (!dryRunMode) logEvent("warn", `[MACRO] Agent stale (${agentAuthAge.toFixed(0)}min) — keyword fallback active, score modifier halved`);
+    }
+    if (marketContext.macro.mode !== "normal") {
+      logEvent("macro", `[5min] Macro: ${marketContext.macro.signal} via ${marketContext.macro.macroAuthority} (${marketContext.macro.scoreModifier > 0 ? "+" : ""}${marketContext.macro.scoreModifier}) | ${(marketContext.macro.triggers||[]).slice(0,3).join(", ")}`);
     }
 
     // Strongly bearish macro — close all calls immediately
@@ -8040,59 +8074,63 @@ async function runScan() {
   }
 
   // ── CONDITION-BASED POST-REVERSAL COOLDOWN ──────────────────────────────
-  // After macro-reversal closes puts, don't re-enter until conditions confirm
-  // bearish again. Prevents immediate re-entry on the same bounce.
-  // Three conditions must ALL be true before puts are allowed again:
-  //   1. Agent macro signal is bearish (mild/bearish/strongly bearish)
-  //   2. SPY has not recovered above the reversal price level
-  //   3. At least 30 minutes have elapsed since the reversal
+  // FIX 2: Uses marketContext.macro (authoritative merged signal) not state._agentMacro (raw)
+  // Prevents split-brain where cooldown and entry gate use different macro objects
+  // Also requires agent update to postdate the reversal event
   let postReversalBlock = false;
   if (state._macroReversalAt && !dryRunMode) {
     const minsSinceReversal = (Date.now() - state._macroReversalAt) / 60000;
-    const agentSignal       = (state._agentMacro || {}).signal || "neutral";
-    const agentBearish      = ["bearish", "strongly bearish", "mild bearish"].includes(agentSignal);
-    const agentConfidence   = (state._agentMacro || {}).agentConfidence || (state._agentMacro || {}).confidence || "low";
+    // Use marketContext.macro — same authoritative object the entry gate reads
+    const macroSignal     = (marketContext.macro || {}).signal || "neutral";
+    const macroBearish    = ["bearish", "strongly bearish", "mild bearish"].includes(macroSignal);
+    const macroAuthority  = (marketContext.macro || {}).macroAuthority || "keyword_fallback";
+    const agentUpdatedAt  = (marketContext.macro || {}).agentLastUpdated || null;
+    const agentConfidence = (state._agentMacro || {}).agentConfidence || (state._agentMacro || {}).confidence || "low";
 
     // Condition 1: minimum 30 minutes
     const minTimeElapsed = minsSinceReversal >= 30;
 
-    // Condition 2: agent macro must be bearish
-    const macroConfirmedBearish = agentBearish;
+    // Condition 2: marketContext.macro (authoritative) must be bearish
+    const macroConfirmedBearish = macroBearish;
 
     // Condition 3: SPY must not be above reversal level
     const spyAboveReversal = state._macroReversalSPY && spyPrice > state._macroReversalSPY * 1.005;
 
-    // Extra gate: if large reversal (5+ positions), require high confidence
+    // Condition 4: agent update must postdate the reversal event (no stale pre-reversal reads)
+    const agentPostdatesReversal = !agentUpdatedAt ||
+      new Date(agentUpdatedAt).getTime() > state._macroReversalAt;
+
+    // Extra gate: large reversal (5+ positions) requires high confidence
     const largeReversal = (state._macroReversalCount || 0) >= 5;
     const confidenceOk  = !largeReversal || agentConfidence === "high";
 
-    if (!minTimeElapsed || !macroConfirmedBearish || spyAboveReversal || !confidenceOk) {
+    if (!minTimeElapsed || !macroConfirmedBearish || spyAboveReversal || !confidenceOk || !agentPostdatesReversal) {
       postReversalBlock = true;
       const reasons = [];
-      if (!minTimeElapsed)        reasons.push(`${minsSinceReversal.toFixed(0)}min elapsed (need 30)`);
-      if (!macroConfirmedBearish) reasons.push(`agent macro: ${agentSignal} (need bearish)`);
-      if (spyAboveReversal)       reasons.push(`SPY above reversal level $${state._macroReversalSPY?.toFixed(2)}`);
-      if (!confidenceOk)          reasons.push(`large reversal needs high confidence (have: ${agentConfidence})`);
-      logEvent("filter", `Post-reversal cooldown active — ${reasons.join(" | ")}`);
+      if (!minTimeElapsed)           reasons.push(`${minsSinceReversal.toFixed(0)}min elapsed (need 30)`);
+      if (!macroConfirmedBearish)    reasons.push(`macro: ${macroSignal} via ${macroAuthority} (need bearish)`);
+      if (spyAboveReversal)          reasons.push(`SPY above reversal $${state._macroReversalSPY?.toFixed(2)}`);
+      if (!agentPostdatesReversal)   reasons.push(`waiting for post-reversal agent update`);
+      if (!confidenceOk)             reasons.push(`large reversal needs high confidence (have: ${agentConfidence})`);
+      logEvent("filter", `[REVERSAL COOLDOWN] Active — ${reasons.join(" | ")}`);
     } else {
       // All conditions met — clear the cooldown
-      logEvent("filter", `Post-reversal cooldown cleared — macro confirmed bearish, conditions met`);
-      state._avoidUntil         = null; // clear avoid hold on account reset
-  state._macroReversalAt    = null;
+      logEvent("filter", `[REVERSAL COOLDOWN] Cleared — macro confirmed bearish via ${macroAuthority}, all conditions met`);
+      state._macroReversalAt    = null;
       state._macroReversalCount = 0;
       state._macroReversalSPY   = null;
       markDirty();
     }
   }
 
-  // ── FIX 3: Puts require agent macro to be bearish — neutral is not enough ──
-  // Macro neutral = market is uncertain = wrong time for directional put entries
-  const agentMacroSignal  = (state._agentMacro || {}).signal || "neutral";
+  // Macro authority — which system is driving decisions this scan
+  // Agent is primary (if fresh), keyword is fallback (halved weight)
+  const macroAuthStamp    = (marketContext.macro || {}).macroAuthority || "keyword_fallback";
+  const agentMacroSignal  = (marketContext.macro || {}).signal || "neutral"; // use authoritative merged signal
   const putsMacroAllowed  = ["bearish", "strongly bearish", "mild bearish", "neutral"].includes(agentMacroSignal);
-  // Note: neutral allowed but only if agent has actually run (not default)
-  // If no agent macro yet, fall back to keyword signal
   const agentHasRun       = !!state._agentMacro;
   const macroClearForPuts = !agentHasRun || putsMacroAllowed;
+  if (!dryRunMode) logEvent("scan", `[MACRO AUTH] ${macroAuthStamp} | signal: ${agentMacroSignal} | agent age: ${agentHasRun ? ((Date.now()-new Date((state._agentMacro||{}).timestamp||0).getTime())/60000).toFixed(0)+"min" : "never"}`);
 
   const isIndexScan  = true; // scan loop handles both index and stocks
 
@@ -8175,10 +8213,19 @@ async function runScan() {
       logEvent("filter", `[AVOID] Entry block stamped — 30min hold until ${new Date(holdUntil).toLocaleTimeString("en-US",{timeZone:"America/New_York"})}`);
     }
   }
-  const avoidHoldActive = state._avoidUntil && Date.now() < state._avoidUntil && agentBias !== "avoid";
+  // avoidHoldActive: timestamp is authoritative — agent can EXTEND but not CANCEL
+  // Removed: agentBias !== "avoid" escape hatch — it turned a 30min hold into a ~5min speedbump
+  // If early cancellation is ever needed, build an explicit /api/clear-avoid endpoint
+  const avoidHoldActive = !!(state._avoidUntil && Date.now() < state._avoidUntil);
   if (avoidHoldActive) {
     const minsLeft = ((state._avoidUntil - Date.now()) / 60000).toFixed(0);
-    logEvent("filter", `[AVOID] Entry hold active — ${minsLeft}min remaining after previous avoid signal`);
+    logEvent("filter", `[AVOID] Entry hold active — ${minsLeft}min remaining (timestamp authoritative)`);
+  }
+  // Agent can extend hold if still saying avoid when timer expires
+  if (!avoidHoldActive && agentBias === "avoid" && state._avoidUntil) {
+    const extendUntil = Date.now() + 30 * 60 * 1000;
+    state._avoidUntil = extendUntil;
+    logEvent("filter", `[AVOID] Hold extended — agent still says avoid, 30min extension stamped`);
   }
   // BF-W2: Enforce macro-defensive cooldown — 30min block on same ticker after defensive close
   if (state._macroDefensiveCooldown) {
@@ -9053,9 +9100,9 @@ async function runScan() {
     const agentMinScore    = isBearishHigh ? 65 : isLowConfidence ? 80 : MIN_SCORE;
     // Instrument-specific min scores — IWM removed (3yr net loser)
     // GLD uses 80+ with DXY/SPY gates applied upstream
-    // 200MA bear regime: require 80+ for puts (prevents knife-catching in sustained downtrend)
-    const below200MAPutMin = spyBelow200MA ? 80 : MIN_SCORE;
-    const effectiveMinScore = Math.max(ddProtocol.minScore || MIN_SCORE, regimeMinScore, agentMinScore, below200MAPutMin);
+    // below200MAPutMin REMOVED — regimeProfile already handles this via trending_bear/crash minScore
+    // Keeping it created a conflict where isBearishHigh (score 65) was silently overridden to 80
+    const effectiveMinScore = Math.max(ddProtocol.minScore || MIN_SCORE, regimeMinScore, agentMinScore);
     // QS-C2: In choppy regime, effectiveMinScore=90 + choppy score penalty (-10) means
     // a position needs 100 base score to clear the bar. Log this near-lockout for visibility.
     if (effectiveMinScore >= 90 && isChoppyRegime) {
@@ -11251,13 +11298,16 @@ async function fetchHistoricalBars(ticker, startDate, endDate) {
   try {
     const feeds = ["sip", "iex"];
     for (const feed of feeds) {
-      const url  = `/stocks/${ticker}/bars?timeframe=1Day&start=${startDate}&end=${endDate}&limit=500&feed=${feed}`;
+      const url  = `/stocks/${ticker}/bars?timeframe=1Day&start=${startDate}&end=${endDate}&limit=1000&feed=${feed}`;
       const data = await alpacaGet(url, ALPACA_DATA);
       if (data && data.bars && data.bars.length > 5) return data.bars;
     }
-    const last = await alpacaGet(`/stocks/${ticker}/bars?timeframe=1Day&start=${startDate}&end=${endDate}&limit=500`, ALPACA_DATA);
+    const last = await alpacaGet(`/stocks/${ticker}/bars?timeframe=1Day&start=${startDate}&end=${endDate}&limit=1000`, ALPACA_DATA);
     return last && last.bars ? last.bars : [];
-  } catch(e) { return []; }
+  } catch(e) {
+    logEvent("warn", `[BACKTEST] fetchHistoricalBars failed for ${ticker}: ${e.message}`);
+    return [];
+  }
 }
 
 function backtestScoreSignal(bars, idx, optionType) {
