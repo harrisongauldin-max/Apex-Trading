@@ -9006,21 +9006,9 @@ async function runScan() {
       weaknessReasons.push(`Below VWAP ${(vwapGap*100).toFixed(1)}% (+${vwapPts})`);
     }
 
-    // Pre-market gap — score penalty/boost for large gap opens
-    // Gap >3% up on a put entry = fading a gap = riskier, reduce score
-    // Gap >3% down on a call entry = buying into a gap = riskier, reduce score
-    // Previously logged but never acted on (panel finding #8)
+    // Pre-market gap — logged for context, direction-aware penalty applied after optionType resolved
     if (preMarket && Math.abs(preMarket.gapPct) > 3) {
-      const gapDir = preMarket.gapPct > 0 ? "up" : "down";
       logEvent("filter", `${stock.ticker} pre-market gap ${preMarket.gapPct > 0 ? "+" : ""}${preMarket.gapPct}%`);
-      // Put entry into gap-up: more conviction needed (stock already sold off from yesterday)
-      // Call entry into gap-down: more conviction needed (stock already bounced from gap)
-      // Both cases raise effectiveMinScore by 5 — requires stronger signal to enter
-      if ((optionType === "put" && preMarket.gapPct > 3) ||
-          (optionType === "call" && preMarket.gapPct < -3)) {
-        score -= 8;
-        reasons.push(`Pre-market gap ${preMarket.gapPct > 0 ? "+" : ""}${preMarket.gapPct}% — entry into gap, higher conviction needed (-8)`);
-      }
     }
 
     // Short interest — computed from prefetched bars
@@ -9441,6 +9429,18 @@ async function runScan() {
       continue;
     }
     const bestReasons = optionType === "put" ? putSetup.reasons : callSetup.reasons;
+
+    // Pre-market gap direction-aware penalty — applied after optionType is known
+    // Gap >3% up on a put entry = fading into rally = -8 conviction penalty
+    // Gap >3% down on a call entry = buying into gap-down = -8 conviction penalty
+    if (preMarket && Math.abs(preMarket.gapPct) > 3) {
+      if ((optionType === "put" && preMarket.gapPct > 3) ||
+          (optionType === "call" && preMarket.gapPct < -3)) {
+        const chosenSetup = optionType === "put" ? putSetup : callSetup;
+        chosenSetup.score = Math.max(0, chosenSetup.score - 8);
+        chosenSetup.reasons.push(`Pre-market gap ${preMarket.gapPct > 0 ? "+" : ""}${preMarket.gapPct}% — entry into gap (-8)`);
+      }
+    }
 
     // Effective min score — agent confidence directly influences entry bar
     // High confidence bearish → lower bar (65) — agent is sure, trust it
