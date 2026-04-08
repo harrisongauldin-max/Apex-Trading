@@ -11901,60 +11901,62 @@ function simulateOptionPnL(entryPrice, optionType, holdDays, outcome, ticker = "
 // This is fundamentally different from single-leg option P&L.
 // Panel requirement: backtest must use spread structure, not naked option approximation.
 function simulateSpreadPnL(netDebit, spreadWidth, optionType, tradeType, holdDays, priceDeltaPct, vixEst = 20, ticker = "SPY") {
-  // Spread economics:
-  // Debit spread: paid netDebit, max profit = spreadWidth - netDebit, max loss = netDebit
-  // Credit spread: received netCredit, max profit = netCredit, max loss = spreadWidth - netCredit
-  const isCredit = tradeType === "credit";
-  const maxProfit = isCredit ? netDebit : (spreadWidth - netDebit);  // netDebit = credit received for credit spreads
+  // Spread economics (dollar terms, per contract):
+  // Debit spread: paid netDebit upfront. Max profit = spreadWidth - netDebit. Max loss = netDebit.
+  // Credit spread: received netCredit. Max profit = netCredit. Max loss = spreadWidth - netCredit.
+  // P&L is expressed as fraction of netDebit so it can be compared to takeProfitPct/stopLossPct.
+  const isCredit  = tradeType === "credit";
+  const maxProfit = isCredit ? netDebit : (spreadWidth - netDebit);
   const maxLoss   = isCredit ? (spreadWidth - netDebit) : netDebit;
 
-  // Price move → option value change (delta-based)
-  // Buy leg delta ~0.35, sell leg delta ~0.20 → net delta ~0.15
-  // Spread value changes more slowly than naked option
-  const netDelta = 0.15; // approximate net delta of ATM/OTM spread
-  const underlyingMove = priceDeltaPct; // as fraction e.g. 0.05 = 5% move
+  // Directed move: positive = favorable for the option type
+  // Puts benefit from underlying falling, calls from rising
+  const directedMove = optionType === "put" ? -priceDeltaPct : priceDeltaPct;
 
-  // For puts: underlying falls → spread gains value
-  // For calls: underlying rises → spread gains value
-  const directedMove = optionType === "put" ? -underlyingMove : underlyingMove;
+  // Spread value change: how much the spread moves in dollar terms
+  // Net delta of ATM/OTM debit spread ≈ 0.15
+  // At full max move (15%+), spread reaches its maximum value
+  const moveMagnitude = Math.min(Math.abs(directedMove), 0.15);
+  const spreadValueChange = (moveMagnitude / 0.15) * spreadWidth; // $0 → $spreadWidth
 
-  // Spread value change: bounded between 0 and spreadWidth
-  // At max move, spread is worth full width (put spread: underlying at or below short strike)
-  const moveMagnitude = Math.min(Math.abs(directedMove), 0.15); // cap contribution at 15% move
-  const spreadValueChange = moveMagnitude / 0.15 * spreadWidth; // linear interpolation to max value
-
-  // Theta decay on debit spreads: net theta is negative (paying theta)
-  // For credit spreads: net theta is positive (collecting theta)
-  const dailyTheta = netDebit / (2 * Math.max(21 - holdDays, 5)); // accelerates near expiry
+  // Theta decay: daily cost of holding a debit spread (enemy) or benefit (credit)
+  const dailyTheta  = netDebit / (2 * Math.max(21 - holdDays, 5));
   const thetaImpact = isCredit ? (dailyTheta * holdDays) : -(dailyTheta * holdDays);
 
-  // Slippage: two legs × round-trip
+  // Transaction costs: slippage (entry + exit round-trip) + bid-ask (two legs)
   const slippagePerLeg = vixEst >= 30 ? 0.06 : vixEst >= 20 ? 0.04 : 0.02;
-  const totalSlippage  = slippagePerLeg * 2; // both legs at entry + exit
+  const legSpreadCost  = ticker === "SPY" ? 0.05 : ticker === "QQQ" ? 0.07 : 0.10;
+  const totalTxCost    = (slippagePerLeg * 2) + legSpreadCost;
 
-  // Bid-ask spread cost (two legs)
-  const legSpread = ticker === "SPY" ? 0.06 : ticker === "QQQ" ? 0.08 : 0.12;
-  const totalTxCost = totalSlippage + legSpread;
-
-  // Gross P&L on spread (as fraction of net debit)
+  // Gross P&L in dollar terms (before tx costs)
+  // KEY FIX: spreadValueChange is the $ GAIN in spread value vs 0 baseline.
+  // The cost basis (netDebit) is already captured in positionCost — do NOT subtract here.
   let grossPnL;
   if (isCredit) {
-    // Credit spread: profit when underlying moves away from short strike
-    // Max profit = keep full credit. Max loss = width - credit.
-    grossPnL = directedMove >= 0
-      ? Math.min(maxProfit, maxProfit * (moveMagnitude / 0.08))  // favorable: earn credit
-      : Math.max(-maxLoss, -maxLoss * (Math.abs(directedMove) / 0.08)); // unfavorable: lose up to width
-    grossPnL += thetaImpact; // theta accrual
+    // Credit spread: we keep credit as price moves away from short strike
+    if (directedMove >= 0) {
+      grossPnL = Math.min(maxProfit, maxProfit * (moveMagnitude / 0.08));
+    } else {
+      grossPnL = Math.max(-maxLoss, -maxLoss * (moveMagnitude / 0.08));
+    }
+    grossPnL += thetaImpact;
   } else {
-    // Debit spread: profit when underlying moves toward long strike
-    grossPnL = directedMove > 0
-      ? Math.min(maxProfit, spreadValueChange - netDebit) // favorable
-      : Math.max(-maxLoss, -(netDebit * (1 - directedMove * 5))); // unfavorable: decay + move
+    // Debit spread: spread gains value as underlying moves in our direction
+    // Favorable: spread value increases from ~0 toward max profit
+    // Unfavorable: spread value erodes from netDebit toward 0
+    if (directedMove > 0) {
+      // Favorable — spread gains value proportional to move, capped at maxProfit
+      grossPnL = Math.min(maxProfit, spreadValueChange);
+    } else {
+      // Unfavorable — spread loses value proportional to move, max loss = netDebit
+      grossPnL = Math.max(-maxLoss, -(maxLoss * (moveMagnitude / 0.15)));
+    }
     grossPnL += thetaImpact;
   }
 
   const netPnL = grossPnL - totalTxCost;
-  // Return as fraction of net debit (for TP/stop comparison)
+  // Return as fraction of netDebit for comparison with takeProfitPct/stopLossPct
+  // Capped at theoretical bounds: -1.0 (lose all) to maxProfit/netDebit (max profit multiple)
   return Math.max(-(maxLoss / netDebit), Math.min(maxProfit / netDebit, netPnL / netDebit));
 }
 
