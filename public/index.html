@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8"/>
 <meta name="viewport" content="width=device-width,initial-scale=1"/>
-<title>ARGO V2.75 — Professional Options Agent</title>
+<title>ARGO V2.80 — Professional Options Agent</title>
 <style>
 :root{
   --bg:#07101f;--panel:#0a1628;--border:#0d3050;--text:#cce8ff;--muted:#336688;
@@ -127,7 +127,7 @@ input[type=text]:focus{border-color:var(--blue)}
       </svg>
     </div>
     <div class="logo-text">
-      <h1>ARGO V2.75 <span id="account-phase-pill" style="font-size:9px;padding:2px 7px;border-radius:10px;letter-spacing:1px;vertical-align:middle;display:none"></span></h1>
+      <h1>ARGO V2.80 <span id="account-phase-pill" style="font-size:9px;padding:2px 7px;border-radius:10px;letter-spacing:1px;vertical-align:middle;display:none"></span></h1>
       <p>PROFESSIONAL OPTIONS AGENT v2.0 · ALPACA PAPER</p>
     </div>
   </div>
@@ -472,7 +472,7 @@ input[type=text]:focus{border-color:var(--blue)}
 
   <div class="section-title">Open Positions</div>
   <div id="positions-wrap">
-    <div class="no-data">No open positions. ARGO V2.75 will enter trades during market hours (Puts 9:45AM / Calls 10AM–3:30PM ET).</div>
+    <div class="no-data">No open positions. ARGO V2.80 will enter trades during market hours (Puts 9:45AM / Calls 10AM–3:30PM ET).</div>
   </div>
 
   <div class="section-title">Portfolio Greeks</div>
@@ -653,7 +653,7 @@ input[type=text]:focus{border-color:var(--blue)}
     <div class="no-data">Loading correlation data...</div>
   </div>
 
-  <div class="section-title">V2.5 Risk Controls</div>
+  <div class="section-title">V2.8 Risk Controls</div>
   <div class="grid4" style="margin-bottom:12px">
     <div class="card">
       <div class="card-title">ACCOUNT PHASE</div>
@@ -750,7 +750,7 @@ input[type=text]:focus{border-color:var(--blue)}
 <div id="tab-journal" class="content">
   <div class="section-title" style="margin-top:0">Trade Journal — Entry Reasoning</div>
   <div id="journal-wrap">
-    <div class="no-data">No journal entries yet. ARGO V2.75 logs detailed reasoning for every trade.</div>
+    <div class="no-data">No journal entries yet. ARGO V2.80 logs detailed reasoning for every trade.</div>
   </div>
 </div>
 
@@ -775,7 +775,7 @@ input[type=text]:focus{border-color:var(--blue)}
   </div>
 
   <div class="alert alert-orange" style="margin-bottom:12px">
-    ARGO V2.75 auto-buys stocks when monthly options profit exceeds $1,000. 20% of profits above threshold are allocated to high-scoring stocks (85+). Stop loss: -15% from entry.
+    ARGO V2.80 auto-buys stocks when monthly options profit exceeds $1,000. 20% of profits above threshold are allocated to high-scoring stocks (85+). Stop loss: -15% from entry.
   </div>
 
   <div class="section-title">Stock Holdings</div>
@@ -803,7 +803,7 @@ input[type=text]:focus{border-color:var(--blue)}
 <div id="tab-backtest" class="content">
   <div style="margin-bottom:14px">
     <span style="font-size:13px;color:#00ff88;letter-spacing:2px;font-weight:700">⚙ BACKTEST ENGINE</span>
-    <span style="font-size:10px;color:#336688;margin-left:10px">Walk-forward simulation · ARGO V2.75 scoring · Alpaca historical data</span>
+    <span style="font-size:10px;color:#336688;margin-left:10px">Walk-forward simulation · ARGO V2.80 scoring · Alpaca historical data</span>
     <div style="font-size:10px;color:#4a6a8a;margin-top:4px">⚠ Conservative estimates — backtest enters one position at a time (walk-forward). Live ARGO holds multiple simultaneous positions, so live returns will typically exceed backtest figures.</div>
   </div>
 
@@ -856,7 +856,7 @@ input[type=text]:focus{border-color:var(--blue)}
   <div style="display:flex;gap:8px;margin-bottom:14px;flex-wrap:wrap">
     <button class="btn btn-green" onclick="runBacktest()" id="bt-run-btn">▶ RUN BACKTEST</button>
     <button class="btn" style="background:#0a1f3a;border:1px solid #ffd700;color:#ffd700" onclick="runStressTest()" id="bt-stress-btn">⚡ STRESS TESTS</button>
-    <button class="btn" style="background:#0a1f3a;border:1px solid #00c4ff;color:#00c4ff" onclick="runFullMatrix()" id="bt-matrix-btn">⚡ RUN FULL MATRIX (SPY/QQQ/TLT/GLD)</button>
+    <button class="btn" style="background:#0a1f3a;border:1px solid #00c4ff;color:#00c4ff" onclick="runFullMatrix()" id="bt-matrix-btn">⚡ RUN FULL MATRIX (SPY/QQQ/TLT/GLD/XLE)</button>
     <button class="btn" style="background:#0a1f3a;border:1px solid #ffd700;color:#ffd700" onclick="runMacroMatrix()" id="bt-macro-btn">⚡ MACRO ETF MATRIX (XLE/KRE/XOP)</button>
   </div>
   <!-- Matrix results area -->
@@ -1301,7 +1301,7 @@ function renderMetrics() {
     document.getElementById('alpaca-cash').textContent = fmt(state.alpacaCash);
     const customBudget = state.customBudget && state.customBudget > 0 ? state.customBudget : null;
     document.getElementById('alpaca-cash-sub').textContent = customBudget
-      ? `ARGO V2.75 using ${fmt(customBudget)} of this`
+      ? `ARGO V2.80 using ${fmt(customBudget)} of this`
       : 'paper balance · synced on boot';
   }
   document.getElementById('heat').style.color = heat > 50 ? 'var(--red)' : heat > 35 ? 'var(--orange)' : 'var(--green)';
@@ -1433,7 +1433,7 @@ function renderMetrics() {
   if (alphaEl && bm) {
     alphaEl.textContent = (bm.alpha >= 0 ? "+" : "") + bm.alpha + "%";
     alphaEl.style.color = bm.alpha >= 0 ? "var(--green)" : "var(--red)";
-    document.getElementById("benchmark-sub").textContent = `ARGO V2.75:${bm.apexReturn >= 0 ? "+" : ""}${bm.apexReturn}% SPY:${bm.spyReturn >= 0 ? "+" : ""}${bm.spyReturn}%`;
+    document.getElementById("benchmark-sub").textContent = `ARGO V2.80:${bm.apexReturn >= 0 ? "+" : ""}${bm.apexReturn}% SPY:${bm.spyReturn >= 0 ? "+" : ""}${bm.spyReturn}%`;
   }
 
   // Drawdown protocol
@@ -1677,7 +1677,7 @@ function renderPositions() {
   const wrap = document.getElementById('positions-wrap');
   const positions = state.positions || [];
   if (!positions.length) {
-    wrap.innerHTML = '<div class="no-data">No open positions. ARGO V2.75 will enter trades during market hours (9:30AM–3:45PM ET). SPY/QQQ spreads primary.</div>';
+    wrap.innerHTML = '<div class="no-data">No open positions. ARGO V2.80 will enter trades during market hours (9:30AM–3:45PM ET). SPY/QQQ spreads primary.</div>';
     return;
   }
   wrap.innerHTML = positions.map(p => {
@@ -1822,7 +1822,7 @@ function renderGreeks() {
     document.getElementById('g-betadelta').textContent = tot.betaDelta.toFixed(2);
   }
 
-  // ── V2.5 system health metrics ─────────────────────────────────────────────
+  // ── V2.8 system health metrics ─────────────────────────────────────────────
   // Account phase
   const phaseEl = document.getElementById('g-phase');
   if (phaseEl) {
@@ -2263,7 +2263,7 @@ async function triggerDryRun() {
     const resp = await fetch('/api/dry-run-scan', {method:'POST'});
     const data = await resp.json();
     await fetchState();
-    alert('Dry run complete! Check the Server Log tab — look for [DRYRUN] entries showing what ARGO V2.75 would trade.');
+    alert('Dry run complete! Check the Server Log tab — look for [DRYRUN] entries showing what ARGO V2.80 would trade.');
   } catch(e) {
     alert('Dry run error: ' + e.message);
   } finally {
@@ -2310,10 +2310,10 @@ async function resetPDT() {
 }
 
 async function resetCircuit() {
-  if (!confirm('Reset circuit breaker? ARGO V2.75 will resume scanning and entering new trades.')) return;
+  if (!confirm('Reset circuit breaker? ARGO V2.80 will resume scanning and entering new trades.')) return;
   const resp = await fetch('/api/reset-circuit', {method:'POST'});
   const data = await resp.json();
-  alert('Circuit breaker reset. ARGO V2.75 is scanning again.');
+  alert('Circuit breaker reset. ARGO V2.80 is scanning again.');
   await fetchState();
 }
 
@@ -2322,7 +2322,7 @@ async function fullReset() {
   if (!confirm('This cannot be undone. Confirm full reset?')) return;
   const resp = await fetch('/api/full-reset', {method:'POST'});
   const data = await resp.json();
-  alert('Full reset complete. ARGO V2.75 restarted with $10,000.');
+  alert('Full reset complete. ARGO V2.80 restarted with $10,000.');
   location.reload();
 }
 
@@ -2425,13 +2425,13 @@ async function downloadDayReport() {
     const url  = URL.createObjectURL(blob);
     const a    = document.createElement('a');
     a.href     = url;
-    a.download = `ARGO V2.75_DayReport_${today}.json`;
+    a.download = `ARGO V2.80_DayReport_${today}.json`;
     a.click();
     URL.revokeObjectURL(url);
 
     // ── Also show quick summary in alert ─────────────────────────────────
     alert(
-      `ARGO V2.75 Day Report — ${today}\n\n` +
+      `ARGO V2.80 Day Report — ${today}\n\n` +
       `Trades: ${trades.length} | Win Rate: ${winRate}%\n` +
       `Total P&L: $${totalPnL.toFixed(2)}\n` +
       `Best: $${bigWin} | Worst: $${bigLoss}\n` +
@@ -2439,7 +2439,7 @@ async function downloadDayReport() {
       `Exit Reasons:\n` +
       Object.entries(byReason).map(([r,v]) => `  ${r}: ${v.count}x ($${v.pnl.toFixed(2)})`).join('\n') +
       `\n\nOpen Positions: ${openPos.length}\n` +
-      `Report saved as ARGO V2.75_DayReport_${today}.json`
+      `Report saved as ARGO V2.80_DayReport_${today}.json`
     );
   } catch(e) {
     alert('Error generating report: ' + e.message);
@@ -2617,7 +2617,7 @@ async function runFullMatrix() {
   const capital     = parseFloat(document.getElementById('bt-capital').value) || 10000;
   const maxPositions= parseInt(document.getElementById('bt-maxpos').value) || 3;
 
-  const instruments = ['SPY','QQQ','TLT','GLD'];
+  const instruments = ['SPY','QQQ','TLT','GLD','XLE'];
   const scores      = [70, 75, 80];
   const total       = instruments.length * scores.length;
   let completed     = 0;
@@ -2638,6 +2638,7 @@ async function runFullMatrix() {
             minScore, holdDays, takeProfitPct:tp, stopLossPct:stop, capital, maxPositions,
             callSizeMult: parseFloat(document.getElementById('bt-callsize')?.value || 1.0),
             putOnly: parseFloat(document.getElementById('bt-callsize')?.value || 1.0) === 0,
+            useSpread: true, useRegimeB: true,
           })
         })
         .then(r => r.json())
@@ -2659,7 +2660,7 @@ async function runFullMatrix() {
   progress.textContent = `✅ All ${total} runs complete`;
   window._matrixData  = matrixData;
   window._matrixMeta  = { instruments, scores, startDate, endDate, holdDays, capital, maxPositions, tp, stop };
-  btn.disabled = false; btn.textContent = '⚡ RUN FULL MATRIX (All 4 × 3 Scores)';
+  btn.disabled = false; btn.textContent = '⚡ RUN FULL MATRIX (All 5 × 3 Scores)';
 }
 
 function renderMatrixTable(data, instruments, scores, capital) {
@@ -2737,12 +2738,12 @@ function copyMatrixTemplate() {
   const NL = '\n';
   const DIV = '════════════════════════════════════════';
 
-  let out = 'BACKTEST MATRIX — ARGO V2.75' + NL;
+  let out = 'BACKTEST MATRIX — ARGO V2.80' + NL;
   out += DIV + NL;
   out += 'PERIOD:    ' + startDate + ' → ' + endDate + NL;
   out += 'HOLD:      ' + holdDays + 'd | MAX POS: ' + maxPositions + ' | CAPITAL: $' + capital + NL;
   out += 'DIRECTION: BOTH (best signal each day)' + NL;
-  out += 'MODEL:     v2.75 — slippage, bid-ask, agent sim, spiral, 200MA, IV rank, regime A/B/C, bear call credit' + NL;
+  out += 'MODEL:     v2.80 — slippage, bid-ask, agent sim, spiral, 200MA, IV rank, regime A/B/C, bear call credit' + NL;
   out += DIV + NL + NL;
 
   for (const ticker of instruments) {
@@ -2919,7 +2920,7 @@ async function runBacktest() {
       putOnly:      btCallSize === 0,
     };
     const modeLabel = body.optionType === "both" ? "puts+calls (best direction daily)" : body.optionType + "s";
-    document.getElementById('bt-loading-msg').textContent = `Replaying ARGO V2.75 ${modeLabel} on ${body.ticker} ${body.startDate}→${body.endDate}...`;
+    document.getElementById('bt-loading-msg').textContent = `Replaying ARGO V2.80 ${modeLabel} on ${body.ticker} ${body.startDate}→${body.endDate}...`;
     const res  = await fetch('/api/backtest', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body) });
     const data = await res.json();
     if (data.error) throw new Error(data.error);
@@ -3129,7 +3130,7 @@ function copyBacktestTemplate() {
     `  ${r}: ${c} (${(c/s.totalTrades*100).toFixed(0)}%)`
   ).join('\n');
 
-  const template = `BACKTEST RESULT — ARGO V2.75
+  const template = `BACKTEST RESULT — ARGO V2.80
 ════════════════════════════════════════
 INSTRUMENT: ${s.ticker}
 DIRECTION:  ${s.optionType?.toUpperCase()}
