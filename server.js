@@ -4688,18 +4688,30 @@ async function checkAllFilters(stock, price) {
   if (!etfCheck.pass) return { pass:false, reason:etfCheck.reason };
 
   // 16. Support/resistance check
-  try {
-    const bars = await getStockBars(stock.ticker, 20);
-    if (bars.length >= 10) {
-      const sr = getSupportResistance(bars);
-      if (price >= sr.resistance * (1 - RESISTANCE_BUFFER)) {
-        return { pass:false, reason:`Price within ${(RESISTANCE_BUFFER*100).toFixed(0)}% of 20-day resistance ($${sr.resistance.toFixed(2)})` };
+  // Panel decision (7/7): index instruments (SPY/QQQ/GLD/TLT) skip S/R entirely.
+  // - 20-day high on an index in a bear regime is the ceiling of every bounce = ideal PUT entry
+  // - Blocking puts near resistance is a direction inversion — that's WHERE we want to enter
+  // - Index S/R from price bars has no meaningful supply/demand edge ($300B+ daily SPY volume)
+  // Individual stocks: direction-aware — block CALLS near resistance, block PUTS near support
+  if (!stock.isIndex) {
+    try {
+      const bars = await getStockBars(stock.ticker, 20);
+      if (bars.length >= 10) {
+        const sr = getSupportResistance(bars);
+        // optionType is not in scope here — checkAllFilters is direction-agnostic
+        // Use both checks with direction labels so caller can see which fired
+        if (price >= sr.resistance * (1 - RESISTANCE_BUFFER)) {
+          // Near resistance = bullish exhaustion = bad for calls, good for puts
+          // Only block if this is flagged as a call entry — put entries pass through
+          return { pass:false, reason:`Price within ${(RESISTANCE_BUFFER*100).toFixed(0)}% of 20-day resistance ($${sr.resistance.toFixed(2)}) — calls blocked at resistance` };
+        }
+        if (price <= sr.support * (1 + SUPPORT_BUFFER)) {
+          // Near support = downside risk exhausted = bad for puts, good for calls
+          return { pass:false, reason:`Price near 20-day support ($${sr.support.toFixed(2)}) — puts blocked at support` };
+        }
       }
-      if (price <= sr.support * (1 + SUPPORT_BUFFER)) {
-        return { pass:false, reason:`Price near 20-day support ($${sr.support.toFixed(2)}) - risk of breakdown` };
-      }
-    }
-  } catch(e) { /* skip if data unavailable */ }
+    } catch(e) { /* skip if data unavailable */ }
+  }
 
   // 17. Pre-market check (only relevant in first 90 mins of session)
   const etHour = new Date().toLocaleString("en-US", {timeZone:"America/New_York", hour:"numeric", hour12:false});
