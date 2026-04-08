@@ -2934,7 +2934,7 @@ const AGENT_TOOLS = [
   }
 ];
 
-async function callClaudeAgent(systemPrompt, userPrompt, maxTokens = 800, useTools = false, enableCache = true) {
+async function callClaudeAgent(systemPrompt, userPrompt, maxTokens = 800, useTools = false, enableCache = true, timeoutMs = 30000) {
   if (!ANTHROPIC_API_KEY) return null;
   try {
     const messages = [{ role: "user", content: userPrompt }];
@@ -2966,7 +2966,7 @@ async function callClaudeAgent(systemPrompt, userPrompt, maxTokens = 800, useToo
       method:  "POST",
       headers,
       body: JSON.stringify(body),
-    }), 30000);
+    }), timeoutMs);
 
     if (!res.ok) {
       const err = await res.text();
@@ -3005,7 +3005,7 @@ async function callClaudeAgent(systemPrompt, userPrompt, maxTokens = 800, useToo
         method:  "POST",
         headers: followHeaders,
         body: JSON.stringify({ model: ANTHROPIC_MODEL, max_tokens: maxTokens, system: systemBlock, messages: followMessages }),
-      }), 30000);
+      }), timeoutMs);
 
       if (!followRes.ok) {
         const ferr = await followRes.text().catch(() => '');
@@ -3317,7 +3317,12 @@ Analyze and return your JSON. Use tools only if you need data not shown above.`;
   if (!state._agentHealth) state._agentHealth = { calls: 0, successes: 0, timeouts: 0, parseErrors: 0, lastSuccess: null };
   state._agentHealth.calls++;
 
-  const raw = await callClaudeAgent(systemPrompt, userPrompt, 1200, true); // useTools=true
+  // Panel decision (7/7): disable tools on macro analysis — all data pre-injected.
+  // useTools=true caused 2 sequential round-trips (4.9% timeout rate).
+  // Pre-injected: VIX, SPY, MAs, breadth, regime, IV rank, headlines, positions.
+  // Tools kept on rescore/briefing where live per-ticker data adds real value.
+  logEvent("scan", `[AGENT] Macro call — useTools:false (pre-injected data sufficient)`);
+  const raw = await callClaudeAgent(systemPrompt, userPrompt, 1200, false, true, 30000); // useTools=false — single round-trip
   if (!raw) {
     state._agentHealth.timeouts++;
     logEvent("warn", `[AGENT HEALTH] Timeout/null — ${state._agentHealth.timeouts} timeouts of ${state._agentHealth.calls} calls`);
@@ -3462,7 +3467,7 @@ ${pdtLeft <= 1 && !pdtProtected ? '- PDT WARNING: only ' + pdtLeft + ' day trade
 
 Does the thesis still hold? Score and recommend.`;
 
-  const raw = await callClaudeAgent(systemPrompt, userPrompt, 600, true);
+  const raw = await callClaudeAgent(systemPrompt, userPrompt, 600, true, true, 45000); // 45s — tool use needs headroom
   if (!raw) return null;
   try {
     const parsed = JSON.parse(raw);
@@ -3618,7 +3623,7 @@ ${headlines.slice(0,5).join('\n')}
 Use your tools to check current prices and signals for each position, then write the morning briefing.`;
 
   try {
-    const raw = await callClaudeAgent(systemPrompt, userPrompt, 600, true);
+    const raw = await callClaudeAgent(systemPrompt, userPrompt, 600, true, true, 45000); // 45s — briefing tool use needs headroom
     if (!raw) return null;
     // Return as plain text — not JSON
     return raw;
@@ -9265,18 +9270,29 @@ async function runScan() {
     // IVR 15-25: options cheap — require higher conviction (80+ score) for debit entries
     // IVR >= 25: normal operating range — no extra gate
     // Credit spreads are EXEMPT — they benefit from selling in low-vol environments
+    //
+    // ── BYPASS: VIX ≥ 25 or Regime B/C ─────────────────────────────────────
+    // Panel unanimous (7/7): the IVR gate was designed to prevent buying debit
+    // options in calm, low-vol markets (VIX 12-18). It has no valid application
+    // when VIX is already elevated (≥25) or regime is already confirmed bear (B/C).
+    // Problem: rolling window includes COVID spike (VIX 68), making VIX 31 appear
+    // as the 3rd percentile. Gate fires incorrectly, blocking ideal put entries.
+    // Fix: bypass entirely when vol is objectively elevated or regime is bear/crisis.
+    const ivrBypass = (state.vix || 0) >= 25 || regimeClass === "B" || regimeClass === "C";
     const ivrNow       = ivRankNow; // already computed above
-    const ivrDebitFloor = 15;       // below this: debit entries blocked
-    const ivrDebitCaution = 25;     // below this: debit entries need 80+
-    const ivrMinScore  = !creditModeActive && !creditCallModeActive
-      ? (ivrNow < ivrDebitFloor   ? 999  // effectively blocked
+    const ivrDebitFloor = 15;       // below this: debit entries blocked (calm markets only)
+    const ivrDebitCaution = 25;     // below this: debit entries need 80+ (calm markets only)
+    const ivrMinScore  = ivrBypass || creditModeActive || creditCallModeActive
+      ? MIN_SCORE  // bypassed: elevated VIX, bear regime, or credit spread
+      : (ivrNow < ivrDebitFloor   ? 999  // effectively blocked
        : ivrNow < ivrDebitCaution ? 80   // caution — require higher conviction
-       : MIN_SCORE)                      // normal
-      : MIN_SCORE;                       // credit spreads exempt from IVR floor
-    if (ivrMinScore === 999 && !dryRunMode) {
+       : MIN_SCORE);                     // normal
+    if (!ivrBypass && ivrMinScore === 999 && !dryRunMode) {
       logEvent("filter", `${stock.ticker} IVR ${ivrNow} below floor (${ivrDebitFloor}) — debit entry blocked (options too cheap)`);
-    } else if (ivrMinScore === 80 && !dryRunMode && ivrNow < ivrDebitCaution) {
+    } else if (!ivrBypass && ivrMinScore === 80 && !dryRunMode && ivrNow < ivrDebitCaution) {
       logEvent("filter", `${stock.ticker} IVR ${ivrNow} low — debit requires 80+ score`);
+    } else if (ivrBypass && ivrNow < ivrDebitFloor && !dryRunMode) {
+      logEvent("filter", `${stock.ticker} IVR ${ivrNow} low but bypassed — VIX ${(state.vix||0).toFixed(1)} ≥ 25 or Regime ${regimeClass}`);
     }
     const effectiveMinScore = Math.max(ddProtocol.minScore || MIN_SCORE, regimeMinScore, agentMinScore, ivrMinScore);
     // QS-C2: In choppy regime, effectiveMinScore=90 + choppy score penalty (-10) means
