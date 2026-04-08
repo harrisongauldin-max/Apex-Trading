@@ -3352,6 +3352,34 @@ Analyze and return your JSON. Use tools only if you need data not shown above.`;
     const successRate = (state._agentHealth.successes / state._agentHealth.calls * 100).toFixed(0);
     _agentMacroCache = { result: parsed, fetchedAt: Date.now() };
     logEvent("macro", `[AGENT] Macro: ${parsed.signal} (${parsed.confidence}) | ${parsed.reasoning?.slice(0,80)} | health:${successRate}%`);
+
+    // ── Agent accuracy tracking (panel requirement) ───────────────────────
+    // Record this call with current SPY price. A deferred job resolves it
+    // 30min and 120min later to measure directional accuracy.
+    // Accuracy = did SPY move in the direction the signal implied?
+    // bearish/strongly bearish → expects SPY to fall
+    // bullish/strongly bullish → expects SPY to rise
+    // neutral/mild = no directional prediction → excluded from accuracy calc
+    const spyNow = state._liveSPY || state.spy || 0;
+    const isDirectional = !["neutral","mild bullish","mild bearish"].includes(parsed.signal);
+    if (spyNow > 0 && isDirectional) {
+      if (!state._agentAccuracy) state._agentAccuracy = { calls: 0, correct30: 0, correct120: 0, pending: [] };
+      state._agentAccuracy.calls++;
+      state._agentAccuracy.pending.push({
+        id:         state._agentAccuracy.calls,
+        timestamp:  Date.now(),
+        signal:     parsed.signal,
+        confidence: parsed.confidence,
+        spyAtCall:  spyNow,
+        resolved30:  false,
+        resolved120: false,
+      });
+      // Cap pending list at 50 — resolved entries cleaned up by the deferred job
+      if (state._agentAccuracy.pending.length > 50) {
+        state._agentAccuracy.pending = state._agentAccuracy.pending.slice(-50);
+      }
+    }
+
     checkMacroShift(parsed.signal);
     return parsed;
   } catch(e) {
@@ -7513,6 +7541,47 @@ async function runScan() {
     if (state.portfolioSnapshots.length > 2500) state.portfolioSnapshots = state.portfolioSnapshots.slice(-2500);
     runAgentRescore();        // parallel hourly rescore for overnight positions (non-blocking)
     runReconciliation().catch(e => logEvent("error", `[RECONCILE] 5-min sync failed: ${e.message}`)); // non-blocking
+
+    // ── Agent accuracy resolution (non-blocking) ──────────────────────────
+    // Checks pending agent calls that are 30+ or 120+ minutes old
+    // Resolves directional accuracy: did SPY move the way the agent predicted?
+    if (state._agentAccuracy && state._agentAccuracy.pending.length > 0) {
+      const spyNow = state._liveSPY || state.spy || 0;
+      if (spyNow > 0) {
+        const now = Date.now();
+        let resolved30 = 0, resolved120 = 0;
+        state._agentAccuracy.pending.forEach(p => {
+          const minsElapsed = (now - p.timestamp) / 60000;
+          const spyChange   = (spyNow - p.spyAtCall) / p.spyAtCall;
+          // bearish signals expect SPY to fall (negative change = correct)
+          // bullish signals expect SPY to rise (positive change = correct)
+          const expectsFall = ["strongly bearish","bearish"].includes(p.signal);
+          const expectsRise = ["strongly bullish","bullish"].includes(p.signal);
+          const correct     = (expectsFall && spyChange < -0.001) || (expectsRise && spyChange > 0.001);
+
+          if (!p.resolved30 && minsElapsed >= 30) {
+            p.resolved30 = true;
+            if (correct) state._agentAccuracy.correct30++;
+            resolved30++;
+          }
+          if (!p.resolved120 && minsElapsed >= 120) {
+            p.resolved120 = true;
+            if (correct) state._agentAccuracy.correct120++;
+            resolved120++;
+          }
+        });
+        // Remove fully resolved entries (both windows done)
+        state._agentAccuracy.pending = state._agentAccuracy.pending.filter(p => !p.resolved120);
+        // Compute accuracy rates
+        const resolved30Total  = state._agentAccuracy.calls - state._agentAccuracy.pending.filter(p => !p.resolved30).length;
+        const resolved120Total = state._agentAccuracy.calls - state._agentAccuracy.pending.length;
+        if (resolved30Total > 0)  state._agentAccuracy.acc30  = parseFloat((state._agentAccuracy.correct30  / resolved30Total  * 100).toFixed(1));
+        if (resolved120Total > 0) state._agentAccuracy.acc120 = parseFloat((state._agentAccuracy.correct120 / resolved120Total * 100).toFixed(1));
+        if (resolved30 > 0 || resolved120 > 0) {
+          logEvent("scan", `[AGENT ACC] 30min: ${state._agentAccuracy.acc30 || "--"}% | 120min: ${state._agentAccuracy.acc120 || "--"}% | n=${state._agentAccuracy.calls} directional calls`);
+        }
+      }
+    }
   }
 
 
@@ -10786,6 +10855,14 @@ app.get("/api/state", async (req, res) => {
     heatCap:       parseFloat((effectiveHeatCap()*100).toFixed(0)),
     fillQuality:   state._fillQuality || { count: 0, totalSlippage: 0, misses: 0, avgSlippage: 0 },
     paperSlippage: state._paperSlippage || { trades: 0, totalEst: 0, avgEst: 0 },
+    agentAccuracy: state._agentAccuracy ? {
+      calls:      state._agentAccuracy.calls,
+      acc30:      state._agentAccuracy.acc30  || null,
+      acc120:     state._agentAccuracy.acc120 || null,
+      correct30:  state._agentAccuracy.correct30,
+      correct120: state._agentAccuracy.correct120,
+      pending:    state._agentAccuracy.pending.length,
+    } : null,
     alpacaCircuit: { open: _alpacaCircuitOpen, consecFails: _alpacaConsecFails },
     avgScanIntervalMs: state._avgScanIntervalMs || 0,
     portfolioBetaDelta: state._portfolioBetaDelta || 0,
@@ -11725,6 +11802,108 @@ function simulateOptionPnL(entryPrice, optionType, holdDays, outcome, ticker = "
   return Math.max(-0.95, Math.min(2.0, pnlPct)); // cap at -95% to +200%
 }
 
+// ── V2.75 Spread P&L Simulator ────────────────────────────────────────────
+// Debit spread: buy ATM, sell OTM — capped loss (net debit) and capped profit (width - debit)
+// Credit spread: sell OTM, buy further OTM — capped profit (net credit) and capped loss (width - credit)
+// This is fundamentally different from single-leg option P&L.
+// Panel requirement: backtest must use spread structure, not naked option approximation.
+function simulateSpreadPnL(netDebit, spreadWidth, optionType, tradeType, holdDays, priceDeltaPct, vixEst = 20, ticker = "SPY") {
+  // Spread economics:
+  // Debit spread: paid netDebit, max profit = spreadWidth - netDebit, max loss = netDebit
+  // Credit spread: received netCredit, max profit = netCredit, max loss = spreadWidth - netCredit
+  const isCredit = tradeType === "credit";
+  const maxProfit = isCredit ? netDebit : (spreadWidth - netDebit);  // netDebit = credit received for credit spreads
+  const maxLoss   = isCredit ? (spreadWidth - netDebit) : netDebit;
+
+  // Price move → option value change (delta-based)
+  // Buy leg delta ~0.35, sell leg delta ~0.20 → net delta ~0.15
+  // Spread value changes more slowly than naked option
+  const netDelta = 0.15; // approximate net delta of ATM/OTM spread
+  const underlyingMove = priceDeltaPct; // as fraction e.g. 0.05 = 5% move
+
+  // For puts: underlying falls → spread gains value
+  // For calls: underlying rises → spread gains value
+  const directedMove = optionType === "put" ? -underlyingMove : underlyingMove;
+
+  // Spread value change: bounded between 0 and spreadWidth
+  // At max move, spread is worth full width (put spread: underlying at or below short strike)
+  const moveMagnitude = Math.min(Math.abs(directedMove), 0.15); // cap contribution at 15% move
+  const spreadValueChange = moveMagnitude / 0.15 * spreadWidth; // linear interpolation to max value
+
+  // Theta decay on debit spreads: net theta is negative (paying theta)
+  // For credit spreads: net theta is positive (collecting theta)
+  const dailyTheta = netDebit / (2 * Math.max(21 - holdDays, 5)); // accelerates near expiry
+  const thetaImpact = isCredit ? (dailyTheta * holdDays) : -(dailyTheta * holdDays);
+
+  // Slippage: two legs × round-trip
+  const slippagePerLeg = vixEst >= 30 ? 0.06 : vixEst >= 20 ? 0.04 : 0.02;
+  const totalSlippage  = slippagePerLeg * 2; // both legs at entry + exit
+
+  // Bid-ask spread cost (two legs)
+  const legSpread = ticker === "SPY" ? 0.06 : ticker === "QQQ" ? 0.08 : 0.12;
+  const totalTxCost = totalSlippage + legSpread;
+
+  // Gross P&L on spread (as fraction of net debit)
+  let grossPnL;
+  if (isCredit) {
+    // Credit spread: profit when underlying moves away from short strike
+    // Max profit = keep full credit. Max loss = width - credit.
+    grossPnL = directedMove >= 0
+      ? Math.min(maxProfit, maxProfit * (moveMagnitude / 0.08))  // favorable: earn credit
+      : Math.max(-maxLoss, -maxLoss * (Math.abs(directedMove) / 0.08)); // unfavorable: lose up to width
+    grossPnL += thetaImpact; // theta accrual
+  } else {
+    // Debit spread: profit when underlying moves toward long strike
+    grossPnL = directedMove > 0
+      ? Math.min(maxProfit, spreadValueChange - netDebit) // favorable
+      : Math.max(-maxLoss, -(netDebit * (1 - directedMove * 5))); // unfavorable: decay + move
+    grossPnL += thetaImpact;
+  }
+
+  const netPnL = grossPnL - totalTxCost;
+  // Return as fraction of net debit (for TP/stop comparison)
+  return Math.max(-(maxLoss / netDebit), Math.min(maxProfit / netDebit, netPnL / netDebit));
+}
+
+// ── V2.75 Regime B Scoring ───────────────────────────────────────────────
+// Adds regime classification to backtest scoring — mirrors live ARGO's regime logic.
+// Regime A (bull): SMA20 > SMA50, price > SMA20, positive momentum → calls favored
+// Regime B (bear): price < SMA50, SMA20 < SMA50, negative momentum → puts on bounces
+// Regime C (crisis): price < SMA200, sustained VIX > 35 → credit only
+// Returns regime class + suggested trade type for backtest routing.
+function backtestClassifyRegime(bars, idx, vixEst) {
+  const slice  = bars.slice(0, idx + 1);
+  const price  = slice[slice.length - 1].c;
+  const sma20  = slice.length >= 20  ? slice.slice(-20).reduce((s,b)=>s+b.c,0)/20  : price;
+  const sma50  = slice.length >= 50  ? slice.slice(-50).reduce((s,b)=>s+b.c,0)/50  : price;
+  const sma200 = slice.length >= 200 ? slice.slice(-200).reduce((s,b)=>s+b.c,0)/200 : price;
+  const mom5   = slice.length >= 5   ? (price - slice[slice.length-5].c)/slice[slice.length-5].c*100 : 0;
+  const mom20  = slice.length >= 20  ? (price - slice[slice.length-20].c)/slice[slice.length-20].c*100 : 0;
+
+  // RSI for bounce detection
+  const rsi = calcRSI(slice);
+
+  let regimeClass = "A";
+  let entryBias   = "neutral";
+  let tradeType   = "spread";
+
+  if (vixEst >= 35 && price < sma200) {
+    regimeClass = "C"; entryBias = "puts_on_bounces"; tradeType = "credit";
+  } else if (price < sma50 && sma20 < sma50 && mom20 < -2) {
+    regimeClass = "B"; entryBias = "puts_on_bounces"; tradeType = "spread";
+  } else if (price > sma20 && sma20 > sma50 && mom20 > 2) {
+    regimeClass = "A"; entryBias = "calls_on_dips"; tradeType = "spread";
+  } else {
+    regimeClass = "A"; entryBias = "neutral"; tradeType = "spread";
+  }
+
+  // Bounce detection: price bounced up from oversold but trend still down
+  const isBounce = regimeClass !== "A" && rsi >= 45 && rsi <= 65 && mom5 > 0 && mom20 < 0;
+  const isPutsOnBounces = (regimeClass === "B" || regimeClass === "C") && isBounce;
+
+  return { regimeClass, entryBias, tradeType, sma20, sma50, sma200, mom5, mom20, rsi, isBounce, isPutsOnBounces };
+}
+
 async function runBacktest(config) {
   try {
   const {
@@ -11737,13 +11916,17 @@ async function runBacktest(config) {
     takeProfitPct = 0.50,
     stopLossPct   = 0.35,
     capital       = 10000,
-    putOnly       = false, // puts-only mode — blocks all call entries
-    callSizeMult  = 1.0,   // asymmetric sizing: calls at reduced fraction (e.g. 0.5 = half size)
+    putOnly       = false,   // puts-only mode — blocks all call entries
+    callSizeMult  = 1.0,     // asymmetric sizing: calls at reduced fraction (e.g. 0.5 = half size)
+    useSpread     = true,    // V2.75: simulate spread P&L (capped r/r) not naked option
+    useRegimeB    = true,    // V2.75: apply regime classification to scoring and trade routing
+    spreadWidth   = null,    // null = VIX-scaled auto (10/15/20), or fixed dollar width
   } = config;
 
   const bothMode = optionType === "both";
   const modeLabel = putOnly ? "PUTS-ONLY" : bothMode ? "PUTS+CALLS" : optionType;
-  logEvent("scan", `[BACKTEST] Starting: ${ticker} ${modeLabel} ${startDate}→${endDate} minScore:${minScore} capital:$${capital}${callSizeMult < 1 ? ` callSize:${callSizeMult}x` : ""}`);
+  const v275tag = useSpread ? "[SPREAD]" : "[NAKED]";
+  logEvent("scan", `[BACKTEST] Starting: ${ticker} ${modeLabel} ${v275tag} ${startDate}→${endDate} minScore:${minScore} capital:$${capital}${callSizeMult < 1 ? ` callSize:${callSizeMult}x` : ""}`);
 
   // Fetch primary + auxiliary bars (SPY + UUP for gate simulation)
   // SPY bars needed for TLT gate (50MA) and GLD gate (5d return)
@@ -11861,10 +12044,37 @@ async function runBacktest(config) {
       if (entryScore < minScore) continue;
     }
 
-    const score   = entryScore;
+    let score   = entryScore;
     const reasons = entryReasons;
 
-    // BT-7: Spiral block
+    // ── V2.75: Regime classification — mirrors live ARGO regime B logic ──────
+    // Applies regime-aware score adjustments not captured in backtestScoreSignal
+    const regime = useRegimeB ? backtestClassifyRegime(bars, i, vixEst) : null;
+    if (regime && useRegimeB) {
+      // Regime B: puts on bounces — bonus for entering on bounce in bear regime
+      if (regime.regimeClass === "B" && entryType === "put" && regime.isPutsOnBounces) {
+        score = Math.min(100, score + 8); // entry bias bonus
+        reasons.push(`~Regime B bounce entry (+8)`);
+      }
+      // Regime A: wrong for puts
+      if (regime.regimeClass === "A" && entryType === "put") {
+        score = Math.max(0, score - 15);
+        reasons.push(`~Regime A — wrong for puts (-15)`);
+      }
+      // Regime B: wrong for calls (unless MR call on extreme oversold)
+      const btRSICheck = calcRSI(bars.slice(0, i + 1));
+      if (regime.regimeClass === "B" && entryType === "call" && btRSICheck > 40) {
+        score = Math.max(0, score - 20);
+        reasons.push(`~Regime B — calls blocked except MR (-20)`);
+      }
+      // Regime C: only credit spreads — block all debit in crisis
+      if (regime.regimeClass === "C" && entryType === "put" && useSpread) {
+        // Allow as credit put spread — score penalty for entering at crisis bottom
+        score = Math.max(0, score - 5);
+        reasons.push(`~Regime C — credit put spread mode (-5)`);
+      }
+      if (score < minScore) continue; // regime adjustment knocked it below threshold
+    }
     if (btSpiralBlocked[entryType]) { spiralBlockCount++; continue; }
 
     // ── Phase 1: Apply instrument-specific entry gates ────────────────────
@@ -11923,27 +12133,37 @@ async function runBacktest(config) {
     // Estimate option premium using already-computed vixEst from gate section above
     const premiumPct = (vixEst / 100) * Math.sqrt(holdDays / 252) * 0.8; // simplified BSM
     const entryPrem  = parseFloat((price * premiumPct).toFixed(2));
-    // Minimum premium: 0.30% of underlying price (scales with ETF price)
-    // Flat $0.30 was filtering XLE ($90) and KRE ($55) at normal VIX
-    // $90 × 0.003 = $0.27 minimum | $55 × 0.003 = $0.165 minimum
     const minPrem = Math.max(0.10, price * 0.003);
     if (entryPrem < minPrem) continue; // too cheap to trade
 
-    // Asymmetric sizing — calls at reduced size (panel: put edge is stronger)
+    // V2.75 spread parameters — net debit ≈35% of spread width (stays within 40% r/r rule)
+    const btSpreadWidth  = spreadWidth || (vixEst >= 35 ? 20 : vixEst >= 25 ? 15 : 10);
+    const btNetDebit     = useSpread ? parseFloat((btSpreadWidth * 0.33).toFixed(2)) : entryPrem;
+    const isRegimeCCredit = regime && regime.regimeClass === "C";
+    const btTradeType    = isRegimeCCredit ? "credit" : "debit";
+
+    // Asymmetric sizing — spread uses net debit as cost basis
     const sizeMult     = entryType === "call" ? callSizeMult : 1.0;
-    const positionCost = parseFloat((entryPrem * 100 * sizeMult).toFixed(2));
+    const positionCost = useSpread
+      ? parseFloat((btNetDebit * 100 * sizeMult).toFixed(2))
+      : parseFloat((entryPrem  * 100 * sizeMult).toFixed(2));
     if (positionCost > cash * 0.20) continue; // max 20% per position
 
-    // Check if at max concurrent positions — settle any that have expired
+    // Settle expired open positions before checking capacity
     for (let j = openBT.length - 1; j >= 0; j--) {
       const op = openBT[j];
       if (i >= op.expiryIdx) {
-        // Settle this position
         const exitBar2 = bars[Math.min(op.expiryIdx, bars.length-1)];
         const pd2 = (exitBar2.c - bars[op.entryIdx].c) / bars[op.entryIdx].c;
-        const dd2 = op.entryType === "put" ? -pd2 : pd2;
-        let pnl2 = simulateOptionPnL(op.entryPrem, op.entryType, op.expiryIdx - op.entryIdx,
-          { priceDelta: dd2 * bars[op.entryIdx].c, daysToExpiry: 21 }, ticker, op.vixEst || 20);
+        let pnl2;
+        if (op.useSpread) {
+          pnl2 = simulateSpreadPnL(op.btNetDebit, op.btSpreadWidth, op.entryType, op.btTradeType,
+            op.expiryIdx - op.entryIdx, pd2, op.vixEst || 20, ticker);
+        } else {
+          const dd2 = op.entryType === "put" ? -pd2 : pd2;
+          pnl2 = simulateOptionPnL(op.entryPrem, op.entryType, op.expiryIdx - op.entryIdx,
+            { priceDelta: dd2 * bars[op.entryIdx].c, daysToExpiry: 21 }, ticker, op.vixEst || 20);
+        }
         pnl2 = Math.max(-stopLossPct, Math.min(takeProfitPct, pnl2));
         const pnlDollar2 = parseFloat((pnl2 * op.positionCost).toFixed(2));
         cash = parseFloat((cash + pnlDollar2).toFixed(2));
@@ -11953,10 +12173,10 @@ async function runBacktest(config) {
         trades.push({
           date: bars[op.expiryIdx]?.t?.split("T")[0] || `day-${op.expiryIdx}`,
           ticker, optionType: op.entryType, score: op.score,
-          entryPrice: bars[op.entryIdx].c, entryPrem: op.entryPrem,
+          entryPrice: bars[op.entryIdx].c, entryPrem: op.useSpread ? op.btNetDebit : op.entryPrem,
           pnlPct: parseFloat((pnl2*100).toFixed(1)), pnlDollar: pnlDollar2,
           exitReason: "hold_expired", holdDays: op.expiryIdx - op.entryIdx,
-          cashAfter: cash, reasons: op.reasons,
+          cashAfter: cash, reasons: op.reasons, tradeType: op.useSpread ? "spread" : "naked",
           vixEst: parseFloat((op.vixEst || 20).toFixed(1)),
           agentRegime: op.agentRegime || "neutral",
         });
@@ -11972,10 +12192,15 @@ async function runBacktest(config) {
     let settled   = false;
 
     for (let d = 1; d <= holdDays && (i + d) < bars.length; d++) {
-      const dayBar      = bars[i + d];
-      const dayDelta    = (dayBar.c - price) / price;
-      const dayDirected = entryType === "put" ? -dayDelta : dayDelta;
-      const estPnlPct   = simulateOptionPnL(entryPrem, entryType, d, { priceDelta: dayDirected * price, daysToExpiry: 21 }, ticker, vixEst);
+      const dayBar   = bars[i + d];
+      const dayDelta = (dayBar.c - price) / price;
+      let estPnlPct;
+      if (useSpread) {
+        estPnlPct = simulateSpreadPnL(btNetDebit, btSpreadWidth, entryType, btTradeType, d, dayDelta, vixEst, ticker);
+      } else {
+        const dayDirected = entryType === "put" ? -dayDelta : dayDelta;
+        estPnlPct = simulateOptionPnL(entryPrem, entryType, d, { priceDelta: dayDirected * price, daysToExpiry: 21 }, ticker, vixEst);
+      }
       if (estPnlPct >= takeProfitPct) {
         pnlPct = takeProfitPct; exitReason = "take_profit"; actualDays = d; settled = true; break;
       }
@@ -12028,13 +12253,17 @@ async function runBacktest(config) {
       const agentRegime = agentRegimeFull.includes("trending_bear") ? "trending_bear"
         : agentRegimeFull.includes("trending_bull") ? "trending_bull"
         : agentRegimeFull.includes("choppy") ? "choppy" : "neutral";
-      trades.push({ date: barDate, ticker, optionType: entryType, score, entryPrice: price, entryPrem,
+      trades.push({ date: barDate, ticker, optionType: entryType, score, entryPrice: price,
+        entryPrem: useSpread ? btNetDebit : entryPrem,
         pnlPct: parseFloat((pnlPct*100).toFixed(1)), pnlDollar, exitReason, holdDays: actualDays,
-        cashAfter: cash, reasons: reasons.slice(0,3), vixEst: parseFloat(vixEst.toFixed(1)), agentRegime });
+        cashAfter: cash, reasons: reasons.slice(0,3), vixEst: parseFloat(vixEst.toFixed(1)),
+        agentRegime, tradeType: useSpread ? `${btTradeType}_spread` : "naked",
+        regimeClass: regime?.regimeClass || "A" });
     } else {
       // Not yet settled — track as open position
       openBT.push({ entryIdx: i, entryType, entryPrem, positionCost, score,
-        expiryIdx: Math.min(i + holdDays, bars.length-1), reasons: reasons.slice(0,3), vixEst, agentRegime });
+        expiryIdx: Math.min(i + holdDays, bars.length-1), reasons: reasons.slice(0,3), vixEst, agentRegime,
+        useSpread, btNetDebit, btSpreadWidth, btTradeType });
     }
     } catch(loopErr) {
       logEvent("error", `[BACKTEST] Loop crash at bar ${i} (${ticker} ${bars[i]?.t?.split("T")[0]}): ${loopErr.message}`);
@@ -12151,12 +12380,27 @@ async function runBacktest(config) {
       barsAnalyzed:    bars.length,
     },
     directionSplit,
+    regimeSplit: (() => {
+      const rs = {};
+      trades.forEach(t => {
+        const rc = t.regimeClass || "A";
+        if (!rs[rc]) rs[rc] = { trades: 0, wins: 0, pnl: 0 };
+        rs[rc].trades++;
+        if (t.pnlDollar > 0) rs[rc].wins++;
+        rs[rc].pnl = parseFloat((rs[rc].pnl + t.pnlDollar).toFixed(2));
+      });
+      Object.keys(rs).forEach(rc => {
+        rs[rc].winRate = rs[rc].trades > 0 ? parseFloat((rs[rc].wins/rs[rc].trades*100).toFixed(1)) : 0;
+      });
+      return rs;
+    })(),
     exitBreakdown,
     scoreBrackets:  brackets,
     monthlyPnL,
     vixWinRates,
     equityCurve,
-    trades,  // full trade list — matrix template uses worst/best 10
+    trades,
+    v275: { useSpread, useRegimeB },
   };
   } catch(e) {
     const stackLine = (e.stack || "").split("\n")[1] || "";
@@ -12204,6 +12448,9 @@ app.post("/api/backtest", async (req, res) => {
       maxPositions:  parseInt(maxPositions),
       putOnly:       Boolean(putOnly),        // puts-only mode
       callSizeMult:  parseFloat(callSizeMult), // asymmetric call sizing
+      useSpread:     req.body.useSpread !== false,  // V2.75: default true — spread P&L simulation
+      useRegimeB:    req.body.useRegimeB !== false, // V2.75: default true — regime classification
+      spreadWidth:   req.body.spreadWidth ? parseFloat(req.body.spreadWidth) : null,
     });
 
     res.json(result);
