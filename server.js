@@ -9605,9 +9605,25 @@ async function runScan() {
         continue;
       }
     } else if (isMeanReversion) {
-      // Mean reversion only: naked option for full leverage on quick move
-      // Only when isMeanReversion explicitly set — not as a default fallback
-      entered = await executeTrade(stock, price, score, reasons, state.vix, optionType, isMeanReversion);
+      // Mean reversion call — use debit spread, not naked
+      // Panel unanimous (7/7): naked MR calls violate defined-risk strategy.
+      // The "full leverage" argument doesn't hold for PDT sub-$25k accounts.
+      // Expected MR bounce (4-6%) is fully captured within a $10-wide spread.
+      // Spread also hedges vega risk — both legs lose on IV expansion if bounce fails.
+      // Use $10 wide (tighter than trending spreads) since MR is a shorter-term thesis.
+      const mrBuyContract = await getRealOptionsContract(stock.ticker, price, optionType, score, state.vix, stock.earningsDate, true); // isMeanReversion=true for DTE
+      if (!mrBuyContract) { logEvent("filter", `${stock.ticker} MR spread: no buy leg found`); continue; }
+      const mrSpreadWidth = state.vix >= 35 ? 12 : 10; // tighter than trending spreads
+      const mrSellContract = await getSpreadSellLeg(stock.ticker, optionType, mrBuyContract, mrSpreadWidth);
+      if (mrSellContract && Math.abs(mrBuyContract.strike - mrSellContract.strike) >= mrSpreadWidth - 2) {
+        logEvent("filter", `${stock.ticker} MR spread: buy $${mrBuyContract.strike} / sell $${mrSellContract.strike} | net $${(mrBuyContract.premium - mrSellContract.premium).toFixed(2)} | width $${Math.abs(mrBuyContract.strike - mrSellContract.strike)}`);
+        const mrSpreadPos = await executeSpreadTrade(stock, price, score, reasons, state.vix, optionType, mrBuyContract, mrSellContract, false);
+        entered = !!mrSpreadPos;
+      } else {
+        // No sell leg found — skip, do not fall back to naked
+        logEvent("warn", `${stock.ticker} MR spread: no sell leg within $${mrSpreadWidth} — skipping (no naked fallback per panel decision)`);
+        continue;
+      }
     } else {
       // useSpread=false, not credit, not MR — agent said naked or non-index
       // For index instruments this shouldn't happen — log and skip
