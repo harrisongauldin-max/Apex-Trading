@@ -107,7 +107,8 @@ const TARGET_DELTA_MAX    = 0.42;
 // 3. If no contract in delta range, widen delta range (crash mode) rather than use OTM%
 // OTM% wins for strike zone; delta wins for contract selection within that zone
 // MAX_TRADES_PER_DAY removed - portfolio heat (60%) controls position limits
-const CONSEC_LOSS_LIMIT   = 3;
+// CONSEC_LOSS_LIMIT removed — consecutive loss counter was removed (gambler's fallacy).
+// Each trade is independent. Size reduction handles drawdown, not entry blocking.
 const WEEKLY_DD_LIMIT     = 0.25;
 const MAX_LOSS_PER_TRADE  = 900;
 const MIN_SCORE           = 70;
@@ -1663,10 +1664,20 @@ function scoreIndexSetup(stock, optionType, spyRSI, spyMACD, spyMomentum, breadt
     else if (ivpPut >= 90) { score -= 5;  reasons.push(`IVP ${ivpPut}% — extreme IV, move may be priced in (-5)`); }
 
     // ── QQQ secondary — only when tech thesis clear ─────────────────────
+    // Panel fix: in Regime B/C with only 4 instruments, agent.bearishTickers is
+    // almost never populated with FAANG names — gate fires on every scan.
+    // QQQ put in a macro bear regime IS the thesis — no additional tech confirmation needed.
+    // Gate only applies in Regime A (bull) or when individual stocks are enabled
+    // (where SPY vs QQQ distinction matters more).
     if (stock.ticker === "QQQ") {
-      const techBearish = (agentMacro || {}).bearishTickers && (agentMacro.bearishTickers.some(t => ["NVDA","MSFT","AAPL","META","GOOGL"].includes(t)));
-      if (!techBearish) { score -= 15; reasons.push("QQQ: no clear tech bearish thesis (-15)"); }
-      else { reasons.push("QQQ: tech names in agent bearish list (+0)"); }
+      const qqqGateApplies = !["trending_bear","breakdown"].includes(regime) || INDIVIDUAL_STOCKS_ENABLED;
+      if (qqqGateApplies) {
+        const techBearish = (agentMacro || {}).bearishTickers && (agentMacro.bearishTickers.some(t => ["NVDA","MSFT","AAPL","META","GOOGL"].includes(t)));
+        if (!techBearish) { score -= 15; reasons.push("QQQ: no clear tech bearish thesis in bull regime (-15)"); }
+        else { reasons.push("QQQ: tech names in agent bearish list (+0)"); }
+      } else {
+        reasons.push(`QQQ: Regime ${regime} — macro bear thesis sufficient, no tech confirmation needed (+0)`);
+      }
     }
 
   } else {
@@ -4266,7 +4277,7 @@ function isGLDEntryAllowed(optionType, dxy, spyReturn5d, vix, gldRSI, gldPrice, 
 // ── TLT Entry Gate — bonds rally when equities fall ────────────────────────
 // TLT calls: when SPY is below its 50MA (equity weakness thesis)
 // TLT puts:  when SPY recovering strongly above 50MA (rates rising = bonds fall)
-function isTLTEntryAllowed(optionType, spyPrice, spyMA50, spyReturn5d, spyMA200) {
+function isTLTEntryAllowed(optionType, spyPrice, spyMA50, spyReturn5d, spyMA200, tltRSI, tltMomentum) {
   if (!spyMA50 || spyMA50 === 0) return { allowed: true }; // no data, don't block
   // Panel decision (5/8): SPY below 50MA OR below 200MA allows TLT calls
   // In 2022, bonds fell while SPY was still above 50MA (both fell on rate hikes)
@@ -4279,10 +4290,23 @@ function isTLTEntryAllowed(optionType, spyPrice, spyMA50, spyReturn5d, spyMA200)
     const maLabel = spyBelow200MA ? "200MA" : "50MA";
     return { allowed: true, reason: `TLT call allowed — SPY below ${maLabel}` };
   } else {
-    // TLT puts: bonds falling = rates rising = SPY recovering above both MAs
-    if (spyWeak) return { allowed: false, reason: `TLT put blocked — SPY below MA, bonds likely rallying not falling` };
-    if (spyReturn5d < 0.01) return { allowed: false, reason: `TLT put blocked — SPY not recovering strongly enough (${(spyReturn5d*100).toFixed(1)}% 5d)` };
-    return { allowed: true };
+    // TLT puts: bonds falling = rates rising
+    // Panel fix: pure SPY-MA gate blocks ALL Regime B — bonds can fall on rate/inflation
+    // fears even while equities are weak. Refine to check TLT's own signals:
+    // Allow TLT put when TLT itself is overbought (RSI > 65) OR SPY is recovering
+    const tltOverbought = tltRSI && tltRSI >= 65;
+    const tltMomentumWeak = tltMomentum && ["recovering", "steady"].includes(tltMomentum);
+    const spyRecovering = !spyWeak || spyReturn5d >= 0.01;
+
+    // Block if: SPY still weak AND TLT not overbought on its own signals
+    // Allow if: TLT RSI is elevated (bond overvaluation) regardless of SPY, OR SPY recovering
+    if (spyWeak && !tltOverbought) {
+      return { allowed: false, reason: `TLT put blocked — SPY below MA and TLT RSI ${tltRSI || "?"}  not overbought (need RSI >65 for bond-specific put thesis)` };
+    }
+    if (spyReturn5d < 0.01 && !tltOverbought) {
+      return { allowed: false, reason: `TLT put blocked — SPY not recovering (${(spyReturn5d*100).toFixed(1)}% 5d) and TLT not overbought` };
+    }
+    return { allowed: true, reason: `TLT put allowed — ${tltOverbought ? `TLT RSI ${tltRSI} overbought` : "SPY recovering"}` };
   }
 }
 
@@ -5970,7 +5994,17 @@ async function confirmPendingOrder() {
       state.positions.push(position);
       state._pendingOrder = null;
 
-      logEvent("trade", `[SPREAD] ENTERED ${pending.ticker} $${buyStrike}/$${sellStrike} ${optionType.toUpperCase()} exp ${expDate} | net $${netDebit} | cost $${finalCost} | score ${score}/100`);
+      // ── Paper slippage estimate (panel fix #10) ───────────────────────────
+      // In paper trading, fills execute at mid-price. In live trading, 2-leg
+      // spreads typically fill $0.05-0.15/leg above mid on buy, below on sell.
+      // Accumulate an estimate so live deployment can calibrate expectations.
+      // Estimate: $0.08/leg × 2 legs = $0.16/contract × contracts
+      const _paperSlipEst = parseFloat((0.16 * (pending.contracts || 1)).toFixed(2));
+      if (!state._paperSlippage) state._paperSlippage = { trades: 0, totalEst: 0 };
+      state._paperSlippage.trades++;
+      state._paperSlippage.totalEst = parseFloat((state._paperSlippage.totalEst + _paperSlipEst).toFixed(2));
+      state._paperSlippage.avgEst   = parseFloat((state._paperSlippage.totalEst / state._paperSlippage.trades).toFixed(2));
+      logEvent("trade", `[SLIPPAGE EST] $${_paperSlipEst} this trade | $${state._paperSlippage.totalEst} cumulative across ${state._paperSlippage.trades} trades (paper mid-fill assumption)`);
       logEvent("trade", `Live fill count: ${(state.closedTrades||[]).length + state.positions.length}/30`);
 
       state.tradeJournal.unshift({
@@ -6269,8 +6303,13 @@ async function executeTrade(stock, price, score, scoreReasons, vix, optionType =
 
   state.positions.push(position);
 
-  // Trade journal entry
-  // Tag if this is an earnings play
+  // ── Paper slippage estimate ───────────────────────────────────────────────
+  const _singleSlipEst = parseFloat((0.08 * (contract.contracts || 1)).toFixed(2));
+  if (!state._paperSlippage) state._paperSlippage = { trades: 0, totalEst: 0 };
+  state._paperSlippage.trades++;
+  state._paperSlippage.totalEst = parseFloat((state._paperSlippage.totalEst + _singleSlipEst).toFixed(2));
+  state._paperSlippage.avgEst   = parseFloat((state._paperSlippage.totalEst / state._paperSlippage.trades).toFixed(2));
+  logEvent("trade", `[SLIPPAGE EST] $${_singleSlipEst} this trade | $${state._paperSlippage.totalEst} cumulative across ${state._paperSlippage.trades} trades (paper mid-fill assumption)`);
   const isEarningsPlay = scoreReasons.some(r => r.includes("Earnings play"));
   if (isEarningsPlay) position.earningsPlay = true;
 
@@ -6737,7 +6776,7 @@ async function closePosition(ticker, reason, exitPremium = null, contractSym = n
 
   logEvent("close",
     `${reason.toUpperCase()} ${ticker} | exit $${ep} | P&L ${pnl>=0?"+":""}${fmt(pnl)} (${pct}%) | ` +
-    `cash ${fmt(state.cash)} | consec losses: ${state.consecutiveLosses}`
+    `cash ${fmt(state.cash)}`
   );
   await syncCashFromAlpaca(); // sync cash from Alpaca after close
   markDirty(); // caller saves — prevents N Redis writes when multiple positions close together
@@ -8836,9 +8875,21 @@ async function runScan() {
       weaknessReasons.push(`Below VWAP ${(vwapGap*100).toFixed(1)}% (+${vwapPts})`);
     }
 
-    // Pre-market gap check — already prefetched
+    // Pre-market gap — score penalty/boost for large gap opens
+    // Gap >3% up on a put entry = fading a gap = riskier, reduce score
+    // Gap >3% down on a call entry = buying into a gap = riskier, reduce score
+    // Previously logged but never acted on (panel finding #8)
     if (preMarket && Math.abs(preMarket.gapPct) > 3) {
+      const gapDir = preMarket.gapPct > 0 ? "up" : "down";
       logEvent("filter", `${stock.ticker} pre-market gap ${preMarket.gapPct > 0 ? "+" : ""}${preMarket.gapPct}%`);
+      // Put entry into gap-up: more conviction needed (stock already sold off from yesterday)
+      // Call entry into gap-down: more conviction needed (stock already bounced from gap)
+      // Both cases raise effectiveMinScore by 5 — requires stronger signal to enter
+      if ((optionType === "put" && preMarket.gapPct > 3) ||
+          (optionType === "call" && preMarket.gapPct < -3)) {
+        score -= 8;
+        reasons.push(`Pre-market gap ${preMarket.gapPct > 0 ? "+" : ""}${preMarket.gapPct}% — entry into gap, higher conviction needed (-8)`);
+      }
     }
 
     // Short interest — computed from prefetched bars
@@ -8949,13 +9000,14 @@ async function runScan() {
         if (putSetup.score > 0  && putSetup.score  < 80) { putSetup.score  = 0; logEvent("filter", `GLD put score ${putSetup.score} below 80 minimum`); }
       }
 
-      // ── TLT entry gate — SPY 50MA direction awareness ──────────────────────
+      // ── TLT entry gate — SPY 50MA + TLT own signals ────────────────────────
       if (stock.ticker === "TLT") {
         const spy5dReturn = spyBars.length >= 5 ? (spyBars[spyBars.length-1].c - spyBars[0].c) / spyBars[0].c : 0;
         const spyPriceNow = spyBars.length ? spyBars[spyBars.length-1].c : 0;
-        // Compute SPY 50MA from agent bars (already fetched for agent context)
-        const tltCallGate = isTLTEntryAllowed("call", spyPriceNow, state._spyMA50 || 0, spy5dReturn, state._spyMA200 || 0);
-        const tltPutGate  = isTLTEntryAllowed("put",  spyPriceNow, state._spyMA50 || 0, spy5dReturn, state._spyMA200 || 0);
+        const tltRSILive  = liveStock.rsi || signals.rsi || null;
+        const tltMomLive  = liveStock.momentum || signals.momentum || null;
+        const tltCallGate = isTLTEntryAllowed("call", spyPriceNow, state._spyMA50 || 0, spy5dReturn, state._spyMA200 || 0, tltRSILive, tltMomLive);
+        const tltPutGate  = isTLTEntryAllowed("put",  spyPriceNow, state._spyMA50 || 0, spy5dReturn, state._spyMA200 || 0, tltRSILive, tltMomLive);
         if (!tltCallGate.allowed) { callSetup.score = 0; logEvent("filter", tltCallGate.reason); }
         if (!tltPutGate.allowed)  { putSetup.score  = 0; logEvent("filter", tltPutGate.reason);  }
       }
@@ -9278,7 +9330,10 @@ async function runScan() {
     // Problem: rolling window includes COVID spike (VIX 68), making VIX 31 appear
     // as the 3rd percentile. Gate fires incorrectly, blocking ideal put entries.
     // Fix: bypass entirely when vol is objectively elevated or regime is bear/crisis.
-    const ivrBypass = (state.vix || 0) >= 25 || regimeClass === "B" || regimeClass === "C";
+    // Panel fix: VIX ≥ 25 alone is not sufficient — a single-day spike in Regime A
+    // would bypass the floor, then IV collapses and the debit spread loses vega.
+    // Require VIX ≥ 25 AND regime not A (structural, not just a spike).
+    const ivrBypass = (((state.vix || 0) >= 25) && regimeClass !== "A") || regimeClass === "B" || regimeClass === "C";
     const ivrNow       = ivRankNow; // already computed above
     const ivrDebitFloor = 15;       // below this: debit entries blocked (calm markets only)
     const ivrDebitCaution = 25;     // below this: debit entries need 80+ (calm markets only)
@@ -9348,9 +9403,9 @@ async function runScan() {
       // Only stagger when the first entry is working (>5% profit confirms thesis)
       const existingChg = existingPos.currentPrice && existingPos.premium
         ? (existingPos.currentPrice - existingPos.premium) / existingPos.premium : 0;
-      if (!staggerBlock && existingChg <= 0.15) {
+      if (!staggerBlock && existingChg <= 0.08) {
         staggerBlock = true;
-        staggerReason = `existing pos ${(existingChg*100).toFixed(0)}% — thesis not confirmed (need >15% profit to add — 5% was within daily sigma)`;
+        staggerReason = `existing pos ${(existingChg*100).toFixed(0)}% — thesis not confirmed (need >8% profit to add)`;
       }
       if (!staggerBlock && existingChg > 0.50) {
         staggerBlock = true;
@@ -9388,7 +9443,7 @@ async function runScan() {
     // Don't count GLD toward put heat cap (it's an uncorrelated asset)
     const MAX_DIR_HEAT = 0.40;
     const isGLDHedge = stock.ticker === "GLD" && optionType === "call";
-    const correlatedTickers = ["SPY","QQQ","IWM"]; // high correlation group
+    const correlatedTickers = ["SPY","QQQ"]; // high correlation group (IWM removed — not in watchlist)
     const dirCost = state.positions
       .filter(p => {
         if (p.ticker === "GLD") return false; // GLD is a hedge, exclude from heat
@@ -9535,14 +9590,16 @@ async function runScan() {
         continue;
       }
     }
-    // ── AGENT PRE-ENTRY CHECK — only for borderline scores ──────────────
-    // Score 85+: high conviction — skip agent call, save tokens
-    // Score 70-84: borderline — agent validates the entry
-    // Credit mode: skip check (direction-neutral, agent not useful)
-    if (!dryRunMode && score < 85 && !creditModeActive) {
+    // ── AGENT PRE-ENTRY CHECK — only for genuinely borderline scores ─────
+    // Panel fix: firing below 85 means paying for a call on nearly every trade.
+    // Only medium-confidence rejections were silently ignored (wasted API cost).
+    // New logic: fire only on 70-79 (true borderline). Scores 80+ have enough
+    // signal consensus to proceed without validation.
+    // Block on both high AND medium confidence rejections (low = too uncertain to block).
+    if (!dryRunMode && score >= MIN_SCORE && score < 80 && !creditModeActive) {
       const preCheck = await getAgentPreEntryCheck(stock, score, reasons, optionType, false);
-      if (!preCheck.approved && preCheck.confidence === "high") {
-        logEvent("filter", `${stock.ticker} blocked by pre-entry agent check — ${preCheck.reason}`);
+      if (!preCheck.approved && ["high","medium"].includes(preCheck.confidence)) {
+        logEvent("filter", `${stock.ticker} blocked by pre-entry agent check (${preCheck.confidence} conf) — ${preCheck.reason}`);
         continue;
       }
     }
@@ -9595,7 +9652,16 @@ async function runScan() {
       const spreadActualWidth = sellContract ? Math.abs(buyContract.strike - sellContract.strike) : 0;
 
       if (sellContract && spreadActualWidth >= targetSpreadWidth - 2) {
-        logEvent("filter", `${stock.ticker} spread: buy $${buyContract.strike} / sell $${sellContract.strike} | net $${(buyContract.premium - sellContract.premium).toFixed(2)} | width $${spreadActualWidth}`);
+        const netDebitCheck = parseFloat((buyContract.premium - sellContract.premium).toFixed(2));
+        const rrRatio = spreadActualWidth > 0 ? netDebitCheck / spreadActualWidth : 1;
+        // Panel fix: validate risk/reward — netDebit must be ≤40% of spread width
+        // e.g. $15 wide spread: max debit = $6.00 (risk $600 to make $900)
+        // If ratio > 0.40 you're risking more than you can make — skip
+        if (rrRatio > 0.40) {
+          logEvent("filter", `${stock.ticker} spread r/r rejected: net $${netDebitCheck} / width $${spreadActualWidth} = ${(rrRatio*100).toFixed(0)}% (max 40%) — skipping`);
+          continue;
+        }
+        logEvent("filter", `${stock.ticker} spread: buy $${buyContract.strike} / sell $${sellContract.strike} | net $${netDebitCheck} | width $${spreadActualWidth} | r/r ${(rrRatio*100).toFixed(0)}%`);
         const spreadPos = await executeSpreadTrade(stock, price, score, reasons, state.vix, optionType, buyContract, sellContract, isChoppyRegime);
         entered = !!spreadPos;
       } else {
@@ -9616,7 +9682,14 @@ async function runScan() {
       const mrSpreadWidth = state.vix >= 35 ? 12 : 10; // tighter than trending spreads
       const mrSellContract = await getSpreadSellLeg(stock.ticker, optionType, mrBuyContract, mrSpreadWidth);
       if (mrSellContract && Math.abs(mrBuyContract.strike - mrSellContract.strike) >= mrSpreadWidth - 2) {
-        logEvent("filter", `${stock.ticker} MR spread: buy $${mrBuyContract.strike} / sell $${mrSellContract.strike} | net $${(mrBuyContract.premium - mrSellContract.premium).toFixed(2)} | width $${Math.abs(mrBuyContract.strike - mrSellContract.strike)}`);
+        const mrActualWidth = Math.abs(mrBuyContract.strike - mrSellContract.strike);
+        const mrNetDebit = parseFloat((mrBuyContract.premium - mrSellContract.premium).toFixed(2));
+        const mrRR = mrActualWidth > 0 ? mrNetDebit / mrActualWidth : 1;
+        if (mrRR > 0.40) {
+          logEvent("filter", `${stock.ticker} MR spread r/r rejected: net $${mrNetDebit} / width $${mrActualWidth} = ${(mrRR*100).toFixed(0)}% (max 40%) — skipping`);
+          continue;
+        }
+        logEvent("filter", `${stock.ticker} MR spread: buy $${mrBuyContract.strike} / sell $${mrSellContract.strike} | net $${mrNetDebit} | width $${mrActualWidth} | r/r ${(mrRR*100).toFixed(0)}%`);
         const mrSpreadPos = await executeSpreadTrade(stock, price, score, reasons, state.vix, optionType, mrBuyContract, mrSellContract, false);
         entered = !!mrSpreadPos;
       } else {
@@ -10712,6 +10785,7 @@ app.get("/api/state", async (req, res) => {
     heatPct:       parseFloat((heatPct()*100).toFixed(1)),
     heatCap:       parseFloat((effectiveHeatCap()*100).toFixed(0)),
     fillQuality:   state._fillQuality || { count: 0, totalSlippage: 0, misses: 0, avgSlippage: 0 },
+    paperSlippage: state._paperSlippage || { trades: 0, totalEst: 0, avgEst: 0 },
     alpacaCircuit: { open: _alpacaCircuitOpen, consecFails: _alpacaConsecFails },
     avgScanIntervalMs: state._avgScanIntervalMs || 0,
     portfolioBetaDelta: state._portfolioBetaDelta || 0,
@@ -11823,7 +11897,7 @@ async function runBacktest(config) {
       : (spySlice.length >= 50 ? spySlice.reduce((s,b) => s + b.c, 0) / spySlice.length : 0);
 
     if (ticker === "TLT") {
-      const tltGate = isTLTEntryAllowed(entryType, spyPrice, spy50MA, spy5d, spy200MAbt);
+      const tltGate = isTLTEntryAllowed(entryType, spyPrice, spy50MA, spy5d, spy200MAbt, null, null);
       if (!tltGate.allowed) { gateSkips.tltSpy50++; continue; }
     }
 
