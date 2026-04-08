@@ -11782,7 +11782,8 @@ function backtestScoreSignal(bars, idx, optionType) {
     if (rsi >= 70)       { score += 20; reasons.push(`RSI ${rsi.toFixed(0)} overbought (+20)`); }
     else if (rsi >= 60)  { score += 10; reasons.push(`RSI ${rsi.toFixed(0)} elevated (+10)`); }
     else if (rsi <= 35)  { return { score: 0, reasons: [`RSI ${rsi.toFixed(0)} oversold — HARD BLOCK`] }; }
-    else if (rsi <= 45)  { score -= 15; reasons.push(`RSI ${rsi.toFixed(0)} oversold for puts (-15)`); }
+    else if (rsi <= 39)  { score -= 15; reasons.push(`RSI ${rsi.toFixed(0)} deeply oversold for puts (-15)`); }
+    else if (rsi <= 45)  { score -= 8;  reasons.push(`RSI ${rsi.toFixed(0)} recovering from oversold (-8)`); }
     else                 { reasons.push(`RSI ${rsi.toFixed(0)} neutral`); }
   } else {
     if (rsi <= 35)       { score += 25; reasons.push(`RSI ${rsi.toFixed(0)} extreme oversold — MR call (+25)`); }
@@ -11821,29 +11822,31 @@ function backtestScoreSignal(bars, idx, optionType) {
     score -= 10; reasons.push(`Move ${(todayMove*100).toFixed(1)}% > 2x ATR ${(atrPct*100).toFixed(1)}% — extended (-10)`);
   }
 
-  // BT-3: Agent score simulation — closes the 20-30pt gap between backtest and live scores
-  // Live ARGO gets +25-35 pts from Claude agent confirmation. Backtest approximates this
-  // using the same technical regime signals the agent would be reading.
-  // Regime derived from: SMA20 vs SMA50, momentum, ADX proxy (ATR-based)
+  // BT-3: Agent score simulation — closes the gap between backtest and live scores
+  // Live ARGO gets +25-35 pts from Claude agent at high confidence. Backtest approximates
+  // using technical regime signals the agent would be reading.
   const sma20 = slice.slice(-20).reduce((s,b) => s + b.c, 0) / 20;
   const sma50 = slice.length >= 50 ? slice.slice(-50).reduce((s,b) => s + b.c, 0) / 50 : sma20;
   const mom20 = slice.length >= 21 ? (price - slice[slice.length-21].c) / slice[slice.length-21].c * 100 : 0;
-  // Simplified ADX proxy: trend strength from directional consistency
-  const adxProxy = Math.abs(mom20) * 2 + (atrPct * 100); // rough trend strength
+  const adxProxy = Math.abs(mom20) * 2 + (atrPct * 100);
   let agentBonus = 0;
   let agentRegime = "neutral";
   if (price < sma20 && sma20 < sma50 && mom20 < -2) {
     agentRegime = "trending_bear";
-    agentBonus  = optionType === "put"  ? 20 : -20; // agent confirms puts, penalizes calls
+    // Raised from ±20 to ±25 — live agent reads news/VIX and gives high-confidence calls
+    // worth +30-35; +25 is a more accurate approximation than +20
+    agentBonus = optionType === "put" ? 25 : -25;
   } else if (price > sma20 && sma20 > sma50 && mom20 > 2) {
     agentRegime = "trending_bull";
-    agentBonus  = optionType === "call" ? 20 : -20; // agent confirms calls, penalizes puts
+    agentBonus  = optionType === "call" ? 25 : -25;
   } else if (Math.abs(mom20) < 1) {
     agentRegime = "choppy";
-    agentBonus  = -10; // agent cautious in choppy — matches live choppy debit block
+    // Neutral — no bonus or penalty. Let RSI/MACD/momentum signals carry the score.
+    // Choppy markets (2023) still have valid high-signal entries; the agent is just
+    // less directionally confident, not blocking. Only high-signal days (RSI extreme
+    // + MACD crossover + weak/strong momentum) will clear 75+ unaided.
+    agentBonus = 0;
   }
-  // Medium confidence approximation (not high) — live agent can be high/medium/low
-  // Using medium (not +35) to avoid over-optimism
   if (agentBonus !== 0) {
     score += agentBonus;
     reasons.push(`~Agent ${agentRegime} simulation (${agentBonus > 0 ? '+' : ''}${agentBonus})`);
@@ -11984,7 +11987,9 @@ function backtestClassifyRegime(bars, idx, vixEst) {
 
   if (vixEst >= 35 && price < sma200) {
     regimeClass = "C"; entryBias = "puts_on_bounces"; tradeType = "credit";
-  } else if (price < sma50 && sma20 < sma50 && mom20 < -2) {
+  } else if (price < sma50 && (sma20 < sma50 || mom20 < -1)) {
+    // Fix 4: loosened from (sma20<sma50 AND mom20<-2) — captures developing downtrends
+    // where SMA20 hasn't crossed below SMA50 yet but momentum is already negative
     regimeClass = "B"; entryBias = "puts_on_bounces"; tradeType = "spread";
   } else if (price > sma20 && sma20 > sma50 && mom20 > 2) {
     regimeClass = "A"; entryBias = "calls_on_dips"; tradeType = "spread";
@@ -11992,8 +11997,13 @@ function backtestClassifyRegime(bars, idx, vixEst) {
     regimeClass = "A"; entryBias = "neutral"; tradeType = "spread";
   }
 
-  // Bounce detection: price bounced up from oversold but trend still down
-  const isBounce = regimeClass !== "A" && rsi >= 45 && rsi <= 65 && mom5 > 0 && mom20 < 0;
+  // Fix 1: Widened bounce detection window
+  // Old: RSI 45-65 AND mom5 > 0
+  // New: RSI 38-72 AND mom5 > -2.0%
+  // RSI 38-44: recovering from oversold = valid entry (stock bouncing back up)
+  // RSI 66-72: overbought relief bounce = valid put entry (chasing rally)
+  // mom5 > -2%: allows slight downward pressure, not requiring a full positive day
+  const isBounce = regimeClass !== "A" && rsi >= 38 && rsi <= 72 && mom5 > -2.0 && mom20 < 0;
   const isPutsOnBounces = (regimeClass === "B" || regimeClass === "C") && isBounce;
 
   return { regimeClass, entryBias, tradeType, sma20, sma50, sma200, mom5, mom20, rsi, isBounce, isPutsOnBounces };
@@ -12170,12 +12180,10 @@ async function runBacktest(config) {
       }
       if (regime.regimeClass === "A") {
         if (entryType === "call") {
-          // Regime A calls_on_dips: only enter on RSI pullbacks, not chasing momentum
-          // Valid call entry: RSI <= 42 (genuine dip) OR RSI 43-58 in established bull
-          // Invalid: RSI > 68 (overbought, chasing) or RSI 59-67 (neither dip nor oversold)
-          const rsiDip        = btRSI <= 42;
-          const rsiHealthyDip = btRSI >= 43 && btRSI <= 58;
-          const isValidCallEntry = rsiDip || rsiHealthyDip;
+          // Fix 2: Widened dipGate — RSI 59-65 in bull market IS a valid dip
+          // Old: RSI <= 42 OR RSI 43-58 (blocked RSI 59-67)
+          // New: RSI <= 65 — only block clearly overbought (RSI > 65 = chasing)
+          const isValidCallEntry = btRSI <= 65;
           if (!isValidCallEntry) {
             if (!gateSkips["dipGate"]) gateSkips["dipGate"] = 0;
             gateSkips["dipGate"]++;
@@ -12254,8 +12262,10 @@ async function runBacktest(config) {
         gateSkips["200maCall"]++;
         continue;
       }
-      // Puts need 80+ when below 200MA
-      if (score < 80) {
+      // Fix 3: Puts need 75+ when below 200MA (was 80+)
+      // The live system uses agent macro as the primary gate, not 200MA score floor
+      // 80+ was blocking the highest-conviction bear market entries at score 75-79
+      if (score < 75) {
         if (!gateSkips["200maPutMin"]) gateSkips["200maPutMin"] = 0;
         gateSkips["200maPutMin"]++;
         continue;
