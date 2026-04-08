@@ -1,5 +1,5 @@
 // -
-// ARGO V2.75 - Systematic SPY/QQQ Options Trading Agent
+// ARGO V2.80 - Systematic SPY/QQQ Options Trading Agent
 // Alpaca Paper Trading Edition
 // -
 const express    = require("express");
@@ -224,6 +224,24 @@ const WATCHLIST = [
     beta:      -0.5,  // strong negative beta = best equity stress hedge
     earningsDate: null,
     isIndex:   true,
+    isPrimary: false,
+  },
+  // ── ENERGY: XLE — Energy Select Sector SPDR ─────────────────────────────
+  // Panel unanimous (9/9): first expansion beyond 4-instrument universe
+  // Driven by oil price + geopolitics — independent of equity sentiment (corr 0.55 vs SPY)
+  // Options ADV 26,153 — liquid enough for spread fills
+  // Entry gated by: oil trend + VIX context + score 75+
+  {
+    ticker:    "XLE",
+    sector:    "Energy",
+    momentum:  "steady",
+    rsi:       50,
+    macd:      "neutral",
+    catalyst:  "Oil price + energy geopolitics — independent macro driver",
+    ivr:       30,
+    beta:      0.80,
+    earningsDate: null,
+    isIndex:   true,   // treated as index — same scoring path as SPY/QQQ
     isPrimary: false,
   },
 ];
@@ -4320,6 +4338,32 @@ function isGLDEntryAllowed(optionType, dxy, spyReturn5d, vix, gldRSI, gldPrice, 
   }
 }
 
+
+// ── XLE Entry Gate — energy sector, oil-price driven ────────────────────────
+// XLE puts: oil rising (energy names pulling back on valuation, not oil) = harder
+//           best put entries: XLE RSI overbought + oil not in confirmed uptrend
+// XLE calls: oil falling = energy sector under pressure = harder
+//            best call entries: XLE RSI oversold + oil stabilizing/recovering
+// Oil trend approximated from XLE's own 20MA slope (oil ETFs track closely)
+// Panel: gate is intentionally lighter than GLD/TLT — XLE uses standard scoring
+function isXLEEntryAllowed(optionType, xleRSI, xleMomentum, vix, xlePrice, xleMA20) {
+  // XLE puts: need RSI elevated (not deeply oversold — that's a call, not put, setup)
+  if (optionType === "put") {
+    if (xleRSI && xleRSI <= 35) return { allowed: false, reason: `XLE put blocked — RSI ${xleRSI?.toFixed(0)} deeply oversold (energy capitulation — wrong for puts)` };
+    // Oil confirmed uptrend (XLE above 20MA by >3%) — puts into strong uptrend discouraged
+    const xleAbove20MA = xleMA20 > 0 && xlePrice > xleMA20 * 1.03;
+    if (xleAbove20MA) return { allowed: false, reason: `XLE put blocked — price $${xlePrice?.toFixed(2)} >3% above 20MA $${xleMA20?.toFixed(2)} (oil uptrend — don't fade)` };
+    return { allowed: true };
+  } else {
+    // XLE calls: need RSI not deeply overbought (chasing energy run)
+    if (xleRSI && xleRSI >= 78) return { allowed: false, reason: `XLE call blocked — RSI ${xleRSI?.toFixed(0)} deeply overbought (energy extended — wrong for calls)` };
+    // Oil confirmed downtrend (XLE >3% below 20MA) — calls into strong downtrend discouraged
+    const xleBelow20MA = xleMA20 > 0 && xlePrice < xleMA20 * 0.97;
+    if (xleBelow20MA) return { allowed: false, reason: `XLE call blocked — price $${xlePrice?.toFixed(2)} >3% below 20MA $${xleMA20?.toFixed(2)} (oil downtrend — don't catch falling knife)` };
+    return { allowed: true };
+  }
+}
+
 // ── TLT Entry Gate — bonds rally when equities fall ────────────────────────
 // TLT calls: when SPY is below its 50MA (equity weakness thesis)
 // TLT puts:  when SPY recovering strongly above 50MA (rates rising = bonds fall)
@@ -4562,7 +4606,7 @@ async function getRealOptionsContract(ticker, price, optionType, score, vix, ear
       // Liquidity (15%) — OI as proxy, unknown OI gets neutral score
       // SPY/QQQ index instruments: always liquid regardless of single-strike OI
       // Monthly expirations have lower OI per strike but the market is deep
-      const isIndexTicker = ["SPY","QQQ","GLD","TLT","DIA"].includes(ticker);
+      const isIndexTicker = ["SPY","QQQ","GLD","TLT","XLE","DIA"].includes(ticker);
       const liquidScore  = isIndexTicker && contractDTE > 14 ? 0.8  // index monthly = liquid
                          : oi === 0 ? 0.5                    // unknown = neutral
                          : oi < 10  ? 0.02                   // essentially no market
@@ -9099,6 +9143,19 @@ async function runScan() {
         if (!tltCallGate.allowed) { callSetup.score = 0; logEvent("filter", tltCallGate.reason); }
         if (!tltPutGate.allowed)  { putSetup.score  = 0; logEvent("filter", tltPutGate.reason);  }
       }
+
+      // ── XLE entry gate — oil trend + RSI extremes ────────────────────────────
+      if (stock.ticker === "XLE") {
+        const xleMA20Live = (state._xleBars && state._xleBars.length >= 20)
+          ? state._xleBars.slice(-20).reduce((s,b) => s + b.c, 0) / 20
+          : 0;
+        const xleCallGate = isXLEEntryAllowed("call", liveStock.rsi, liveStock.momentum, state.vix, liveStock.price || 0, xleMA20Live);
+        const xlePutGate  = isXLEEntryAllowed("put",  liveStock.rsi, liveStock.momentum, state.vix, liveStock.price || 0, xleMA20Live);
+        if (!xleCallGate.allowed) { callSetup.score = 0; logEvent("filter", xleCallGate.reason); }
+        if (!xlePutGate.allowed)  { putSetup.score  = 0; logEvent("filter", xlePutGate.reason);  }
+        // XLE is NOT correlated with SPY/QQQ group — independent oil driver
+        // Do not suppress based on SPY/QQQ positions
+      }
     } else {
       // Individual stocks: use scorePutSetup/scoreCallSetup
       // scoreSetup removed — scoreIndexSetup handles SPY/QQQ, scorePutSetup handles individual stocks
@@ -10109,7 +10166,7 @@ async function sendMorningBriefing() {
     // ── Footer ────────────────────────────────────────────────────────
     const footer = `
       <div style="border-top:3px double #333;margin-top:16px;padding-top:8px;text-align:center;font-size:9px;color:#999;letter-spacing:1px">
-        ARGO V2.75 · Entry window 9:30am–3:45pm ET · SPY/QQQ primary · Monthly options
+        ARGO V2.80 · Entry window 9:30am–3:45pm ET · SPY/QQQ primary · Monthly options
       </div>`;
 
     // ── Assemble ──────────────────────────────────────────────────────
@@ -10664,7 +10721,7 @@ async function premarketAssessment() {
             <em>These are recommendations only. ARGO-V2.5 will manage exits automatically at open.</em>
           </div>
           <div style="border-top:3px double #333;margin-top:12px;padding-top:8px;text-align:center;font-size:9px;color:#999;letter-spacing:1px">
-            ARGO V2.75 · Market opens in ~45 minutes · Entry window 9:30am ET
+            ARGO V2.80 · Market opens in ~45 minutes · Entry window 9:30am ET
           </div>
         </div>`
       );
@@ -11650,7 +11707,7 @@ process.on("unhandledRejection", (reason, promise) => {
 // Boot sequence - load state from Redis then start server
 initState().then(() => {
   app.listen(PORT, () => {
-    console.log(`ARGO V2.75 running on port ${PORT}`);
+    console.log(`ARGO V2.80 running on port ${PORT}`);
     console.log(`Alpaca key:  ${ALPACA_KEY?"SET":"NOT SET"}`);
     console.log(`Gmail:       ${GMAIL_USER||"NOT SET"}`);
     console.log(`Resend:      ${RESEND_API_KEY?"SET ✅":"NOT SET — email disabled"}`);
@@ -11666,7 +11723,7 @@ initState().then(() => {
 });
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// ARGO V2.75 — BACKTESTING ENGINE
+// ARGO V2.80 — BACKTESTING ENGINE
 // Walk-forward simulation using Alpaca historical daily bars
 // Replays ARGO's scoring logic against historical data without real orders
 // QS-W2/GL-1: Addresses the out-of-sample validation gap identified by panel
@@ -11821,7 +11878,7 @@ function simulateOptionPnL(entryPrice, optionType, holdDays, outcome, ticker = "
   return Math.max(-0.95, Math.min(2.0, pnlPct)); // cap at -95% to +200%
 }
 
-// ── V2.75 Spread P&L Simulator ────────────────────────────────────────────
+// ── V2.80 Spread P&L Simulator ────────────────────────────────────────────
 // Debit spread: buy ATM, sell OTM — capped loss (net debit) and capped profit (width - debit)
 // Credit spread: sell OTM, buy further OTM — capped profit (net credit) and capped loss (width - credit)
 // This is fundamentally different from single-leg option P&L.
@@ -11884,7 +11941,7 @@ function simulateSpreadPnL(netDebit, spreadWidth, optionType, tradeType, holdDay
   return Math.max(-(maxLoss / netDebit), Math.min(maxProfit / netDebit, netPnL / netDebit));
 }
 
-// ── V2.75 Regime B Scoring ───────────────────────────────────────────────
+// ── V2.80 Regime B Scoring ───────────────────────────────────────────────
 // Adds regime classification to backtest scoring — mirrors live ARGO's regime logic.
 // Regime A (bull): SMA20 > SMA50, price > SMA20, positive momentum → calls favored
 // Regime B (bear): price < SMA50, SMA20 < SMA50, negative momentum → puts on bounces
@@ -11937,8 +11994,8 @@ async function runBacktest(config) {
     capital       = 10000,
     putOnly       = false,   // puts-only mode — blocks all call entries
     callSizeMult  = 1.0,     // asymmetric sizing: calls at reduced fraction (e.g. 0.5 = half size)
-    useSpread     = true,    // V2.75: simulate spread P&L (capped r/r) not naked option
-    useRegimeB    = true,    // V2.75: apply regime classification to scoring and trade routing
+    useSpread     = true,    // V2.80: simulate spread P&L (capped r/r) not naked option
+    useRegimeB    = true,    // V2.80: apply regime classification to scoring and trade routing
     spreadWidth   = null,    // null = VIX-scaled auto (10/15/20), or fixed dollar width
   } = config;
 
@@ -12071,7 +12128,7 @@ async function runBacktest(config) {
     let score   = entryScore;
     const reasons = entryReasons;
 
-    // ── V2.75: Regime classification — mirrors live ARGO regime B logic ──────
+    // ── V2.80: Regime classification — mirrors live ARGO regime B logic ──────
     const regime = useRegimeB ? backtestClassifyRegime(bars, i, vixEst) : null;
     if (regime && useRegimeB) {
       // Regime B: puts on bounces — bonus when entering on a relief bounce
@@ -12123,6 +12180,19 @@ async function runBacktest(config) {
       if (!tltGate.allowed) { gateSkips.tltSpy50++; continue; }
     }
 
+    // XLE gate — oil trend via 20MA, RSI extremes
+    if (ticker === "XLE") {
+      const xleMA20bt = bars.length >= 20
+        ? bars.slice(Math.max(0,i-19), i+1).reduce((s,b) => s + b.c, 0) / Math.min(20, i+1)
+        : 0;
+      const xleGate = isXLEEntryAllowed(entryType, btRSI, null, vixEst, price, xleMA20bt);
+      if (!xleGate.allowed) {
+        if (!gateSkips["xleOilTrend"]) gateSkips["xleOilTrend"] = 0;
+        gateSkips["xleOilTrend"]++;
+        continue;
+      }
+    }
+
     // ── 200MA regime filter — mirrors live ARGO behavior ───────────────────
     // When SPY is below its 200MA: block calls entirely, require 80+ for puts
     // Uses the same spy200MAbt computed above — no duplicate computation
@@ -12148,7 +12218,7 @@ async function runBacktest(config) {
     const minPrem = Math.max(0.10, price * 0.003);
     if (entryPrem < minPrem) continue; // too cheap to trade
 
-    // V2.75 spread parameters — net debit ≈35% of spread width (stays within 40% r/r rule)
+    // V2.80 spread parameters — net debit ≈35% of spread width (stays within 40% r/r rule)
     const btSpreadWidth  = spreadWidth || (vixEst >= 35 ? 20 : vixEst >= 25 ? 15 : 10);
     const btNetDebit     = useSpread ? parseFloat((btSpreadWidth * 0.33).toFixed(2)) : entryPrem;
     const isRegimeCCredit = regime && regime.regimeClass === "C";
@@ -12460,8 +12530,8 @@ app.post("/api/backtest", async (req, res) => {
       maxPositions:  parseInt(maxPositions),
       putOnly:       Boolean(putOnly),        // puts-only mode
       callSizeMult:  parseFloat(callSizeMult), // asymmetric call sizing
-      useSpread:     req.body.useSpread !== false,  // V2.75: default true — spread P&L simulation
-      useRegimeB:    req.body.useRegimeB !== false, // V2.75: default true — regime classification
+      useSpread:     req.body.useSpread !== false,  // V2.80: default true — spread P&L simulation
+      useRegimeB:    req.body.useRegimeB !== false, // V2.80: default true — regime classification
       spreadWidth:   req.body.spreadWidth ? parseFloat(req.body.spreadWidth) : null,
     });
 
