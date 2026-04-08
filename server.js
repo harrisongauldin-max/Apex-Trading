@@ -12150,15 +12150,46 @@ async function runBacktest(config) {
     // ── V2.80: Regime classification — mirrors live ARGO regime B logic ──────
     const regime = useRegimeB ? backtestClassifyRegime(bars, i, vixEst) : null;
     if (regime && useRegimeB) {
-      // Regime B: puts on bounces — bonus when entering on a relief bounce
-      // backtestScoreSignal's agent sim already handles Regime A/B penalties
-      // This block only ADDS regime-specific signals not in the base scorer
+      // ── ENTRY BIAS GATE — enforced as hard filter, not just score modifier ──
+      // Live ARGO's entryBias field gates entries: puts_on_bounces means
+      // ONLY enter puts when price has bounced (RSI 45-65, short-term recovery).
+      // Entering puts into a fresh crash (RSI < 40) or after an exhausted bounce
+      // (RSI > 68) is the wrong timing — these are the entries that stop out fast.
+      // This is the single most important missing feature from the prior backtest.
+      if (regime.regimeClass === "B" || regime.regimeClass === "C") {
+        if (entryType === "put" && !regime.isPutsOnBounces) {
+          // Not a valid bounce entry — skip
+          // Allow exception: RSI >= 68 (genuinely overbought on bounce = valid put)
+          const rsiOverbought = btRSI >= 68;
+          if (!rsiOverbought) {
+            if (!gateSkips["bounceGate"]) gateSkips["bounceGate"] = 0;
+            gateSkips["bounceGate"]++;
+            continue;
+          }
+        }
+      }
+      if (regime.regimeClass === "A") {
+        if (entryType === "call") {
+          // Regime A calls_on_dips: only enter on RSI pullbacks, not chasing momentum
+          // Valid call entry: RSI <= 42 (genuine dip) OR RSI 43-58 in established bull
+          // Invalid: RSI > 68 (overbought, chasing) or RSI 59-67 (neither dip nor oversold)
+          const rsiDip        = btRSI <= 42;
+          const rsiHealthyDip = btRSI >= 43 && btRSI <= 58;
+          const isValidCallEntry = rsiDip || rsiHealthyDip;
+          if (!isValidCallEntry) {
+            if (!gateSkips["dipGate"]) gateSkips["dipGate"] = 0;
+            gateSkips["dipGate"]++;
+            continue;
+          }
+        }
+      }
+
+      // Regime B bounce bonus — kept for scoring but no longer the only gate
       if (regime.regimeClass === "B" && entryType === "put" && regime.isPutsOnBounces) {
         score = Math.min(100, score + 8);
         reasons.push(`~Regime B bounce entry (+8)`);
       }
-      // Regime B: calls only allowed as MR (RSI < 40) — base scorer partially handles this
-      // via agent sim (-20 for calls in bear regime), but add a top-up for high RSI calls
+      // Regime B: calls only allowed as MR (RSI < 40)
       if (regime.regimeClass === "B" && entryType === "call" && btRSI > 55) {
         score = Math.max(0, score - 10);
         reasons.push(`~Regime B — calls need RSI <55 (-10)`);
@@ -12404,6 +12435,8 @@ async function runBacktest(config) {
   // Ensure 200MA gate counters exist even if never triggered
   if (!gateSkips["200maCall"])   gateSkips["200maCall"]   = 0;
   if (!gateSkips["200maPutMin"]) gateSkips["200maPutMin"] = 0;
+  if (!gateSkips["bounceGate"])  gateSkips["bounceGate"]  = 0;
+  if (!gateSkips["dipGate"])     gateSkips["dipGate"]     = 0;
   const totalGateSkips  = Object.values(gateSkips).reduce((s,v) => s+v, 0);
   const minScore_used   = config.minScore || 70;
 
