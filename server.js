@@ -9417,6 +9417,21 @@ async function runScan() {
       // Only credit spread entries allowed — still score for credit
       putSetup.tradeType = "credit";
     }
+
+    // ── Persist scores for dashboard watchlist ticker display ─────────────
+    if (!state._lastScanScores) state._lastScanScores = {};
+    state._lastScanScores[stock.ticker] = {
+      call:      callScore,
+      put:       putScore,
+      best:      Math.max(callScore, putScore),
+      direction: putScore >= callScore ? "put" : "call",
+      rsi:       signals.rsi,
+      macd:      signals.macd,
+      momentum:  signals.momentum,
+      price:     price,
+      vwap:      signals.intradayVWAP || 0,
+      updatedAt: Date.now(),
+    };
     // In defensive mode - zero out call scores
     if (macro.mode === "defensive") callScore = 0;
 
@@ -11008,6 +11023,8 @@ app.get("/api/state", async (req, res) => {
     zweigThrust:        state._zweigThrust || null,
     skew:               state._skew || null,
     aaii:               state._aaii || null,
+    lastScanScores:     state._lastScanScores || {},
+    watchlist:          WATCHLIST.map(w => ({ ticker: w.ticker, sector: w.sector, beta: w.beta, isPrimary: w.isPrimary, catalyst: w.catalyst })),
   });
 });
 
