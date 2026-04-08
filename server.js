@@ -642,6 +642,34 @@ async function initState() {
         }
       }
     } catch(e) { console.log("[STARTUP] Could not cancel open orders:", e.message); }
+
+    // ── Force-close Alpaca positions for tickers not in active watchlist ──────
+    // Catches stale positions from removed instruments (IWM, old individual stocks)
+    // that can't be managed by ARGO and cause reconciliation loops
+    try {
+      const activeTickers = new Set([
+        ...WATCHLIST.map(w => w.ticker),
+        ...(INDIVIDUAL_STOCKS_ENABLED ? INDIVIDUAL_STOCK_WATCHLIST.map(w => w.ticker) : []),
+      ]);
+      const allAlpacaPos = await alpacaGet("/positions");
+      if (Array.isArray(allAlpacaPos)) {
+        for (const alpPos of allAlpacaPos) {
+          // Only check options positions (OCC symbol format)
+          if (!/^[A-Z]+\d{6}[CP]\d{8}$/.test(alpPos.symbol)) continue;
+          const underlyingTicker = alpPos.symbol.match(/^([A-Z]+)\d{6}[CP]/)?.[1];
+          if (underlyingTicker && !activeTickers.has(underlyingTicker)) {
+            console.log(`[STARTUP] Closing stale position for removed ticker ${underlyingTicker} (${alpPos.symbol})`);
+            const qty  = Math.abs(parseInt(alpPos.qty || 1));
+            const side = parseInt(alpPos.qty) > 0 ? "sell" : "buy";
+            const intent = parseInt(alpPos.qty) > 0 ? "sell_to_close" : "buy_to_close";
+            await alpacaPost("/orders", {
+              symbol: alpPos.symbol, qty, side, type: "market",
+              time_in_force: "day", position_intent: intent,
+            }).catch(e => console.log(`[STARTUP] Could not close ${alpPos.symbol}: ${e.message}`));
+          }
+        }
+      }
+    } catch(e) { console.log("[STARTUP] Could not clean stale positions:", e.message); }
   }
   // Clear any pending order state from previous session
   state._pendingOrder = null;
@@ -703,8 +731,21 @@ async function runReconciliation() {
     }
 
     // ── Orphan detection — Alpaca has position, ARGO doesn't ─────────────
+    // Build set of active watchlist tickers — only reconstruct orphans for these
+    // Prevents removed tickers (IWM, old individual stocks) from being resurrected on restart
+    const activeTickers = new Set([
+      ...WATCHLIST.map(w => w.ticker),
+      ...(INDIVIDUAL_STOCKS_ENABLED ? INDIVIDUAL_STOCK_WATCHLIST.map(w => w.ticker) : []),
+    ]);
+
     const orphanedAlpaca = alpacaPositions.filter(alpPos => {
       if (!/^[A-Z]+\d{6}[CP]\d{8}$/.test(alpPos.symbol)) return false;
+      // Extract underlying ticker from OCC symbol (letters before the 6-digit date)
+      const underlyingTicker = alpPos.symbol.match(/^([A-Z]+)\d{6}[CP]/)?.[1];
+      if (underlyingTicker && !activeTickers.has(underlyingTicker)) {
+        logEvent("warn", `[RECONCILE] Skipping orphan for removed ticker ${underlyingTicker} (${alpPos.symbol}) — not in active watchlist`);
+        return false;
+      }
       return !state.positions.find(p =>
         p.contractSymbol === alpPos.symbol ||
         p.buySymbol      === alpPos.symbol ||
