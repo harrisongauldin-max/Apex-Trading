@@ -3340,7 +3340,14 @@ Analyze and return your JSON. Use tools only if you need data not shown above.`;
     return null;
   }
   try {
-    const parsed = JSON.parse(raw);
+    // Strip extended thinking tags — model may prepend <thinking>...</thinking> before JSON
+    let cleanRaw = raw || "";
+    if (cleanRaw.includes("<thinking>")) {
+      cleanRaw = cleanRaw.replace(/<thinking>[\s\S]*?<\/thinking>/g, "").trim();
+      logEvent("warn", `[AGENT] Stripped <thinking> block — model outputting chain-of-thought before JSON`);
+    }
+    cleanRaw = cleanRaw.replace(/^```(?:json)?\n?/m, "").replace(/\n?```$/m, "").trim();
+    const parsed = JSON.parse(cleanRaw);
     // Validate required fields
     if (!parsed.signal || parsed.modifier === undefined) {
       state._agentHealth.parseErrors++;
@@ -3387,6 +3394,17 @@ Analyze and return your JSON. Use tools only if you need data not shown above.`;
     logEvent("warn", `[AGENT HEALTH] JSON parse exception: ${e.message} | Raw: ${raw?.slice(0,60)}`);
     return null;
   }
+}
+
+
+// Strip model chain-of-thought and markdown fences before JSON parsing
+function stripThinking(raw) {
+  if (!raw) return "";
+  let clean = raw;
+  if (clean.includes("<thinking>")) {
+    clean = clean.replace(/<thinking>[\s\S]*?<\/thinking>/g, "").trim();
+  }
+  return clean.replace(/^```(?:json)?\n?/m, "").replace(/\n?```$/m, "").trim();
 }
 
 // ── Live rescore agent ────────────────────────────────────────────────────
@@ -3509,7 +3527,7 @@ Does the thesis still hold? Score and recommend.`;
   const raw = await callClaudeAgent(systemPrompt, userPrompt, 600, true, true, 45000); // 45s — tool use needs headroom
   if (!raw) return null;
   try {
-    const parsed = JSON.parse(raw);
+    const parsed = JSON.parse(stripThinking(raw));
     // Server-side safety guards — never trust agent alone
     if (isProfit && parsed.recommendation === "EXIT") {
       parsed.recommendation = "WATCH";
@@ -9064,9 +9082,10 @@ async function runScan() {
         const gldPutGate  = isGLDEntryAllowed("put",  dxy5d, spy5dReturn, state.vix, liveStock.rsi, liveStock.price || 0, gldMA20Live);
         if (!gldCallGate.allowed) { callSetup.score = 0; logEvent("filter", gldCallGate.reason); }
         if (!gldPutGate.allowed)  { putSetup.score  = 0; logEvent("filter", gldPutGate.reason);  }
-        // GLD min score 80 (panel consensus — higher bar for hedge instrument)
-        if (callSetup.score > 0 && callSetup.score < 80) { callSetup.score = 0; logEvent("filter", `GLD call score ${callSetup.score} below 80 minimum — hedge instrument requires high conviction`); }
-        if (putSetup.score > 0  && putSetup.score  < 80) { putSetup.score  = 0; logEvent("filter", `GLD put score ${putSetup.score} below 80 minimum`); }
+        // GLD min score 75 (panel decision: 80 was triple-locking with DXY + RSI gates)
+        // Lowered to 75 — consistent with other instruments. Gates still require RSI >68 for puts.
+        if (callSetup.score > 0 && callSetup.score < 75) { callSetup.score = 0; logEvent("filter", `GLD call score ${callSetup.score} below 75 minimum — hedge instrument requires high conviction`); }
+        if (putSetup.score > 0  && putSetup.score  < 75) { putSetup.score  = 0; logEvent("filter", `GLD put score ${putSetup.score} below 75 minimum`); }
       }
 
       // ── TLT entry gate — SPY 50MA + TLT own signals ────────────────────────
@@ -12089,8 +12108,8 @@ async function runBacktest(config) {
         else gateSkips.gldPutDxy++;
         continue;
       }
-      // GLD min score 80
-      if (score < 80) continue;
+      // GLD min score 75 (lowered from 80 — panel decision)
+      if (score < 75) continue;
     }
     // Compute SPY 200MA once — used by both TLT gate and 200MA regime filter
     // Need full 200-bar history; if insufficient, use available bars (rolling)
