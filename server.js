@@ -12025,6 +12025,11 @@ async function runBacktest(config) {
     // GLD RSI at this bar for put gate
     const btRSI = calcRSI(bars.slice(0, i + 1));
 
+    // vixEst — needed for regime classification AND gate section below
+    // Compute early so both can use it without duplication
+    const atrEarlyPre = calcATR(bars.slice(Math.max(0, i-14), i+1), 14) || price * 0.01;
+    const vixEst      = Math.min(50, Math.max(15, (atrEarlyPre / price) * 100 * 16));
+
     // "both" mode: score both directions, enter the better one
     let entryType = optionType;
     let entryScore, entryReasons;
@@ -12048,39 +12053,27 @@ async function runBacktest(config) {
     const reasons = entryReasons;
 
     // ── V2.75: Regime classification — mirrors live ARGO regime B logic ──────
-    // Applies regime-aware score adjustments not captured in backtestScoreSignal
     const regime = useRegimeB ? backtestClassifyRegime(bars, i, vixEst) : null;
     if (regime && useRegimeB) {
-      // Regime B: puts on bounces — bonus for entering on bounce in bear regime
+      // Regime B: puts on bounces — bonus when entering on a relief bounce
+      // backtestScoreSignal's agent sim already handles Regime A/B penalties
+      // This block only ADDS regime-specific signals not in the base scorer
       if (regime.regimeClass === "B" && entryType === "put" && regime.isPutsOnBounces) {
-        score = Math.min(100, score + 8); // entry bias bonus
+        score = Math.min(100, score + 8);
         reasons.push(`~Regime B bounce entry (+8)`);
       }
-      // Regime A: wrong for puts
-      if (regime.regimeClass === "A" && entryType === "put") {
-        score = Math.max(0, score - 15);
-        reasons.push(`~Regime A — wrong for puts (-15)`);
+      // Regime B: calls only allowed as MR (RSI < 40) — base scorer partially handles this
+      // via agent sim (-20 for calls in bear regime), but add a top-up for high RSI calls
+      if (regime.regimeClass === "B" && entryType === "call" && btRSI > 55) {
+        score = Math.max(0, score - 10);
+        reasons.push(`~Regime B — calls need RSI <55 (-10)`);
       }
-      // Regime B: wrong for calls (unless MR call on extreme oversold)
-      const btRSICheck = calcRSI(bars.slice(0, i + 1));
-      if (regime.regimeClass === "B" && entryType === "call" && btRSICheck > 40) {
-        score = Math.max(0, score - 20);
-        reasons.push(`~Regime B — calls blocked except MR (-20)`);
-      }
-      // Regime C: only credit spreads — block all debit in crisis
-      if (regime.regimeClass === "C" && entryType === "put" && useSpread) {
-        // Allow as credit put spread — score penalty for entering at crisis bottom
-        score = Math.max(0, score - 5);
-        reasons.push(`~Regime C — credit put spread mode (-5)`);
-      }
-      if (score < minScore) continue; // regime adjustment knocked it below threshold
+      if (score < minScore) continue;
     }
     if (btSpiralBlocked[entryType]) { spiralBlockCount++; continue; }
 
     // ── Phase 1: Apply instrument-specific entry gates ────────────────────
-    // vixEst needed here for GLD VIX gate — compute early from ATR
-    const atrEarly  = calcATR(bars.slice(Math.max(0, i-14), i+1), 14) || price * 0.01;
-    const vixEst    = Math.min(50, Math.max(15, (atrEarly / price) * 100 * 16));
+    // vixEst already computed above (before regime classification)
 
     if (ticker === "GLD") {
       // Compute GLD 20MA for backtest gate
