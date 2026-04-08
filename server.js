@@ -645,22 +645,21 @@ async function initState() {
 
     // ── Force-close Alpaca positions for tickers not in active watchlist ──────
     // Catches stale positions from removed instruments (IWM, old individual stocks)
-    // that can't be managed by ARGO and cause reconciliation loops
+    // that can't be managed by ARGO and cause reconciliation loops every restart
     try {
-      const activeTickers = new Set([
+      const startupActiveTickers = new Set([
         ...WATCHLIST.map(w => w.ticker),
         ...(INDIVIDUAL_STOCKS_ENABLED ? INDIVIDUAL_STOCK_WATCHLIST.map(w => w.ticker) : []),
       ]);
       const allAlpacaPos = await alpacaGet("/positions");
       if (Array.isArray(allAlpacaPos)) {
         for (const alpPos of allAlpacaPos) {
-          // Only check options positions (OCC symbol format)
           if (!/^[A-Z]+\d{6}[CP]\d{8}$/.test(alpPos.symbol)) continue;
           const underlyingTicker = alpPos.symbol.match(/^([A-Z]+)\d{6}[CP]/)?.[1];
-          if (underlyingTicker && !activeTickers.has(underlyingTicker)) {
+          if (underlyingTicker && !startupActiveTickers.has(underlyingTicker)) {
             console.log(`[STARTUP] Closing stale position for removed ticker ${underlyingTicker} (${alpPos.symbol})`);
-            const qty  = Math.abs(parseInt(alpPos.qty || 1));
-            const side = parseInt(alpPos.qty) > 0 ? "sell" : "buy";
+            const qty    = Math.abs(parseInt(alpPos.qty || 1));
+            const side   = parseInt(alpPos.qty) > 0 ? "sell" : "buy";
             const intent = parseInt(alpPos.qty) > 0 ? "sell_to_close" : "buy_to_close";
             await alpacaPost("/orders", {
               symbol: alpPos.symbol, qty, side, type: "market",
@@ -673,6 +672,43 @@ async function initState() {
   }
   // Clear any pending order state from previous session
   state._pendingOrder = null;
+
+  // ── SEED IVR ROLLING WINDOW from VIXY historical bars ───────────────────
+  // On cold start (fresh account, Redis cleared, or new deployment), _vixRolling
+  // has 0-5 readings all near today's VIX, making the range [31.0-31.5] instead
+  // of a real 252-day range. IVR then shows 8-15 even at VIX 31, blocking entries.
+  // Fix: if we have fewer than 30 readings, seed from VIXY 1-year daily bars.
+  if (!state._vixRolling || state._vixRolling.length < 30) {
+    try {
+      console.log("[IVR SEED] Rolling window thin — seeding from VIXY 1-year history...");
+      const endDate   = new Date().toISOString().split("T")[0];
+      const startDate = new Date(Date.now() - 380 * 86400000).toISOString().split("T")[0];
+      const vixyBars  = await alpacaGet(`/stocks/VIXY/bars?timeframe=1Day&start=${startDate}&end=${endDate}&limit=260&feed=iex`, ALPACA_DATA);
+      if (vixyBars && vixyBars.bars && vixyBars.bars.length > 20) {
+        // VIXY ≈ VIX * 0.85 (VIXY is the ETF, tracks VIX futures with slight drag)
+        // Invert to approximate VIX: VIX ≈ VIXY_close / 0.85
+        const seedReadings = vixyBars.bars.map(b => parseFloat((b.c / 0.85).toFixed(2)));
+        state._vixRolling = seedReadings.slice(-252); // keep last 252
+        const vixMin = Math.min(...state._vixRolling);
+        const vixMax = Math.max(...state._vixRolling);
+        const currentVIX = state.vix || seedReadings[seedReadings.length - 1];
+        state._ivRank = vixMax > vixMin
+          ? parseFloat(((currentVIX - vixMin) / (vixMax - vixMin) * 100).toFixed(1))
+          : 50;
+        state._ivEnv  = state._ivRank >= 70 ? "high" : state._ivRank >= 50 ? "elevated" : state._ivRank >= 30 ? "normal" : "low";
+        console.log(`[IVR SEED] Seeded ${state._vixRolling.length} bars | VIX range: [${vixMin.toFixed(1)}-${vixMax.toFixed(1)}] | IVR: ${state._ivRank} (${state._ivEnv})`);
+        markDirty();
+      } else {
+        console.log("[IVR SEED] Could not fetch VIXY bars — using default IVR 50");
+        state._ivRank = 50;
+        state._ivEnv  = "elevated";
+      }
+    } catch(e) {
+      console.log("[IVR SEED] Seed failed:", e.message, "— using default IVR 50");
+      state._ivRank = 50;
+      state._ivEnv  = "elevated";
+    }
+  }
 
   // ── POSITION RECONCILIATION — runs on startup and every 5 minutes ────────
   await runReconciliation();
@@ -740,7 +776,7 @@ async function runReconciliation() {
 
     const orphanedAlpaca = alpacaPositions.filter(alpPos => {
       if (!/^[A-Z]+\d{6}[CP]\d{8}$/.test(alpPos.symbol)) return false;
-      // Extract underlying ticker from OCC symbol (letters before the 6-digit date)
+      // Extract underlying ticker from OCC symbol and check against active watchlist
       const underlyingTicker = alpPos.symbol.match(/^([A-Z]+)\d{6}[CP]/)?.[1];
       if (underlyingTicker && !activeTickers.has(underlyingTicker)) {
         logEvent("warn", `[RECONCILE] Skipping orphan for removed ticker ${underlyingTicker} (${alpPos.symbol}) — not in active watchlist`);
@@ -7334,15 +7370,40 @@ async function runScan() {
     }
 
     // Strongly bullish macro — close losing puts (thesis broken by macro tailwind)
-    if (macro.mode === "aggressive" && !dryRunMode) {
+    // ── AGENT FRESHNESS GATE — mirrors defensive suppression ──────────────────
+    // The defensive close correctly requires agent confirmation when stale.
+    // The bullish close must do the same — keyword "ceasefire" alone is not enough
+    // to close puts when VIX is 30+ and agent is 15+ minutes stale.
+    // Rule: keyword-only "aggressive" signal cannot fire bullish close.
+    //       Agent must either (a) confirm bullish, OR (b) be fresh and not bearish.
+    const bullishAgentSignal  = (state._agentMacro || {}).signal || "neutral";
+    const bullishAgentAge     = state._agentMacro && state._agentMacro.timestamp
+      ? (Date.now() - new Date(state._agentMacro.timestamp).getTime()) / 60000 : 999;
+    const bullishAgentFresh   = bullishAgentAge < 15; // 15 min — same window as stale warning
+    const agentConfirmsBullish = ["strongly bullish","bullish","mild bullish"].includes(bullishAgentSignal);
+    const agentContrasBullish  = ["strongly bearish","bearish","mild bearish"].includes(bullishAgentSignal);
+    const macroAuthority       = (marketContext.macro || {}).macroAuthority || "keyword_fallback";
+    const bullishCloseSuppressed =
+      macroAuthority === "keyword_fallback" &&   // keyword-only, agent not authoritative
+      !bullishAgentFresh &&                      // agent is stale
+      !agentConfirmsBullish;                     // agent hasn't said bullish
+    const bullishCloseAllowed =
+      !bullishCloseSuppressed &&
+      !(agentContrasBullish && bullishAgentFresh); // fresh bearish agent blocks keyword bullish close
+
+    if (macro.mode === "aggressive" && !dryRunMode && bullishCloseAllowed) {
       logEvent("macro", `BULLISH MACRO — ${macro.signal}: ${macro.triggers.slice(0,3).join(", ")} — closing losing puts`);
       for (const pos of [...state.positions]) {
         if (pos.optionType !== "put") continue;
         const curP = pos.currentPrice || pos.premium;
         const chg  = pos.premium > 0 ? (curP - pos.premium) / pos.premium : 0;
-        // Use contractSymbol to target exact position — multiple same-ticker puts possible
         if (chg < -0.05) await closePosition(pos.ticker, "macro-bullish", null, pos.contractSymbol || pos.buySymbol);
       }
+    } else if (macro.mode === "aggressive" && !dryRunMode && !bullishCloseAllowed) {
+      const suppressReason = bullishCloseSuppressed
+        ? `keyword-only signal + agent stale ${bullishAgentAge.toFixed(0)}min + no agent bullish confirmation`
+        : `agent ${bullishAgentSignal} (${bullishAgentAge.toFixed(0)}min) contradicts keyword bullish`;
+      logEvent("macro", `[BULLISH SUPPRESSED] Keyword "aggressive" signal suppressed — ${suppressReason} — keeping puts open`);
     }
     // Always compute streaks live from closedTrades — avoids stale Redis values
     const liveStreaks = getStreakAnalysis();
