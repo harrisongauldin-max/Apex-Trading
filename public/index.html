@@ -498,6 +498,8 @@ input[type=text]:focus{border-color:var(--blue)}
     <button class="btn btn-red" onclick="resetMonth()">↺ RESET MONTH</button>
     <button class="btn" style="background:#1a1a40;border:1px solid #4444ff;color:#8888ff" onclick="resetCircuit()">⟳ RESET CIRCUIT</button>
     <button class="btn" style="background:#1a2a1a;border:1px solid #44ff44;color:#88ff88" onclick="resetPDT()">🔄 RESET PDT</button>
+    <button class="btn" style="background:#2a1a00;border:1px solid #ffaa00;color:#ffcc44" onclick="resetBaseline()">⚑ RESET BASELINE</button>
+    <button class="btn" style="background:#1a2a30;border:1px solid #00aacc;color:#00ccff" onclick="resetBaseline()" title="Resets profit-lock baseline to current Alpaca balance. Preserves all trade history.">📐 RESET BASELINE</button>
     <button class="btn" style="background:#401010;border:1px solid #ff4444;color:#ff8888" onclick="fullReset()">🗑 FULL RESET</button>
     <button class="btn" style="background:#7b0000;border:1px solid #ff0000" onclick="emergencyClose()">⚠ EMERGENCY CLOSE ALL</button>
     <button class="btn" style="background:#0a1f3a;border:1px solid #00c4ff;color:#00c4ff" onclick="downloadDayReport()">📊 DAY REPORT</button>
@@ -2313,6 +2315,19 @@ async function resetPDT() {
   await fetchState();
 }
 
+async function resetBaseline() {
+  if (!confirm('Reset profit-lock baseline to current Alpaca balance?\n\nThis clears the false profit-lock from old account sessions.\nTrade history, positions, and P&L are preserved.')) return;
+  try {
+    const res  = await fetch('/api/reset-baseline', { method: 'POST' });
+    const data = await res.json();
+    if (data.ok) {
+      alert(`Baseline reset to $${data.newBaseline?.toFixed(2)}\nProfit-lock cleared. ARGO will resume normal entries.`);
+      await fetchState();
+    } else {
+      alert('Reset failed: ' + (data.error || 'Unknown error'));
+    }
+  } catch(e) { alert('Reset failed: ' + e.message); }
+}
 async function resetCircuit() {
   if (!confirm('Reset circuit breaker? ARGO V2.75 will resume scanning and entering new trades.')) return;
   const resp = await fetch('/api/reset-circuit', {method:'POST'});
