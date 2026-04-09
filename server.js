@@ -1,5 +1,5 @@
 // -
-// ARGO V2.81 - Systematic SPY/QQQ Options Trading Agent
+// ARGO V2.82 - Systematic SPY/QQQ Options Trading Agent
 // Alpaca Paper Trading Edition
 // -
 const express    = require("express");
@@ -40,6 +40,9 @@ const STATE_FILE        = path.join(__dirname, "state.json");
 const REDIS_URL         = process.env.UPSTASH_REDIS_REST_URL  || "";
 const REDIS_TOKEN       = process.env.UPSTASH_REDIS_REST_TOKEN || "";
 const REDIS_KEY         = "spt1:state";
+const REDIS_SAVE_INTERVAL = 30 * 1000; // 30s minimum between Redis writes
+let lastRedisSave = 0;     // timestamp of last successful Redis save
+let stateDirty    = false; // true when state has unsaved changes
 
 // - Trading Constants -
 const MONTHLY_BUDGET      = 10000;
@@ -7997,7 +8000,25 @@ async function runScan() {
         logEvent("scan", `${pos.ticker} PDT EMERGENCY PROFIT +${(chg*100).toFixed(0)}% - exiting same-day (above 65% threshold)`);
         await closePosition(pos.ticker, "target"); continue;
       }
-      // Loss emergency - -30% to -35% is severe, worth burning a day trade
+      // Panel fix (V2.82): PDT overnight risk budget
+      // If position is down >20% AND it is after 2:30pm ET - close it even if it burns a day trade
+      // Research: compounding overnight loss on a -20% position in Regime B exceeds value of saved day trade
+      // Behavioral finance: PDT conservation is loss aversion - P&L must take priority at this loss level
+      const pdtRiskBudgetTriggered = chg <= -0.20 && etHourForPDT >= 14.5;
+      if (pdtRiskBudgetTriggered) {
+        logEvent("scan", `${pos.ticker} PDT OVERNIGHT RISK BUDGET - ${(chg*100).toFixed(0)}% after 2:30pm - closing to prevent compounding overnight loss (burning day trade)`);
+        await closePosition(pos.ticker, "overnight-risk"); continue;
+      }
+      // Panel fix (V2.82): Agent high-confidence EXIT overrides PDT hold when losing >15%
+      // The agent has live macro context - its EXIT signal carries real information
+      // PDT block should not be an absolute wall against a significant losing position
+      const agentSaysExit = pos._liveRescore?.recommendation === "EXIT" && pos._liveRescore?.confidence === "high";
+      const agentExitOverride = agentSaysExit && chg <= -0.15;
+      if (agentExitOverride) {
+        logEvent("scan", `${pos.ticker} PDT AGENT OVERRIDE - high confidence EXIT + ${(chg*100).toFixed(0)}% loss - closing despite PDT protection | ${pos._liveRescore?.reasoning || ""}`);
+        await closePosition(pos.ticker, "agent-exit"); continue;
+      }
+      // Loss emergency - -30% is severe, worth burning a day trade
       if (chg <= -PDT_LOSS_EXIT) {
         logEvent("scan", `${pos.ticker} PDT EMERGENCY LOSS ${(chg*100).toFixed(0)}% - exiting same-day (below -30% threshold)`);
         await closePosition(pos.ticker, "fast-stop"); continue;
@@ -8018,9 +8039,12 @@ async function runScan() {
     }
 
     // After-3pm hold mode (above $25k accounts still respect this)
+    // Panel fix (V2.82): threshold tightened from -25% to -15%
+    // Holding a -24% position overnight to save a day trade is loss aversion not risk management
+    // At -16% to -24% the thesis is in distress - overnight hold in Regime B compounds the loss
     const pdtHoldMode = openedToday && inFinalHour && !dryRunMode && !belowPDTLimit;
-    if (pdtHoldMode && chg > -0.25) {
-      logEvent("scan", `${pos.ticker} holding overnight (after 3pm, avoid day trade)`);
+    if (pdtHoldMode && chg > -0.15) {
+      logEvent("scan", `${pos.ticker} holding overnight (after 3pm, avoid day trade) | ${(chg*100).toFixed(0)}%`);
       pos.price = price; pos.currentPrice = curP;
       markDirty();
       continue;
@@ -8376,22 +8400,58 @@ async function runScan() {
     }
 
     // 11. OVERNIGHT RISK - high VIX, losing position into close
+    // Panel fix (V2.82): two-tier system - close worse positions earlier for better liquidity
+    // Tier 1 (3:00pm): severely losing positions (-20%+) - close while liquidity is healthy
+    // Tier 2 (3:30pm): moderately losing (-8%+) or short DTE (3 or less) - close before final spread widening
+    // Moved from 3:45pm to 3:30pm - execution algo: last 15min has 3-5x wider bid-ask on options
     const etHourNow = scanET.getHours() + scanET.getMinutes() / 60;
-    if (etHourNow >= 15.75 && state.vix >= 30) {
-      if (chg <= -0.10) {
-        logEvent("scan", `${pos.ticker} overnight-risk - losing ${(chg*100).toFixed(0)}% into close VIX ${state.vix}`);
+    // Tier 1: severe losses at 3pm - best liquidity window
+    if (etHourNow >= 15.0 && state.vix >= 25 && chg <= -0.20) {
+      logEvent("scan", `${pos.ticker} overnight-risk TIER1 - severely losing ${(chg*100).toFixed(0)}% at 3pm - closing at healthy liquidity | VIX ${state.vix}`);
+      await closePosition(pos.ticker, "overnight-risk"); continue;
+    }
+    // Tier 2: moderate losses or short DTE at 3:30pm
+    if (etHourNow >= 15.5 && state.vix >= 30) {
+      if (chg <= -0.08) {
+        logEvent("scan", `${pos.ticker} overnight-risk TIER2 - losing ${(chg*100).toFixed(0)}% into close VIX ${state.vix}`);
+        await closePosition(pos.ticker, "overnight-risk"); continue;
+      }
+      if (dte <= 3) {
+        logEvent("scan", `${pos.ticker} overnight-risk TIER2 - ${dte}DTE too short for overnight hold`);
         await closePosition(pos.ticker, "overnight-risk"); continue;
       }
       if (dte <= 7) {
-        logEvent("scan", `${pos.ticker} overnight-risk - ${dte}DTE too short for overnight hold`);
-        await closePosition(pos.ticker, "overnight-risk"); continue;
+        logEvent("scan", `${pos.ticker} overnight-risk TIER2 - ${dte}DTE elevated overnight theta risk - monitoring`);
       }
     }
 
     // Update current price on position so dashboard shows live data
     pos.price        = price;
     pos.currentPrice = curP;
-    logEvent("scan", `${pos.ticker} | chg:${(chg*100).toFixed(1)}% | cur:$${curP} | peak:$${pos.peakPremium.toFixed(2)} | DTE:${dte} | HOLD`);
+
+    // V2.82: Close-of-day range position check for hold decisions (Technical Analyst recommendation)
+    // After 3:30pm, log where the underlying closed relative to its daily range
+    // Weak close (bottom 25% of range) = sellers in control at close = overnight continuation lower more likely
+    // Strong close (top 25% of range) = buyers stepped in = overnight recovery more likely
+    if (etHourNow >= 15.5 && bars && bars.length >= 1) {
+      const todayBar = bars[bars.length - 1];
+      const dayHigh = todayBar.h || price;
+      const dayLow  = todayBar.l || price;
+      const dayRange = dayHigh - dayLow;
+      if (dayRange > 0) {
+        const closePosition = (price - dayLow) / dayRange;
+        const closeLabel = closePosition <= 0.25 ? "WEAK CLOSE - sellers in control" : closePosition >= 0.75 ? "STRONG CLOSE - buyers in control" : "neutral close";
+        if (closePosition <= 0.25 && chg < 0) {
+          logEvent("scan", `${pos.ticker} | chg:${(chg*100).toFixed(1)}% | cur:$${curP} | peak:$${pos.peakPremium.toFixed(2)} | DTE:${dte} | HOLD | ${closeLabel} (${(closePosition*100).toFixed(0)}th pctile of range) - elevated overnight risk`);
+        } else {
+          logEvent("scan", `${pos.ticker} | chg:${(chg*100).toFixed(1)}% | cur:$${curP} | peak:$${pos.peakPremium.toFixed(2)} | DTE:${dte} | HOLD | ${closeLabel}`);
+        }
+      } else {
+        logEvent("scan", `${pos.ticker} | chg:${(chg*100).toFixed(1)}% | cur:$${curP} | peak:$${pos.peakPremium.toFixed(2)} | DTE:${dte} | HOLD`);
+      }
+    } else {
+      logEvent("scan", `${pos.ticker} | chg:${(chg*100).toFixed(1)}% | cur:$${curP} | peak:$${pos.peakPremium.toFixed(2)} | DTE:${dte} | HOLD`);
+    }
     markDirty(); // will be flushed at end of scan, not every tick
     } catch(posErr) {
       logEvent("error", `Position scan error for ${pos?.ticker || "unknown"}: ${posErr.message}`);
@@ -9118,7 +9178,7 @@ async function runScan() {
       ...stock,
       price:         price,
       rsi:           signals.rsi,       // intraday RSI -- display/timing only
-      dailyRsi:      signals.dailyRsi,  // daily RSI -- scoring thresholds (V2.81)
+      dailyRsi:      (signals && typeof signals.dailyRsi === "number") ? signals.dailyRsi : (signals?.rsi || 50), // daily RSI -- scoring thresholds (V2.81), null-guarded
       macd:          signals.macd,
       momentum:      signals.momentum,  // now intraday momentum when available
       ivr:           signals.ivr,
@@ -9145,9 +9205,13 @@ async function runScan() {
       const todayStr = getETTime().toISOString().slice(0, 10);
       // Only add one reading per day
       if (rsiHist.length === 0 || rsiHist[rsiHist.length - 1]?.date !== todayStr) {
-        rsiHist.push({ date: todayStr, rsi: signals.dailyRsi });
-        if (rsiHist.length > 5) rsiHist.shift(); // keep last 5 days only
-        state._rsiHistory[stock.ticker] = rsiHist.map(r => r.rsi); // flatten to array for scoreIndexSetup
+        // V2.81 null guard: signals.dailyRsi can be undefined when bars are empty
+        const dailyRsiVal = (signals && typeof signals.dailyRsi === "number") ? signals.dailyRsi : null;
+        if (dailyRsiVal !== null) {
+          rsiHist.push({ date: todayStr, rsi: dailyRsiVal });
+          if (rsiHist.length > 5) rsiHist.shift(); // keep last 5 days only
+          state._rsiHistory[stock.ticker] = rsiHist.map(r => r.rsi); // flatten to array for scoreIndexSetup
+        }
       }
 
       // V2.81: Intraday oversold scan counter for MR stabilization gate
@@ -9161,16 +9225,30 @@ async function runScan() {
       }
     }
 
-    // Time of day adjustment - only penalize late entries when VIX elevated OR volume declining
-    // A strong high-volume breakout at 2:30PM is still worth trading
+    // Time of day adjustment - panel fix (V2.82)
+    // Entry window: normal entries close at 3:00pm, MR calls allowed until 3:30pm
+    // Score gate: replace 0.80x multiplier with flat min score (cleaner, no cliff effect)
+    //   VIX 25-30 after 2:30pm: min score 85
+    //   VIX 30+   after 2:30pm: min score 90
+    // IV expansion into close makes last-hour options more expensive in high-VIX environments
+    // Execution algo: spread partial fill risk rises significantly after 3:30pm
     const etHour      = scanET.getHours() + scanET.getMinutes() / 60;
-    const isLastHour  = etHour >= 15.0;
-    const isLateDay   = etHour >= 14.5;
+    const isLastHour  = etHour >= 15.0;   // after 3pm
+    const isLateDay   = etHour >= 14.5;   // after 2:30pm
     const volDecline  = todayVol < avgVol * 0.7;
 
-    let timeOfDayMult = 1.0;
-    if (isLastHour && (state.vix >= 25 || volDecline)) timeOfDayMult = 0.80;
-    else if (isLateDay && state.vix >= 30)              timeOfDayMult = 0.90;
+    // Panel fix: flat min score replaces 0.80x multiplier
+    // timeOfDayMult kept at 1.0 - score penalty is now applied via timeOfDayMinScore gate below
+    const timeOfDayMult = 1.0; // no longer used as multiplier - kept for compatibility
+    // Entry window gate: block new entries after 3pm (MR exception handled at execution)
+    // Normal entries: 3:00pm cutoff
+    // Mean reversion calls: 3:30pm cutoff (capitulation has genuine overnight edge)
+    const entryWindowClosed = etHour >= 15.0; // 3:00pm normal cutoff
+    // Afternoon min score gate - replaces 0.80x multiplier
+    let timeOfDayMinScore = MIN_SCORE; // default - no penalty
+    if (isLateDay && state.vix >= 30)        timeOfDayMinScore = 90; // VIX 30+ after 2:30pm - high bar
+    else if (isLateDay && state.vix >= 25)   timeOfDayMinScore = 85; // VIX 25-30 after 2:30pm - elevated bar
+    else if (isLastHour && volDecline)       timeOfDayMinScore = 85; // low volume last hour - elevated bar
 
     // - F7: Weekly trend filter -
     // Fetch cached weekly trend (60-min cache, no extra API call)
@@ -9325,13 +9403,8 @@ async function runScan() {
       putSetup.reasons.push(`Low volume selloff (-3)`);
     }
 
-    // Apply time of day multiplier
-    callSetup.score = Math.round(callSetup.score * timeOfDayMult);
-    putSetup.score  = Math.round(putSetup.score  * timeOfDayMult);
-    if (timeOfDayMult < 1.0) {
-      callSetup.reasons.push(`Time of day adj x${timeOfDayMult}`);
-      putSetup.reasons.push(`Time of day adj x${timeOfDayMult}`);
-    }
+    // V2.82: time of day multiplier replaced by flat min score gate (see timeOfDayMinScore above)
+    // Scores are no longer modified - the gate is applied in finalMinScore below
 
     // Unusual options activity boost - high vol/OI ratio means big money is moving
     // This uses today's options volume vs open interest on the selected contract
@@ -9710,9 +9783,22 @@ async function runScan() {
     const macdMinScore = macdContradicts ? 85 : effectiveMinScore;
     if (macdContradicts) logEvent("filter", `${liveStock.ticker} MACD ${macdSignal} contradicts ${optionType} - raising min score to 85`);
 
-    const finalMinScore = Math.max(effectiveMinScore, staggeredMinScore, macdMinScore);
+    // V2.82: entry window gate - block new entries after 3pm (MR exception below)
+    // Mean reversion calls (capitulation bounce) allowed until 3:30pm
+    const isMREntry = (callSetup.isMeanReversion || putSetup.isMeanReversion);
+    const mrWindowOpen = etHour < 15.5; // MR entries allowed until 3:30pm
+    if (entryWindowClosed && !dryRunMode) {
+      if (!isMREntry) {
+        logEvent("filter", `${stock.ticker} entry window closed (after 3pm) - normal entries blocked`);
+        continue;
+      } else if (!mrWindowOpen) {
+        logEvent("filter", `${stock.ticker} MR entry window closed (after 3:30pm) - all entries blocked`);
+        continue;
+      }
+    }
+    const finalMinScore = Math.max(effectiveMinScore, staggeredMinScore, macdMinScore, timeOfDayMinScore);
     if (bestScore < finalMinScore) {
-      const reason = sameTickerSameDir.length > 0 ? staggerReason : macdContradicts ? "MACD contradiction" : (etHourNow >= 13 ? "afternoon" : ddProtocol.level) + " protocol";
+      const reason = sameTickerSameDir.length > 0 ? staggerReason : macdContradicts ? "MACD contradiction" : timeOfDayMinScore > MIN_SCORE ? `afternoon VIX${state.vix?.toFixed(0)}` : (etHourNow >= 13 ? "afternoon" : ddProtocol.level) + " protocol";
       logEvent("filter", `${stock.ticker} call:${callSetup.score} put:${putSetup.score} - below ${finalMinScore} (${reason}) - skip`);
       continue;
     }
@@ -10440,7 +10526,7 @@ function buildEmailHTML(type) {
 ${type === "morning" ? `
 <div style="background:rgba(0,255,136,0.05);border:1px solid rgba(0,255,136,0.15);border-radius:8px;padding:14px">
   <h3 style="color:#00ff88;font-size:11px;margin:0 0 6px">TODAY'S OUTLOOK</h3>
-  <p style="font-size:12px;color:#cce8ff;margin:0">ARGO-V2.5 will scan every 10 seconds from 10:00 AM - 3:30 PM ET. VIX is currently ${state.vix} - ${state.vix<20?"normal conditions, full sizing":"reduced sizing active"}. ${state.positions.length} position${state.positions.length!==1?"s":""} currently open.</p>
+  <p style="font-size:12px;color:#cce8ff;margin:0">ARGO-V2.82 will scan every 10 seconds. New entries: 9:30AM-3:00PM ET (mean reversion to 3:30PM). Position management runs until 3:50PM. VIX is currently ${state.vix} - ${state.vix<20?"normal conditions, full sizing":"reduced sizing active"}. ${state.positions.length} position${state.positions.length!==1?"s":""} currently open.</p>
 </div>` : `
 <div style="background:rgba(0,196,255,0.05);border:1px solid rgba(0,196,255,0.15);border-radius:8px;padding:14px">
   <h3 style="color:#00c4ff;font-size:11px;margin:0 0 6px">END OF DAY SUMMARY</h3>
