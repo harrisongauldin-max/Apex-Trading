@@ -3103,8 +3103,8 @@ async function getMarketauxNews() {
 // ── Agent-powered macro analysis ─────────────────────────────────────────
 // Replaces keyword matching with genuine language understanding
 // Falls back to keyword system if agent unavailable
-let _agentMacroCache = { result: null, fetchedAt: 0 };
-const AGENT_MACRO_CACHE_MS = 3 * 60 * 1000; // 3 minutes — faster macro reaction with only 2 instruments
+let _agentMacroCache = { result: null, fetchedAt: 0, lastVIX: 0, lastSPY: 0, lastHeadlineHash: 0 };
+const AGENT_MACRO_CACHE_MS = 10 * 60 * 1000; // 10 minutes — macro regime doesn't shift every 3 min (was 3min, ~70% cost reduction)
 
 // ── Agent Day Plan — pre-market strategic assessment ─────────────────────
 // Runs at 6am, 7:30am, 8:30am ET before market opens
@@ -3236,15 +3236,36 @@ function applyExitUrgency(agentResult) {
 
 async function getAgentMacroAnalysis(headlines) {
   if (!ANTHROPIC_API_KEY || !headlines || headlines.length === 0) return null;
-  // Return cached result if fresh
+
+  // Simple headline hash — detect if news has actually changed
+  const headlineHash = headlines.slice(0, 8).join("").length; // cheap proxy for content change
+
+  // Return cached result if fresh AND inputs haven't changed meaningfully
   if (_agentMacroCache.result && Date.now() - _agentMacroCache.fetchedAt < AGENT_MACRO_CACHE_MS) {
     return _agentMacroCache.result;
   }
-  const systemPrompt = `You are the head macro strategist for ARGO-V2.5, a systematic SPY/QQQ options trading system. Return ONLY valid JSON — no markdown, no preamble.
 
-{"signal":"strongly bearish"|"bearish"|"mild bearish"|"neutral"|"mild bullish"|"bullish"|"strongly bullish","modifier":-20to20,"confidence":"high"|"medium"|"low","mode":"defensive"|"cautious"|"normal"|"aggressive","reasoning":"1 sentence","regime":"trending_bear"|"trending_bull"|"choppy"|"breakdown"|"recovery"|"neutral","regimeDuration":"intraday"|"1-3 days"|"3-7 days"|"1-2 weeks"|"multi-week","entryBias":"puts_on_bounces"|"calls_on_dips"|"neutral"|"avoid","tradeType":"spread"|"credit"|"naked"|"none","vixOutlook":"spiking"|"elevated_stable"|"mean_reverting"|"falling"|"unknown","keyLevels":{"spySupport":null,"spyResistance":null},"catalysts":[],"bearishTickers":[],"bullishTickers":[],"themes":[],"exitUrgency":"hold"|"monitor"|"trim"|"exit","positionSizeMult":0.25|0.5|0.75|1.0|1.25|1.5,"schemaVersion":2}
+  // OPT-2: Skip call if inputs haven't shifted enough to change the signal
+  // VIX within 1.0 point + SPY within 0.5% + same headlines = same answer
+  // Only applies when cache exists but is expired — avoids stale data on first call
+  const currentVIX = state.vix || 20;
+  const currentSPY = state._liveSPY || 0;
+  if (_agentMacroCache.result && _agentMacroCache.fetchedAt > 0) {
+    const vixDelta    = Math.abs(currentVIX - (_agentMacroCache.lastVIX || 0));
+    const spyDelta    = Math.abs(currentSPY - (_agentMacroCache.lastSPY || 0));
+    const sameNews    = headlineHash === (_agentMacroCache.lastHeadlineHash || 0);
+    if (vixDelta < 1.0 && spyDelta < 1.0 && sameNews) {
+      // Inputs unchanged — extend cache another 10 minutes, no API call needed
+      _agentMacroCache.fetchedAt = Date.now();
+      logEvent("scan", `[AGENT] Skipped — inputs unchanged (ΔVIX:${vixDelta.toFixed(1)} ΔSPY:${spyDelta.toFixed(2)} sameNews:${sameNews}) — reusing ${_agentMacroCache.result.signal}`);
+      return _agentMacroCache.result;
+    }
+  }
+  const systemPrompt = `You are the macro strategist for ARGO, a SPY/QQQ options trading system. Return ONLY valid JSON.
 
-Rules: regime=what SPY does next 3-10 days. entryBias: puts_on_bounces=bearish trend wait for relief; calls_on_dips=bullish wait for weakness. tradeType: spread=grinding trend, naked=sharp mean-reversion, none=unclear. vixOutlook: spiking=buy puts aggressively, falling=puts losing value. exitUrgency: hold=thesis intact, monitor=watch closely, trim=close half, exit=close all. positionSizeMult: 0.25=minimal, 1.0=normal, 1.5=high conviction. Focus on 3-10 day outlook not just today. schemaVersion always 2.`;
+Schema: {"signal":"strongly bearish"|"bearish"|"mild bearish"|"neutral"|"mild bullish"|"bullish"|"strongly bullish","modifier":-20to20,"confidence":"high"|"medium"|"low","mode":"defensive"|"cautious"|"normal"|"aggressive","reasoning":"1 sentence","regime":"trending_bear"|"trending_bull"|"choppy"|"breakdown"|"recovery"|"neutral","regimeDuration":"intraday"|"1-3 days"|"3-7 days"|"1-2 weeks"|"multi-week","entryBias":"puts_on_bounces"|"calls_on_dips"|"neutral"|"avoid","tradeType":"spread"|"credit"|"naked"|"none","vixOutlook":"spiking"|"elevated_stable"|"mean_reverting"|"falling"|"unknown","keyLevels":{"spySupport":null,"spyResistance":null},"catalysts":[],"themes":[],"exitUrgency":"hold"|"monitor"|"trim"|"exit","positionSizeMult":0.25|0.5|0.75|1.0|1.25|1.5,"schemaVersion":2}
+
+Focus on 3-10 day SPY outlook. puts_on_bounces=bearish trend. calls_on_dips=bullish trend. positionSizeMult 1.0=normal 0.25=minimal. schemaVersion always 2.`;
 
   // Pre-fetch market status so agent doesn't need to tool-call for it
   const mktStatus = await agentTool_getMarketStatus().catch(() => ({}));
@@ -3338,7 +3359,7 @@ Rules: regime=what SPY does next 3-10 days. entryBias: puts_on_bounces=bearish t
 - Open positions: ${(state.positions||[]).map(p => p.ticker + '(' + (p.optionType==='put'?'P':'C') + '@' + (p.chgPct !== undefined ? (p.chgPct*100).toFixed(0)+'%' : '--') + ')').join(', ') || 'none'}
 
 Headlines to analyze (newest first):
-${headlines.slice(0, 15).map((h, i) => (i+1) + '. ' + h).join('\n')}
+${headlines.slice(0, 8).map((h, i) => (i+1) + '. ' + h).join('\n')}
 
 Analyze and return your JSON. Use tools only if you need data not shown above.`;
 
@@ -3351,7 +3372,7 @@ Analyze and return your JSON. Use tools only if you need data not shown above.`;
   // Pre-injected: VIX, SPY, MAs, breadth, regime, IV rank, headlines, positions.
   // Tools kept on rescore/briefing where live per-ticker data adds real value.
   logEvent("scan", `[AGENT] Macro call — useTools:false (pre-injected data sufficient)`);
-  const raw = await callClaudeAgent(systemPrompt, userPrompt, 1200, false, true, 30000); // useTools=false — single round-trip
+  const raw = await callClaudeAgent(systemPrompt, userPrompt, 600, false, true, 30000); // useTools=false — single round-trip | OPT-4: 600 tokens sufficient for JSON response (was 1200)
   if (!raw) {
     state._agentHealth.timeouts++;
     logEvent("warn", `[AGENT HEALTH] Timeout/null — ${state._agentHealth.timeouts} timeouts of ${state._agentHealth.calls} calls`);
@@ -3375,7 +3396,7 @@ Analyze and return your JSON. Use tools only if you need data not shown above.`;
     state._agentHealth.successes++;
     state._agentHealth.lastSuccess = new Date().toISOString();
     const successRate = (state._agentHealth.successes / state._agentHealth.calls * 100).toFixed(0);
-    _agentMacroCache = { result: parsed, fetchedAt: Date.now() };
+    _agentMacroCache = { result: parsed, fetchedAt: Date.now(), lastVIX: currentVIX, lastSPY: currentSPY, lastHeadlineHash: headlineHash };
     logEvent("macro", `[AGENT] Macro: ${parsed.signal} (${parsed.confidence}) | ${parsed.reasoning?.slice(0,80)} | health:${successRate}%`);
 
     // ── Agent accuracy tracking (panel requirement) ───────────────────────
