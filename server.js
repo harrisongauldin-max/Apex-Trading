@@ -2718,16 +2718,16 @@ function getDrawdownProtocol() {
   } else if (drawdown <= -5) {
     return { level: "watch",    sizeMultiplier: 0.75, message: "WATCH drawdown — 75% position sizing.", minScore: MIN_SCORE };
   }
-  // Profit-lock: if account has grown >10% this month, protect gains by reducing size
-  const monthStart  = state.dayStartCash || MONTHLY_BUDGET;
-  const currentVal  = state.cash + openCostBasis();
-  const monthReturn = (currentVal - monthStart) / monthStart;
+  // Profit-lock: use Alpaca equity (cash + open position market value) as current value
+  // Avoids double-counting bug where cash + openCostBasis() inflates value when positions are open
+  // Falls back to cash + openCostBasis() if Alpaca equity not yet synced
+  const monthStart  = state.accountBaseline || state.dayStartCash || MONTHLY_BUDGET;
+  const currentVal  = state.alpacaEquity || (state.cash + openCostBasis());
+  const monthReturn = monthStart > 0 ? (currentVal - monthStart) / monthStart : 0;
   if (monthReturn >= 0.15) {
-    // Up 15%+ on month — lock in gains, minimal new risk
-    return { level: "profit_lock", sizeMultiplier: 0.25, message: "Profit-lock: up 15%+ this month — protecting gains.", minScore: MIN_SCORE };
+    return { level: "profit_lock", sizeMultiplier: 0.25, message: `Profit-lock: up ${(monthReturn*100).toFixed(1)}% vs baseline $${monthStart.toFixed(0)} — protecting gains.`, minScore: MIN_SCORE };
   } else if (monthReturn >= 0.10) {
-    // Up 10%+ — reduce new exposure
-    return { level: "profit_protect", sizeMultiplier: 0.50, message: "Profit-protect: up 10%+ this month — reduced sizing.", minScore: MIN_SCORE };
+    return { level: "profit_protect", sizeMultiplier: 0.50, message: `Profit-protect: up ${(monthReturn*100).toFixed(1)}% vs baseline — reduced sizing.`, minScore: MIN_SCORE };
   }
   return { level: "normal", sizeMultiplier: 1.0, message: "Normal operations.", minScore: MIN_SCORE };
 }
@@ -5399,6 +5399,9 @@ async function syncCashFromAlpaca() {
     state.alpacaCash      = alpacaCash;
     state.alpacaBuyPower  = alpacaBuyPower;
     state.alpacaOptBP     = alpacaOptBP; // options-specific buying power — gates new option entries
+    // Store full portfolio value (cash + open position market value) for profit lock
+    const alpacaEquity    = parseFloat(acct.equity || acct.portfolio_value || alpacaCash);
+    if (alpacaEquity > 0) state.alpacaEquity = alpacaEquity;
 
     // Alpaca tracks day trades authoritatively — use their count as source of truth
     // acct.daytrade_count = rolling 5-day day trade count (resets as old trades age out)
@@ -11524,21 +11527,19 @@ app.post("/api/reset-month", async (req, res) => {
 // Resets: dayStartCash, weekStartCash, peakCash, accountBaseline, monthlyProfit
 app.post("/api/reset-baseline", async (req, res) => {
   try {
-    // Get live Alpaca balance as the new reference point
+    // Get live Alpaca equity (cash + open position value) as the new reference point
     const acct = await alpacaGet("/account");
-    const alpacaBalance = acct ? parseFloat(acct.equity || acct.portfolio_value || acct.cash || MONTHLY_BUDGET) : MONTHLY_BUDGET;
-    const newBaseline = alpacaBalance > 0 ? alpacaBalance : MONTHLY_BUDGET;
+    const alpacaEquity  = acct ? parseFloat(acct.equity || acct.portfolio_value || acct.cash || MONTHLY_BUDGET) : MONTHLY_BUDGET;
+    const newBaseline   = alpacaEquity > 0 ? alpacaEquity : MONTHLY_BUDGET;
 
-    // Reset financial reference points only
+    // Reset financial reference points only — preserves trade history
     state.dayStartCash    = newBaseline;
     state.weekStartCash   = newBaseline;
     state.peakCash        = newBaseline;
     state.accountBaseline = newBaseline;
+    state.alpacaEquity    = newBaseline; // sync so profit lock uses fresh value immediately
     state.monthlyProfit   = 0;
     state.monthStart      = new Date().toLocaleDateString();
-
-    // Clear profit-lock related flags
-    state._profitLockActive = false;
 
     await saveStateNow();
     logEvent("reset", `Baseline reset to $${newBaseline.toFixed(2)} (from Alpaca) — profit-lock cleared. Trade history preserved.`);
