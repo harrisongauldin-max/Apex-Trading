@@ -6042,7 +6042,9 @@ async function executeSpreadTrade(stock, price, score, scoreReasons, vix, option
   // If _dayPlan is null (e.g. after mid-day reset), default to high risk (conservative)
   // A missing day plan should never unlock full sizing - fail safe, not fail open
   // 200MA bear regime: additional 50% size reduction (stacks with other multipliers)
-  const below200MAMult = spyBelow200MA ? 0.5 : 1.0;
+  // Derived from state directly -- spyBelow200MA is a runScan-scoped var, not available here
+  const spyBelow200MALocal = !!(state._spyMA200 && state._liveSPY && state._liveSPY < state._spyMA200);
+  const below200MAMult = spyBelow200MALocal ? 0.5 : 1.0;
   const riskMult = ((!state._dayPlan || state._dayPlan.riskLevel === "high") ? 0.5 : 1.0) * below200MAMult;
   // 3B: Score-proportional sizing - higher conviction = larger position (pre-30 fills cap still applies)
   // Applied downstream as a multiplier on contract count
@@ -10018,9 +10020,32 @@ async function runScan() {
       }
     }
     const finalMinScore = Math.max(finalEffectiveMin, staggeredMinScore, macdMinScore, timeOfDayMinScore);
+
+    // V2.84: Save score snapshot for /api/score-debug - always current, zero extra API calls
+    if (!state._scoreDebug) state._scoreDebug = {};
+    state._scoreDebug[stock.ticker] = {
+      ts:           Date.now(),
+      price,
+      putScore:     putSetup.score,
+      callScore:    callSetup.score,
+      effectiveMin: finalMinScore,
+      putReasons:   putSetup.reasons,
+      callReasons:  callSetup.reasons,
+      signals: {
+        rsi:          signals.rsi,
+        dailyRsi:     signals.dailyRsi,
+        macd:         signals.macd,
+        momentum:     signals.momentum,
+        ivPercentile: signals.ivPercentile,
+        volPaceRatio: signals.volPaceRatio,
+        intradayVWAP: signals.intradayVWAP,
+      },
+    };
+
     if (bestScore < finalMinScore) {
       const reason = sameTickerSameDir.length > 0 ? staggerReason : macdContradicts ? "MACD contradiction" : timeOfDayMinScore > MIN_SCORE ? `afternoon VIX${state.vix?.toFixed(0)}` : (etHourNow >= 13 ? "afternoon" : ddProtocol.level) + " protocol";
       logEvent("filter", `${stock.ticker} call:${callSetup.score} put:${putSetup.score} - below ${finalMinScore} (${reason}) - skip`);
+      state._scoreDebug[stock.ticker].blocked = [`score ${bestScore} below min ${finalMinScore} (${reason})`];
       continue;
     }
 
@@ -11555,115 +11580,92 @@ app.post("/api/test-morning-review", async (req, res) => {
   res.json({ reviewed: results.length, results });
 });
 
-// - Score Debug API - returns full scoring breakdown for every instrument -
-// Shows exactly how each instrument scored, every signal, every penalty, every gate
-// Replaces manual log-reading for diagnosing why trades aren't firing
-app.get("/api/score-debug", async (req, res) => {
+// - Score Debug API - reads score snapshots saved during last real scan -
+// Zero extra API calls - data is always from the most recent scan pass
+app.get("/api/score-debug", (req, res) => {
   try {
-    const agentMacro   = state._agentMacro || {};
-    const regimeClass  = state._regimeClass || "A";
-    const regimeForGate = regimeClass === "B" ? "trending_bear" : regimeClass === "C" ? "breakdown" : regimeClass === "A" ? "trending_bull" : "neutral";
-    const regimeClassToName = { "B": "trending_bear", "C": "breakdown", "A": "trending_bull" };
-    const priceBasedRegime  = regimeClassToName[regimeClass] || "neutral";
-    const agentTradeTypeGate = (state._agentMacro && state._agentMacro.tradeType) ? (state._agentMacro.tradeType || "spread") : ((state._dayPlan || {}).tradeType || "spread");
-    const isChoppyRegime = regimeForGate === "choppy" || agentTradeTypeGate === "none";
-    const creditAllowedVIX = (state.vix || 0) >= 25;
-    const isBearTrend = ["trending_bear","breakdown"].includes(regimeForGate);
-    const ivRankNow = state._ivRank || 50;
-    const ivElevated = ivRankNow >= 50;
+    const agentMacro    = state._agentMacro || {};
+    const regimeClass   = state._regimeClass || "A";
+    const regimeForGate = regimeClass === "B" ? "trending_bear" : regimeClass === "C" ? "breakdown" : "trending_bull";
+    const agentTradeTypeGate = (state._agentMacro?.tradeType) || ((state._dayPlan || {}).tradeType) || "spread";
+    const isChoppyRegime     = regimeForGate === "choppy" || agentTradeTypeGate === "none";
+    const creditAllowedVIX   = (state.vix || 0) >= 25;
+    const ivRankNow          = state._ivRank || 0;
+    const ivElevated         = ivRankNow >= 50;
+    const isBearTrend        = ["trending_bear","breakdown"].includes(regimeForGate);
     const creditCallModeActive = isBearTrend && creditAllowedVIX && ivElevated;
-    const creditModeActive = (isChoppyRegime || agentTradeTypeGate === "credit") && creditAllowedVIX;
-    const spyBelow200MA = state._spyMA200 && state._liveSPY && state._liveSPY < state._spyMA200;
-    const below200MACallBlock = !!spyBelow200MA;
-    const macroBullish = agentMacro.mode === "aggressive";
-    const vixFallingPause = state._vixFallingPause || false;
-    const avoidHoldActive = !!(state._avoidUntil && Date.now() < state._avoidUntil);
+    const creditModeActive     = (isChoppyRegime || agentTradeTypeGate === "credit") && creditAllowedVIX;
+    const spyBelow200MA        = state._spyMA200 && state._liveSPY && state._liveSPY < state._spyMA200;
+    const avoidHoldActive      = !!(state._avoidUntil && Date.now() < state._avoidUntil);
+    const avoidUntilStr        = avoidHoldActive ? new Date(state._avoidUntil).toLocaleTimeString("en-US",{timeZone:"America/New_York"}) : null;
 
-    // Gates summary
     const gates = {
+      regimeClass,
+      priceRegime:        regimeForGate,
+      agentRegime:        agentMacro.regime || "unknown",
+      agentTradeType:     agentTradeTypeGate,
       isChoppyRegime,
       creditModeActive,
       creditCallModeActive,
-      below200MACallBlock,
-      macroBullish,
-      vixFallingPause,
+      below200MACallBlock: !!spyBelow200MA,
+      macroBullish:       agentMacro.mode === "aggressive",
+      vixFallingPause:    !!(state._vixFallingPause),
       avoidHoldActive,
-      agentTradeType: agentTradeTypeGate,
-      priceRegime: priceBasedRegime,
-      agentRegime: agentMacro.regime || "unknown",
-      ivr: ivRankNow,
+      avoidUntilStr,
+      ivr:                ivRankNow,
       ivElevated,
-      vix: state.vix,
-      regimeClass,
+      vix:                state.vix,
+      spyPrice:           state._liveSPY,
+      spy50MA:            state._spyMA50,
+      spy200MA:           state._spyMA200,
+      regimeDuration:     state._regimeDuration || 0,
     };
 
-    // Score each instrument
-    const results = [];
-    for (const stock of WATCHLIST) {
-      try {
-        const price     = await getStockQuote(stock.ticker);
-        const bars      = await getStockBars(stock.ticker, 60);
-        const intraday  = await getIntradayBars(stock.ticker);
-        const signals   = await getDynamicSignals(stock.ticker, bars, intraday);
-        const liveStock = { ...stock, price, rsi: signals.rsi, dailyRsi: signals.dailyRsi,
-          macd: signals.macd, momentum: signals.momentum, ivr: signals.ivr,
-          intradayVWAP: signals.intradayVWAP || 0, ivPercentile: signals.ivPercentile || 50,
-          dailyRsi: (signals && typeof signals.dailyRsi === "number") ? signals.dailyRsi : (signals?.rsi || 50) };
+    // Build per-instrument results from scan snapshots
+    const snapshots = state._scoreDebug || {};
+    const results = WATCHLIST.map(stock => {
+      const snap = snapshots[stock.ticker];
+      if (!snap) return { ticker: stock.ticker, noData: true };
 
-        const spyRSI      = liveStock.dailyRsi || liveStock.rsi || 50;
-        const spyMACD     = liveStock.macd || "neutral";
-        const spyMomentum = liveStock.momentum || "steady";
-        const breadthVal  = typeof (state._marketContext?.breadth) === "number"
-          ? state._marketContext.breadth * 100
-          : parseFloat((state._marketContext?.breadth || "50").toString()) || 50;
+      const ageSec = Math.round((Date.now() - snap.ts) / 1000);
+      const bestScore = Math.max(snap.putScore, snap.callScore);
+      const bestType  = snap.putScore >= snap.callScore ? "put" : "call";
 
-        const scoringMacroBase = { ...agentMacro, regime: priceBasedRegime };
-        const scoringMacro = creditModeActive ? { ...scoringMacroBase, tradeType: "credit" } : scoringMacroBase;
+      // Reconstruct gate blocks for display
+      const blocks = [...(snap.blocked || [])];
+      if (isChoppyRegime && !creditModeActive)  blocks.push("choppy regime - debit blocked");
+      if (creditModeActive)                      blocks.push("credit put mode active");
+      if (creditCallModeActive)                  blocks.push("credit call mode active");
+      if (gates.below200MACallBlock)             blocks.push("SPY below 200MA - calls blocked");
+      if (gates.macroBullish)                    blocks.push("macro aggressive - puts blocked");
+      if (gates.vixFallingPause)                 blocks.push("VIX falling - puts paused");
+      if (avoidHoldActive)                       blocks.push(`avoid hold until ${avoidUntilStr}`);
 
-        const putResult  = scoreIndexSetup(liveStock, "put",  spyRSI, spyMACD, spyMomentum, breadthVal, state.vix, scoringMacro);
-        const callResult = scoreIndexSetup(liveStock, "call", spyRSI, spyMACD, spyMomentum, breadthVal, state.vix, scoringMacro);
-
-        // Effective min score
-        const isRegimeBCredit = (creditModeActive || creditCallModeActive) && regimeClass === "B";
-        const effectiveMin = isRegimeBCredit ? 65 : 70;
-        const bestScore = Math.max(putResult.score, callResult.score);
-        const bestType  = putResult.score >= callResult.score ? "put" : "call";
-
-        // Block reasons
-        const blocks = [];
-        if (isChoppyRegime && !creditModeActive) blocks.push("choppy regime - debit blocked");
-        if (creditModeActive) blocks.push("credit put mode active (debit puts blocked)");
-        if (below200MACallBlock) blocks.push("SPY below 200MA - calls blocked");
-        if (macroBullish) blocks.push("macro aggressive/bullish - puts blocked");
-        if (vixFallingPause) blocks.push("VIX falling - puts paused");
-        if (avoidHoldActive) blocks.push(`avoid hold active until ${new Date(state._avoidUntil).toLocaleTimeString()}`);
-        if (bestScore < effectiveMin) blocks.push(`score ${bestScore} below min ${effectiveMin}`);
-
-        results.push({
-          ticker: stock.ticker,
-          price,
-          putScore:    putResult.score,
-          callScore:   callResult.score,
-          bestScore,
-          bestType,
-          effectiveMin,
-          wouldEnter:  blocks.length === 0,
-          blocks,
-          putReasons:  putResult.reasons,
-          callReasons: callResult.reasons,
-          signals: { rsi: signals.rsi, dailyRsi: signals.dailyRsi, macd: signals.macd, momentum: signals.momentum, ivPercentile: signals.ivPercentile },
-        });
-      } catch(e) {
-        results.push({ ticker: stock.ticker, error: e.message });
-      }
-    }
+      return {
+        ticker:      stock.ticker,
+        price:       snap.price,
+        ageSec,
+        putScore:    snap.putScore,
+        callScore:   snap.callScore,
+        bestScore,
+        bestType,
+        effectiveMin: snap.effectiveMin,
+        wouldEnter:  blocks.length === 0 || (blocks.length === 1 && (blocks[0].includes("credit") && bestScore >= snap.effectiveMin)),
+        blocks,
+        putReasons:  snap.putReasons  || [],
+        callReasons: snap.callReasons || [],
+        signals:     snap.signals     || {},
+      };
+    });
 
     res.json({
-      timestamp: new Date().toISOString(),
+      timestamp:   new Date().toISOString(),
+      lastScan:    state.lastScan,
       gates,
-      agentSignal:  agentMacro.signal || "unknown",
-      agentConf:    agentMacro.confidence || "unknown",
-      agentBias:    agentMacro.entryBias || "unknown",
+      agentSignal: agentMacro.signal     || "unknown",
+      agentConf:   agentMacro.confidence || "unknown",
+      agentBias:   agentMacro.entryBias  || "unknown",
+      agentReasoning: agentMacro.reasoning || "",
       results,
     });
   } catch(e) {
