@@ -1773,7 +1773,8 @@ function scoreIndexSetup(stock, optionType, spyRSI, spyMACD, spyMomentum, breadt
     // V2.81 change 4: RSI velocity penalty
     // Fast RSI moves are statistically less reliable than sustained readings
     // If daily RSI moved 20+ points in recent sessions, the signal is a fast bounce/crash not a regime condition
-    const rsiHistory = state._rsiHistory?.[stock.ticker] || [];
+    const rsiHistRaw = state._rsiHistory?.[stock.ticker] || [];
+    const rsiHistory = rsiHistRaw.map(r => typeof r === 'object' ? (r?.rsi || 50) : r);
     if (rsiHistory.length >= 3) {
       const rsiChange = Math.abs(spyRSI - rsiHistory[rsiHistory.length - 3]);
       if (rsiChange >= 20) {
@@ -1916,7 +1917,8 @@ function scoreIndexSetup(stock, optionType, spyRSI, spyMACD, spyMomentum, breadt
     else if (spyRSI >= 70)                                                        { score -= 15; reasons.push(`SPY RSI ${spyRSI} overbought for calls (-15)`); }
 
     // V2.81 change 4 (call side): RSI velocity penalty
-    const rsiHistoryCall = state._rsiHistory?.[stock.ticker] || [];
+    const rsiHistoryCallRaw = state._rsiHistory?.[stock.ticker] || [];
+    const rsiHistoryCall = rsiHistoryCallRaw.map(r => typeof r === 'object' ? (r?.rsi || 50) : r);
     if (rsiHistoryCall.length >= 3) {
       const rsiChangeCall = Math.abs(spyRSI - rsiHistoryCall[rsiHistoryCall.length - 3]);
       if (rsiChangeCall >= 20) {
@@ -9343,8 +9345,13 @@ async function runScan() {
       // V2.81: RSI history tracker for velocity penalty (3-session window)
       // Stores up to 5 daily RSI readings per ticker to detect fast RSI moves
       if (!state._rsiHistory) state._rsiHistory = {};
-      if (!state._rsiHistory[stock.ticker]) state._rsiHistory[stock.ticker] = [];
-      const rsiHist = state._rsiHistory[stock.ticker];
+      // Always keep as array of objects {date, rsi} -- never flatten to numbers in place
+      // Flatten only happens when passing to scoreIndexSetup (read-only, not stored)
+      let rsiHist = state._rsiHistory[stock.ticker] || [];
+      // Migrate legacy flat number arrays from previous builds
+      if (rsiHist.length > 0 && typeof rsiHist[0] !== 'object') {
+        rsiHist = []; // reset malformed history -- will rebuild correctly
+      }
       const todayStr = getETTime().toISOString().slice(0, 10);
       // Only add one reading per day
       if (rsiHist.length === 0 || rsiHist[rsiHist.length - 1]?.date !== todayStr) {
@@ -9353,9 +9360,10 @@ async function runScan() {
         if (dailyRsiVal !== null) {
           rsiHist.push({ date: todayStr, rsi: dailyRsiVal });
           if (rsiHist.length > 5) rsiHist.shift(); // keep last 5 days only
-          state._rsiHistory[stock.ticker] = rsiHist.map(r => r.rsi); // flatten to array for scoreIndexSetup
         }
       }
+      // Store as objects -- scoreIndexSetup reads rsiHist.map(r => r.rsi) at call time
+      state._rsiHistory[stock.ticker] = rsiHist;
 
       // V2.81: Intraday oversold scan counter for MR stabilization gate
       // Counts consecutive intraday scans where RSI <=35 -- resets when RSI recovers
