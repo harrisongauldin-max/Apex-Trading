@@ -1,5 +1,5 @@
 // -
-// ARGO V2.83 - Systematic SPY/QQQ Options Trading Agent
+// ARGO V2.84 - Systematic SPY/QQQ Options Trading Agent
 // Alpaca Paper Trading Edition
 // -
 const express    = require("express");
@@ -1691,6 +1691,19 @@ function scoreIndexSetup(stock, optionType, spyRSI, spyMACD, spyMomentum, breadt
     else if (regime === "choppy")                                                  { score -= 10; reasons.push("Choppy regime - puts risky (-10)"); }
     else if (["trending_bull","recovery"].includes(regime))                       { score -= 25; reasons.push(`Regime: ${regime} - wrong for puts (-25)`); }
 
+    // V2.84: Regime B duration boost (panel fix -- Stat Arb + Quant Strategist)
+    // The longer the bear trend is confirmed, the higher confidence puts are the right trade
+    // Research: sustained regime (3+ days below 200MA) has higher directional accuracy than intraday regime calls
+    // _regimeDuration tracks days SPY has been below 200MA (incremented daily in regime classifier)
+    const regimeDuration = state._regimeDuration || 0;
+    if (["trending_bear","breakdown"].includes(regime) && regimeDuration >= 10) {
+      score += 15; reasons.push(`Bear trend confirmed ${regimeDuration}d - sustained regime high confidence (+15)`);
+    } else if (["trending_bear","breakdown"].includes(regime) && regimeDuration >= 5) {
+      score += 10; reasons.push(`Bear trend confirmed ${regimeDuration}d - sustained regime (+10)`);
+    } else if (["trending_bear","breakdown"].includes(regime) && regimeDuration >= 3) {
+      score += 5; reasons.push(`Bear trend confirmed ${regimeDuration}d - regime establishing (+5)`);
+    }
+
     // - SPY technicals (V2.81 - all thresholds now use daily RSI) -
     // V2.81 change 1: Regime-gate overbought put bonus
     // RSI >=70 in Regime A (bull trend) = healthy trend, not a fade signal (+5 only)
@@ -1727,7 +1740,26 @@ function scoreIndexSetup(stock, optionType, spyRSI, spyMACD, spyMomentum, breadt
         score = 0; reasons.push(`SPY RSI ${spyRSI} oversold - debit put hard block (stock already crashed) (+0)`); return { score: 0, reasons, tradeType };
       }
     }
-    else if (spyRSI <= 45)                                                        { score -= 15; reasons.push(`SPY RSI ${spyRSI} oversold for puts (-15)`); }
+    else if (spyRSI <= 45) {
+      // V2.84: Regime-aware RSI penalty (panel fix -- Technical Analyst + Stat Arb)
+      // Regime A (bull): RSI <=45 means stock already sold off -- put thesis weak (-15)
+      // Regime B (bear trend): RSI <=45 means downtrend intact -- neutral for puts (0)
+      // Regime B + RSI <=40: valid but elevated overnight gap risk -- apply 0.75x sizing via _rsiBearOversold flag
+      const inBearTrend = ["trending_bear","breakdown"].includes(regime);
+      if (inBearTrend) {
+        if (spyRSI <= 40) {
+          // RSI deeply oversold in bear trend -- valid but size conservatively
+          score += 0; reasons.push(`SPY RSI ${spyRSI} oversold in bear trend - trend intact, no penalty but size reduced (+0)`);
+          // Flag for 0.75x sizing modifier applied at execution
+          tradeType = tradeType || "spread";
+          reasons.push(`[OVERSOLD-BEAR] RSI ${spyRSI} <=40 in Regime B - 0.75x sizing applied`);
+        } else {
+          score += 0; reasons.push(`SPY RSI ${spyRSI} oversold in bear trend - downtrend intact, no penalty (+0)`);
+        }
+      } else {
+        score -= 15; reasons.push(`SPY RSI ${spyRSI} oversold for puts - stock already crashed in bull regime (-15)`);
+      }
+    }
 
     // V2.81 change 4: RSI velocity penalty
     // Fast RSI moves are statistically less reliable than sustained readings
@@ -6297,7 +6329,7 @@ async function confirmPendingOrder() {
   }
 }
 
-async function executeTrade(stock, price, score, scoreReasons, vix, optionType = "call", isMeanReversion = false) {
+async function executeTrade(stock, price, score, scoreReasons, vix, optionType = "call", isMeanReversion = false, sizeMod = 1.0) {
   // Quick cash pre-check before expensive API calls
   // Use conservative estimate: assume at least $200 premium * 1 contract = $200 min cost
   const estimatedMinCost = price * 0.03 * 100; // ~3% OTM premium estimate * 100
@@ -6340,7 +6372,12 @@ async function executeTrade(stock, price, score, scoreReasons, vix, optionType =
 
   // Position sizing based on real premium
   // Unified Kelly-primary sizing - single call, all adjustments inside
-  const contracts = calcPositionSize(contract.premium, score, vix);
+  let contracts = calcPositionSize(contract.premium, score, vix);
+  // V2.84: apply Regime B oversold sizing modifier (0.75x when RSI <=40 in bear trend)
+  if (sizeMod < 1.0) {
+    contracts = Math.max(1, Math.floor(contracts * sizeMod));
+    logEvent("scan", `[SIZING] ${stock.ticker} sizeMod ${sizeMod}x applied - ${contracts} contracts (oversold bear trend)`);
+  }
   if (contracts < 1) {
     logEvent("skip", `${stock.ticker} - position size too small`);
     return false;
@@ -8764,7 +8801,18 @@ async function runScan() {
     const holdUntil = Date.now() + 30 * 60 * 1000;
     if (!state._avoidUntil || holdUntil > state._avoidUntil) {
       state._avoidUntil = holdUntil;
-      logEvent("filter", `[AVOID] Entry block stamped - 30min hold until ${new Date(holdUntil).toLocaleTimeString("en-US",{timeZone:"America/New_York"})}`);
+      // V2.84: Track daily avoid stamp count -- panel flagged this as a hidden entry blocker
+      // If firing 5+ times per day it is blocking entries for hours cumulatively
+      if (!state._avoidStampsToday) state._avoidStampsToday = { date: "", count: 0 };
+      const todayStr = getETTime().toISOString().slice(0, 10);
+      if (state._avoidStampsToday.date !== todayStr) {
+        state._avoidStampsToday = { date: todayStr, count: 0 };
+      }
+      state._avoidStampsToday.count++;
+      logEvent("filter", `[AVOID] Entry block stamped #${state._avoidStampsToday.count} today - 30min hold until ${new Date(holdUntil).toLocaleTimeString("en-US",{timeZone:"America/New_York"})}`);
+      if (state._avoidStampsToday.count >= 4) {
+        logEvent("warn", `[AVOID] Stamped ${state._avoidStampsToday.count} times today - agent is repeatedly returning avoid bias - may be suppressing entries excessively`);
+      }
     }
   }
   // avoidHoldActive: timestamp is authoritative - agent can EXTEND but not CANCEL
@@ -9771,7 +9819,18 @@ async function runScan() {
     } else if (ivrBypass && ivrNow < ivrDebitFloor && !dryRunMode) {
       logEvent("filter", `${stock.ticker} IVR ${ivrNow} low but bypassed - VIX ${(state.vix||0).toFixed(1)} - 25 or Regime ${regimeClass}`);
     }
-    const effectiveMinScore = Math.max(ddProtocol.minScore || MIN_SCORE, regimeMinScore, agentMinScore, ivrMinScore);
+    // V2.84: Credit spreads in Regime B use lower min score (panel fix)
+    // Credit spreads have defined risk and reduced premium outlay vs debit spreads
+    // In confirmed Regime B, the directional thesis is clear -- 65 is appropriate
+    // Debit spreads still require 70 -- they need stronger conviction to justify buying premium
+    const isRegimeBCredit = (creditModeActive || creditCallModeActive) && regimeClass === "B";
+    const creditRegimeBMin = isRegimeBCredit ? 65 : MIN_SCORE;
+    if (isRegimeBCredit && creditRegimeBMin < MIN_SCORE) {
+      logEvent("filter", `[REGIME B CREDIT] Min score reduced to ${creditRegimeBMin} for credit spread in confirmed bear trend`);
+    }
+    const effectiveMinScore = Math.max(ddProtocol.minScore || MIN_SCORE, regimeMinScore, agentMinScore, ivrMinScore, creditRegimeBMin === 65 ? 0 : MIN_SCORE);
+    // Note: when isRegimeBCredit, we want to ALLOW 65 -- so we override effectiveMinScore floor
+    const finalEffectiveMin = isRegimeBCredit ? Math.min(effectiveMinScore, 65) : effectiveMinScore;
     // QS-C2: In choppy regime, effectiveMinScore=90 + choppy score penalty (-10) means
     // a position needs 100 base score to clear the bar. Log this near-lockout for visibility.
     if (effectiveMinScore >= 90 && isChoppyRegime) {
@@ -9852,6 +9911,16 @@ async function runScan() {
     const macdMinScore = macdContradicts ? 85 : effectiveMinScore;
     if (macdContradicts) logEvent("filter", `${liveStock.ticker} MACD ${macdSignal} contradicts ${optionType} - raising min score to 85`);
 
+    // V2.84: Regime B oversold sizing modifier (Risk Manager recommendation)
+    // When RSI <=40 in Regime B, valid but elevated overnight gap risk
+    // Apply 0.75x size multiplier to compensate -- trade is right, size conservatively
+    const regimeBOversoldMod = (["trending_bear","breakdown"].includes(agentRegime) &&
+      (liveStock.dailyRsi || liveStock.rsi || 50) <= 40 &&
+      optionType === "put") ? 0.75 : 1.0;
+    if (regimeBOversoldMod < 1.0) {
+      logEvent("filter", `${stock.ticker} Regime B put with RSI <=40 - valid but applying 0.75x size (elevated overnight gap risk)`);
+    }
+
     // V2.82: entry window gate - block new entries after 3pm (MR exception below)
     // Mean reversion calls (capitulation bounce) allowed until 3:30pm
     const isMREntry = (callSetup.isMeanReversion || putSetup.isMeanReversion);
@@ -9865,7 +9934,7 @@ async function runScan() {
         continue;
       }
     }
-    const finalMinScore = Math.max(effectiveMinScore, staggeredMinScore, macdMinScore, timeOfDayMinScore);
+    const finalMinScore = Math.max(finalEffectiveMin, staggeredMinScore, macdMinScore, timeOfDayMinScore);
     if (bestScore < finalMinScore) {
       const reason = sameTickerSameDir.length > 0 ? staggerReason : macdContradicts ? "MACD contradiction" : timeOfDayMinScore > MIN_SCORE ? `afternoon VIX${state.vix?.toFixed(0)}` : (etHourNow >= 13 ? "afternoon" : ddProtocol.level) + " protocol";
       logEvent("filter", `${stock.ticker} call:${callSetup.score} put:${putSetup.score} - below ${finalMinScore} (${reason}) - skip`);
@@ -10074,7 +10143,7 @@ async function runScan() {
       entered = !!icPos;
     } else if (useCreditSpread || useCreditCallSpread) {
       state._lastEntryType = "credit"; // tag for VIX sizing adjustment
-      const creditPos = await executeCreditSpread(stock, price, score, reasons, state.vix, optionType);
+      const creditPos = await executeCreditSpread(stock, price, score, reasons, state.vix, optionType, regimeBOversoldMod);
       entered = !!creditPos;
     } else if (useSpread) {
       // Trending regime: buy direction via debit spread
@@ -10139,7 +10208,7 @@ async function runScan() {
         logEvent("filter", `${stock.ticker} index trade type unclear (agent: ${agentTradeType}) - skipping`);
         continue;
       }
-      entered = await executeTrade(stock, price, score, reasons, state.vix, optionType, isMeanReversion);
+      entered = await executeTrade(stock, price, score, reasons, state.vix, optionType, isMeanReversion, regimeBOversoldMod);
     }
     if (entered) await new Promise(r=>setTimeout(r,500));
   }
