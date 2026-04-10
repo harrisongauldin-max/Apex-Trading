@@ -9451,12 +9451,7 @@ async function runScan() {
     // Normal entries: 3:00pm cutoff
     // Mean reversion calls: 3:30pm cutoff (capitulation has genuine overnight edge)
     const entryWindowClosed = etHour >= 15.0; // 3:00pm normal cutoff
-    // Afternoon gate is now handled by evaluateEntry via rb (Regime A only, bypassed in B)
-    // timeOfDayMinScore kept for backward compat with finalMinScore below
-    let timeOfDayMinScore = MIN_SCORE;
-    if (rb.gates.afternoonMinActive && isLateDay) {
-      timeOfDayMinScore = state.vix >= 30 ? 90 : state.vix >= 25 ? 85 : MIN_SCORE;
-    }
+    // Afternoon minimum handled by evaluateEntry via rb.gates.afternoonMinActive
 
     // - F7: Weekly trend filter -
     // Fetch cached weekly trend (60-min cache, no extra API call)
@@ -9900,14 +9895,12 @@ async function runScan() {
       }
     }
 
-    // Minimum score  -- now derived from rulebook (regime-aware, panel-tuned)
+    // Agent/regime minimums owned by entryEngine rulebook
     const etHourNow     = scanET.getHours() + scanET.getMinutes() / 60;
     const agentConf     = (state._agentMacro || {}).confidence || "low";
     const agentSig      = (state._agentMacro || {}).signal || "neutral";
     const agentLastRun  = (state._agentMacro || {}).timestamp || null;
     const agentStale    = !agentLastRun || ((Date.now() - new Date(agentLastRun).getTime()) / 60000) > 30;
-    const agentMinScore = agentStale || agentConf === "low" ? MIN_SCORE + 10 : MIN_SCORE;
-    const regimeMinScore = rb.minScorePut; // from rulebook, price-based regime
     // Instrument-specific min scores - IWM removed (3yr net loser)
     // GLD uses 80+ with DXY/SPY gates applied upstream
     // below200MAPutMin REMOVED - regimeProfile already handles this via trending_bear/crash minScore
@@ -9929,25 +9922,16 @@ async function runScan() {
     // Panel fix: VIX - 25 alone is not sufficient - a single-day spike in Regime A
     // would bypass the floor, then IV collapses and the debit spread loses vega.
     // Require VIX - 25 AND regime not A (structural, not just a spike).
-    const ivrBypass = (((state.vix || 0) >= 25) && regimeClass !== "A") || regimeClass === "B" || regimeClass === "C";
-    const ivrNow       = ivRankNow; // already computed above
-    const ivrDebitFloor = 15;       // below this: debit entries blocked (calm markets only)
-    const ivrDebitCaution = 25;     // below this: debit entries need 80+ (calm markets only)
-    const ivrMinScore  = ivrBypass || creditModeActive || creditCallModeActive
-      ? MIN_SCORE  // bypassed: elevated VIX, bear regime, or credit spread
-      : (ivrNow < ivrDebitFloor   ? 999  // effectively blocked
-       : ivrNow < ivrDebitCaution ? 80   // caution - require higher conviction
-       : MIN_SCORE);                     // normal
-    if (!ivrBypass && ivrMinScore === 999 && !dryRunMode) {
-      logEvent("filter", `${stock.ticker} IVR ${ivrNow} below floor (${ivrDebitFloor}) - debit entry blocked (options too cheap)`);
-    } else if (!ivrBypass && ivrMinScore === 80 && !dryRunMode && ivrNow < ivrDebitCaution) {
-      logEvent("filter", `${stock.ticker} IVR ${ivrNow} low - debit requires 80+ score`);
-    } else if (ivrBypass && ivrNow < ivrDebitFloor && !dryRunMode) {
-      logEvent("filter", `${stock.ticker} IVR ${ivrNow} low but bypassed - VIX ${(state.vix||0).toFixed(1)} - 25 or Regime ${regimeClass}`);
-    }
-    // Minimum scores owned by evaluateEntry (entryEngine.js) -- single authority
-    // effectiveMinScore stub only -- used by macdMinScore reference below
-    const effectiveMinScore = MIN_SCORE;
+    // IVR diagnostics (gate logic owned by entryEngine rulebook)
+    const ivrNow          = ivRankNow;
+    const ivrDebitFloor   = 15;
+    const ivrDebitCaution = 25;
+    const ivrBypass       = rb.ivElevated || rb.isBearRegime || rb.isCrisis;
+    if (!ivrBypass && ivrNow < ivrDebitFloor && !dryRunMode)
+      logEvent("filter", `${stock.ticker} IVR ${ivrNow} low - debit options cheap (entryEngine gates)`);
+    else if (!ivrBypass && ivrNow < ivrDebitCaution && !dryRunMode)
+      logEvent("filter", `${stock.ticker} IVR ${ivrNow} below caution threshold`);
+    const effectiveMinScore = MIN_SCORE; // stub -- entryEngine is min score authority
     if (agentStale && !dryRunMode) {
       logEvent("filter", `Agent macro stale (${agentStaleMins.toFixed(0)}min) - raising min score. Last signal: ${agentSig || "none"}`);
       if (agentStaleMins > 90 && isMarketHours()) {
@@ -9984,19 +9968,15 @@ async function runScan() {
     const macdContradicts = rb.gates.macdContradictsGate && !creditModeActive &&
       ((optionType === "put" && macdBullish && dailyRsiNow < 65) ||
        (optionType === "call" && macdBearish && !isMRCall));
-    const macdMinScore = macdContradicts ? 85 : effectiveMinScore;
+    // macdMinScore removed -- evaluateEntry handles MACD contradiction gate
     if (!rb.gates.macdContradictsGate && optionType === "put" && macdBullish && dailyRsiNow >= 68)
-      logEvent("filter", `${liveStock.ticker} MACD contradiction bypassed - RSI ${dailyRsiNow.toFixed(0)} overbought + bullish MACD in Regime B = bounce fade`);
-    if (macdContradicts) logEvent("filter", `${liveStock.ticker} MACD ${macdSignal} contradicts ${optionType} - raising min score to 85`);
+      logEvent("filter", `${liveStock.ticker} MACD bypass - RSI ${dailyRsiNow.toFixed(0)} overbought + bullish MACD in Regime B = bounce fade`);
+    if (macdContradicts) logEvent("filter", `${liveStock.ticker} MACD ${macdSignal} contradicts ${optionType} - evaluateEntry raises minimum`);
 
-    // V2.84: Regime B oversold sizing modifier (Risk Manager recommendation)
-    // When RSI <=40 in Regime B, valid but elevated overnight gap risk
-    // Apply 0.75x size multiplier to compensate -- trade is right, size conservatively
-    const regimeBOversoldMod = (["trending_bear","breakdown"].includes(authRegimeName) &&
-      (liveStock.dailyRsi || liveStock.rsi || 50) <= 40 &&
-      optionType === "put") ? 0.75 : 1.0;
-    if (regimeBOversoldMod < 1.0) {
-      logEvent("filter", `${stock.ticker} Regime B put with RSI <=40 - valid but applying 0.75x size (elevated overnight gap risk)`);
+    // Sizing modifier from entryEngine (eeCandidate.sizeMod) -- replaces regimeBOversoldMod
+    // eeCandidate.sizeMod already accounts for oversold reduction, crisis sizing, IV boost
+    if (eeCandidate && eeCandidate.sizeMod < 1.0) {
+      logEvent("filter", `${stock.ticker} size modifier ${eeCandidate.sizeMod.toFixed(2)}x applied (entryEngine: oversold/crisis/IV)`)
     }
 
     // V2.82: entry window gate - block new entries after 3pm (MR exception below)
@@ -10261,10 +10241,9 @@ async function runScan() {
       const icPos = await executeIronCondor(stock, price, score, reasons, state.vix);
       entered = !!icPos;
     } else if (useCreditSpread || useCreditCallSpread) {
-      state._lastEntryType = "credit"; // tag for VIX sizing adjustment
-      // regimeBOversoldMod declared in scoring block above -- use local fallback if out of scope
-      const _sizeMod = (["trending_bear","breakdown"].includes(authRegimeName) &&
-        (stock.dailyRsi || stock.rsi || 50) <= 40 && optionType === "put") ? 0.75 : 1.0;
+      state._lastEntryType = "credit";
+      // Sizing from entryEngine eeCandidate.sizeMod (accounts for oversold, crisis, IV boost)
+      const _sizeMod = (eeCandidate && eeCandidate.sizeMod) || 1.0;
       const creditPos = await executeCreditSpread(stock, price, score, reasons, state.vix, optionType, _sizeMod);
       entered = !!creditPos;
     } else if (useSpread) {
@@ -10330,7 +10309,7 @@ async function runScan() {
         logEvent("filter", `${stock.ticker} index trade type unclear (agent: ${agentTradeType}) - skipping`);
         continue;
       }
-      const _sizeModDebit = typeof regimeBOversoldMod !== "undefined" ? regimeBOversoldMod : 1.0;
+      const _sizeModDebit = (eeCandidate && eeCandidate.sizeMod) || 1.0;
       entered = await executeTrade(stock, price, score, reasons, state.vix, optionType, isMeanReversion, _sizeModDebit);
     }
     if (entered) await new Promise(r=>setTimeout(r,500));
