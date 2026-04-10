@@ -9489,10 +9489,11 @@ async function runScan() {
     // [Regime A only] Late entries have elevated overnight gap risk in bull market
     // [Regime B bypass] Afternoon = bounce has run out = best fade timing. Risk Manager condition:
     //   bypass only when agent confirms puts_on_bounces with medium/high confidence and not stale
-    const agentConfLocal         = (state._agentMacro || {}).confidence || "low";
-    const agentLastRunLocal      = (state._agentMacro || {}).timestamp || null;
-    const agentStaleLocal        = !agentLastRunLocal || ((Date.now() - new Date(agentLastRunLocal).getTime()) / 60000) > 30;
-    const bypassAfternoonGate    = !inBullRegime && agentWantsPutsOnBounce && agentConfLocal !== "low" && !agentStaleLocal;
+    const agentConfLocal             = (state._agentMacro || {}).confidence || "low";
+    const agentLastRunLocal          = (state._agentMacro || {}).timestamp || null;
+    const agentStaleLocal            = !agentLastRunLocal || ((Date.now() - new Date(agentLastRunLocal).getTime()) / 60000) > 30;
+    const agentWantsPutsOnBounceNow  = (state._agentMacro || {}).entryBias === "puts_on_bounces";
+    const bypassAfternoonGate        = !inBullRegime && agentWantsPutsOnBounceNow && agentConfLocal !== "low" && !agentStaleLocal;
     let timeOfDayMinScore = MIN_SCORE; // default - no penalty
     if (isLateDay && state.vix >= 30 && !bypassAfternoonGate)      timeOfDayMinScore = 90; // VIX 30+ after 2:30pm
     else if (isLateDay && state.vix >= 25 && !bypassAfternoonGate) timeOfDayMinScore = 85; // VIX 25-30 after 2:30pm
