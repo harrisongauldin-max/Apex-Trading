@@ -9237,6 +9237,8 @@ async function runScan() {
 
     if (!price || price < MIN_STOCK_PRICE) {
       logEvent("filter", `${stock.ticker} price $${price||0} unavailable or below min - skip`);
+      if (!state._scoreDebug) state._scoreDebug = {};
+      state._scoreDebug[stock.ticker] = { ts: Date.now(), price: price||0, putScore: 0, callScore: 0, effectiveMin: MIN_SCORE, putReasons: [], callReasons: [], signals: {}, blocked: ["no price data"] };
       continue;
     }
 
@@ -9281,6 +9283,8 @@ async function runScan() {
       const isPutRelevant = putRelevantFails.some(f => filterResult.reason?.includes(f));
       if (!isPutRelevant) {
         logEvent("filter", `${stock.ticker} filter fail: ${filterResult.reason}`);
+        if (!state._scoreDebug) state._scoreDebug = {};
+        state._scoreDebug[stock.ticker] = { ts: Date.now(), price: price||0, putScore: 0, callScore: 0, effectiveMin: MIN_SCORE, putReasons: [], callReasons: [], signals: {}, blocked: [`pre-score filter: ${filterResult.reason}`] };
         continue;
       }
       // Sector ETF boost - scaled by how much this stock lags its ETF
@@ -9314,6 +9318,8 @@ async function runScan() {
     // Dynamic signals - calculated live from real price bars
     if (bars.length < 10) {
       logEvent("filter", `${stock.ticker} insufficient bars (${bars.length}) - skip`);
+      if (!state._scoreDebug) state._scoreDebug = {};
+      state._scoreDebug[stock.ticker] = { ts: Date.now(), price: price||0, putScore: 0, callScore: 0, effectiveMin: MIN_SCORE, putReasons: [], callReasons: [], signals: {}, blocked: [`insufficient bars (${bars.length})`] };
       continue;
     }
     const signals = await getDynamicSignals(stock.ticker, bars, intradayBars, stock._realIV || null);
@@ -9840,6 +9846,29 @@ async function runScan() {
     }
     const bestReasons = optionType === "put" ? putSetup.reasons : callSetup.reasons;
 
+    // V2.84: Save score snapshot immediately after scoring - captures every instrument
+    // even those that hit early gate continues. Updated again below with finalMinScore.
+    if (!state._scoreDebug) state._scoreDebug = {};
+    state._scoreDebug[stock.ticker] = {
+      ts:           Date.now(),
+      price,
+      putScore,
+      callScore,
+      effectiveMin: MIN_SCORE, // updated below once finalMinScore is computed
+      putReasons:   putSetup.reasons,
+      callReasons:  callSetup.reasons,
+      signals: {
+        rsi:          signals.rsi,
+        dailyRsi:     signals.dailyRsi,
+        macd:         signals.macd,
+        momentum:     signals.momentum,
+        ivPercentile: signals.ivPercentile,
+        volPaceRatio: signals.volPaceRatio,
+        intradayVWAP: signals.intradayVWAP,
+      },
+      blocked: [],
+    };
+
     // Pre-market gap direction-aware penalty - applied after optionType is known
     // Gap >3% up on a put entry = fading into rally = -8 conviction penalty
     // Gap >3% down on a call entry = buying into gap-down = -8 conviction penalty
@@ -10021,31 +10050,10 @@ async function runScan() {
     }
     const finalMinScore = Math.max(finalEffectiveMin, staggeredMinScore, macdMinScore, timeOfDayMinScore);
 
-    // V2.84: Save score snapshot for /api/score-debug - always current, zero extra API calls
-    if (!state._scoreDebug) state._scoreDebug = {};
-    state._scoreDebug[stock.ticker] = {
-      ts:           Date.now(),
-      price,
-      putScore:     putSetup.score,
-      callScore:    callSetup.score,
-      effectiveMin: finalMinScore,
-      putReasons:   putSetup.reasons,
-      callReasons:  callSetup.reasons,
-      signals: {
-        rsi:          signals.rsi,
-        dailyRsi:     signals.dailyRsi,
-        macd:         signals.macd,
-        momentum:     signals.momentum,
-        ivPercentile: signals.ivPercentile,
-        volPaceRatio: signals.volPaceRatio,
-        intradayVWAP: signals.intradayVWAP,
-      },
-    };
-
     if (bestScore < finalMinScore) {
       const reason = sameTickerSameDir.length > 0 ? staggerReason : macdContradicts ? "MACD contradiction" : timeOfDayMinScore > MIN_SCORE ? `afternoon VIX${state.vix?.toFixed(0)}` : (etHourNow >= 13 ? "afternoon" : ddProtocol.level) + " protocol";
       logEvent("filter", `${stock.ticker} call:${callSetup.score} put:${putSetup.score} - below ${finalMinScore} (${reason}) - skip`);
-      state._scoreDebug[stock.ticker].blocked = [`score ${bestScore} below min ${finalMinScore} (${reason})`];
+      if (state._scoreDebug?.[stock.ticker]) { state._scoreDebug[stock.ticker].effectiveMin = finalMinScore; state._scoreDebug[stock.ticker].blocked = [`score ${bestScore} below min ${finalMinScore} (${reason})`]; }
       continue;
     }
 
