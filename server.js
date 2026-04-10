@@ -115,6 +115,17 @@ const TARGET_DELTA_MAX    = 0.42;
 const WEEKLY_DD_LIMIT     = 0.25;
 const MAX_LOSS_PER_TRADE  = 900;
 const MIN_SCORE           = 70;
+
+// Instrument-level execution constraints - enforced at execution entry, not inferred from gate state
+// This is the authoritative rule for what trade types each instrument may execute
+// Panel unanimous: these constraints must survive any gate condition shift between scoring and execution
+const INSTRUMENT_CONSTRAINTS = {
+  TLT: { allowedTypes: ["credit_put", "credit_call"], reason: "Bond ETF - slow movement, only collect premium" },
+  GLD: { allowedTypes: ["credit_put", "credit_call", "debit_put"], reason: "Commodity hedge - debit calls only on equity selloffs" },
+  SPY: { allowedTypes: ["credit_put", "credit_call", "debit_put", "debit_call", "iron_condor"] },
+  QQQ: { allowedTypes: ["credit_put", "credit_call", "debit_put", "debit_call", "iron_condor"] },
+  XLE: { allowedTypes: ["debit_put"], reason: "Energy ETF - directional puts on downtrend only" },
+};
 // Entry windows handled by isEntryWindow() - see function below
 const STOCK_PROFIT_THRESH = 1000;   // monthly profit threshold for stock buys
 const STOCK_ALLOC_PCT     = 0.20;   // 20% of profits above threshold
@@ -8803,21 +8814,19 @@ async function runScan() {
   // _dayPlan.regime is the morning baseline, used only when _agentMacro hasn't run yet.
   // applyIntradayRegimeOverride updates _dayPlan for the morning context - but scoring
   // uses _agentMacro directly so intraday shifts are immediately reflected.
-  const agentRegime       = (state._agentMacro || {}).regime || (state._dayPlan || {}).regime || "neutral";
-  // V2.84 fix: agent tradeType takes priority over day plan -- agent updates every 3min with live data
-  // Day plan tradeType was overriding agent causing "choppy" block all day from a stale morning baseline
-  // Only fall back to day plan if agent has never run (null _agentMacro)
-  const agentTradeTypeGate = (state._agentMacro && (state._agentMacro || {}).tradeType)
-    ? (state._agentMacro.tradeType || "spread")
-    : ((state._dayPlan || {}).tradeType || "spread");
-  // V2.84 fix: use price-based regime classifier for choppy/bear gate decision
-  // Agent calls regime "choppy" on gap-up days in bear markets, wrongly blocking puts
-  // _regimeClass (200MA + VIX + drawdown) is objective -- only use agent regime as fallback
-  const regimeForGate  = state._regimeClass === "B" ? "trending_bear"
+  // PANEL FIX: Single authoritative regime derived from price-based classifier
+  // Priority: price-based regime (_regimeClass) wins on structural decisions
+  // Agent regime is advisory only - used for magnitude/bias, never for gate decisions
+  // This eliminates the choppy contradiction (agent says choppy, price-classifier says Regime B)
+  const authRegimeName = state._regimeClass === "B" ? "trending_bear"
                        : state._regimeClass === "C" ? "breakdown"
-                       : state._regimeClass === "A" ? "trending_bull"
-                       : agentRegime;
-  const isChoppyRegime    = regimeForGate === "choppy" || agentTradeTypeGate === "none";
+                       : "trending_bull"; // Regime A = bull
+  const agentRegime        = (state._agentMacro || {}).regime || "neutral"; // advisory only
+  const agentTradeTypeGate = (state._agentMacro?.tradeType) || ((state._dayPlan || {}).tradeType) || "spread";
+  // isChoppyRegime: only true when BOTH price and agent agree, OR agent explicitly says none
+  // Prevents single-agent choppy call from blocking all entries in a confirmed bear trend
+  const regimeForGate  = authRegimeName;
+  const isChoppyRegime = agentTradeTypeGate === "none"; // only agent "none" blocks, not agent "choppy"
   // SKEW elevated = puts doubly overpriced (both fear + tail risk premium)
   // When SKEW >= 130 lower the VIX threshold - SKEW compensates for lower VIX
   const skewElevated      = (state._skew?.skew || 0) >= 130;
@@ -9482,13 +9491,9 @@ async function runScan() {
         ? marketContext.breadth * 100
         : parseFloat((marketContext?.breadth || "50").toString()) || 50;
       // Pass credit mode to scoreIndexSetup so RSI block and scoring adjust correctly
-      // V2.84 fix: override agent regime with price-based classifier (_regimeClass)
-      // Agent calls regime "choppy" on gap-up days in bear markets -- this applies -10 to put scores
-      // The price-based classifier (200MA + VIX + drawdown) is more objective and consistent
-      // Agent's signal/confidence/entryBias/tradeType are still used -- only regime is overridden
-      const regimeClassToName = { "B": "trending_bear", "C": "breakdown", "A": "trending_bull" };
-      const priceBasedRegime  = regimeClassToName[state._regimeClass] || (agentMacro || {}).regime || "neutral";
-      const scoringMacroBase  = { ...(agentMacro || {}), regime: priceBasedRegime };
+      // Scoring uses authRegimeName (price-based, computed once at scan top)
+      // Agent signal/confidence/entryBias used for magnitude -- regime overridden by price classifier
+      const scoringMacroBase  = { ...(agentMacro || {}), regime: authRegimeName };
       const scoringMacro = creditModeActive
         ? { ...scoringMacroBase, tradeType: "credit" }
         : scoringMacroBase;
@@ -10130,7 +10135,26 @@ async function runScan() {
     logEvent("filter", `${stock.ticker} best setup: ${optionType.toUpperCase()} score ${bestScore} | RSI:${signals.rsi} MACD:${signals.macd} MOM:${signals.momentum}`);
     // Queue for execution - heat is rechecked live in the execution loop below
     const isMR = optionType === "call" && callSetup.isMeanReversion;
-    scored.push({ stock: liveStock, price, score: bestScore, reasons: bestReasons, optionType, isMeanReversion: isMR });
+    // PANEL FIX: Lock trade type at score time - execution must honor this, never re-derive from gate state
+    // This prevents the TLT class of disaster where creditModeActive flips between scoring and execution
+    const _scoredTradeType = useCreditCallSpread ? "credit_call"
+      : (creditModeActive && optionType === "put" && (ivRankNow||0) >= 50) ? "credit_put"
+      : isMR ? "debit_naked"
+      : "debit";
+    const _instrumentConstraint = INSTRUMENT_CONSTRAINTS[liveStock.ticker] || null;
+    scored.push({
+      stock: liveStock, price, score: bestScore, reasons: bestReasons, optionType, isMeanReversion: isMR,
+      tradeIntent: {
+        type:               _scoredTradeType,
+        instrumentConstraint: _instrumentConstraint,
+        creditModeSnap:     creditModeActive,
+        creditCallModeSnap: creditCallModeActive,
+        ivRankSnap:         ivRankNow || 0,
+        isChoppySnap:       isChoppyRegime,
+        regimeSnap:         state._regimeClass || "A",
+        lockedAt:           Date.now(),
+      }
+    });
   }
 
   // Sort by score descending
@@ -10186,7 +10210,7 @@ async function runScan() {
 
   // Enter trades - sorted by score, best first
   // heatPct() is live and updates after every executeTrade call
-  for (const { stock, price, score, reasons, optionType, isMeanReversion } of scored) {
+  for (const { stock, price, score, reasons, optionType, isMeanReversion, tradeIntent } of scored) {
     if (heatPct() >= effectiveHeatCap()) break;
     if (state.cash <= CAPITAL_FLOOR) break;
 
@@ -10243,39 +10267,31 @@ async function runScan() {
       }
     }
 
-    // - SPREAD vs NAKED DECISION -
-    // Choppy + high VIX - credit spread (sell premium, theta works for us)
-    // Trending regime - debit spread (buy direction, need move to profit)
-    // Mean reversion - naked option (quick move, full leverage)
-    const agentTradeType  = (state._agentMacro || {}).tradeType || "spread";
-    // Credit put spread: choppy + high VIX - sell put premium
-    // Credit call spread: trending_bear + VIX>=25 + IVR>=50 - sell call premium (bear call)
-    // 2A: IV rank gate - only enter credit spreads when options are at least moderately expensive
-    const ivRankOk = ivRankNow >= 50; // IVR 50+ = options elevated relative to history
-    const ivRankMsg = ivRankOk ? `IVR ${ivRankNow} (${state._ivEnv})` : `IVR ${ivRankNow} too low for credit spreads`;
-    if (creditCallModeActive && !ivRankOk) logEvent("filter", `[IV] ${stock.ticker} bear call blocked - ${ivRankMsg}`);
-    const useCreditSpread     = creditModeActive && stock.isIndex && !isMeanReversion && optionType === "put" && ivRankOk;
-    const useCreditCallSpread = creditCallModeActive && stock.isIndex && !isMeanReversion && optionType === "call" && ivRankOk;
-    // 3A: Iron condor - choppy regime + IVR > 60 + VIX 18-28 (sell premium both sides)
-    const useIronCondor = isChoppyRegime && stock.isIndex && ivRankNow >= 60 && state.vix >= 18 && state.vix <= 35
-      && !isMeanReversion && creditAllowedVIX && !dryRunMode
-      && !state.positions.some(p => p.ticker === stock.ticker); // no existing position on this ticker
-    // 2A: Score-proportional sizing multiplier for credit spreads at high IVR
-    // IVR 70+: 1.5x size (rich premium, high conviction to sell)
-    // IVR 50-70: 1.0x size (baseline)
-    const ivSizeMult = ivHigh ? 1.5 : 1.0;
-    if ((useCreditSpread || useCreditCallSpread) && ivHigh) {
-      logEvent("scan", `[IV] ${stock.ticker} credit spread - IVR ${ivRankNow} HIGH, size mult ${ivSizeMult}x`);
+    // - TRADE TYPE from tradeIntent (locked at score time) -
+    // PANEL FIX: Never re-derive trade type from current gate state - it may have shifted since scoring
+    // Honor the decision that was made when this candidate was scored, with full market context
+    const intent = tradeIntent || {};
+    const intentType = intent.type || "debit";
+    const useCreditSpread     = intentType === "credit_put"  && stock.isIndex && !isMeanReversion;
+    const useCreditCallSpread = intentType === "credit_call" && stock.isIndex && !isMeanReversion;
+    const useIronCondor       = intentType === "iron_condor" && stock.isIndex && !isMeanReversion && !dryRunMode
+      && !state.positions.some(p => p.ticker === stock.ticker);
+    const agentTradeType      = (state._agentMacro || {}).tradeType || "spread";
+    const useSpread           = !useCreditSpread && !useCreditCallSpread && !useIronCondor && stock.isIndex && !isMeanReversion;
+    const ivSizeMult          = (intent.ivRankSnap || 0) >= 70 ? 1.5 : 1.0;
+    if ((useCreditSpread || useCreditCallSpread) && ivSizeMult > 1.0) {
+      logEvent("scan", `[IV] ${stock.ticker} credit spread - IVR ${intent.ivRankSnap} HIGH, size mult ${ivSizeMult}x`);
     }
-    const useSpread           = stock.isIndex && !useCreditSpread && !useCreditCallSpread && agentTradeType !== "naked" && !isMeanReversion;
 
-    // - TLT: credit spreads only - block debit spread execution -
-    // TLT is a bond ETF - slow movement means debit spreads (requiring large directional moves)
-    // almost never reach max profit. Only credit spreads (collecting premium) make sense on TLT.
-    // This is enforced at execution: if not in credit mode, skip TLT entirely.
-    if (stock.ticker === "TLT" && !creditModeActive && !creditCallModeActive) {
-      logEvent("filter", `TLT debit spread blocked - TLT only enters as credit spread (collect premium, not directional bet)`);
-      continue;
+    // INSTRUMENT_CONSTRAINTS: enforce allowed trade types at execution entry
+    // This is the final safety check - survives any gate shift between scoring and execution
+    const constraint = intent.instrumentConstraint || INSTRUMENT_CONSTRAINTS[stock.ticker] || null;
+    if (constraint) {
+      const allowed = constraint.allowedTypes || [];
+      if (!allowed.includes(intentType)) {
+        logEvent("filter", `[CONSTRAINT] ${stock.ticker} blocked - intent type "${intentType}" not in allowed [${allowed.join(",")}]${constraint.reason ? " | " + constraint.reason : ""}`);
+        continue;
+      }
     }
 
     let entered = false;
@@ -10288,7 +10304,8 @@ async function runScan() {
     } else if (useCreditSpread || useCreditCallSpread) {
       state._lastEntryType = "credit"; // tag for VIX sizing adjustment
       // regimeBOversoldMod declared in scoring block above -- use local fallback if out of scope
-      const _sizeMod = typeof regimeBOversoldMod !== "undefined" ? regimeBOversoldMod : 1.0;
+      const _sizeMod = (["trending_bear","breakdown"].includes(authRegimeName) &&
+        (stock.dailyRsi || stock.rsi || 50) <= 40 && optionType === "put") ? 0.75 : 1.0;
       const creditPos = await executeCreditSpread(stock, price, score, reasons, state.vix, optionType, _sizeMod);
       entered = !!creditPos;
     } else if (useSpread) {
@@ -11623,6 +11640,7 @@ app.get("/api/score-debug", (req, res) => {
     const agentMacro    = state._agentMacro || {};
     const regimeClass   = state._regimeClass || "A";
     const regimeForGate = regimeClass === "B" ? "trending_bear" : regimeClass === "C" ? "breakdown" : "trending_bull";
+    // authRegimeName mirrors the scan-loop logic for accurate gate display
     const agentTradeTypeGate = (state._agentMacro?.tradeType) || ((state._dayPlan || {}).tradeType) || "spread";
     const isChoppyRegime     = regimeForGate === "choppy" || agentTradeTypeGate === "none";
     const creditAllowedVIX   = (state.vix || 0) >= 25;
