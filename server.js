@@ -9677,13 +9677,18 @@ async function runScan() {
     // SPY recovery suppresses puts - market bouncing = puts fighting the tape
     // BYPASS: when agent says puts_on_bounces, the gap-up IS the entry signal - don't penalize
     // The agent already assessed the bounce and determined it's a fade opportunity
+    // BYPASS: credit puts - SPY recovering is GOOD for credit puts (short put moves further OTM)
+    //   selling premium above the market, recovery = more cushion, not a headwind
     const putsOnBouncesBias  = (state._agentMacro || {}).entryBias === "puts_on_bounces";
     const bearRegimeRecovery = ["trending_bear","breakdown"].includes(state._regimeClass === "B" ? "trending_bear" : state._regimeClass === "C" ? "breakdown" : "other");
-    if (spyRecovering && !(putsOnBouncesBias && bearRegimeRecovery)) {
+    const isCreditPutMode    = creditModeActive; // credit put = sell premium, recovery = good
+    if (spyRecovering && !(putsOnBouncesBias && bearRegimeRecovery) && !isCreditPutMode) {
       putSetup.score = Math.max(0, putSetup.score - 20);
       putSetup.reasons.push("SPY recovering - tape fighting puts (-20)");
     } else if (spyRecovering && putsOnBouncesBias) {
       putSetup.reasons.push("SPY recovering but agent says puts_on_bounces - bounce fade thesis (+0)");
+    } else if (spyRecovering && isCreditPutMode) {
+      putSetup.reasons.push("SPY recovering - credit put benefits (short put moves further OTM) (+0)");
     }
 
     // Relative sector weakness - real edge vs just broad market selloff
