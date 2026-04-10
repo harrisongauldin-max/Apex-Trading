@@ -10269,6 +10269,15 @@ async function runScan() {
     }
     const useSpread           = stock.isIndex && !useCreditSpread && !useCreditCallSpread && agentTradeType !== "naked" && !isMeanReversion;
 
+    // - TLT: credit spreads only - block debit spread execution -
+    // TLT is a bond ETF - slow movement means debit spreads (requiring large directional moves)
+    // almost never reach max profit. Only credit spreads (collecting premium) make sense on TLT.
+    // This is enforced at execution: if not in credit mode, skip TLT entirely.
+    if (stock.ticker === "TLT" && !creditModeActive && !creditCallModeActive) {
+      logEvent("filter", `TLT debit spread blocked - TLT only enters as credit spread (collect premium, not directional bet)`);
+      continue;
+    }
+
     let entered = false;
     state._lastEntryType = null; // reset before each entry attempt
     if (useIronCondor) {
