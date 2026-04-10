@@ -9635,8 +9635,8 @@ async function runScan() {
     // SPY recovery suppresses puts - market bouncing = puts fighting the tape
     // BYPASS: when agent says puts_on_bounces, the gap-up IS the entry signal - don't penalize
     // The agent already assessed the bounce and determined it's a fade opportunity
-    const putsOnBouncesBias = (agentMacro || {}).entryBias === "puts_on_bounces";
-    const bearRegimeRecovery = ["trending_bear","breakdown"].includes(regime);
+    const putsOnBouncesBias  = (state._agentMacro || {}).entryBias === "puts_on_bounces";
+    const bearRegimeRecovery = ["trending_bear","breakdown"].includes(state._regimeClass === "B" ? "trending_bear" : state._regimeClass === "C" ? "breakdown" : "other");
     if (spyRecovering && !(putsOnBouncesBias && bearRegimeRecovery)) {
       putSetup.score = Math.max(0, putSetup.score - 20);
       putSetup.reasons.push("SPY recovering - tape fighting puts (-20)");
