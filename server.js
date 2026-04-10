@@ -1757,11 +1757,9 @@ function scoreIndexSetup(stock, optionType, spyRSI, spyMACD, spyMomentum, breadt
       const inBearTrend = ["trending_bear","breakdown"].includes(regime);
       if (inBearTrend) {
         if (spyRSI <= 40) {
-          // RSI deeply oversold in bear trend -- valid but size conservatively
           score += 0; reasons.push(`SPY RSI ${spyRSI} oversold in bear trend - trend intact, no penalty but size reduced (+0)`);
-          // Flag for 0.75x sizing modifier applied at execution
-          tradeType = tradeType || "spread";
-          reasons.push(`[OVERSOLD-BEAR] RSI ${spyRSI} <=40 in Regime B - 0.75x sizing applied`);
+          // Note: 0.75x sizing applied at execution via regimeBOversoldMod check
+          reasons.push(`[OVERSOLD-BEAR] RSI ${spyRSI} <=40 in Regime B - 0.75x sizing applied at execution`);
         } else {
           score += 0; reasons.push(`SPY RSI ${spyRSI} oversold in bear trend - downtrend intact, no penalty (+0)`);
         }
@@ -10339,25 +10337,36 @@ async function runScan() {
   ]).catch(() => { markDirty(); }); // on timeout: mark dirty, periodic flush will handle it
   } catch(e) {
     logEvent("error", `runScan crashed: ${e.message} | stack: ${e.stack?.split("\n")[1]?.trim() || "unknown"}`);
-    // Track consecutive scan failures - alert after 3 in a row
+    // Track consecutive scan failures
     state._scanFailures = (state._scanFailures || 0) + 1;
-    if (state._scanFailures >= 3 && RESEND_API_KEY && GMAIL_USER && isMarketHours()) {
+    const n = state._scanFailures;
+    // Email throttle: send on failures 1, 2, 3 (so you know immediately), then every 30
+    // Prevents inbox flooding during extended crashes (7 emails per crash was too many)
+    const shouldEmail = (n <= 3) || (n % 30 === 0);
+    if (shouldEmail && RESEND_API_KEY && GMAIL_USER && isMarketHours()) {
+      const subject = n <= 3
+        ? `ARGO ALERT - Scanner crash #${n} (${e.message.slice(0,50)})`
+        : `ARGO ALERT - Scanner still failing (${n} consecutive errors)`;
       Promise.race([
         sendResendEmail(
-          `ARGO-V2.5 ALERT - Scanner failing (${state._scanFailures} errors)`,
+          subject,
           `<div style="font-family:monospace;background:#07101f;color:#ff5555;padding:20px">
-          <h2>- ARGO-V2.5 Scanner Error</h2>
-          <p>Consecutive scan failures: <strong>${state._scanFailures}</strong></p>
+          <h2>!! ARGO Scanner Error</h2>
+          <p>Consecutive scan failures: <strong>${n}</strong></p>
           <p>Last error: ${e.message}</p>
+          <p>Stack: ${e.stack?.split("\n")[1]?.trim() || "unknown"}</p>
           <p>Time: ${new Date().toISOString()}</p>
           <p>Open positions: ${state.positions.length}</p>
-          <p>Cash: $${state.cash}</p>
+          <p>Cash: $${state.cash?.toFixed(2)}</p>
+          ${n > 3 ? `<p style="color:#ffaa00">Note: emails suppressed between failure #4 and this one to avoid inbox flooding. Alerting every 30 failures.</p>` : ''}
           <p><strong>Check Railway logs immediately.</strong></p>
         </div>`
         ),
-        new Promise(r => setTimeout(r, 5000)), // 5s timeout - don't let email hang block finally
+        new Promise(r => setTimeout(r, 5000)),
       ]).catch(() => {});
-      logEvent("warn", `Scan failure alert sent - ${state._scanFailures} consecutive errors`);
+      logEvent("warn", `Scan failure alert sent - ${n} consecutive errors`);
+    } else if (!shouldEmail) {
+      logEvent("warn", `Scan failure #${n} - email suppressed (next alert at #${Math.ceil(n/30)*30})`);
     }
   } finally {
     // Reset failure counter on successful scan completion
@@ -11544,6 +11553,122 @@ app.post("/api/test-morning-review", async (req, res) => {
     }
   }
   res.json({ reviewed: results.length, results });
+});
+
+// - Score Debug API - returns full scoring breakdown for every instrument -
+// Shows exactly how each instrument scored, every signal, every penalty, every gate
+// Replaces manual log-reading for diagnosing why trades aren't firing
+app.get("/api/score-debug", async (req, res) => {
+  try {
+    const agentMacro   = state._agentMacro || {};
+    const regimeClass  = state._regimeClass || "A";
+    const regimeForGate = regimeClass === "B" ? "trending_bear" : regimeClass === "C" ? "breakdown" : regimeClass === "A" ? "trending_bull" : "neutral";
+    const regimeClassToName = { "B": "trending_bear", "C": "breakdown", "A": "trending_bull" };
+    const priceBasedRegime  = regimeClassToName[regimeClass] || "neutral";
+    const agentTradeTypeGate = (state._agentMacro && state._agentMacro.tradeType) ? (state._agentMacro.tradeType || "spread") : ((state._dayPlan || {}).tradeType || "spread");
+    const isChoppyRegime = regimeForGate === "choppy" || agentTradeTypeGate === "none";
+    const creditAllowedVIX = (state.vix || 0) >= 25;
+    const isBearTrend = ["trending_bear","breakdown"].includes(regimeForGate);
+    const ivRankNow = state._ivRank || 50;
+    const ivElevated = ivRankNow >= 50;
+    const creditCallModeActive = isBearTrend && creditAllowedVIX && ivElevated;
+    const creditModeActive = (isChoppyRegime || agentTradeTypeGate === "credit") && creditAllowedVIX;
+    const spyBelow200MA = state._spyMA200 && state._liveSPY && state._liveSPY < state._spyMA200;
+    const below200MACallBlock = !!spyBelow200MA;
+    const macroBullish = agentMacro.mode === "aggressive";
+    const vixFallingPause = state._vixFallingPause || false;
+    const avoidHoldActive = !!(state._avoidUntil && Date.now() < state._avoidUntil);
+
+    // Gates summary
+    const gates = {
+      isChoppyRegime,
+      creditModeActive,
+      creditCallModeActive,
+      below200MACallBlock,
+      macroBullish,
+      vixFallingPause,
+      avoidHoldActive,
+      agentTradeType: agentTradeTypeGate,
+      priceRegime: priceBasedRegime,
+      agentRegime: agentMacro.regime || "unknown",
+      ivr: ivRankNow,
+      ivElevated,
+      vix: state.vix,
+      regimeClass,
+    };
+
+    // Score each instrument
+    const results = [];
+    for (const stock of WATCHLIST) {
+      try {
+        const price     = await getStockQuote(stock.ticker);
+        const bars      = await getStockBars(stock.ticker, 60);
+        const intraday  = await getIntradayBars(stock.ticker);
+        const signals   = await getDynamicSignals(stock.ticker, bars, intraday);
+        const liveStock = { ...stock, price, rsi: signals.rsi, dailyRsi: signals.dailyRsi,
+          macd: signals.macd, momentum: signals.momentum, ivr: signals.ivr,
+          intradayVWAP: signals.intradayVWAP || 0, ivPercentile: signals.ivPercentile || 50,
+          dailyRsi: (signals && typeof signals.dailyRsi === "number") ? signals.dailyRsi : (signals?.rsi || 50) };
+
+        const spyRSI      = liveStock.dailyRsi || liveStock.rsi || 50;
+        const spyMACD     = liveStock.macd || "neutral";
+        const spyMomentum = liveStock.momentum || "steady";
+        const breadthVal  = typeof (state._marketContext?.breadth) === "number"
+          ? state._marketContext.breadth * 100
+          : parseFloat((state._marketContext?.breadth || "50").toString()) || 50;
+
+        const scoringMacroBase = { ...agentMacro, regime: priceBasedRegime };
+        const scoringMacro = creditModeActive ? { ...scoringMacroBase, tradeType: "credit" } : scoringMacroBase;
+
+        const putResult  = scoreIndexSetup(liveStock, "put",  spyRSI, spyMACD, spyMomentum, breadthVal, state.vix, scoringMacro);
+        const callResult = scoreIndexSetup(liveStock, "call", spyRSI, spyMACD, spyMomentum, breadthVal, state.vix, scoringMacro);
+
+        // Effective min score
+        const isRegimeBCredit = (creditModeActive || creditCallModeActive) && regimeClass === "B";
+        const effectiveMin = isRegimeBCredit ? 65 : 70;
+        const bestScore = Math.max(putResult.score, callResult.score);
+        const bestType  = putResult.score >= callResult.score ? "put" : "call";
+
+        // Block reasons
+        const blocks = [];
+        if (isChoppyRegime && !creditModeActive) blocks.push("choppy regime - debit blocked");
+        if (creditModeActive) blocks.push("credit put mode active (debit puts blocked)");
+        if (below200MACallBlock) blocks.push("SPY below 200MA - calls blocked");
+        if (macroBullish) blocks.push("macro aggressive/bullish - puts blocked");
+        if (vixFallingPause) blocks.push("VIX falling - puts paused");
+        if (avoidHoldActive) blocks.push(`avoid hold active until ${new Date(state._avoidUntil).toLocaleTimeString()}`);
+        if (bestScore < effectiveMin) blocks.push(`score ${bestScore} below min ${effectiveMin}`);
+
+        results.push({
+          ticker: stock.ticker,
+          price,
+          putScore:    putResult.score,
+          callScore:   callResult.score,
+          bestScore,
+          bestType,
+          effectiveMin,
+          wouldEnter:  blocks.length === 0,
+          blocks,
+          putReasons:  putResult.reasons,
+          callReasons: callResult.reasons,
+          signals: { rsi: signals.rsi, dailyRsi: signals.dailyRsi, macd: signals.macd, momentum: signals.momentum, ivPercentile: signals.ivPercentile },
+        });
+      } catch(e) {
+        results.push({ ticker: stock.ticker, error: e.message });
+      }
+    }
+
+    res.json({
+      timestamp: new Date().toISOString(),
+      gates,
+      agentSignal:  agentMacro.signal || "unknown",
+      agentConf:    agentMacro.confidence || "unknown",
+      agentBias:    agentMacro.entryBias || "unknown",
+      results,
+    });
+  } catch(e) {
+    res.status(500).json({ error: e.message });
+  }
 });
 
 app.get("/api/logs", (req, res) => {
