@@ -150,6 +150,7 @@ input[type=text]:focus{border-color:var(--blue)}
   <div class="tab" onclick="switchTab('report')">REPORT</div>
   <div class="tab" onclick="switchTab('backtest')">BACKTEST</div>
   <div class="tab" onclick="switchTab('log')">SERVER LOG</div>
+  <div class="tab" onclick="switchTab('score'); fetchScoreDebug()">SCORE DEBUG</div>
 </div>
 
 <!-- ═══════════════ TRADING TAB ═══════════════ -->
@@ -981,6 +982,21 @@ input[type=text]:focus{border-color:var(--blue)}
   </div>
   <!-- ── Log box ── -->
   <div class="log-box" id="server-log" style="height:800px;overflow-y:auto"></div>
+</div>
+
+<!-- ═══════════════ SCORE DEBUG TAB ═══════════════ -->
+<div id="tab-score" class="content">
+  <div style="display:flex;align-items:center;gap:8px;margin-bottom:12px;flex-wrap:wrap">
+    <button class="btn" onclick="fetchScoreDebug()" style="font-size:11px">REFRESH</button>
+    <label style="font-size:11px;color:var(--muted)">Auto-refresh every 30s while tab is open</label>
+    <span id="score-updated" style="font-size:10px;color:var(--muted);margin-left:auto"></span>
+  </div>
+
+  <!-- Gates summary -->
+  <div id="score-gates" style="background:var(--panel);border:1px solid var(--border);border-radius:8px;padding:12px;margin-bottom:12px;font-size:11px;font-family:var(--font)"></div>
+
+  <!-- Per-instrument breakdown -->
+  <div id="score-results"></div>
 </div>
 
 
@@ -2597,6 +2613,102 @@ function startLogPolling() {
   _logTimer = setInterval(() => { if (_logLive) fetchLogs(true); }, 15000);
 }
 startLogPolling();
+
+// ── SCORE DEBUG ───────────────────────────────────────────────────────────────
+let _scoreTimer = null;
+
+async function fetchScoreDebug() {
+  const updEl = document.getElementById('score-updated');
+  if (updEl) updEl.textContent = 'loading...';
+  try {
+    const r    = await fetch('/api/score-debug');
+    const data = await r.json();
+    renderScoreDebug(data);
+    if (updEl) updEl.textContent = 'updated ' + new Date().toLocaleTimeString();
+  } catch(e) {
+    const gEl = document.getElementById('score-gates');
+    if (gEl) gEl.innerHTML = '<span style="color:var(--red)">fetch error: ' + e.message + '</span>';
+  }
+}
+
+function renderScoreDebug(data) {
+  const gEl = document.getElementById('score-gates');
+  const rEl = document.getElementById('score-results');
+  if (!gEl || !rEl) return;
+
+  const g = data.gates || {};
+  const GATE_COLOR = v => v ? 'var(--red)' : 'var(--green)';
+  const FLAG = v => `<span style="color:${GATE_COLOR(v)};font-weight:700">${v ? 'YES' : 'NO'}</span>`;
+
+  gEl.innerHTML = `
+    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:8px;margin-bottom:8px">
+      <div><span style="color:var(--muted)">Agent signal:</span> <strong style="color:var(--blue)">${data.agentSignal} (${data.agentConf})</strong></div>
+      <div><span style="color:var(--muted)">Entry bias:</span> <strong>${data.agentBias}</strong></div>
+      <div><span style="color:var(--muted)">Price regime:</span> <strong>${g.priceRegime}</strong></div>
+      <div><span style="color:var(--muted)">Agent regime:</span> <strong style="color:${g.agentRegime !== g.priceRegime ? 'var(--orange)' : 'var(--text)'}">${g.agentRegime}${g.agentRegime !== g.priceRegime ? ' ⚠ overridden' : ''}</strong></div>
+      <div><span style="color:var(--muted)">VIX:</span> <strong>${(g.vix||0).toFixed(1)}</strong> &nbsp; <span style="color:var(--muted)">IVR:</span> <strong>${(g.ivr||0).toFixed(0)} ${g.ivElevated ? '✓' : '✗'}</strong></div>
+      <div><span style="color:var(--muted)">Agent tradeType:</span> <strong style="color:${g.agentTradeType==='none'?'var(--red)':'var(--text)'}">${g.agentTradeType}</strong></div>
+    </div>
+    <div style="display:flex;flex-wrap:wrap;gap:8px;font-size:10px;padding-top:8px;border-top:1px solid var(--border)">
+      <span>Choppy block: ${FLAG(g.isChoppyRegime)}</span>
+      <span>Credit PUT mode: ${FLAG(g.creditModeActive)}</span>
+      <span>Credit CALL mode: ${FLAG(g.creditCallModeActive)}</span>
+      <span>200MA call block: ${FLAG(g.below200MACallBlock)}</span>
+      <span>Macro bullish: ${FLAG(g.macroBullish)}</span>
+      <span>VIX falling pause: ${FLAG(g.vixFallingPause)}</span>
+      <span>Avoid hold: ${FLAG(g.avoidHoldActive)}</span>
+    </div>`;
+
+  const scoreColor = s => s >= 80 ? 'var(--green)' : s >= 65 ? 'var(--blue)' : s >= 50 ? 'var(--gold)' : 'var(--muted)';
+  const reasonColor = r => {
+    if (r.includes('(-')) return '#ff7766';
+    if (r.includes('(+') && !r.includes('+0)')) return '#88dd88';
+    if (r.includes('BLOCK') || r.includes('block') || r.includes('hard zero')) return '#ff5544';
+    return 'var(--muted)';
+  };
+
+  rEl.innerHTML = (data.results || []).map(item => {
+    if (item.error) return `<div class="card" style="margin-bottom:8px;padding:10px;border-color:var(--red)">
+      <strong style="color:var(--red)">${item.ticker}</strong> <span style="color:var(--muted);font-size:11px">error: ${item.error}</span></div>`;
+
+    const wouldEnter = item.wouldEnter;
+    const best = item.bestType === 'put' ? item.putScore : item.callScore;
+    const bestReasons = item.bestType === 'put' ? item.putReasons : item.callReasons;
+
+    return `<div class="card" style="margin-bottom:10px;padding:12px;border-color:${wouldEnter?'var(--green)':item.bestScore>=item.effectiveMin?'var(--gold)':'var(--border)'}">
+      <div style="display:flex;align-items:center;gap:10px;margin-bottom:8px;flex-wrap:wrap">
+        <span style="font-size:15px;font-weight:700;color:var(--blue)">${item.ticker}</span>
+        <span style="font-size:12px;color:var(--muted)">$${(item.price||0).toFixed(2)}</span>
+        <span style="font-size:11px;padding:2px 8px;border-radius:10px;background:rgba(0,196,255,.1);color:var(--blue)">PUT: <strong style="color:${scoreColor(item.putScore)}">${item.putScore}</strong></span>
+        <span style="font-size:11px;padding:2px 8px;border-radius:10px;background:rgba(0,196,255,.1);color:var(--blue)">CALL: <strong style="color:${scoreColor(item.callScore)}">${item.callScore}</strong></span>
+        <span style="font-size:11px;color:var(--muted)">min: ${item.effectiveMin}</span>
+        <span style="margin-left:auto;font-size:11px;font-weight:700;color:${wouldEnter?'var(--green)':'var(--red)'}">${wouldEnter ? '✓ WOULD ENTER' : '✗ BLOCKED'}</span>
+      </div>
+      <div style="font-size:10px;color:var(--muted);margin-bottom:6px">
+        RSI: ${(item.signals?.rsi||0).toFixed(1)} intra / ${(item.signals?.dailyRsi||0).toFixed(1)} daily &nbsp;|&nbsp;
+        MACD: ${item.signals?.macd||'--'} &nbsp;|&nbsp;
+        MOM: ${item.signals?.momentum||'--'} &nbsp;|&nbsp;
+        IVP: ${item.signals?.ivPercentile||'--'}%
+      </div>
+      ${item.blocks.length ? `<div style="margin-bottom:6px">${item.blocks.map(b=>`<span style="font-size:10px;background:rgba(255,80,80,.12);color:var(--red);padding:1px 6px;border-radius:4px;margin-right:4px">${b}</span>`).join('')}</div>` : ''}
+      <div style="border-top:1px solid var(--border);padding-top:6px;margin-top:4px">
+        <div style="font-size:10px;color:var(--muted);margin-bottom:4px">BEST SETUP (${item.bestType?.toUpperCase()}):</div>
+        ${(bestReasons||[]).map(r=>`<div style="font-size:10px;color:${reasonColor(r)};line-height:1.6">${r}</div>`).join('')}
+      </div>
+    </div>`;
+  }).join('');
+}
+
+// Auto-refresh when score tab is active
+const _origSwitchTab = window.switchTab;
+window.switchTab = function(tab) {
+  _origSwitchTab && _origSwitchTab(tab);
+  clearInterval(_scoreTimer);
+  if (tab === 'score') {
+    fetchScoreDebug();
+    _scoreTimer = setInterval(fetchScoreDebug, 30000);
+  }
+};
 
 // ── BACKTEST ENGINE JS ───────────────────────────────────────────────────────
 async function runMacroMatrix() {
