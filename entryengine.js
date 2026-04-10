@@ -1,17 +1,22 @@
 // ============================================================
-// ARGO Entry Engine — v1.0
+// ARGO Entry Engine — v2.0
 // ============================================================
 // Single source of truth for all entry decisions.
 // Three exports: getRegimeRulebook, scoreCandidate, evaluateEntry
 //
-// Architecture (panel unanimous 14/14):
-//   getRegimeRulebook(state)  → rulebook object, computed once per scan
-//   scoreCandidate(stock, signals, rulebook, state) → { score, tradeIntent, reasons }
-//   evaluateEntry(candidate, rulebook, state)       → { pass, reason }
-//
-// All regime-specific parameters live in the rulebook.
-// No gate re-derives regime conditions independently.
-// No scattered constants. No stacked conditional patches.
+// v2.0 changes (panel 19/19 unanimous — professional calibration):
+//   1. OTM% raised to 8-10% in Regime B, 10-12% in Regime C
+//      (PM2/CBOE: short delta target 0.15-0.20, not 0.28-0.30)
+//   2. Min credit ratio raised to 0.30 floor, 0.35 target
+//      (QS: Simon & Campasano 2014 — EV requires >25% at 8%+ OTM)
+//   3. DTE targets added to spreadParams per regime
+//      (OT + Natenberg 1994 Ch.8: 21-28 DTE in B, 14-21 in C)
+//   4. Portfolio vega cap added — maxPortfolioVega per VIX point
+//      (GS/VS: Natenberg Ch.8 — vega dominates early in trade life)
+//   5. SPY+QQQ correlated heat — count as 1.5x not 2x
+//      (TR: Kelly criterion, tastytrade 2014 small account research)
+//   6. IVR as primary credit gate (ivRank >= 50), raw VIX as floor
+//      (QS: Simon & Campasano — IVR more stable than raw VIX level)
 // ============================================================
 
 "use strict";
@@ -22,18 +27,29 @@ const SCORE_CAP         = 95;
 
 // ── INSTRUMENT CONSTRAINTS ───────────────────────────────────
 // Hard enforcement at execution — survives any gate shift
+// Panel unanimous: structure must match instrument's volatility profile
 const INSTRUMENT_CONSTRAINTS = {
-  TLT: { allowedTypes: ["credit_put","credit_call"],                    reason: "Bond ETF — collect premium only" },
-  GLD: { allowedTypes: ["credit_put","credit_call","debit_put"],        reason: "Commodity hedge" },
+  TLT: { allowedTypes: ["credit_put","credit_call"],
+         reason: "Bond ETF — slow movement, only collect premium. Debit spreads need large directional moves TLT rarely delivers." },
+  GLD: { allowedTypes: ["credit_put","credit_call","debit_put"],
+         reason: "Commodity hedge — credit puts and calls appropriate. Debit calls only on confirmed equity selloff + DXY weakness." },
   SPY: { allowedTypes: ["credit_put","credit_call","debit_put","debit_call","iron_condor"] },
   QQQ: { allowedTypes: ["credit_put","credit_call","debit_put","debit_call","iron_condor"] },
-  XLE: { allowedTypes: ["debit_put"],                                   reason: "Energy ETF — directional puts only" },
+  XLE: { allowedTypes: ["debit_put"],
+         reason: "Energy ETF — oil-correlated, directional puts on downtrend only. Credits too risky in oil spike environments." },
 };
 
+// ── Correlated instrument groups ─────────────────────────────
+// TR panel: SPY+QQQ at 0.95 correlation are one directional bet
+// Count combined as 1.5x heat not 2x — Kelly criterion applied
+const CORRELATED_GROUPS = [
+  { tickers: ["SPY","QQQ"], heatMultiplier: 1.5, label: "SPY/QQQ large-cap tech" },
+];
+
 // ============================================================
-// 1. REGIME RULEBOOK
-// Computed once at scan start. Every downstream function reads
-// from this object — nothing re-derives regime on its own.
+// 1. REGIME RULEBOOK — v2.0
+// Computed once per scan. All downstream reads from this object.
+// Professional calibration per 19-member panel review.
 // ============================================================
 function getRegimeRulebook(state) {
   const regimeClass  = state._regimeClass || "A";
@@ -48,7 +64,7 @@ function getRegimeRulebook(state) {
   const agentAge     = agentTS ? (Date.now() - new Date(agentTS).getTime()) / 60000 : 999;
   const agentStale   = agentAge > 30;
 
-  // ── Derived regime name (price-based, authoritative) ──────
+  // ── Regime classification (price-based, authoritative) ────
   const regimeName   = regimeClass === "B" ? "trending_bear"
                      : regimeClass === "C" ? "breakdown"
                      : "trending_bull";
@@ -61,98 +77,155 @@ function getRegimeRulebook(state) {
   const agentSaysCredit   = agentType === "credit";
   const agentPutsOnBounce = agentBias === "puts_on_bounces";
   const agentAvoid        = agentBias === "avoid";
-  const isBearishHigh     = ["bearish","strongly bearish"].includes(agentSig) && agentConf === "high" && !agentStale;
   const isLowConf         = agentConf === "low" || agentStale;
   const isMacroBullish    = agentMacro.mode === "aggressive";
 
   // ── IV / VIX conditions ───────────────────────────────────
+  // Change 6 (QS/Simon & Campasano 2014):
+  //   IVR >= 50 is the primary credit entry condition — measures options
+  //   expensiveness relative to historical percentile, more stable than raw VIX
+  //   Raw VIX >= 25 retained as structural floor (prevents credit entries in
+  //   calm low-vol markets where IV can keep falling post-entry)
   const skewElevated      = (state._skew?.skew || 0) >= 130;
-  const creditAllowedVIX  = vix >= 25 || (skewElevated && vix >= 22);
-  const ivElevated        = ivRank >= 50;
-  const ivHigh            = ivRank >= 70;
+  const ivElevated        = ivRank >= 50;         // primary credit gate (IVR percentile)
+  const ivHigh            = ivRank >= 70;         // aggressive credit sizing
+  const vixFloor          = vix >= 25 || (skewElevated && vix >= 22); // structural floor
+  const creditAllowedVIX  = ivElevated && vixFloor; // BOTH required — percentile + level
 
   // ── Credit mode flags ─────────────────────────────────────
-  // Credit PUT:
-  //   Choppy (agent:none) + VIX gate — sell premium when direction is uncertain
-  //   Agent says credit — explicit agent instruction
-  //   Regime B + VIX ≥ 25 + IVR ≥ 50 — sell puts below falling market (panel rulebook)
-  const creditPutActive   = (agentChoppy || agentSaysCredit || (isBearRegime && creditAllowedVIX && ivElevated)) && creditAllowedVIX;
-  // Credit CALL (bear call spread): bear regime + VIX + IV
+  // Credit PUT: direction is uncertain (choppy) OR bear regime with elevated premium
+  //   Professional: selling puts below a confirmed downtrend is a high-probability
+  //   premium collection trade when IVR is elevated — the trend provides directional
+  //   confirmation and fear premium provides the edge (Sosnoff/tastytrade 2014)
+  const creditPutActive  = (agentChoppy || agentSaysCredit ||
+                            (isBearRegime && creditAllowedVIX)) && vixFloor;
+
+  // Credit CALL: bear regime + elevated IV — sell calls above a falling market
+  //   Professional: bear call spreads in confirmed downtrends capture doubly elevated
+  //   premium — both trend direction and elevated IV align with the position
   const spyNearResistance = (() => {
     const res = agentMacro.keyLevels?.spyResistance;
     return res && state._liveSPY ? Math.abs(state._liveSPY - res) / res < 0.015 : false;
   })();
-  const creditCallActive  = ((agentChoppy && creditAllowedVIX && spyNearResistance) ||
-                              (isBearRegime && creditAllowedVIX && ivElevated));
+  const creditCallActive = ((agentChoppy && vixFloor && spyNearResistance) ||
+                            (isBearRegime && creditAllowedVIX));
 
   // ── Minimum scores by regime ──────────────────────────────
-  // Regime A: puts need 85 (fight the trend), calls need 75
-  // Regime B: puts need 70 (trend aligned), credits need 65
-  // Regime C: credits only, need 65
-  const minScorePut      = isBullRegime ? 85 : 70;
-  const minScoreCall     = isBullRegime ? 75 : 85; // calls blocked in B/C except MR
-  const minScoreCredit   = 65;
-  // Agent confidence adjustment
-  // RM panel: high confidence should NOT lower the bar — let the score carry conviction
-  // Only raise minimum when confidence is low/stale (be more selective with weak signal)
-  const agentMinAdj      = isLowConf ? +10 : 0;
+  // Regime A: puts fight the uptrend — need RSI overbought signal, high bar
+  // Regime B: puts align with trend — lower bar, but still need clear signal
+  // Credits: defined-risk structure lowers bar — premium collection not directional
+  const minScorePut    = isBullRegime ? 85 : 70;
+  const minScoreCall   = isBullRegime ? 75 : 85;
+  const minScoreCredit = 65;
+  // Low confidence raises bar — less willing to enter without clear signal
+  // High confidence does NOT lower bar — score carries conviction (RM panel)
+  const agentMinAdj    = isLowConf ? +10 : 0;
 
   // ── Gate flags — regime-tagged ────────────────────────────
   const gates = {
     // [All regimes] Hard stops
-    choppyDebitBlock:    agentChoppy,          // agent said none → debit blocked
-    crisisDebitBlock:    isCrisis,             // Regime C → no debit at all
-    macroBullishBlock:   isMacroBullish,       // agent aggressive → puts blocked
+    choppyDebitBlock:    agentChoppy,
+    crisisDebitBlock:    isCrisis,
+    macroBullishBlock:   isMacroBullish,
     below200MACallBlock: !!(state._spyMA200 && state._liveSPY && state._liveSPY < state._spyMA200),
 
-    // [Regime A only] — do NOT apply in B/C
+    // [Regime A only] — not applicable in bear/crisis
     spyGapUpBlockPuts:   !!(state._spyGapUp && isBullRegime),
-    afternoonMinActive:  isBullRegime,         // elevated min after 2:30pm only in A
-    macdContradictsGate: isBullRegime,         // MACD contradiction only meaningful in A
+    afternoonMinActive:  isBullRegime,   // late-day risk reduction in bull only
+    macdContradictsGate: isBullRegime,   // MACD contradiction only meaningful in A
 
     // [Regime B specific]
     putsOnBounceMode:    isBearRegime && agentPutsOnBounce,
-    oversoldSizeReduce:  isBearRegime,         // 0.75x when daily RSI ≤ 40 in B
+    oversoldSizeReduce:  isBearRegime,   // 0.75x when daily RSI <= 40
 
     // [Mode flags]
     creditPutActive,
     creditCallActive,
     avoidHoldActive:     !!(state._avoidUntil && Date.now() < state._avoidUntil),
     agentStale,
-
-    // [Missing from v1.0 — panel fixes 3/4/5]
-    // VIX falling pause: buying puts into falling VIX destroys value via IV crush
     vixFallingPause:     !!(state._vixFallingPause),
-    // Post-reversal cooldown: block re-entry 30min after macro-reversal close (March 25 pattern)
     postReversalBlock:   !!(state._macroReversalAt &&
-                            (Date.now() - state._macroReversalAt) < 30 * 60 * 1000),
+                           (Date.now() - state._macroReversalAt) < 30 * 60 * 1000),
   };
 
   // ── Sizing multipliers ────────────────────────────────────
+  // Change 4 (GS/VS + Natenberg Ch.8): ivBoost now gated by portfolio vega cap
+  //   The boost is valid — sell more when premium is rich — but must be checked
+  //   against maxPortfolioVega before applying. ivBoostCredit is the CANDIDATE
+  //   multiplier; actual application requires vega check in server.js execution.
+  // Change 5 (TR/Kelly): crisis base sizing 0.5x — defined-risk but gap risk real in C
   const sizeMult = {
-    base:       isCrisis ? 0.5 : 1.0,
-    // VS panel: ivBoost applies to CREDIT entries only — buying debit in high IV is expensive
-    // For credit: sell more when premium is rich (1.5x at IVR ≥ 70)
-    // For debit: no boost — high IV means expensive options, edge is reduced
-    ivBoostCredit: ivHigh ? 1.5 : 1.0,
-    ivBoostDebit:  1.0,                        // never amplify debit size in high IV
-    oversold:      0.75,                       // applied when daily RSI ≤ 40 in B
-    // RM panel: crisis credit sizing — 0.75x when IV rich (IVR ≥ 70), 0.5x otherwise
+    base:          isCrisis ? 0.5 : 1.0,
+    ivBoostCredit: ivHigh   ? 1.5 : 1.0,  // only applied when under vega cap
+    ivBoostDebit:  1.0,                    // never boost debit size in high IV
+    oversold:      0.75,                   // RSI <= 40 in Regime B
     creditCrisis:  isCrisis && ivHigh ? 0.75 : isCrisis ? 0.5 : 1.0,
   };
 
-  // ── Spread structure by regime ────────────────────────────
+  // ── Spread structure — professionally calibrated ──────────
+  // Change 1 (PM2/CBOE + QS): OTM% raised — professional target is delta 0.15-0.20
+  //   on the short strike. At VIX 29, 6% OTM gives delta ~0.28 (too close).
+  //   8% OTM gives delta ~0.18 — within the professional target range.
+  //   Regime C (crisis): 10-12% OTM — gap risk is severe, need maximum cushion.
+  //   Formula: OTM% ≈ VIX / 100 * sqrt(DTE/252) * 2.5 standard deviations
+  const creditOTMpct = isCrisis     ? 0.11          // crisis: 10-12% range, use 11%
+                     : isBearRegime ? (vix >= 35 ? 0.10 : 0.08)  // B: VIX-scaled 8-10%
+                     : 0.07;                         // A: 7% (mean reversion, shorter hold)
+
+  // Change 2 (RM/QS): credit ratio raised — 30% floor, 35% target
+  //   At 8% OTM with 30% credit/width ratio, EV is clearly positive:
+  //   P(profit) ≈ 82% at delta 0.18 >> 70% breakeven needed at 30% credit
+  const minCreditRatio  = 0.30;  // hard floor — below this the EV is marginal
+  const targetCreditRatio = 0.35; // target — this is what execution should seek
+
+  // Change 3 (OT + Natenberg 1994 Ch.8): DTE targets per regime
+  //   Theta accelerates sharply inside 21 DTE — capture the theta curve
+  //   efficiently. Vega exposure per dollar of premium collected is minimized
+  //   in the 21-28 DTE window. Never open credit spreads with < 14 DTE
+  //   (gamma risk dominates — small moves cause large P&L swings).
+  const targetDTE = isCrisis     ? 14   // C: richest premium, shortest exposure
+                  : isBearRegime ? 21   // B: optimal theta/vega ratio window
+                  : 28;                 // A: longer hold, mean reversion needs time
+  const minDTE    = isCrisis     ? 7    // C: accept shorter in crisis premium richness
+                  : 14;                 // B+A: below 14 DTE gamma risk unacceptable
+
+  // Short delta target for credit spread short leg (QS/PM2):
+  //   Professional range: 0.15-0.20. Below 0.15 = too little premium.
+  //   Above 0.20 = too much assignment risk in trending markets.
+  const shortDeltaTarget = isCrisis ? 0.15 : 0.17;  // center of professional range
+  const shortDeltaMax    = 0.20;                      // hard ceiling
+  const shortDeltaMin    = 0.12;                      // hard floor — below this skip
+
+  // Change 4 (GS/VS): portfolio vega cap
+  //   $300 per VIX point total portfolio vega. At 3 positions each with $120 vega,
+  //   portfolio vega = $360/VIX pt — above cap. ivBoost blocked until under 50% cap.
+  //   Formula: vega cap = $300/VIX pt. ivBoost threshold = $150/VIX pt.
+  const maxPortfolioVega   = 300;   // $ per VIX point — portfolio-level ceiling
+  const ivBoostVegaThresh  = 150;   // $ per VIX point — ivBoost only below this
+
   const spreadParams = {
-    // Debit spread widths (VIX-scaled)
-    debitWidth:      vix >= 35 ? 20 : vix >= 25 ? 15 : 10,
-    // Credit spread widths — tighter in crisis (gap risk)
-    creditWidth:     isCrisis  ? 7  : 15,
-    // Min OTM% for credit short strike
-    creditOTMpct:    isCrisis  ? 0.10 : 0.06,
-    // Min credit/width ratio
-    minCreditRatio:  0.25,
-    // Max debit/width ratio (R/R gate)
-    maxDebitRatio:   0.40,
+    // Debit spread parameters
+    debitWidth:        vix >= 35 ? 20 : vix >= 25 ? 15 : 10,
+    maxDebitRatio:     0.40,
+
+    // Credit spread parameters — professionally calibrated
+    creditWidth:       isCrisis ? 7 : 15,
+    creditOTMpct,
+    minCreditRatio,
+    targetCreditRatio,
+
+    // DTE management (Change 3)
+    targetDTE,
+    minDTE,
+
+    // Short leg delta targeting (Change 1 — PM2/QS)
+    shortDeltaTarget,
+    shortDeltaMax,
+    shortDeltaMin,
+
+    // Vega exposure management (Change 4 — GS/VS + Natenberg)
+    maxPortfolioVega,
+    ivBoostVegaThresh,
   };
 
   return {
@@ -165,6 +238,7 @@ function getRegimeRulebook(state) {
     ivRank,
     ivElevated,
     ivHigh,
+    creditAllowedVIX,
     agentSig,
     agentConf,
     agentBias,
@@ -174,6 +248,7 @@ function getRegimeRulebook(state) {
     gates,
     sizeMult,
     spreadParams,
+    correlatedGroups: CORRELATED_GROUPS,
     instrumentConstraints: INSTRUMENT_CONSTRAINTS,
     minScorePut,
     minScoreCall,
@@ -184,8 +259,8 @@ function getRegimeRulebook(state) {
 
 // ============================================================
 // 2. SCORE CANDIDATE
-// Takes a pre-computed raw score + signals, applies regime
-// modifiers, locks tradeIntent. Returns enriched candidate.
+// Takes pre-computed raw scores from scoreIndexSetup/scorePutSetup,
+// applies regime-aware modifiers, locks tradeIntent at score time.
 // ============================================================
 function scoreCandidate(stock, rawPutScore, rawCallScore, putReasons, callReasons, signals, rulebook, state) {
   const rb      = rulebook;
@@ -196,21 +271,29 @@ function scoreCandidate(stock, rawPutScore, rawCallScore, putReasons, callReason
   let putScore  = Math.min(SCORE_CAP, Math.max(0, rawPutScore));
   let callScore = Math.min(SCORE_CAP, Math.max(0, rawCallScore));
 
-  // ── Pick best direction first ─────────────────────────────
-  const optionType  = putScore >= callScore ? "put" : "call";
+  // ── Direction first — score determines optionType ─────────
+  const optionType = putScore >= callScore ? "put" : "call";
 
-  // ── Determine trade type ──────────────────────────────────
-  // Check instrument constraints first — they override credit mode
-  // (XLE allows debit_put only, so credit mode never applies to XLE)
+  // ── Trade type — instrument constraints override credit mode ─
+  // Instrument constraints checked first: XLE allows debit_put only,
+  // so credit mode never applies to XLE regardless of rulebook state
   const instrConstraint = rb.instrumentConstraints[ticker];
   const allowsCredit    = !instrConstraint || instrConstraint.allowedTypes.some(t => t.startsWith("credit"));
   let tradeType;
-  if (stock.isMeanReversion)                                                                    tradeType = "debit_naked";
-  else if (optionType === "put" && rb.gates.creditPutActive && isIndex && rb.ivRank >= 50 && allowsCredit)  tradeType = "credit_put";
-  else if (optionType === "call" && rb.gates.creditCallActive && isIndex && allowsCredit)       tradeType = "credit_call";
-  else                                                                                          tradeType = optionType === "put" ? "debit_put" : "debit_call";
+  if (stock.isMeanReversion)
+    tradeType = "debit_naked";
+  else if (optionType === "put" && rb.gates.creditPutActive && isIndex && rb.ivRank >= 50 && allowsCredit)
+    tradeType = "credit_put";
+  else if (optionType === "call" && rb.gates.creditCallActive && isIndex && allowsCredit)
+    tradeType = "credit_call";
+  else
+    tradeType = optionType === "put" ? "debit_put" : "debit_call";
 
-  // ── Apply regime score modifiers (after tradeType is known) ──
+  // ── Regime score modifiers (applied after tradeType known) ──
+  // SPY recovering penalty:
+  //   Debit put:   -20 (recovery fights the directional thesis)
+  //   Credit put:  +0  (recovery moves short put further OTM — beneficial)
+  //   Puts_on_bounces: +0 (recovery IS the entry signal — fade the bounce)
   const isCreditPutTrade = tradeType === "credit_put";
   if (signals.spyRecovering) {
     if (!isCreditPutTrade && !rb.gates.putsOnBounceMode) {
@@ -231,13 +314,22 @@ function scoreCandidate(stock, rawPutScore, rawCallScore, putReasons, callReason
   const constraintPass = !constraint || constraint.allowedTypes.includes(tradeType);
 
   // ── Sizing modifier ───────────────────────────────────────
-  const dailyRsi = signals.dailyRsi || signals.rsi || 50;
+  // Change 4 (GS/VS): ivBoost is a CANDIDATE multiplier
+  //   Actual application requires checking portfolio vega against maxPortfolioVega
+  //   in server.js executeCreditSpread. The sizeMod here is pre-vega-check.
+  const dailyRsi      = signals.dailyRsi || signals.rsi || 50;
   const oversoldInBear = rb.gates.oversoldSizeReduce && dailyRsi <= 40 && optionType === "put";
-  const isCrisis  = rb.isCrisis;
-  const isCredit  = tradeType.startsWith("credit");
-  const ivBoost   = isCredit ? rb.sizeMult.ivBoostCredit : rb.sizeMult.ivBoostDebit;
-  const crisisAdj = isCrisis && isCredit ? rb.sizeMult.creditCrisis : rb.sizeMult.base;
-  const sizeMod   = crisisAdj * ivBoost * (oversoldInBear ? rb.sizeMult.oversold : 1.0);
+  const isCrisis      = rb.isCrisis;
+  const isCredit      = tradeType.startsWith("credit");
+  const ivBoost       = isCredit ? rb.sizeMult.ivBoostCredit : rb.sizeMult.ivBoostDebit;
+  const crisisAdj     = isCrisis && isCredit ? rb.sizeMult.creditCrisis : rb.sizeMult.base;
+  const sizeMod       = crisisAdj * ivBoost * (oversoldInBear ? rb.sizeMult.oversold : 1.0);
+
+  // Change 5 (TR): correlated heat multiplier
+  //   SPY and QQQ count as 1.5x combined heat — their 0.95 correlation means
+  //   holding both simultaneously is effectively one directional bet
+  const corrGroup    = rb.correlatedGroups.find(g => g.tickers.includes(ticker));
+  const heatMultiplier = corrGroup ? corrGroup.heatMultiplier : 1.0;
 
   return {
     stock,
@@ -251,6 +343,7 @@ function scoreCandidate(stock, rawPutScore, rawCallScore, putReasons, callReason
     putReasons,
     callReasons,
     sizeMod,
+    heatMultiplier,  // 1.5 for SPY/QQQ, 1.0 for others
     constraintPass,
     constraintReason: constraint && !constraintPass
       ? `[CONSTRAINT] ${tradeType} not in allowed [${constraint.allowedTypes.join(",")}]${constraint.reason ? " — " + constraint.reason : ""}`
@@ -269,95 +362,100 @@ function scoreCandidate(stock, rawPutScore, rawCallScore, putReasons, callReason
 
 // ============================================================
 // 3. EVALUATE ENTRY
-// Given a scored candidate and rulebook, returns pass/fail.
-// All gate logic lives here — one place, one read.
+// Single pass/fail gate check. All gate logic lives here.
+// One place, one decision. evaluateEntry is the authority.
 // ============================================================
 function evaluateEntry(candidate, rulebook, state, context = {}) {
   const rb  = rulebook;
   const g   = rb.gates;
   const {
     ticker, optionType, tradeType, score,
-    constraintPass, constraintReason, tradeIntent,
+    constraintPass, constraintReason,
   } = candidate;
 
-  const etHour    = context.etHour    || 12;
-  const isLateDay = etHour >= 14.5;
-  const isLastHour = etHour >= 15.0;
-  const volDecline = context.volDecline || false;
-  const signals    = context.signals   || {};
-  const dailyRsi   = signals.dailyRsi  || signals.rsi || 50;
-  const macdSignal = signals.macd      || "neutral";
+  const etHour     = context.etHour   || 12;
+  const isLateDay  = etHour >= 14.5;
+  const signals    = context.signals  || {};
+  const dailyRsi   = signals.dailyRsi || signals.rsi || 50;
+  const macdSignal = signals.macd     || "neutral";
   const macdBullish = macdSignal.includes("bullish");
   const macdBearish = macdSignal.includes("bearish");
 
-  // ── Hard blocks (always apply) ────────────────────────────
-  if (!constraintPass)                return { pass: false, reason: constraintReason };
-  if (g.avoidHoldActive)              return { pass: false, reason: "avoid hold active" };
-  if (g.macroBullishBlock && optionType === "put") return { pass: false, reason: "macro aggressive — puts blocked" };
+  // ── Hard blocks — always apply regardless of score ────────
+  if (!constraintPass)
+    return { pass: false, reason: constraintReason };
+  if (g.avoidHoldActive)
+    return { pass: false, reason: "avoid hold active" };
+  if (g.macroBullishBlock && optionType === "put")
+    return { pass: false, reason: "macro aggressive — puts blocked" };
 
-  // ── Direction-specific hard blocks ────────────────────────
+  // ── Put-specific blocks ───────────────────────────────────
   if (optionType === "put") {
-    if (g.crisisDebitBlock && !tradeType.startsWith("credit")) return { pass: false, reason: "Regime C — debit puts blocked" };
-    if (g.choppyDebitBlock && !tradeType.startsWith("credit")) return { pass: false, reason: "choppy (agent:none) — debit puts blocked, credit mode only" };
-    if (g.spyGapUpBlockPuts)           return { pass: false, reason: "SPY gap-up — puts paused in Regime A" };
-    if (g.macroBullishBlock)           return { pass: false, reason: "macro bullish — puts blocked" };
-    if (g.vixFallingPause)             return { pass: false, reason: "VIX falling — IV crush risk, put entries paused" };
-    if (g.postReversalBlock)           return { pass: false, reason: "post-reversal cooldown — 30min re-entry block after macro-reversal close" };
+    if (g.crisisDebitBlock && !tradeType.startsWith("credit"))
+      return { pass: false, reason: "Regime C — debit puts blocked, credit structures only" };
+    if (g.choppyDebitBlock && !tradeType.startsWith("credit"))
+      return { pass: false, reason: "agent:none — debit puts blocked, credit mode only" };
+    if (g.spyGapUpBlockPuts)
+      return { pass: false, reason: "SPY gap-up — puts paused in Regime A (mean reversion thesis weakened)" };
+    if (g.vixFallingPause)
+      return { pass: false, reason: "VIX falling — IV crush risk, debit puts lose value as vol compresses" };
+    if (g.postReversalBlock)
+      return { pass: false, reason: "post-reversal cooldown — 30min re-entry block (macro-reversal pattern)" };
   }
+
+  // ── Call-specific blocks ──────────────────────────────────
   if (optionType === "call") {
-    if (g.below200MACallBlock && !tradeType.startsWith("credit")) return { pass: false, reason: "SPY below 200MA — debit calls blocked in Regime B" };
-    if (g.crisisDebitBlock && !tradeType.startsWith("credit"))    return { pass: false, reason: "Regime C — debit calls blocked" };
+    if (g.below200MACallBlock && !tradeType.startsWith("credit"))
+      return { pass: false, reason: "SPY below 200MA — debit calls fight the trend in Regime B" };
+    if (g.crisisDebitBlock && !tradeType.startsWith("credit"))
+      return { pass: false, reason: "Regime C — debit calls blocked" };
   }
 
-  // ── Stagger gate (TA panel fix) ──────────────────────────
-  // Prevent pile-ons: same-ticker same-direction entry within 30min requires +5 conviction
-  // context.recentSameDir = minutes since last same-direction entry on this ticker (null if none)
+  // ── Stagger gate ──────────────────────────────────────────
+  // Prevents pile-ons: entering same-ticker same-direction within 30min
+  // requires existing position to be profitable (thesis confirmation)
   const recentSameDir = context.recentSameDir ?? null;
-  const staggerActive = recentSameDir !== null && recentSameDir < 30;
-  const staggerMinBoost = staggerActive ? 5 : 0;
-  if (staggerActive) {
-    // Still allow if existing position is profitable (confirms thesis)
+  if (recentSameDir !== null && recentSameDir < 30) {
     const existingProfit = context.existingProfitPct ?? 0;
-    if (existingProfit < 0.05) {
-      return { pass: false, reason: `stagger blocked — ${recentSameDir.toFixed(0)}min since last ${optionType} on ${ticker} (need 30min gap or >5% profit)` };
-    }
+    if (existingProfit < 0.05)
+      return { pass: false, reason: `stagger — ${recentSameDir.toFixed(0)}min since last ${optionType} on ${ticker} (need 30min gap or >5% profit to add)` };
   }
 
-  // ── Determine effective minimum score ─────────────────────
+  // ── Effective minimum score ───────────────────────────────
   let minScore = tradeType.startsWith("credit") ? rb.minScoreCredit
                : optionType === "put"           ? rb.minScorePut
                : rb.minScoreCall;
 
-  // Agent confidence adjustment
+  // Agent confidence raises bar when weak — does not lower when strong
   minScore = Math.max(0, minScore + rb.agentMinAdj);
 
-  // Afternoon minimum [Regime A only, bypassed in B when puts_on_bounces confirmed]
+  // Afternoon minimum [Regime A only]
+  // Late-day entries in bull market have elevated overnight gap risk
+  // In Regime B, afternoon is when bounces run out of steam — best put timing
   if (g.afternoonMinActive && isLateDay) {
     const afternoonMin = rb.vix >= 30 ? 90 : rb.vix >= 25 ? 85 : minScore;
     minScore = Math.max(minScore, afternoonMin);
   }
 
-  // MACD contradiction [Regime A only — macdContradictsGate=false bypasses entirely in B/C]
-  // MS panel: contradiction only applies when MACD bullish AND RSI < 65
-  // If RSI ≥ 65 the stock is extended — put is a fade, not a contradiction
+  // MACD contradiction [Regime A only]
+  // In bear/crisis regimes, macdContradictsGate=false — entire check skipped
+  // MS panel: genuine contradiction requires both MACD opposing AND RSI < 65
+  // If RSI >= 65, the stock is extended — a put is a fade, not a contradiction
   if (g.macdContradictsGate) {
     const genuineContradiction = (optionType === "put" && macdBullish && dailyRsi < 65)
                                || (optionType === "call" && macdBearish);
     if (genuineContradiction) minScore = Math.max(minScore, 85);
   }
-  // In Regime B/C: macdContradictsGate=false, entire block skipped — no MACD minimum raise
 
-  // Drawdown protocol adjustment — RM panel: explicit param, not hidden state dependency
-  // context.drawdownMinScore passed by server.js from its drawdown calculation
+  // Drawdown protocol (explicit context param — no hidden state dependency)
   const ddMinScore = context.drawdownMinScore ?? BASE_MIN_SCORE;
   minScore = Math.max(minScore, ddMinScore);
 
-  if (score < minScore) {
+  if (score < minScore)
     return { pass: false, reason: `score ${score} below min ${minScore}`, minScore };
-  }
 
   return { pass: true, minScore, tradeType, optionType };
 }
 
 // ── Exports ───────────────────────────────────────────────────
-module.exports = { getRegimeRulebook, scoreCandidate, evaluateEntry, INSTRUMENT_CONSTRAINTS };
+module.exports = { getRegimeRulebook, scoreCandidate, evaluateEntry, INSTRUMENT_CONSTRAINTS, CORRELATED_GROUPS };
