@@ -2644,12 +2644,15 @@ function renderScoreDebug(data) {
     <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:8px;margin-bottom:8px">
       <div><span style="color:var(--muted)">Agent signal:</span> <strong style="color:var(--blue)">${data.agentSignal} (${data.agentConf})</strong></div>
       <div><span style="color:var(--muted)">Entry bias:</span> <strong>${data.agentBias}</strong></div>
-      <div><span style="color:var(--muted)">Price regime:</span> <strong>${g.priceRegime}</strong></div>
+      <div><span style="color:var(--muted)">Price regime:</span> <strong>${g.priceRegime}</strong> <span style="font-size:10px;color:var(--muted)">${g.regimeDuration||0}d</span></div>
       <div><span style="color:var(--muted)">Agent regime:</span> <strong style="color:${g.agentRegime !== g.priceRegime ? 'var(--orange)' : 'var(--text)'}">${g.agentRegime}${g.agentRegime !== g.priceRegime ? ' ⚠ overridden' : ''}</strong></div>
       <div><span style="color:var(--muted)">VIX:</span> <strong>${(g.vix||0).toFixed(1)}</strong> &nbsp; <span style="color:var(--muted)">IVR:</span> <strong>${(g.ivr||0).toFixed(0)} ${g.ivElevated ? '✓' : '✗'}</strong></div>
       <div><span style="color:var(--muted)">Agent tradeType:</span> <strong style="color:${g.agentTradeType==='none'?'var(--red)':'var(--text)'}">${g.agentTradeType}</strong></div>
+      <div><span style="color:var(--muted)">SPY:</span> <strong>$${(g.spyPrice||0).toFixed(2)}</strong> &nbsp; <span style="color:var(--muted)">50MA:</span> $${(g.spy50MA||0).toFixed(0)} &nbsp; <span style="color:var(--muted)">200MA:</span> $${(g.spy200MA||0).toFixed(0)}</div>
+      <div><span style="color:var(--muted)">Last scan:</span> <strong style="font-size:10px">${data.lastScan ? new Date(data.lastScan).toLocaleTimeString() : '--'}</strong></div>
     </div>
-    <div style="display:flex;flex-wrap:wrap;gap:8px;font-size:10px;padding-top:8px;border-top:1px solid var(--border)">
+    ${data.agentReasoning ? `<div style="font-size:10px;color:var(--muted);padding:6px 0;border-top:1px solid var(--border);border-bottom:1px solid var(--border);margin-bottom:8px;font-style:italic">"${data.agentReasoning}"</div>` : ''}
+    <div style="display:flex;flex-wrap:wrap;gap:8px;font-size:10px;padding-top:6px">
       <span>Choppy block: ${FLAG(g.isChoppyRegime)}</span>
       <span>Credit PUT mode: ${FLAG(g.creditModeActive)}</span>
       <span>Credit CALL mode: ${FLAG(g.creditCallModeActive)}</span>
@@ -2668,6 +2671,9 @@ function renderScoreDebug(data) {
   };
 
   rEl.innerHTML = (data.results || []).map(item => {
+    if (item.noData) return `<div class="card" style="margin-bottom:8px;padding:10px;opacity:0.5">
+      <strong>${item.ticker}</strong> <span style="color:var(--muted);font-size:11px">no scan data yet — waiting for first scan</span></div>`;
+
     if (item.error) return `<div class="card" style="margin-bottom:8px;padding:10px;border-color:var(--red)">
       <strong style="color:var(--red)">${item.ticker}</strong> <span style="color:var(--muted);font-size:11px">error: ${item.error}</span></div>`;
 
@@ -2679,6 +2685,7 @@ function renderScoreDebug(data) {
       <div style="display:flex;align-items:center;gap:10px;margin-bottom:8px;flex-wrap:wrap">
         <span style="font-size:15px;font-weight:700;color:var(--blue)">${item.ticker}</span>
         <span style="font-size:12px;color:var(--muted)">$${(item.price||0).toFixed(2)}</span>
+        <span style="font-size:10px;color:${item.ageSec > 120 ? 'var(--orange)' : 'var(--muted)'}">${item.ageSec}s ago</span>
         <span style="font-size:11px;padding:2px 8px;border-radius:10px;background:rgba(0,196,255,.1);color:var(--blue)">PUT: <strong style="color:${scoreColor(item.putScore)}">${item.putScore}</strong></span>
         <span style="font-size:11px;padding:2px 8px;border-radius:10px;background:rgba(0,196,255,.1);color:var(--blue)">CALL: <strong style="color:${scoreColor(item.callScore)}">${item.callScore}</strong></span>
         <span style="font-size:11px;color:var(--muted)">min: ${item.effectiveMin}</span>
