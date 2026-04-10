@@ -9524,6 +9524,14 @@ async function runScan() {
         if (qqqCallOpen && callSetup.score < 80) { callSetup.score = Math.min(callSetup.score, 30); logEvent("filter", `SPY corr-block: QQQ call open, SPY call score <80 suppressed`); }
         if (qqqPutOpen  && callSetup.score > 0) { callSetup.score = Math.min(callSetup.score, 30); }
         if (qqqCallOpen && putSetup.score  > 0) { putSetup.score  = Math.min(putSetup.score,  30); }
+        // Update scoreDebug after correlation suppression so tab shows actual scores
+        if (state._scoreDebug?.[stock.ticker]) {
+          state._scoreDebug[stock.ticker].putScore  = putSetup.score;
+          state._scoreDebug[stock.ticker].callScore = callSetup.score;
+          if (qqqPutOpen && putSetup.score <= 30) {
+            state._scoreDebug[stock.ticker].blocked = [...(state._scoreDebug[stock.ticker].blocked||[]), "corr-block: QQQ put open, SPY suppressed to 30"];
+          }
+        }
       }
 
       // - GLD entry gate - DXY + SPY momentum + VIX (panel-validated) -
@@ -10137,8 +10145,8 @@ async function runScan() {
     const isMR = optionType === "call" && callSetup.isMeanReversion;
     // PANEL FIX: Lock trade type at score time - execution must honor this, never re-derive from gate state
     // This prevents the TLT class of disaster where creditModeActive flips between scoring and execution
-    const _scoredTradeType = useCreditCallSpread ? "credit_call"
-      : (creditModeActive && optionType === "put" && (ivRankNow||0) >= 50) ? "credit_put"
+    const _scoredTradeType = (creditCallModeActive && optionType === "call") ? "credit_call"
+      : (creditModeActive && optionType === "put" && ivRankNow >= 50) ? "credit_put"
       : isMR ? "debit_naked"
       : "debit";
     const _instrumentConstraint = INSTRUMENT_CONSTRAINTS[liveStock.ticker] || null;
@@ -11695,6 +11703,7 @@ app.get("/api/score-debug", (req, res) => {
       if (gates.vixFallingPause)                 blocks.push("VIX falling - puts paused");
       if (avoidHoldActive)                       blocks.push(`avoid hold until ${avoidUntilStr}`);
 
+      const instrConstraint = INSTRUMENT_CONSTRAINTS[stock.ticker] || null;
       return {
         ticker:      stock.ticker,
         price:       snap.price,
@@ -11706,6 +11715,7 @@ app.get("/api/score-debug", (req, res) => {
         effectiveMin: snap.effectiveMin,
         wouldEnter:  blocks.length === 0 || (blocks.length === 1 && (blocks[0].includes("credit") && bestScore >= snap.effectiveMin)),
         blocks,
+        constraint:  instrConstraint ? `${instrConstraint.allowedTypes.join("/")} only${instrConstraint.reason ? " - " + instrConstraint.reason : ""}` : null,
         putReasons:  snap.putReasons  || [],
         callReasons: snap.callReasons || [],
         signals:     snap.signals     || {},
