@@ -3,6 +3,7 @@
 // Alpaca Paper Trading Edition
 // -
 const express    = require("express");
+const { getRegimeRulebook, scoreCandidate: EE_scoreCandidate, evaluateEntry } = require("./entryEngine.js");
 const cron       = require("node-cron");
 const fetch      = require("node-fetch");
 const fs         = require("fs");
@@ -4548,11 +4549,11 @@ function isGLDEntryAllowed(optionType, dxy, spyReturn5d, vix, gldRSI, gldPrice, 
     if (gldDowntrend)     return { allowed: false, reason: `GLD call blocked - GLD $${gldPrice.toFixed(2)} below 20MA $${gldMA20.toFixed(2)}, don't buy calls in downtrend` };
     return { allowed: true };
   } else {
-    // GLD puts — two paths by trade type:
-    // Debit puts: RSI ≥ 68 required (directional bet — gold must fall to profit)
-    // Credit puts: RSI irrelevant — selling premium above current price, not predicting direction
+    // GLD puts  -- two paths by trade type:
+    // Debit puts: RSI >= 68 required (directional bet  -- gold must fall to profit)
+    // Credit puts: RSI irrelevant  -- selling premium above current price, not predicting direction
     // [Regime A] RSI gate applies fully
-    // [Regime B credit] bypass RSI overbought — IV level is what matters for premium collection
+    // [Regime B credit] bypass RSI overbought  -- IV level is what matters for premium collection
     const gldOverbought  = gldRSI >= 68;
     const dxyRising      = dxy && dxy.change > 0;
     const isGLDCreditPut = arguments[7] === "credit_put";
@@ -8729,7 +8730,7 @@ async function runScan() {
   const dayPlanRiskMult = (dayPlan && dayPlan.riskLevel === "high" && !dryRunMode) ? 0.50 : 1.0;
   if (dayPlanRiskMult < 1.0) logEvent("filter", `[DAY PLAN] High risk day - position sizing reduced 50%`);
 
-  const macroBullish  = (marketContext.macro?.mode === "aggressive");
+  const macroBullish      = rb.gates.macroBullishBlock; // from rulebook (replaces old derivation)
   const pdtCount      = countRecentDayTrades();
   const pdtBlocked    = !dryRunMode && pdtCount >= PDT_LIMIT;
   if (pdtBlocked) logEvent("filter", `PDT limit reached (${pdtCount}/${PDT_LIMIT} day trades in 5 days) - same-day exits blocked, new entries still allowed`);
@@ -8828,78 +8829,40 @@ async function runScan() {
   // _dayPlan.regime is the morning baseline, used only when _agentMacro hasn't run yet.
   // applyIntradayRegimeOverride updates _dayPlan for the morning context - but scoring
   // uses _agentMacro directly so intraday shifts are immediately reflected.
-  // PANEL FIX: Single authoritative regime derived from price-based classifier
-  // Priority: price-based regime (_regimeClass) wins on structural decisions
-  // Agent regime is advisory only - used for magnitude/bias, never for gate decisions
-  // This eliminates the choppy contradiction (agent says choppy, price-classifier says Regime B)
-  const authRegimeName = state._regimeClass === "B" ? "trending_bear"
-                       : state._regimeClass === "C" ? "breakdown"
-                       : "trending_bull"; // Regime A = bull
-  const agentRegime        = (state._agentMacro || {}).regime || "neutral"; // advisory only
-  const agentTradeTypeGate = (state._agentMacro?.tradeType) || ((state._dayPlan || {}).tradeType) || "spread";
-  // isChoppyRegime: only true when BOTH price and agent agree, OR agent explicitly says none
-  // Prevents single-agent choppy call from blocking all entries in a confirmed bear trend
-  const regimeForGate  = authRegimeName;
-  const isChoppyRegime = agentTradeTypeGate === "none"; // only agent "none" blocks, not agent "choppy"
-  // SKEW elevated = puts doubly overpriced (both fear + tail risk premium)
-  // When SKEW >= 130 lower the VIX threshold - SKEW compensates for lower VIX
+  // -- ENTRY ENGINE: Regime Rulebook ----------------------------------------
+  // Single source of truth for all entry decisions (panel unanimous 14/14)
+  // Computed once per scan  -- all downstream code reads from rb.gates, never re-derives
+  const rb = dryRunMode
+    ? { ...getRegimeRulebook(state), gates: { ...getRegimeRulebook(state).gates,
+        choppyDebitBlock: false, crisisDebitBlock: false, avoidHoldActive: false,
+        postReversalBlock: false, vixFallingPause: false } }
+    : getRegimeRulebook(state);
+
+  // Surface key flags for the rest of runScan that references them directly
+  const authRegimeName    = rb.regimeName;
+  const isChoppyRegime    = rb.gates.choppyDebitBlock; // agent said none
+  const creditModeActive  = rb.gates.creditPutActive;
+  const creditCallModeActive = rb.gates.creditCallActive;
+  const choppyDebitBlock  = rb.gates.choppyDebitBlock;
+  const crisisDebitBlock  = rb.gates.crisisDebitBlock;
+  const inBullRegime      = rb.isBullRegime;
+  const isBearTrend       = rb.isBearRegime;
+  const ivRankNow         = rb.ivRank;
+  const ivElevated        = rb.ivElevated;
+  const ivHigh            = rb.ivHigh;
+  const regimeClass       = rb.regimeClass;
   const skewElevated      = (state._skew?.skew || 0) >= 130;
-  // Simon & Campasano (2014): momentum fails above VIX 25, mean reversion dominates
-  // Paper validates credit spread entries starting at VIX 25, not 28
-  // Simon & Campasano: threshold 25. SKEW elevated lowers to 22 (not 20 - too low premium at VIX 20)
-  const creditAllowedVIX  = state.vix >= 25 || (skewElevated && state.vix >= 22);
-  if (skewElevated && state.vix >= 22 && state.vix < 28) {
-    logEvent("filter", `SKEW ${state._skew.skew} elevated - lowering credit spread VIX threshold to 22`);
-  }
-  // - 1A: CREDIT MODE GATE (panel unanimous 11/11) -
-  // EXPANDED: credit spreads now fire in trending_bear + high VIX
-  // Previously only fired in choppy regime - missed the biggest opportunity environment
-  //
-  // Credit spread conditions:
-  //   Choppy: sell premium because direction is uncertain (original logic)
-  //   Trending bear + VIX >= 25: sell call premium above falling market (new)
-  //   Trending bear + IVR >= 50: elevated IV makes credit collection worthwhile (new)
-  //
-  const choppyDebitBlock  = isChoppyRegime && !dryRunMode;
-  const agentSaysCredit   = agentTradeTypeGate === "credit";
-  const isBearTrend       = authRegimeName === "trending_bear" || authRegimeName === "breakdown";
-  const ivRankNow         = state._ivRank || 50;
-  const ivElevated        = ivRankNow >= 50; // options at least moderately expensive
-  const ivHigh            = ivRankNow >= 70; // options expensive - sell premium aggressively
+  const creditAllowedVIX  = rb.vix >= 25 || (skewElevated && rb.vix >= 22);
 
-  // Bull put credit spreads: sell puts BELOW market (neutral-to-bullish structure)
-  //   - Choppy + high VIX: original logic
-  //   - NOT allowed in trending_bear below 200MA (bullish bet in bear regime - panel said correctly blocked)
-  const creditModeActive = (isChoppyRegime || agentSaysCredit) && creditAllowedVIX && !dryRunMode;
-
-  // Bear call credit spreads: sell calls ABOVE market (bearish structure) 
-  //   - Choppy near resistance: original logic
-  //   - trending_bear + VIX >= 25: NEW - sell calls above falling market, collect rich premium
-  //   - trending_bear + IVR >= 50: NEW - elevated IV justifies credit collection even without resistance
-  const spyNearResistance = (() => {
-    const res = (state._agentMacro || {}).keyLevels?.spyResistance;
-    if (!res || !state.spyPrice) return false;
-    return Math.abs(state.spyPrice - res) / res < 0.015;
-  })();
-  const bearCallChoppy    = isChoppyRegime && creditAllowedVIX && spyNearResistance;
-  const bearCallTrend     = isBearTrend && creditAllowedVIX && ivElevated && !dryRunMode;
-  const creditCallModeActive = (bearCallChoppy || bearCallTrend) && !dryRunMode;
-
-  if (choppyDebitBlock) logEvent("filter", `Choppy regime - debit entries blocked${creditModeActive ? ", credit PUT mode active" : creditCallModeActive ? ", credit CALL mode active" : ", VIX too low for credits"}`);
-  if (bearCallTrend && !bearCallChoppy) logEvent("filter", `[CREDIT CALL] Trending bear + VIX ${state.vix} + IVR ${ivRankNow} - bear call spread mode active`);
-
-  // - 2B: REGIME-BASED STRATEGY SELECTION -
-  // Regime A (bull): mean reversion - debit spreads, both directions
-  // Regime B (trending bear): trend mode - bear call credits + debit puts on bounces
-  // Regime C (crisis): bear call credits only - mean reversion fails in crisis
-  const regimeClass = state._regimeClass || "A";
-  const strategyMode = regimeClass === "C" ? "CRISIS - bear call credits only, no debit buys"
+  // Strategy log
+  const strategyMode = regimeClass === "C" ? "CRISIS - bear call credits only"
     : regimeClass === "B" ? "BEAR TREND - bear call credits + debit puts on bounces"
     : "BULL - mean reversion, both directions";
   logEvent("scan", `[STRATEGY] Regime ${regimeClass}: ${strategyMode} | IVR:${ivRankNow} (${state._ivEnv})`);
-  // In crisis regime: block debit put entries (mean reversion fails when SPY > 20% off highs)
-  const crisisDebitBlock = regimeClass === "C" && !dryRunMode;
-  if (crisisDebitBlock) logEvent("filter", `[REGIME C] Crisis mode - debit put entries blocked, mean reversion unreliable`);
+  if (rb.gates.choppyDebitBlock) logEvent("filter", `Choppy regime - debit entries blocked${creditModeActive ? ", credit PUT mode active" : creditCallModeActive ? ", credit CALL mode active" : ", VIX too low for credits"}`);
+  if (creditCallModeActive && isBearTrend) logEvent("filter", `[CREDIT CALL] Trending bear + VIX ${state.vix} + IVR ${ivRankNow} - bear call spread mode active`);
+  if (crisisDebitBlock && !dryRunMode) logEvent("filter", `[REGIME C] Crisis mode - debit put entries blocked, mean reversion unreliable`);
+  if (skewElevated && state.vix >= 22 && state.vix < 28) logEvent("filter", `SKEW ${(state._skew?.skew||0)} elevated - credit VIX threshold lowered to 22`);
 
 
   // AVOID HOLD TIME: when agent says avoid, stamp _avoidUntil for 30 minutes
@@ -8946,25 +8909,28 @@ async function runScan() {
     }
   }
 
-  // MR calls bypass choppy block - extreme oversold in high-VIX IS the ideal MR call setup
+  // MR calls bypass choppy block  -- extreme oversold in high-VIX is the ideal MR setup
   const spyRSIForMR   = (marketContext.spySignals && marketContext.spySignals.rsi) || state._lastSpyRSI || 50;
   const isMRCondition = spyRSIForMR <= 35 && state.vix >= 25;
-  // 200MA bear regime: calls blocked entirely
-  const below200MACallBlock = spyBelow200MA && !dryRunMode;
-  const callsAllowed  = (isEntryWindow("call", true) && !finalHourBlock && !suppressBlock && !below200MACallBlock && (!choppyDebitBlock || isMRCondition) && !avoidHoldActive) || dryRunMode;
+  const below200MACallBlock = rb.gates.below200MACallBlock;
+  // Derive allowed flags from rulebook gates (entry window still checked here for timing)
+  const entryWindowOpen   = isEntryWindow("put", true) && !finalHourBlock && !suppressBlock;
+  const callWindowOpen    = isEntryWindow("call", true) && !finalHourBlock && !suppressBlock;
+  const putsAllowed       = (entryWindowOpen && !rb.gates.vixFallingPause && !rb.gates.spyGapUpBlockPuts
+                             && !rb.gates.postReversalBlock && !rb.gates.macroBullishBlock
+                             && !rb.gates.choppyDebitBlock && !rb.gates.avoidHoldActive
+                             && !rb.gates.crisisDebitBlock) || dryRunMode;
+  const callsAllowed      = (callWindowOpen && !rb.gates.below200MACallBlock
+                             && (!rb.gates.choppyDebitBlock || isMRCondition)
+                             && !rb.gates.avoidHoldActive) || dryRunMode;
+  const creditAllowed     = creditModeActive  && entryWindowOpen && !rb.gates.avoidHoldActive && !rb.gates.vixFallingPause;
+  const callCreditAllowed = creditCallModeActive && callWindowOpen && !rb.gates.avoidHoldActive;
   if (isMRCondition && choppyDebitBlock) logEvent("filter", `MR call allowed in choppy - SPY RSI ${spyRSIForMR.toFixed(1)} extreme oversold + VIX ${state.vix}`);
-  // PANEL FIX [Regime A only]: gap-up ends mean reversion thesis in bull market
-  // In Regime B/C gap-up IS the puts_on_bounces entry signal — do not block
-  const inBullRegime      = authRegimeName === "trending_bull";
-  const spyGapUpBlockPuts = spyGapUp && inBullRegime;
-  const putsAllowed   = (isEntryWindow("put",  true) && !vixFallingPause && !spyGapUpBlockPuts && !postReversalBlock && !finalHourBlock && !suppressBlock && !macroBullish && !choppyDebitBlock && !avoidHoldActive && !crisisDebitBlock) || dryRunMode;
-  // Credit spreads allowed even in choppy regime - that's the point of credit mode
-  const creditAllowed     = creditModeActive     && isEntryWindow("put",  true) && !finalHourBlock && !suppressBlock && !vixFallingPause && !avoidHoldActive;
-  const callCreditAllowed = creditCallModeActive && isEntryWindow("call", true) && !finalHourBlock && !suppressBlock;
   if (creditAllowed && !putsAllowed) logEvent("filter", "Debit puts blocked - credit put spread mode active");
-  if (callCreditAllowed)             logEvent("filter", "Near resistance in choppy regime - credit call spread mode active");
-  if (macroBullish && !dryRunMode) logEvent("filter", `Macro bullish (${marketContext.macro?.signal}) - puts blocked`);
-  if (vixFallingPause && !dryRunMode) logEvent("filter", "VIX falling - put entries paused, call entries favored (VIX compression)");
+  if (callCreditAllowed)             logEvent("filter", "Bear call credit mode active");
+  if (macroBullish && !dryRunMode)  logEvent("filter", `Macro bullish (${marketContext.macro?.signal}) - puts blocked`);
+  if (rb.gates.vixFallingPause && !dryRunMode) logEvent("filter", "VIX falling - put entries paused");
+  if (rb.gates.postReversalBlock && !dryRunMode) logEvent("filter", "Post-reversal cooldown active - puts blocked 30min");
 
   // - VIX SPIKE EXIT - close call positions on sharp VIX spike -
   // VIX jumping 8+ points intraday crushes call delta AND increases IV on short leg
@@ -9485,20 +9451,12 @@ async function runScan() {
     // Normal entries: 3:00pm cutoff
     // Mean reversion calls: 3:30pm cutoff (capitulation has genuine overnight edge)
     const entryWindowClosed = etHour >= 15.0; // 3:00pm normal cutoff
-    // Afternoon min score gate - replaces 0.80x multiplier
-    // [Regime A only] Late entries have elevated overnight gap risk in bull market
-    // [Regime B bypass] Afternoon = bounce has run out = best fade timing. Risk Manager condition:
-    //   bypass only when agent confirms puts_on_bounces with medium/high confidence and not stale
-    const agentConfLocal             = (state._agentMacro || {}).confidence || "low";
-    const agentLastRunLocal          = (state._agentMacro || {}).timestamp || null;
-    const agentStaleLocal            = !agentLastRunLocal || ((Date.now() - new Date(agentLastRunLocal).getTime()) / 60000) > 30;
-    const agentWantsPutsOnBounceNow  = (state._agentMacro || {}).entryBias === "puts_on_bounces";
-    const bypassAfternoonGate        = !inBullRegime && agentWantsPutsOnBounceNow && agentConfLocal !== "low" && !agentStaleLocal;
-    let timeOfDayMinScore = MIN_SCORE; // default - no penalty
-    if (isLateDay && state.vix >= 30 && !bypassAfternoonGate)      timeOfDayMinScore = 90; // VIX 30+ after 2:30pm
-    else if (isLateDay && state.vix >= 25 && !bypassAfternoonGate) timeOfDayMinScore = 85; // VIX 25-30 after 2:30pm
-    else if (isLastHour && volDecline && !bypassAfternoonGate)     timeOfDayMinScore = 85; // low volume last hour
-    if (bypassAfternoonGate && isLateDay) logEvent("filter", `${stock.ticker} afternoon gate bypassed - Regime B puts_on_bounces (${agentConfLocal} conf)`);
+    // Afternoon gate is now handled by evaluateEntry via rb (Regime A only, bypassed in B)
+    // timeOfDayMinScore kept for backward compat with finalMinScore below
+    let timeOfDayMinScore = MIN_SCORE;
+    if (rb.gates.afternoonMinActive && isLateDay) {
+      timeOfDayMinScore = state.vix >= 30 ? 90 : state.vix >= 25 ? 85 : MIN_SCORE;
+    }
 
     // - F7: Weekly trend filter -
     // Fetch cached weekly trend (60-min cache, no extra API call)
@@ -9942,27 +9900,14 @@ async function runScan() {
       }
     }
 
-    // Effective min score - agent confidence directly influences entry bar
-    // High confidence bearish - lower bar (65) - agent is sure, trust it
-    // Low confidence or stale macro - raise bar (80) - be more selective
-    // No agent run yet - normal bar (70)
-    const etHourNow = scanET.getHours() + scanET.getMinutes() / 60;
-    // PANEL FIX: use price-based _regimeClass not agent regime label
-    // Agent calls regime "choppy" on gap-up days in bear markets → was silently setting regimeMinScore=90
-    // _regimeClass (200MA + VIX + drawdown) is objective and consistent
-    const _priceRegimeLabel = state._regimeClass === "B" ? "trending_bear"
-                            : state._regimeClass === "C" ? "breakdown"
-                            : "trending_bull";
-    const regimeProfile    = getRegimeProfile(_priceRegimeLabel);
-    const regimeMinScore   = regimeProfile.minScore;
-    const agentConf        = (state._agentMacro || {}).confidence || "low";
-    const agentSig         = (state._agentMacro || {}).signal || "neutral";
-    const agentLastRun     = (state._agentMacro || {}).timestamp || null;
-    const agentStaleMins   = agentLastRun ? (Date.now() - new Date(agentLastRun).getTime()) / 60000 : 999;
-    const agentStale       = !agentLastRun || agentStaleMins > 30; // cache 30 min
-    const isBearishHigh    = ["bearish","strongly bearish"].includes(agentSig) && agentConf === "high" && !agentStale;
-    const isLowConfidence  = agentConf === "low" || agentStale;
-    const agentMinScore    = isBearishHigh ? 65 : isLowConfidence ? 80 : MIN_SCORE;
+    // Minimum score  -- now derived from rulebook (regime-aware, panel-tuned)
+    const etHourNow     = scanET.getHours() + scanET.getMinutes() / 60;
+    const agentConf     = (state._agentMacro || {}).confidence || "low";
+    const agentSig      = (state._agentMacro || {}).signal || "neutral";
+    const agentLastRun  = (state._agentMacro || {}).timestamp || null;
+    const agentStale    = !agentLastRun || ((Date.now() - new Date(agentLastRun).getTime()) / 60000) > 30;
+    const agentMinScore = agentStale || agentConf === "low" ? MIN_SCORE + 10 : MIN_SCORE;
+    const regimeMinScore = rb.minScorePut; // from rulebook, price-based regime
     // Instrument-specific min scores - IWM removed (3yr net loser)
     // GLD uses 80+ with DXY/SPY gates applied upstream
     // below200MAPutMin REMOVED - regimeProfile already handles this via trending_bear/crash minScore
@@ -10081,22 +10026,20 @@ async function runScan() {
     }
     if (staggerBlock) { logEvent("filter", `${stock.ticker} stagger blocked - ${staggerReason}`); continue; }
 
-    // MACD contradiction gate - require higher conviction when MACD opposes trade direction
-    // Credit spreads: direction-neutral, bypass gate
-    // [Regime A] Bullish MACD genuinely contradicts a put — market has upward momentum
-    // [Regime B bypass] dailyRSI ≥ 68 + bullish MACD = overbought bounce = PUT CATALYST not contradiction
-    //   (Options Market Structure Analyst: highest-conviction fade setup, not a red flag)
+    // MACD contradiction  -- rulebook handles regime-awareness (A only, bypass in B via gate flag)
     const macdSignal    = liveStock.macd || "neutral";
     const macdBullish   = macdSignal.includes("bullish");
     const macdBearish   = macdSignal.includes("bearish");
     const isMRCall      = callSetup.isMeanReversion && optionType === "call";
-    const isCreditEntry = creditModeActive;
     const dailyRsiNow   = liveStock.dailyRsi || liveStock.rsi || 50;
-    const macdOverboughtBypass = optionType === "put" && macdBullish && !inBullRegime && dailyRsiNow >= 68;
-    const macdContradicts = !isCreditEntry && !macdOverboughtBypass &&
-      ((optionType === "put" && macdBullish) || (optionType === "call" && macdBearish && !isMRCall));
+    // [Regime A only] gate  -- rb.gates.macdContradictsGate is false in B/C (bypassed)
+    // MS panel: genuine contradiction requires MACD opposing AND RSI < 65 (not extended)
+    const macdContradicts = rb.gates.macdContradictsGate && !creditModeActive &&
+      ((optionType === "put" && macdBullish && dailyRsiNow < 65) ||
+       (optionType === "call" && macdBearish && !isMRCall));
     const macdMinScore = macdContradicts ? 85 : effectiveMinScore;
-    if (macdOverboughtBypass) logEvent("filter", `${liveStock.ticker} MACD contradiction bypassed - RSI ${dailyRsiNow.toFixed(0)} overbought + bullish MACD in Regime B = bounce fade setup`);
+    if (!rb.gates.macdContradictsGate && optionType === "put" && macdBullish && dailyRsiNow >= 68)
+      logEvent("filter", `${liveStock.ticker} MACD contradiction bypassed - RSI ${dailyRsiNow.toFixed(0)} overbought + bullish MACD in Regime B = bounce fade`);
     if (macdContradicts) logEvent("filter", `${liveStock.ticker} MACD ${macdSignal} contradicts ${optionType} - raising min score to 85`);
 
     // V2.84: Regime B oversold sizing modifier (Risk Manager recommendation)
@@ -10186,26 +10129,25 @@ async function runScan() {
     logEvent("filter", `${stock.ticker} best setup: ${optionType.toUpperCase()} score ${bestScore} | RSI:${signals.rsi} MACD:${signals.macd} MOM:${signals.momentum}`);
     // Queue for execution - heat is rechecked live in the execution loop below
     const isMR = optionType === "call" && callSetup.isMeanReversion;
-    // PANEL FIX: Lock trade type at score time - execution must honor this, never re-derive from gate state
-    // This prevents the TLT class of disaster where creditModeActive flips between scoring and execution
-    const _scoredTradeType = (creditCallModeActive && optionType === "call") ? "credit_call"
-      : (creditModeActive && optionType === "put" && ivRankNow >= 50) ? "credit_put"
-      : isMR ? "debit_naked"
-      : optionType === "put" ? "debit_put"
-      : "debit_call";
-    const _instrumentConstraint = INSTRUMENT_CONSTRAINTS[liveStock.ticker] || null;
+    // ENTRY ENGINE: score candidate  -- locks tradeIntent at score time
+    const eeCandidate = EE_scoreCandidate(
+      { ...liveStock, isMeanReversion: isMR },
+      putSetup.score, callSetup.score,
+      putSetup.reasons, callSetup.reasons,
+      { rsi: signals.rsi, dailyRsi: signals.dailyRsi, macd: signals.macd,
+        spyRecovering: !!(spyRecovering) },
+      rb, state
+    );
+    // Merge entry engine result with scan data
     scored.push({
-      stock: liveStock, price, score: bestScore, reasons: bestReasons, optionType, isMeanReversion: isMR,
-      tradeIntent: {
-        type:               _scoredTradeType,
-        instrumentConstraint: _instrumentConstraint,
-        creditModeSnap:     creditModeActive,
-        creditCallModeSnap: creditCallModeActive,
-        ivRankSnap:         ivRankNow || 0,
-        isChoppySnap:       isChoppyRegime,
-        regimeSnap:         state._regimeClass || "A",
-        lockedAt:           Date.now(),
-      }
+      stock: liveStock, price,
+      score:         eeCandidate.score,
+      reasons:       eeCandidate.reasons,
+      optionType:    eeCandidate.optionType,
+      isMeanReversion: isMR,
+      tradeIntent:   eeCandidate.tradeIntent,
+      sizeMod:       eeCandidate.sizeMod,
+      constraintPass: eeCandidate.constraintPass,
     });
   }
 
@@ -10262,7 +10204,7 @@ async function runScan() {
 
   // Enter trades - sorted by score, best first
   // heatPct() is live and updates after every executeTrade call
-  for (const { stock, price, score, reasons, optionType, isMeanReversion, tradeIntent } of scored) {
+  for (const { stock, price, score, reasons, optionType, isMeanReversion, tradeIntent, constraintPass, constraintReason } of scored) {
     if (heatPct() >= effectiveHeatCap()) break;
     if (state.cash <= CAPITAL_FLOOR) break;
 
@@ -10319,31 +10261,55 @@ async function runScan() {
       }
     }
 
-    // - TRADE TYPE from tradeIntent (locked at score time) -
-    // PANEL FIX: Never re-derive trade type from current gate state - it may have shifted since scoring
-    // Honor the decision that was made when this candidate was scored, with full market context
-    const intent = tradeIntent || {};
+    // ENTRY ENGINE: evaluateEntry  -- single gate check using locked tradeIntent
+    const intent     = tradeIntent || {};
     const intentType = intent.type || (optionType === "put" ? "debit_put" : "debit_call");
+
+    // Build stagger context
+    const sameTickerSameDirPos = state.positions.filter(p =>
+      p.ticker === stock.ticker &&
+      ((intentType.includes("put") && p.optionType === "put") ||
+       (intentType.includes("call") && p.optionType === "call"))
+    );
+    const recentSameDirMins = sameTickerSameDirPos.length > 0
+      ? Math.min(...sameTickerSameDirPos.map(p => (Date.now() - new Date(p.entryTime||0).getTime()) / 60000))
+      : null;
+    const existingProfitPct = sameTickerSameDirPos.length > 0
+      ? Math.max(...sameTickerSameDirPos.map(p => parseFloat(p.pnlPct || 0)))
+      : 0;
+    const ddProtocol = marketContext.drawdownProtocol || { minScore: MIN_SCORE };
+
+    const eeResult = evaluateEntry(
+      { ticker: stock.ticker, optionType, tradeType: intentType, score,
+        constraintPass: constraintPass !== false,
+        constraintReason: constraintReason || null,
+        tradeIntent: intent },
+      rb, state,
+      { etHour: etHourNow, isLateDay, isLastHour, volDecline,
+        signals: { dailyRsi: liveStock.dailyRsi || liveStock.rsi || 50,
+                   macd: liveStock.macd || "neutral" },
+        recentSameDir:       recentSameDirMins,
+        existingProfitPct,
+        drawdownMinScore:    ddProtocol.minScore || MIN_SCORE }
+    );
+    if (!eeResult.pass && !dryRunMode) {
+      logEvent("filter", `${stock.ticker} entry blocked - ${eeResult.reason}`);
+      recordGateBlock(stock.ticker, eeResult.reason, rb.regimeName, score);
+      continue;
+    }
+
+    // Derive execution path from locked intentType
+    const agentTradeType      = (state._agentMacro || {}).tradeType || "spread";
     const useCreditSpread     = intentType === "credit_put"  && stock.isIndex && !isMeanReversion;
     const useCreditCallSpread = intentType === "credit_call" && stock.isIndex && !isMeanReversion;
     const useIronCondor       = intentType === "iron_condor" && stock.isIndex && !isMeanReversion && !dryRunMode
       && !state.positions.some(p => p.ticker === stock.ticker);
-    const agentTradeType      = (state._agentMacro || {}).tradeType || "spread";
-    const useSpread           = !useCreditSpread && !useCreditCallSpread && !useIronCondor && !isMeanReversion && stock.isIndex && intentType !== "debit_naked";
-    const ivSizeMult          = (intent.ivRankSnap || 0) >= 70 ? 1.5 : 1.0;
+    const useSpread           = !useCreditSpread && !useCreditCallSpread && !useIronCondor
+      && stock.isIndex && !isMeanReversion && intentType !== "debit_naked";
+    const ivSizeMult          = rb.sizeMult.ivBoostCredit && intentType.startsWith("credit")
+      ? rb.sizeMult.ivBoostCredit : 1.0;
     if ((useCreditSpread || useCreditCallSpread) && ivSizeMult > 1.0) {
-      logEvent("scan", `[IV] ${stock.ticker} credit spread - IVR ${intent.ivRankSnap} HIGH, size mult ${ivSizeMult}x`);
-    }
-
-    // INSTRUMENT_CONSTRAINTS: enforce allowed trade types at execution entry
-    // This is the final safety check - survives any gate shift between scoring and execution
-    const constraint = intent.instrumentConstraint || INSTRUMENT_CONSTRAINTS[stock.ticker] || null;
-    if (constraint) {
-      const allowed = constraint.allowedTypes || [];
-      if (!allowed.includes(intentType)) {
-        logEvent("filter", `[CONSTRAINT] ${stock.ticker} blocked - intent type "${intentType}" not in allowed [${allowed.join(",")}]${constraint.reason ? " | " + constraint.reason : ""}`);
-        continue;
-      }
+      logEvent("scan", `[IV] ${stock.ticker} credit spread - IVR ${rb.ivRank} HIGH, size mult ${ivSizeMult}x`);
     }
 
     let entered = false;
