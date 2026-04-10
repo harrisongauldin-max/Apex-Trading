@@ -3527,7 +3527,7 @@ Rules: regime=what SPY does next 3-10 days. entryBias: puts_on_bounces=bearish t
 Headlines to analyze (newest first):
 ${headlines.slice(0, 15).map((h, i) => (i+1) + '. ' + h).join('\n')}
 
-Analyze and return your JSON. Use tools only if you need data not shown above.`;
+Respond with ONLY the JSON object. No words before or after. Start your response with { and end with }.`;
 
   // AG-8: Track agent health
   if (!state._agentHealth) state._agentHealth = { calls: 0, successes: 0, timeouts: 0, parseErrors: 0, lastSuccess: null };
@@ -3552,6 +3552,16 @@ Analyze and return your JSON. Use tools only if you need data not shown above.`;
       logEvent("warn", `[AGENT] Stripped <thinking> block - model outputting chain-of-thought before JSON`);
     }
     cleanRaw = cleanRaw.replace(/^```(?:json)?\n?/m, "").replace(/\n?```$/m, "").trim();
+    // V2.84: If response starts with prose instead of {, extract the JSON object
+    // Handles "Looking at the market..." preamble before the actual JSON
+    if (!cleanRaw.startsWith("{")) {
+      const jsonStart = cleanRaw.indexOf("{");
+      const jsonEnd   = cleanRaw.lastIndexOf("}");
+      if (jsonStart !== -1 && jsonEnd !== -1 && jsonEnd > jsonStart) {
+        logEvent("warn", `[AGENT] Response started with prose - extracting JSON from position ${jsonStart}`);
+        cleanRaw = cleanRaw.slice(jsonStart, jsonEnd + 1);
+      }
+    }
     const parsed = JSON.parse(cleanRaw);
     // Validate required fields
     if (!parsed.signal || parsed.modifier === undefined) {
