@@ -4777,6 +4777,8 @@ async function getRealOptionsContract(ticker, price, optionType, score, vix, ear
       // MR calls can use 14 DTE (quick bounce play)
       // Index instruments (SPY/QQQ etc) have liquid weeklies at any DTE
       // PDT 21 DTE floor only applies to single stocks where theta decay is a real risk
+      // isIndexTicker declared here -- used for both minDTE and liquidScore below
+      const isIndexTicker = ["SPY","QQQ","GLD","TLT","XLE","DIA"].includes(ticker);
       const minDTE = isIndexTicker ? 3 : isMeanReversion ? 14 : 21;
       if (contractDTE < minDTE) { skipped++; continue; }
 
@@ -4793,7 +4795,6 @@ async function getRealOptionsContract(ticker, price, optionType, score, vix, ear
       // Liquidity (15%) - OI as proxy, unknown OI gets neutral score
       // SPY/QQQ index instruments: always liquid regardless of single-strike OI
       // Monthly expirations have lower OI per strike but the market is deep
-      const isIndexTicker = ["SPY","QQQ","GLD","TLT","XLE","DIA"].includes(ticker);
       const liquidScore  = isIndexTicker && contractDTE > 14 ? 0.8  // index monthly = liquid
                          : oi === 0 ? 0.5                    // unknown = neutral
                          : oi < 10  ? 0.02                   // essentially no market
@@ -10177,7 +10178,9 @@ async function runScan() {
       entered = !!icPos;
     } else if (useCreditSpread || useCreditCallSpread) {
       state._lastEntryType = "credit"; // tag for VIX sizing adjustment
-      const creditPos = await executeCreditSpread(stock, price, score, reasons, state.vix, optionType, regimeBOversoldMod);
+      // regimeBOversoldMod declared in scoring block above -- use local fallback if out of scope
+      const _sizeMod = typeof regimeBOversoldMod !== "undefined" ? regimeBOversoldMod : 1.0;
+      const creditPos = await executeCreditSpread(stock, price, score, reasons, state.vix, optionType, _sizeMod);
       entered = !!creditPos;
     } else if (useSpread) {
       // Trending regime: buy direction via debit spread
@@ -10242,7 +10245,8 @@ async function runScan() {
         logEvent("filter", `${stock.ticker} index trade type unclear (agent: ${agentTradeType}) - skipping`);
         continue;
       }
-      entered = await executeTrade(stock, price, score, reasons, state.vix, optionType, isMeanReversion, regimeBOversoldMod);
+      const _sizeModDebit = typeof regimeBOversoldMod !== "undefined" ? regimeBOversoldMod : 1.0;
+      entered = await executeTrade(stock, price, score, reasons, state.vix, optionType, isMeanReversion, _sizeModDebit);
     }
     if (entered) await new Promise(r=>setTimeout(r,500));
   }
