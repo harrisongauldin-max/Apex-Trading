@@ -3490,6 +3490,19 @@ Rules: regime=what SPY does next 3-10 days. entryBias: puts_on_bounces=bearish t
   const regimeC = state._spyDrawdown < -20 && state._vixSustained > 35 && state._regimeDuration > 10;
   const regimeB = !regimeA && !regimeC; // trending/transitional - the current environment
   state._regimeClass = regimeC ? "C" : regimeB ? "B" : "A";
+
+  // _regimeDuration: days SPY has been below 200MA - increment once per trading day
+  // Used for regime duration boost in scoring (+5 after 3d, +10 after 5d, +15 after 10d)
+  if (!state._regimeDurationDate) state._regimeDurationDate = "";
+  const todayDateStr = new Date().toISOString().slice(0, 10);
+  if (spyBelowNow && state._regimeDurationDate !== todayDateStr) {
+    state._regimeDuration = (state._regimeDuration || 0) + 1;
+    state._regimeDurationDate = todayDateStr;
+  } else if (!spyBelowNow) {
+    state._regimeDuration = 0; // reset when SPY recovers above 200MA
+    state._regimeDurationDate = "";
+  }
+
   logEvent("scan", `[REGIME] Class:${state._regimeClass} | Below200MA:${state._regimeDuration}d | VIX5d:${state._vixSustained} | SPYdd:${state._spyDrawdown}%`);
 
   // - AG-3: Account drawdown context -
@@ -9620,9 +9633,15 @@ async function runScan() {
     // Note: logged in executeTrade when volOIRatio > 3
 
     // SPY recovery suppresses puts - market bouncing = puts fighting the tape
-    if (spyRecovering) {
+    // BYPASS: when agent says puts_on_bounces, the gap-up IS the entry signal - don't penalize
+    // The agent already assessed the bounce and determined it's a fade opportunity
+    const putsOnBouncesBias = (agentMacro || {}).entryBias === "puts_on_bounces";
+    const bearRegimeRecovery = ["trending_bear","breakdown"].includes(regime);
+    if (spyRecovering && !(putsOnBouncesBias && bearRegimeRecovery)) {
       putSetup.score = Math.max(0, putSetup.score - 20);
       putSetup.reasons.push("SPY recovering - tape fighting puts (-20)");
+    } else if (spyRecovering && putsOnBouncesBias) {
+      putSetup.reasons.push("SPY recovering but agent says puts_on_bounces - bounce fade thesis (+0)");
     }
 
     // Relative sector weakness - real edge vs just broad market selloff
