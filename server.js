@@ -6287,12 +6287,15 @@ async function confirmPendingOrder() {
 
       state.tradeJournal.unshift({
         time: new Date().toISOString(), ticker: pending.ticker,
-        action: "OPEN", optionType, isSpread: true,
-        strike: buyStrike, expDate,
-        buyStrike, sellStrike,
-        spreadLabel: `$${buyStrike}/$${sellStrike}`,
-        premium: netDebit, cost: finalCost, score, scoreReasons,
-        reasoning: `[SPREAD] Score ${score}/100. Net debit $${netDebit}. Max profit $${maxProfit}.`,
+        action: "OPEN", optionType, isSpread: true, isCreditSpread: true,
+        strike: pending.sellStrike, expDate,
+        buyStrike: pending.buyStrike, sellStrike: pending.sellStrike,
+        spreadLabel: `$${pending.buyStrike}/$${pending.sellStrike}`,
+        premium: netCredit, cost: marginRequired, score,
+        contracts: pending.contracts,
+        scoreReasons: pending.scoreReasons || [],
+        delta: null, iv: null, vix: state.vix,
+        reasoning: `[CREDIT SPREAD] Score ${score}/100. Net credit $${netCredit}. Max profit $${maxProfit}. Max loss $${maxLoss}.`,
       });
       if (state.tradeJournal.length > 100) state.tradeJournal = state.tradeJournal.slice(0, 100);
 
