@@ -968,12 +968,19 @@ input[type=text]:focus{border-color:var(--blue)}
       <option value="macro">macro</option>
     </select>
     <input id="log-search" type="text" placeholder="search..." oninput="renderServerLog()" style="background:var(--panel);border:1px solid var(--border);color:var(--text);padding:4px 8px;border-radius:6px;font-family:var(--font);font-size:11px;width:160px" />
+    <select id="log-limit" onchange="fetchLogs()" style="background:var(--panel);border:1px solid var(--border);color:var(--text);padding:4px 8px;border-radius:6px;font-family:var(--font);font-size:11px">
+      <option value="200">200 rows</option>
+      <option value="500">500 rows</option>
+      <option value="1000">1000 rows</option>
+      <option value="2000">2000 rows</option>
+    </select>
     <button class="btn" id="log-live-btn" onclick="toggleLogLive()" style="font-size:11px">PAUSE</button>
     <button class="btn" onclick="fetchLogs()" style="font-size:11px">REFRESH</button>
+    <button class="btn" onclick="copyLog()" style="font-size:11px">COPY LOG</button>
     <button class="btn" onclick="clearLog()" style="font-size:11px">CLEAR</button>
   </div>
   <!-- ── Log box ── -->
-  <div class="log-box" id="server-log" style="height:560px;overflow-y:auto"></div>
+  <div class="log-box" id="server-log" style="height:800px;overflow-y:auto"></div>
 </div>
 
 
@@ -2002,7 +2009,7 @@ function renderJournal() {
   const wrap = document.getElementById('journal-wrap');
   const journal = state.tradeJournal || [];
   if (!journal.length) { wrap.innerHTML = '<div class="no-data">No journal entries yet.</div>'; return; }
-  wrap.innerHTML = journal.slice(0, 30).map(e => {
+  wrap.innerHTML = journal.slice(0, 50).map(e => {
     const isOpen  = e.action === 'OPEN';
     const color   = isOpen ? 'var(--green)' : (e.pnl >= 0 ? 'var(--blue)' : 'var(--red)');
     const score   = e.score;
@@ -2015,7 +2022,7 @@ function renderJournal() {
           <span style="font-size:10px;padding:2px 8px;border-radius:10px;background:${isOpen?'rgba(0,255,136,.1)':'rgba(0,196,255,.1)'};color:${color}">${e.action}</span>
           ${isOpen ? `<span style="font-size:10px;color:var(--muted)">${
             e.isSpread && e.buyStrike && e.sellStrike
-              ? '$'+e.buyStrike+'/'+'$'+e.sellStrike+(e.isCreditSpread?'P-SPRD':'P-SPRD')
+              ? '$'+e.buyStrike+'/'+'$'+e.sellStrike+' '+(e.optionType==='put'?'PUT':'CALL')+' SPRD'
               : e.strike
                 ? '$'+e.strike+(e.optionType==='put'?'P':'C')+' · '+(e.expDate||'?')
                 : e.optionType
@@ -2038,7 +2045,11 @@ function renderJournal() {
       }).join('') + '</div>') : ''}
       <div class="journal-meta">
         <span>${new Date(e.time).toLocaleString()}</span>
-        ${isOpen ? `<span>δ ${e.delta}</span><span>IV ${e.iv}%</span><span>VIX ${e.vix}</span>` : `<span>Reason: ${e.reason}</span><span style="font-size:9px;padding:1px 5px;border-radius:8px;background:${e.tradeType==='credit_spread'?'rgba(0,255,136,.12)':e.tradeType==='debit_spread'?'rgba(0,150,255,.12)':'rgba(100,100,100,.1)'};color:${e.tradeType==='credit_spread'?'var(--green)':e.tradeType==='debit_spread'?'var(--blue)':'var(--muted)'}">${(e.tradeType||'naked').replace('_',' ').toUpperCase()}</span>`}
+        ${isOpen
+          ? (e.delta != null
+              ? `<span>delta ${e.delta}</span><span>IV ${e.iv||'--'}%</span><span>VIX ${e.vix||'--'}</span>`
+              : `<span>contracts ${e.contracts||'--'}</span><span>premium $${e.premium||'--'}</span><span>VIX ${e.vix||'--'}</span>`)
+          : `<span>Reason: ${e.reason}</span><span style="font-size:9px;padding:1px 5px;border-radius:8px;background:${e.tradeType==='credit_spread'?'rgba(0,255,136,.12)':e.tradeType==='debit_spread'?'rgba(0,150,255,.12)':'rgba(100,100,100,.1)'};color:${e.tradeType==='credit_spread'?'var(--green)':e.tradeType==='debit_spread'?'var(--blue)':'var(--muted)'}">${(e.tradeType||'naked').replace('_',' ').toUpperCase()}</span>`}
         ${e.catalyst ? `<span>Catalyst: ${e.catalyst}</span>` : ''}
       </div>
     </div>`;
@@ -2470,7 +2481,9 @@ let _allLogs  = [];
 
 async function fetchLogs(silent=false) {
   try {
-    const r = await fetch('/api/logs?limit=200');
+    const limitEl = document.getElementById('log-limit');
+    const limit = limitEl ? limitEl.value : 200;
+    const r = await fetch('/api/logs?limit=' + limit);
     if (!r.ok) throw new Error('HTTP ' + r.status);
     const data = await r.json();
     _allLogs = data.logs || [];
@@ -2539,6 +2552,29 @@ function clearLog() {
   _allLogs = [];
   const log = document.getElementById('server-log');
   if (log) log.innerHTML = '<div style="color:var(--muted);padding:12px;font-size:11px">cleared</div>';
+}
+
+function copyLog() {
+  const filterVal = (document.getElementById('log-filter')?.value || '').trim();
+  const search    = (document.getElementById('log-search')?.value || '').toLowerCase();
+  const types     = filterVal ? filterVal.split(',') : null;
+  let logs = _allLogs.length ? _allLogs : (state.tradeLog || []);
+  if (types)  logs = logs.filter(e => types.includes(e.type));
+  if (search) logs = logs.filter(e => (e.message||'').toLowerCase().includes(search));
+  const text = logs.map(e => {
+    const t = new Date(e.time).toLocaleTimeString();
+    return `[${t}] [${(e.type||'').toUpperCase()}] ${e.message||''}`;
+  }).join('\n');
+  navigator.clipboard.writeText(text).then(() => {
+    const btn = document.querySelector('button[onclick="copyLog()"]');
+    if (btn) { const orig = btn.textContent; btn.textContent = 'COPIED!'; setTimeout(() => btn.textContent = orig, 1500); }
+  }).catch(() => {
+    // Fallback for older browsers
+    const ta = document.createElement('textarea');
+    ta.value = text; document.body.appendChild(ta); ta.select(); document.execCommand('copy'); document.body.removeChild(ta);
+    const btn = document.querySelector('button[onclick="copyLog()"]');
+    if (btn) { const orig = btn.textContent; btn.textContent = 'COPIED!'; setTimeout(() => btn.textContent = orig, 1500); }
+  });
 }
 
 function toggleLogLive() {
