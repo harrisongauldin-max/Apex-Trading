@@ -807,8 +807,17 @@ async function runReconciliation() {
       const symbols = [pos.contractSymbol, pos.buySymbol, pos.sellSymbol].filter(Boolean);
       // A spread is a ghost only if BOTH legs are missing from Alpaca
       const allMissing = symbols.length > 0 && symbols.every(s => !alpacaSymbols.has(s));
-      if (allMissing) {
-        logEvent("warn", `[RECONCILE] Ghost: ${pos.ticker} ${pos.contractSymbol||pos.buySymbol} - closed externally`);
+      // V2.84 fix: positions with NO symbols stored (estimated entries, pre-spread architecture)
+      // cannot be matched by symbol -- fall back to checking if Alpaca has ANY option on this ticker
+      const noSymbolsStored = symbols.length === 0;
+      const alpacaHasTickerOption = alpacaPositions.some(p => {
+        const underlying = p.symbol?.match(/^([A-Z]+)\d{6}[CP]/)?.[1];
+        return underlying === pos.ticker;
+      });
+      const symbollessGhost = noSymbolsStored && !alpacaHasTickerOption;
+      if (allMissing || symbollessGhost) {
+        const ghostReason = symbollessGhost ? "no contract symbols stored + Alpaca empty for ticker" : "closed externally";
+        logEvent("warn", `[RECONCILE] Ghost: ${pos.ticker} ${pos.contractSymbol||pos.buySymbol||"(no symbol)"} - ${ghostReason}`);
         const idx = state.positions.indexOf(pos);
         state.positions.splice(idx, 1);
         state.closedTrades.push({
@@ -2634,8 +2643,8 @@ function calcKellySize(recentTrades = 20) {
   // QS-W3: Kelly needs minimum 10 trades for any statistical relevance
   // Below 10 trades, Kelly is noise not signal - default to 1 contract
   // Below 20 trades, Kelly is unreliable - cap its influence at half weight
-  if (trades.length < 5)  return { contracts: 1, kelly: 0, halfKelly: 0, winRate: 0, payoffRatio: 0 };
-  if (trades.length < 10) return { contracts: 1, kelly: 0, halfKelly: 0, winRate: 0, payoffRatio: 0, note: "insufficient history" };
+  if (trades.length < 5)  return { contracts: 1, kelly: null, halfKelly: null, winRate: null, payoffRatio: null, note: "Need 5+ trades" };
+  if (trades.length < 10) return { contracts: 1, kelly: null, halfKelly: null, winRate: null, payoffRatio: null, note: "Need 10+ trades for Kelly" };
   const wins      = trades.filter(t => t.pnl > 0);
   const losses    = trades.filter(t => t.pnl <= 0);
   const winRate   = wins.length / trades.length;
@@ -7414,7 +7423,7 @@ let marketContext = {
   benchmark:         null,
   stressTest:        [],
   drawdownProtocol:  { level: "normal", sizeMultiplier: 1.0, message: "Normal operations.", minScore: 70 },
-  monteCarlo:        { median: 0, percentile5: 0, percentile95: 0, probProfit: 0, message: "Insufficient data" },
+  monteCarlo:        { median: null, percentile5: null, percentile95: null, probProfit: null, message: "Insufficient data" },
   kelly:             { contracts: 1, kelly: 0, halfKelly: 0, winRate: 0, payoffRatio: 0 },
   relativeValue:     {},
   globalMarket:      { signal: "neutral", modifier: 0, qqqChg: 0, iwmChg: 0, eemChg: 0 },
@@ -12026,15 +12035,22 @@ function calcInformationRatio() {
 }
 function calcDrawdownDuration() {
   const trades = state.closedTrades || [];
-  if (!trades.length) return 0;
-  let maxDuration = 0, currentDuration = 0, inDD = false;
-  let peak = 0, running = 0;
+  if (!trades.length) return { avgDuration: 0, maxDuration: 0, currentDuration: 0 };
+  let maxDuration = 0, currentDuration = 0, totalDuration = 0, ddCount = 0;
+  let peak = 0, running = 0, inDD = false;
   trades.forEach(t => {
     running += (t.pnl||0);
-    if (running > peak) { peak = running; inDD = false; currentDuration = 0; }
-    else { inDD = true; currentDuration++; maxDuration = Math.max(maxDuration, currentDuration); }
+    if (running > peak) {
+      if (inDD && currentDuration > 0) { totalDuration += currentDuration; ddCount++; }
+      peak = running; inDD = false; currentDuration = 0;
+    } else {
+      inDD = true; currentDuration++;
+      maxDuration = Math.max(maxDuration, currentDuration);
+    }
   });
-  return maxDuration;
+  if (inDD && currentDuration > 0) { totalDuration += currentDuration; ddCount++; }
+  const avgDuration = ddCount > 0 ? parseFloat((totalDuration / ddCount).toFixed(1)) : 0;
+  return { avgDuration, maxDuration, currentDuration: inDD ? currentDuration : 0 };
 }
 function calcAutocorrelation() {
   const trades = state.closedTrades || [];
