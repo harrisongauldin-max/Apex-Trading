@@ -4626,7 +4626,7 @@ function calcMAE() {
 }
 
 // - Sector Rotation -
-async function getRealOptionsContract(ticker, price, optionType, score, vix, earningsDate, isMeanReversion = false) {
+async function getRealOptionsContract(ticker, price, optionType, score, vix, earningsDate, isMeanReversion = false, creditStrikeTarget = null) {
   try {
     // Determine target expiry window
     const { expDate: targetExpDate, expDays: targetExpDays, expiryType } = selectExpiry(score, vix, optionType, earningsDate, ticker, isMeanReversion);
@@ -4813,8 +4813,21 @@ async function getRealOptionsContract(ticker, price, optionType, score, vix, ear
       const theta        = Math.abs(parseFloat(greeks.theta || 0));
       const thetaPct     = mid > 0 ? theta / mid : 0;
 
-      // Combined score
-      const contractScore = deltaScore * 0.50 + expiryScore * 0.20 + liquidScore * 0.15 + spreadScore * 0.15;
+      // Strike proximity score -- only for credit spreads where OTM% target matters
+      // Without this, delta selection picks the nearest 0.30-delta contract which can be
+      // very close to the money on gap-up days, destroying the credit spread's safety buffer
+      let strikeProximityScore = 0;
+      let strikeWeightAdj = 0;
+      if (creditStrikeTarget && creditStrikeTarget > 0) {
+        const contractStrike = parseFloat(contract.strike_price);
+        const strikeDiff = Math.abs(contractStrike - creditStrikeTarget);
+        strikeProximityScore = Math.max(0, 1 - strikeDiff / 20); // 0 pts if >$20 away, 1.0 if exact
+        strikeWeightAdj = 0.25; // reallocate 25% weight to strike proximity for credit spreads
+      }
+      // Combined score -- credit spreads weight strike proximity heavily
+      const contractScore = creditStrikeTarget
+        ? deltaScore * 0.25 + expiryScore * 0.15 + liquidScore * 0.15 + spreadScore * 0.20 + strikeProximityScore * 0.25
+        : deltaScore * 0.50 + expiryScore * 0.20 + liquidScore * 0.15 + spreadScore * 0.15;
 
       if (contractScore > bestScore) {
         bestScore = contractScore;
@@ -5805,7 +5818,7 @@ async function executeIronCondor(stock, price, score, scoreReasons, vix) {
   }
 }
 
-async function executeCreditSpread(stock, price, score, scoreReasons, vix, optionType) {
+async function executeCreditSpread(stock, price, score, scoreReasons, vix, optionType, sizeMod = 1.0) {
   try {
     // For put credit spread: sell ~0.30 delta put (OTM), buy ~0.20 delta put (further OTM)
     // Target: sell strike ~5% below current price, buy $10 lower
@@ -5829,8 +5842,9 @@ async function executeCreditSpread(stock, price, score, scoreReasons, vix, optio
       ? shortStrikeTarget - spreadWidth
       : shortStrikeTarget + spreadWidth;
 
-    // Get short leg (near OTM - we sell this)
-    const shortContract = await getRealOptionsContract(stock.ticker, shortStrikeTarget, optionType, score, vix, stock.earningsDate, false);
+    // Get short leg -- pass strikeTarget so contract selection honors OTM% target
+    // Credit spreads must use strike-proximity scoring, not just delta matching
+    const shortContract = await getRealOptionsContract(stock.ticker, shortStrikeTarget, optionType, score, vix, stock.earningsDate, false, shortStrikeTarget);
     if (!shortContract) { logEvent("filter", `${stock.ticker} credit spread: no short leg found`); return null; }
 
     // Get long leg (further OTM - we buy this as protection)
@@ -5849,6 +5863,18 @@ async function executeCreditSpread(stock, price, score, scoreReasons, vix, optio
 
     const maxProfit  = netCredit;                              // keep all credit if expires worthless
     const maxLoss    = parseFloat((actualWidth - netCredit).toFixed(2)); // width - credit = max risk
+
+    // V2.84: Risk/reward validation for credit spreads
+    // Maximum acceptable risk/reward ratio: 4:1 (risk $400 to make $100)
+    // This requires ~80% win rate to break even -- achievable with proper strike selection
+    // Worse than 4:1 (e.g. TLT $97 profit / $903 loss = 9.3:1) is not a viable strategy
+    const rrRatioCred = maxLoss > 0 ? maxProfit / maxLoss : 0;
+    const MIN_CREDIT_RR = 0.25; // minimum 1:4 ratio (collect at least 25% of width)
+    if (rrRatioCred < MIN_CREDIT_RR) {
+      logEvent("filter", `${stock.ticker} credit spread R/R ${(rrRatioCred*100).toFixed(0)}% (credit $${netCredit} / risk $${maxLoss}) - below 25% minimum - skip`);
+      return null;
+    }
+    logEvent("filter", `${stock.ticker} credit spread R/R: collect $${(netCredit*100).toFixed(0)} / risk $${(maxLoss*100).toFixed(0)} per contract (${(rrRatioCred*100).toFixed(0)}% ratio)`);
     // 3B: Score-proportional + IV-rank sizing for credit spreads
     // Base contracts from score: 90+=2, 85+=1.5, 80+=1.25, else 1
     const scoreBaseMult  = score >= 90 ? 2.0 : score >= 85 ? 1.5 : score >= 80 ? 1.25 : 1.0;
