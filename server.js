@@ -3,7 +3,7 @@
 // Alpaca Paper Trading Edition
 // -
 const express    = require("express");
-const { getRegimeRulebook, scoreCandidate: EE_scoreCandidate, evaluateEntry } = require("./entryEngine.js");
+const { getRegimeRulebook, scoreCandidate: EE_scoreCandidate, evaluateEntry } = require("./entryengine.js");
 const cron       = require("node-cron");
 const fetch      = require("node-fetch");
 const fs         = require("fs");
@@ -9945,35 +9945,19 @@ async function runScan() {
     } else if (ivrBypass && ivrNow < ivrDebitFloor && !dryRunMode) {
       logEvent("filter", `${stock.ticker} IVR ${ivrNow} low but bypassed - VIX ${(state.vix||0).toFixed(1)} - 25 or Regime ${regimeClass}`);
     }
-    // V2.84: Credit spreads in Regime B use lower min score (panel fix)
-    // Credit spreads have defined risk and reduced premium outlay vs debit spreads
-    // In confirmed Regime B, the directional thesis is clear -- 65 is appropriate
-    // Debit spreads still require 70 -- they need stronger conviction to justify buying premium
-    const isRegimeBCredit = (creditModeActive || creditCallModeActive) && regimeClass === "B";
-    const creditRegimeBMin = isRegimeBCredit ? 65 : MIN_SCORE;
-    if (isRegimeBCredit && creditRegimeBMin < MIN_SCORE) {
-      logEvent("filter", `[REGIME B CREDIT] Min score reduced to ${creditRegimeBMin} for credit spread in confirmed bear trend`);
-    }
-    const effectiveMinScore = Math.max(ddProtocol.minScore || MIN_SCORE, regimeMinScore, agentMinScore, ivrMinScore, creditRegimeBMin === 65 ? 0 : MIN_SCORE);
-    // Note: when isRegimeBCredit, we want to ALLOW 65 -- so we override effectiveMinScore floor
-    const finalEffectiveMin = isRegimeBCredit ? Math.min(effectiveMinScore, 65) : effectiveMinScore;
-    // QS-C2: In choppy regime, effectiveMinScore=90 + choppy score penalty (-10) means
-    // a position needs 100 base score to clear the bar. Log this near-lockout for visibility.
-    if (effectiveMinScore >= 90 && isChoppyRegime) {
-      logEvent("filter", `[CHOPPY] Effective min score ${effectiveMinScore} in choppy regime - near-lockout condition, credit mode only`);
-    }
+    // Minimum scores owned by evaluateEntry (entryEngine.js) -- single authority
+    // effectiveMinScore stub only -- used by macdMinScore reference below
+    const effectiveMinScore = MIN_SCORE;
     if (agentStale && !dryRunMode) {
-      logEvent("filter", `Agent macro stale (${agentStaleMins.toFixed(0)}min) - raising min score to 80. Last signal: ${agentSig || "none"}`);
-      // If stale > 90 min during market hours, flag for investigation
+      logEvent("filter", `Agent macro stale (${agentStaleMins.toFixed(0)}min) - raising min score. Last signal: ${agentSig || "none"}`);
       if (agentStaleMins > 90 && isMarketHours()) {
         logEvent("warn", `[AGENT] Macro analysis has not run in ${agentStaleMins.toFixed(0)} minutes - check API key and headlines`);
       }
     }
 
-    // - Staggered entry logic -
-    // Stagger applies to DEBIT spreads only - buying direction in tranches on bounces
-    // Credit spreads are premium sellers - multiple entries = more uncapped short exposure
-    // BF-W2: Per-ticker macro-defensive cooldown - skip re-entry 30min after defensive close
+    // Stagger gate -- now owned by evaluateEntry (entryEngine.js)
+    // evaluateEntry receives recentSameDir + existingProfitPct in context and handles blocking
+    // BF-W2: Per-ticker macro-defensive cooldown kept here (separate from stagger -- ticker-level)
     if (state._macroDefensiveCooldown && state._macroDefensiveCooldown[stock.ticker]) {
       const cooldownMins = (Date.now() - state._macroDefensiveCooldown[stock.ticker]) / 60000;
       if (cooldownMins < 30) {
@@ -9981,50 +9965,13 @@ async function runScan() {
         continue;
       }
     }
-
-    // For credit spreads: allow only 1 per ticker per direction
+    // sameTickerSameDir still needed to pass stagger context to evaluateEntry below
     const sameTickerSameDir = state.positions.filter(p => p.ticker === stock.ticker && p.optionType === optionType);
+    // Credit spreads: hard limit 1 per ticker per direction (premium exposure management)
     if (creditModeActive && sameTickerSameDir.length >= 1) {
-      logEvent("filter", `${stock.ticker} credit spread - already have ${sameTickerSameDir.length} position(s) in this direction - no stagger for credit spreads`);
+      logEvent("filter", `${stock.ticker} credit spread - already have ${sameTickerSameDir.length} position(s) in this direction`);
       continue;
     }
-    let staggeredMinScore = effectiveMinScore;
-    let staggerBlock = false;
-    let staggerReason = "";
-
-    if (sameTickerSameDir.length >= maxPerTicker) {
-      // Already at max positions for this ticker/direction
-      staggerBlock = true;
-      staggerReason = `max ${maxPerTicker} positions reached`;
-    } else if (sameTickerSameDir.length >= 1) {
-      const existingPos = sameTickerSameDir[sameTickerSameDir.length - 1]; // most recent
-      // Gate 1: Minimum 30 minutes between stagger entries - avoid double-entry on same spike
-      const minsAgo = existingPos.openDate
-        ? (Date.now() - new Date(existingPos.openDate).getTime()) / 60000 : 0;
-      if (minsAgo < 30) {
-        staggerBlock = true;
-        staggerReason = `too soon (${minsAgo.toFixed(0)}min since last entry, need 30min)`;
-      }
-      // Gate 2: Existing position must be profitable before adding a second tranche
-      // Averaging into a loser encodes the most dangerous trading bias - do not allow it
-      // Only stagger when the first entry is working (>5% profit confirms thesis)
-      const existingChg = existingPos.currentPrice && existingPos.premium
-        ? (existingPos.currentPrice - existingPos.premium) / existingPos.premium : 0;
-      if (!staggerBlock && existingChg <= 0.08) {
-        staggerBlock = true;
-        staggerReason = `existing pos ${(existingChg*100).toFixed(0)}% - thesis not confirmed (need >8% profit to add)`;
-      }
-      if (!staggerBlock && existingChg > 0.50) {
-        staggerBlock = true;
-        staggerReason = `existing pos +${(existingChg*100).toFixed(0)}% - thesis already played out, don't chase`;
-      }
-      // Gate 3: Only +5pts higher conviction (not +15)
-      if (!staggerBlock) {
-        staggeredMinScore = effectiveMinScore + 5;
-        staggerReason = `stagger (+5 conviction, ${minsAgo.toFixed(0)}min gap, existing ${(existingChg*100).toFixed(0)}%)`;
-      }
-    }
-    if (staggerBlock) { logEvent("filter", `${stock.ticker} stagger blocked - ${staggerReason}`); continue; }
 
     // MACD contradiction  -- rulebook handles regime-awareness (A only, bypass in B via gate flag)
     const macdSignal    = liveStock.macd || "neutral";
@@ -10065,15 +10012,9 @@ async function runScan() {
         continue;
       }
     }
-    const finalMinScore = Math.max(finalEffectiveMin, staggeredMinScore, macdMinScore, timeOfDayMinScore);
-
-    if (bestScore < finalMinScore) {
-      const reason = sameTickerSameDir.length > 0 ? staggerReason : macdContradicts ? "MACD contradiction" : timeOfDayMinScore > MIN_SCORE ? `afternoon VIX${state.vix?.toFixed(0)}` : (etHourNow >= 13 ? "afternoon" : ddProtocol.level) + " protocol";
-      logEvent("filter", `${stock.ticker} call:${callSetup.score} put:${putSetup.score} - below ${finalMinScore} (${reason}) - skip`);
-      if (state._scoreDebug?.[stock.ticker]) { state._scoreDebug[stock.ticker].effectiveMin = finalMinScore; state._scoreDebug[stock.ticker].blocked = [`score ${bestScore} below min ${finalMinScore} (${reason})`]; }
-      recordGateBlock(stock.ticker, reason, authRegimeName, bestScore);
-      continue;
-    }
+    // finalMinScore gate removed -- evaluateEntry (entryEngine.js) is the single authority
+    // scoreDebug effectiveMin updated by entryEngine result below
+    // macdMinScore / timeOfDayMinScore passed to evaluateEntry via context
 
     // - Correlation-aware directional heat cap -
     // SPY/QQQ/IWM are highly correlated - count combined as single direction
