@@ -122,8 +122,8 @@ const MIN_SCORE           = 70;
 const INSTRUMENT_CONSTRAINTS = {
   TLT: { allowedTypes: ["credit_put", "credit_call"], reason: "Bond ETF - slow movement, only collect premium" },
   GLD: { allowedTypes: ["credit_put", "credit_call", "debit_put"], reason: "Commodity hedge - debit calls only on equity selloffs" },
-  SPY: { allowedTypes: ["credit_put", "credit_call", "debit_put", "debit_call", "iron_condor"] },
-  QQQ: { allowedTypes: ["credit_put", "credit_call", "debit_put", "debit_call", "iron_condor"] },
+  SPY: { allowedTypes: ["credit_put", "credit_call", "debit_put", "debit_call", "iron_condor", "debit_naked"] },
+  QQQ: { allowedTypes: ["credit_put", "credit_call", "debit_put", "debit_call", "iron_condor", "debit_naked"] },
   XLE: { allowedTypes: ["debit_put"], reason: "Energy ETF - directional puts on downtrend only" },
 };
 // Entry windows handled by isEntryWindow() - see function below
@@ -9840,8 +9840,12 @@ async function runScan() {
     // Apply gap direction constraint
     let callScore = callSetup.score;
     let putScore  = putSetup.score;
-    if (marketGapDirection === "down") callScore = 0; // gap down = puts only
-    if (marketGapDirection === "up")   putScore  = 0; // gap up = calls only
+    // Gap direction filter: only applies in Regime A (bull market mean reversion)
+    // In Regime B (bear trend), a gap UP is the puts_on_bounces entry signal - do NOT zero puts
+    const inBearRegimeForGap = authRegimeName === "trending_bear" || authRegimeName === "breakdown";
+    const agentWantsPutsOnBounce = (state._agentMacro || {}).entryBias === "puts_on_bounces";
+    if (marketGapDirection === "down" && !inBearRegimeForGap) callScore = 0;
+    if (marketGapDirection === "up"   && !inBearRegimeForGap && !agentWantsPutsOnBounce) putScore = 0;
     // Apply entry window constraint
     if (!callsAllowed) callScore = 0;
     // Credit mode: allow put scoring even when debit puts blocked
@@ -9865,6 +9869,17 @@ async function runScan() {
       vwap:      signals.intradayVWAP || 0,
       updatedAt: Date.now(),
     };
+    // Save score snapshot AFTER all zeroing/adjustments - reflects actual execution scores
+    if (!state._scoreDebug) state._scoreDebug = {};
+    state._scoreDebug[stock.ticker] = {
+      ts: Date.now(), price, putScore, callScore,
+      effectiveMin: MIN_SCORE,
+      putReasons: putSetup.reasons, callReasons: callSetup.reasons,
+      signals: { rsi: signals.rsi, dailyRsi: signals.dailyRsi, macd: signals.macd,
+        momentum: signals.momentum, ivPercentile: signals.ivPercentile,
+        volPaceRatio: signals.volPaceRatio, intradayVWAP: signals.intradayVWAP },
+      blocked: [],
+    };
     // In defensive mode - zero out call scores
     if (macro.mode === "defensive") callScore = 0;
 
@@ -9878,28 +9893,8 @@ async function runScan() {
     }
     const bestReasons = optionType === "put" ? putSetup.reasons : callSetup.reasons;
 
-    // V2.84: Save score snapshot immediately after scoring - captures every instrument
-    // even those that hit early gate continues. Updated again below with finalMinScore.
-    if (!state._scoreDebug) state._scoreDebug = {};
-    state._scoreDebug[stock.ticker] = {
-      ts:           Date.now(),
-      price,
-      putScore,
-      callScore,
-      effectiveMin: MIN_SCORE, // updated below once finalMinScore is computed
-      putReasons:   putSetup.reasons,
-      callReasons:  callSetup.reasons,
-      signals: {
-        rsi:          signals.rsi,
-        dailyRsi:     signals.dailyRsi,
-        macd:         signals.macd,
-        momentum:     signals.momentum,
-        ivPercentile: signals.ivPercentile,
-        volPaceRatio: signals.volPaceRatio,
-        intradayVWAP: signals.intradayVWAP,
-      },
-      blocked: [],
-    };
+    // Score debug snapshot saved BELOW after gap/gate adjustments so it reflects actual execution scores
+    // Score debug snapshot saved after gap/gate adjustments below
 
     // Pre-market gap direction-aware penalty - applied after optionType is known
     // Gap >3% up on a put entry = fading into rally = -8 conviction penalty
@@ -10286,7 +10281,7 @@ async function runScan() {
     const useIronCondor       = intentType === "iron_condor" && stock.isIndex && !isMeanReversion && !dryRunMode
       && !state.positions.some(p => p.ticker === stock.ticker);
     const agentTradeType      = (state._agentMacro || {}).tradeType || "spread";
-    const useSpread           = !useCreditSpread && !useCreditCallSpread && !useIronCondor && stock.isIndex && !isMeanReversion;
+    const useSpread           = !useCreditSpread && !useCreditCallSpread && !useIronCondor && !isMeanReversion && stock.isIndex && intentType !== "debit_naked";
     const ivSizeMult          = (intent.ivRankSnap || 0) >= 70 ? 1.5 : 1.0;
     if ((useCreditSpread || useCreditCallSpread) && ivSizeMult > 1.0) {
       logEvent("scan", `[IV] ${stock.ticker} credit spread - IVR ${intent.ivRankSnap} HIGH, size mult ${ivSizeMult}x`);
