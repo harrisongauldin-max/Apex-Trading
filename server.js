@@ -4548,11 +4548,16 @@ function isGLDEntryAllowed(optionType, dxy, spyReturn5d, vix, gldRSI, gldPrice, 
     if (gldDowntrend)     return { allowed: false, reason: `GLD call blocked - GLD $${gldPrice.toFixed(2)} below 20MA $${gldMA20.toFixed(2)}, don't buy calls in downtrend` };
     return { allowed: true };
   } else {
-    // GLD puts: only when gold is genuinely overbought
-    const gldOverbought = gldRSI >= 68;
-    const dxyRising     = dxy && dxy.change > 0;
-    if (!gldOverbought) return { allowed: false, reason: `GLD put blocked - RSI ${gldRSI?.toFixed(0)||'?'} not overbought (need >68 for put thesis)` };
-    if (dxyRising)      return { allowed: false, reason: `GLD put blocked - DXY rising (+${dxy?.change||0}%), dollar strength supports gold` };
+    // GLD puts — two paths by trade type:
+    // Debit puts: RSI ≥ 68 required (directional bet — gold must fall to profit)
+    // Credit puts: RSI irrelevant — selling premium above current price, not predicting direction
+    // [Regime A] RSI gate applies fully
+    // [Regime B credit] bypass RSI overbought — IV level is what matters for premium collection
+    const gldOverbought  = gldRSI >= 68;
+    const dxyRising      = dxy && dxy.change > 0;
+    const isGLDCreditPut = arguments[7] === "credit_put";
+    if (!gldOverbought && !isGLDCreditPut) return { allowed: false, reason: `GLD put blocked - RSI ${gldRSI?.toFixed(0)||'?'} not overbought (need >68 for debit put thesis)` };
+    if (dxyRising) return { allowed: false, reason: `GLD put blocked - DXY rising (+${dxy?.change||0}%), dollar strength supports gold` };
     return { allowed: true };
   }
 }
@@ -7496,6 +7501,15 @@ let marketContext = {
   streaks:           { currentStreak: 0, currentType: null, maxWinStreak: 0, maxLossStreak: 0 },
 };
 
+// Gate audit logger - records which gate blocked each instrument each scan
+// Rolling 100-entry window in state._gateAudit for visibility in score debug
+// Regime Classification Specialist: measure gates before removing them
+function recordGateBlock(ticker, gate, regime, score) {
+  if (!state._gateAudit) state._gateAudit = [];
+  state._gateAudit.push({ ts: Date.now(), ticker, gate, regime, score });
+  if (state._gateAudit.length > 100) state._gateAudit = state._gateAudit.slice(-100);
+}
+
 async function runScan() {
   if (scanRunning) { logEvent("scan", "Scan skipped - previous scan still running"); return; }
   scanRunning = true;
@@ -8939,7 +8953,11 @@ async function runScan() {
   const below200MACallBlock = spyBelow200MA && !dryRunMode;
   const callsAllowed  = (isEntryWindow("call", true) && !finalHourBlock && !suppressBlock && !below200MACallBlock && (!choppyDebitBlock || isMRCondition) && !avoidHoldActive) || dryRunMode;
   if (isMRCondition && choppyDebitBlock) logEvent("filter", `MR call allowed in choppy - SPY RSI ${spyRSIForMR.toFixed(1)} extreme oversold + VIX ${state.vix}`);
-  const putsAllowed   = (isEntryWindow("put",  true) && !vixFallingPause && !spyGapUp && !postReversalBlock && !finalHourBlock && !suppressBlock && !macroBullish && !choppyDebitBlock && !avoidHoldActive && !crisisDebitBlock) || dryRunMode;
+  // PANEL FIX [Regime A only]: gap-up ends mean reversion thesis in bull market
+  // In Regime B/C gap-up IS the puts_on_bounces entry signal — do not block
+  const inBullRegime      = authRegimeName === "trending_bull";
+  const spyGapUpBlockPuts = spyGapUp && inBullRegime;
+  const putsAllowed   = (isEntryWindow("put",  true) && !vixFallingPause && !spyGapUpBlockPuts && !postReversalBlock && !finalHourBlock && !suppressBlock && !macroBullish && !choppyDebitBlock && !avoidHoldActive && !crisisDebitBlock) || dryRunMode;
   // Credit spreads allowed even in choppy regime - that's the point of credit mode
   const creditAllowed     = creditModeActive     && isEntryWindow("put",  true) && !finalHourBlock && !suppressBlock && !vixFallingPause && !avoidHoldActive;
   const callCreditAllowed = creditCallModeActive && isEntryWindow("call", true) && !finalHourBlock && !suppressBlock;
@@ -9468,10 +9486,18 @@ async function runScan() {
     // Mean reversion calls: 3:30pm cutoff (capitulation has genuine overnight edge)
     const entryWindowClosed = etHour >= 15.0; // 3:00pm normal cutoff
     // Afternoon min score gate - replaces 0.80x multiplier
+    // [Regime A only] Late entries have elevated overnight gap risk in bull market
+    // [Regime B bypass] Afternoon = bounce has run out = best fade timing. Risk Manager condition:
+    //   bypass only when agent confirms puts_on_bounces with medium/high confidence and not stale
+    const agentConfLocal         = (state._agentMacro || {}).confidence || "low";
+    const agentLastRunLocal      = (state._agentMacro || {}).timestamp || null;
+    const agentStaleLocal        = !agentLastRunLocal || ((Date.now() - new Date(agentLastRunLocal).getTime()) / 60000) > 30;
+    const bypassAfternoonGate    = !inBullRegime && agentWantsPutsOnBounce && agentConfLocal !== "low" && !agentStaleLocal;
     let timeOfDayMinScore = MIN_SCORE; // default - no penalty
-    if (isLateDay && state.vix >= 30)        timeOfDayMinScore = 90; // VIX 30+ after 2:30pm - high bar
-    else if (isLateDay && state.vix >= 25)   timeOfDayMinScore = 85; // VIX 25-30 after 2:30pm - elevated bar
-    else if (isLastHour && volDecline)       timeOfDayMinScore = 85; // low volume last hour - elevated bar
+    if (isLateDay && state.vix >= 30 && !bypassAfternoonGate)      timeOfDayMinScore = 90; // VIX 30+ after 2:30pm
+    else if (isLateDay && state.vix >= 25 && !bypassAfternoonGate) timeOfDayMinScore = 85; // VIX 25-30 after 2:30pm
+    else if (isLastHour && volDecline && !bypassAfternoonGate)     timeOfDayMinScore = 85; // low volume last hour
+    if (bypassAfternoonGate && isLateDay) logEvent("filter", `${stock.ticker} afternoon gate bypassed - Regime B puts_on_bounces (${agentConfLocal} conf)`);
 
     // - F7: Weekly trend filter -
     // Fetch cached weekly trend (60-min cache, no extra API call)
@@ -9543,7 +9569,9 @@ async function runScan() {
           ? state._gldBars.slice(-20).reduce((s,b) => s + b.c, 0) / 20
           : 0;
         const gldCallGate = isGLDEntryAllowed("call", dxy5d, spy5dReturn, state.vix, liveStock.rsi, liveStock.price || 0, gldMA20Live);
-        const gldPutGate  = isGLDEntryAllowed("put",  dxy5d, spy5dReturn, state.vix, liveStock.rsi, liveStock.price || 0, gldMA20Live);
+        // Pass tradeIntent type so GLD gate can bypass RSI check for credit puts
+        const _gldIntentType = (creditModeActive && putSetup.score >= MIN_SCORE) ? "credit_put" : "debit_put";
+        const gldPutGate  = isGLDEntryAllowed("put",  dxy5d, spy5dReturn, state.vix, liveStock.rsi, liveStock.price || 0, gldMA20Live, _gldIntentType);
         if (!gldCallGate.allowed) { callSetup.score = 0; logEvent("filter", gldCallGate.reason); }
         if (!gldPutGate.allowed)  { putSetup.score  = 0; logEvent("filter", gldPutGate.reason);  }
         // GLD min score 75 (panel decision: 80 was triple-locking with DXY + RSI gates)
@@ -9844,12 +9872,12 @@ async function runScan() {
     // In Regime B (bear trend), a gap UP is the puts_on_bounces entry signal - do NOT zero puts
     const inBearRegimeForGap = authRegimeName === "trending_bear" || authRegimeName === "breakdown";
     const agentWantsPutsOnBounce = (state._agentMacro || {}).entryBias === "puts_on_bounces";
-    if (marketGapDirection === "down" && !inBearRegimeForGap) callScore = 0;
-    if (marketGapDirection === "up"   && !inBearRegimeForGap && !agentWantsPutsOnBounce) putScore = 0;
+    if (marketGapDirection === "down" && !inBearRegimeForGap) { callScore = 0; recordGateBlock(stock.ticker, "gap_direction_down", authRegimeName, callScore); }
+    if (marketGapDirection === "up"   && !inBearRegimeForGap && !agentWantsPutsOnBounce) { putScore = 0; recordGateBlock(stock.ticker, "gap_direction_up", authRegimeName, putScore); }
     // Apply entry window constraint
-    if (!callsAllowed) callScore = 0;
+    if (!callsAllowed) { callScore = 0; recordGateBlock(stock.ticker, "calls_not_allowed", authRegimeName, callScore); }
     // Credit mode: allow put scoring even when debit puts blocked
-    if (!putsAllowed && !creditAllowed) putScore = 0;
+    if (!putsAllowed && !creditAllowed) { putScore = 0; recordGateBlock(stock.ticker, "puts_not_allowed", authRegimeName, putScore); }
     else if (!putsAllowed && creditAllowed) {
       // Only credit spread entries allowed - still score for credit
       putSetup.tradeType = "credit";
@@ -9913,7 +9941,13 @@ async function runScan() {
     // Low confidence or stale macro - raise bar (80) - be more selective
     // No agent run yet - normal bar (70)
     const etHourNow = scanET.getHours() + scanET.getMinutes() / 60;
-    const regimeProfile    = getRegimeProfile(marketContext.regime?.regime || "neutral");
+    // PANEL FIX: use price-based _regimeClass not agent regime label
+    // Agent calls regime "choppy" on gap-up days in bear markets → was silently setting regimeMinScore=90
+    // _regimeClass (200MA + VIX + drawdown) is objective and consistent
+    const _priceRegimeLabel = state._regimeClass === "B" ? "trending_bear"
+                            : state._regimeClass === "C" ? "breakdown"
+                            : "trending_bull";
+    const regimeProfile    = getRegimeProfile(_priceRegimeLabel);
     const regimeMinScore   = regimeProfile.minScore;
     const agentConf        = (state._agentMacro || {}).confidence || "low";
     const agentSig         = (state._agentMacro || {}).signal || "neutral";
@@ -10041,15 +10075,22 @@ async function runScan() {
     }
     if (staggerBlock) { logEvent("filter", `${stock.ticker} stagger blocked - ${staggerReason}`); continue; }
 
-    // MACD contradiction gate - if MACD contradicts direction, require higher conviction
-    // Credit spreads are direction-neutral - MACD is irrelevant, bypass gate
-    const macdSignal = liveStock.macd || "neutral";
-    const macdBullish = macdSignal.includes("bullish");
-    const macdBearish = macdSignal.includes("bearish");
-    const isMRCall    = callSetup.isMeanReversion && optionType === "call";
-    const isCreditEntry = creditModeActive; // credit spreads bypass MACD gate
-    const macdContradicts = !isCreditEntry && ((optionType === "put" && macdBullish) || (optionType === "call" && macdBearish && !isMRCall));
+    // MACD contradiction gate - require higher conviction when MACD opposes trade direction
+    // Credit spreads: direction-neutral, bypass gate
+    // [Regime A] Bullish MACD genuinely contradicts a put — market has upward momentum
+    // [Regime B bypass] dailyRSI ≥ 68 + bullish MACD = overbought bounce = PUT CATALYST not contradiction
+    //   (Options Market Structure Analyst: highest-conviction fade setup, not a red flag)
+    const macdSignal    = liveStock.macd || "neutral";
+    const macdBullish   = macdSignal.includes("bullish");
+    const macdBearish   = macdSignal.includes("bearish");
+    const isMRCall      = callSetup.isMeanReversion && optionType === "call";
+    const isCreditEntry = creditModeActive;
+    const dailyRsiNow   = liveStock.dailyRsi || liveStock.rsi || 50;
+    const macdOverboughtBypass = optionType === "put" && macdBullish && !inBullRegime && dailyRsiNow >= 68;
+    const macdContradicts = !isCreditEntry && !macdOverboughtBypass &&
+      ((optionType === "put" && macdBullish) || (optionType === "call" && macdBearish && !isMRCall));
     const macdMinScore = macdContradicts ? 85 : effectiveMinScore;
+    if (macdOverboughtBypass) logEvent("filter", `${liveStock.ticker} MACD contradiction bypassed - RSI ${dailyRsiNow.toFixed(0)} overbought + bullish MACD in Regime B = bounce fade setup`);
     if (macdContradicts) logEvent("filter", `${liveStock.ticker} MACD ${macdSignal} contradicts ${optionType} - raising min score to 85`);
 
     // V2.84: Regime B oversold sizing modifier (Risk Manager recommendation)
@@ -10081,6 +10122,7 @@ async function runScan() {
       const reason = sameTickerSameDir.length > 0 ? staggerReason : macdContradicts ? "MACD contradiction" : timeOfDayMinScore > MIN_SCORE ? `afternoon VIX${state.vix?.toFixed(0)}` : (etHourNow >= 13 ? "afternoon" : ddProtocol.level) + " protocol";
       logEvent("filter", `${stock.ticker} call:${callSetup.score} put:${putSetup.score} - below ${finalMinScore} (${reason}) - skip`);
       if (state._scoreDebug?.[stock.ticker]) { state._scoreDebug[stock.ticker].effectiveMin = finalMinScore; state._scoreDebug[stock.ticker].blocked = [`score ${bestScore} below min ${finalMinScore} (${reason})`]; }
+      recordGateBlock(stock.ticker, reason, authRegimeName, bestScore);
       continue;
     }
 
@@ -11727,6 +11769,7 @@ app.get("/api/score-debug", (req, res) => {
       agentBias:   agentMacro.entryBias  || "unknown",
       agentReasoning: agentMacro.reasoning || "",
       results,
+      gateAudit:   (state._gateAudit || []).slice(-50).reverse(), // last 50, newest first
     });
   } catch(e) {
     res.status(500).json({ error: e.message });
