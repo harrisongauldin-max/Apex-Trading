@@ -988,6 +988,7 @@ input[type=text]:focus{border-color:var(--blue)}
 <div id="tab-score" class="content">
   <div style="display:flex;align-items:center;gap:8px;margin-bottom:12px;flex-wrap:wrap">
     <button class="btn" onclick="fetchScoreDebug()" style="font-size:11px">REFRESH</button>
+    <button class="btn" onclick="copyScoreDebug()" style="font-size:11px">COPY</button>
     <label style="font-size:11px;color:var(--muted)">Auto-refresh every 30s while tab is open</label>
     <span id="score-updated" style="font-size:10px;color:var(--muted);margin-left:auto"></span>
   </div>
@@ -2624,11 +2625,65 @@ async function fetchScoreDebug() {
     const r    = await fetch('/api/score-debug');
     const data = await r.json();
     renderScoreDebug(data);
+    window._lastScoreDebugData = data; // store for copy
     if (updEl) updEl.textContent = 'updated ' + new Date().toLocaleTimeString();
   } catch(e) {
     const gEl = document.getElementById('score-gates');
     if (gEl) gEl.innerHTML = '<span style="color:var(--red)">fetch error: ' + e.message + '</span>';
   }
+}
+
+function copyScoreDebug() {
+  const data = window._lastScoreDebugData;
+  if (!data) { alert('No score data yet — click REFRESH first'); return; }
+
+  const g = data.gates || {};
+  const lines = [];
+
+  lines.push(`ARGO SCORE DEBUG — ${new Date().toLocaleString()}`);
+  lines.push(`Last scan: ${data.lastScan ? new Date(data.lastScan).toLocaleTimeString() : '--'}`);
+  lines.push('');
+  lines.push('=== GATES ===');
+  lines.push(`Agent:       ${data.agentSignal} (${data.agentConf}) | Bias: ${data.agentBias}`);
+  lines.push(`Price regime: ${g.priceRegime} (${g.regimeDuration || 0}d) | Agent regime: ${g.agentRegime}${g.agentRegime !== g.priceRegime ? ' [OVERRIDDEN]' : ''}`);
+  lines.push(`VIX: ${(g.vix||0).toFixed(1)} | IVR: ${(g.ivr||0).toFixed(0)} ${g.ivElevated ? '(elevated)' : '(low)'} | SPY: $${(g.spyPrice||0).toFixed(2)}`);
+  lines.push(`Agent tradeType: ${g.agentTradeType} | Choppy block: ${g.isChoppyRegime ? 'YES' : 'no'} | Credit PUT: ${g.creditModeActive ? 'YES' : 'no'} | Credit CALL: ${g.creditCallModeActive ? 'YES' : 'no'}`);
+  lines.push(`200MA call block: ${g.below200MACallBlock ? 'YES' : 'no'} | Macro bullish: ${g.macroBullish ? 'YES' : 'no'} | VIX falling: ${g.vixFallingPause ? 'YES' : 'no'} | Avoid hold: ${g.avoidHoldActive ? 'YES' : 'no'}`);
+  if (data.agentReasoning) lines.push(`Agent: "${data.agentReasoning}"`);
+  lines.push('');
+  lines.push('=== SCORES ===');
+
+  for (const item of (data.results || [])) {
+    if (item.noData) { lines.push(`${item.ticker}: no data yet`); continue; }
+    if (item.error)  { lines.push(`${item.ticker}: ERROR - ${item.error}`); continue; }
+
+    const status = item.wouldEnter ? 'WOULD ENTER' : 'BLOCKED';
+    lines.push(`${item.ticker.padEnd(4)} PUT:${String(item.putScore).padStart(3)} CALL:${String(item.callScore).padStart(3)} MIN:${item.effectiveMin} [${status}] $${(item.price||0).toFixed(2)} | ${item.ageSec}s ago`);
+    if (item.signals) {
+      lines.push(`     RSI:${(item.signals.rsi||0).toFixed(1)}i/${(item.signals.dailyRsi||0).toFixed(1)}d MACD:${item.signals.macd||'--'} MOM:${item.signals.momentum||'--'} IVP:${item.signals.ivPercentile||'--'}%`);
+    }
+    if (item.blocks?.length) {
+      lines.push(`     BLOCKS: ${item.blocks.join(' | ')}`);
+    }
+    // Best setup reasons
+    const reasons = item.bestType === 'put' ? item.putReasons : item.callReasons;
+    if (reasons?.length) {
+      lines.push(`     ${item.bestType?.toUpperCase()} REASONS:`);
+      for (const r of reasons) lines.push(`       ${r}`);
+    }
+    lines.push('');
+  }
+
+  const text = lines.join('\n');
+  navigator.clipboard.writeText(text).then(() => {
+    const btn = document.querySelector('button[onclick="copyScoreDebug()"]');
+    if (btn) { const orig = btn.textContent; btn.textContent = 'COPIED!'; setTimeout(() => btn.textContent = orig, 1500); }
+  }).catch(() => {
+    const ta = document.createElement('textarea');
+    ta.value = text; document.body.appendChild(ta); ta.select(); document.execCommand('copy'); document.body.removeChild(ta);
+    const btn = document.querySelector('button[onclick="copyScoreDebug()"]');
+    if (btn) { const orig = btn.textContent; btn.textContent = 'COPIED!'; setTimeout(() => btn.textContent = orig, 1500); }
+  });
 }
 
 function renderScoreDebug(data) {
