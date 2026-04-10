@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8"/>
 <meta name="viewport" content="width=device-width,initial-scale=1"/>
-<title>ARGO V2.83 — Systematic Options Spread Agent</title>
+<title>ARGO V2.84 — Professional Options Agent</title>
 <style>
 :root{
   --bg:#07101f;--panel:#0a1628;--border:#0d3050;--text:#cce8ff;--muted:#336688;
@@ -127,8 +127,8 @@ input[type=text]:focus{border-color:var(--blue)}
       </svg>
     </div>
     <div class="logo-text">
-      <h1>ARGO V2.83 <span id="account-phase-pill" style="font-size:9px;padding:2px 7px;border-radius:10px;letter-spacing:1px;vertical-align:middle;display:none"></span></h1>
-      <p>SYSTEMATIC OPTIONS SPREAD AGENT · ALPACA PAPER</p>
+      <h1>ARGO V2.84 <span id="account-phase-pill" style="font-size:9px;padding:2px 7px;border-radius:10px;letter-spacing:1px;vertical-align:middle;display:none"></span></h1>
+      <p>PROFESSIONAL OPTIONS AGENT v2.0 · ALPACA PAPER</p>
     </div>
   </div>
   <div class="header-right">
@@ -207,7 +207,7 @@ input[type=text]:focus{border-color:var(--blue)}
 
     <!-- Day Plan Row — populated from _dayPlan -->
     <div id="day-plan-row" style="display:none;margin-bottom:8px;padding:8px;background:rgba(0,100,200,.08);border-radius:6px;border:1px solid rgba(0,100,200,.2)">
-      <div style="font-size:9px;color:var(--blue);letter-spacing:1px;margin-bottom:6px">📋 DAY PLAN</div>
+      <div style="font-size:9px;color:var(--blue);letter-spacing:1px;margin-bottom:6px">📋 DAY PLAN <span style="font-size:8px;opacity:0.7;font-weight:400;letter-spacing:0">(morning baseline)</span></div>
       <div style="display:flex;gap:16px;flex-wrap:wrap">
         <div><div style="font-size:9px;color:var(--muted)">REGIME</div><div id="dp-regime" style="font-size:11px;font-weight:700;color:var(--text)">--</div></div>
         <div><div style="font-size:9px;color:var(--muted)">ENTRY BIAS</div><div id="dp-bias" style="font-size:11px;font-weight:700;color:var(--text)">--</div></div>
@@ -472,7 +472,7 @@ input[type=text]:focus{border-color:var(--blue)}
 
   <div class="section-title">Open Positions</div>
   <div id="positions-wrap">
-    <div class="no-data">No open positions. ARGO V2.83 will enter trades during market hours (9:30AM–3:00PM ET, MR entries to 3:30PM).</div>
+    <div class="no-data">No open positions. ARGO V2.84 will enter trades during market hours (Puts 9:45AM / Calls 10AM–3:30PM ET).</div>
   </div>
 
   <div class="section-title">Portfolio Greeks</div>
@@ -750,7 +750,7 @@ input[type=text]:focus{border-color:var(--blue)}
 <div id="tab-journal" class="content">
   <div class="section-title" style="margin-top:0">Trade Journal — Entry Reasoning</div>
   <div id="journal-wrap">
-    <div class="no-data">No journal entries yet. ARGO V2.83 logs detailed reasoning for every trade.</div>
+    <div class="no-data">No journal entries yet. ARGO V2.84 logs detailed reasoning for every trade.</div>
   </div>
 </div>
 
@@ -775,7 +775,7 @@ input[type=text]:focus{border-color:var(--blue)}
   </div>
 
   <div class="alert alert-orange" style="margin-bottom:12px">
-    ARGO V2.83 auto-buys stocks when monthly options profit exceeds $1,000. 20% of profits above threshold are allocated to high-scoring stocks (85+). Stop loss: -15% from entry.
+    ARGO V2.84 auto-buys stocks when monthly options profit exceeds $1,000. 20% of profits above threshold are allocated to high-scoring stocks (85+). Stop loss: -15% from entry.
   </div>
 
   <div class="section-title">Stock Holdings</div>
@@ -803,7 +803,7 @@ input[type=text]:focus{border-color:var(--blue)}
 <div id="tab-backtest" class="content">
   <div style="margin-bottom:14px">
     <span style="font-size:13px;color:#00ff88;letter-spacing:2px;font-weight:700">⚙ BACKTEST ENGINE</span>
-    <span style="font-size:10px;color:#336688;margin-left:10px">Walk-forward simulation · ARGO V2.83 scoring · Alpaca historical data</span>
+    <span style="font-size:10px;color:#336688;margin-left:10px">Walk-forward simulation · ARGO V2.84 scoring · Alpaca historical data</span>
     <div style="font-size:10px;color:#4a6a8a;margin-top:4px">⚠ Conservative estimates — backtest enters one position at a time (walk-forward). Live ARGO holds multiple simultaneous positions, so live returns will typically exceed backtest figures.</div>
   </div>
 
@@ -1301,7 +1301,7 @@ function renderMetrics() {
     document.getElementById('alpaca-cash').textContent = fmt(state.alpacaCash);
     const customBudget = state.customBudget && state.customBudget > 0 ? state.customBudget : null;
     document.getElementById('alpaca-cash-sub').textContent = customBudget
-      ? `ARGO V2.83 using ${fmt(customBudget)} of this`
+      ? `ARGO V2.84 using ${fmt(customBudget)} of this`
       : 'paper balance · synced on boot';
   }
   document.getElementById('heat').style.color = heat > 50 ? 'var(--red)' : heat > 35 ? 'var(--orange)' : 'var(--green)';
@@ -1433,7 +1433,7 @@ function renderMetrics() {
   if (alphaEl && bm) {
     alphaEl.textContent = (bm.alpha >= 0 ? "+" : "") + bm.alpha + "%";
     alphaEl.style.color = bm.alpha >= 0 ? "var(--green)" : "var(--red)";
-    document.getElementById("benchmark-sub").textContent = `ARGO V2.83:${bm.apexReturn >= 0 ? "+" : ""}${bm.apexReturn}% SPY:${bm.spyReturn >= 0 ? "+" : ""}${bm.spyReturn}%`;
+    document.getElementById("benchmark-sub").textContent = `ARGO V2.84:${bm.apexReturn >= 0 ? "+" : ""}${bm.apexReturn}% SPY:${bm.spyReturn >= 0 ? "+" : ""}${bm.spyReturn}%`;
   }
 
   // Drawdown protocol
@@ -1474,7 +1474,14 @@ function renderMetrics() {
   const calEl = document.getElementById("calmar");
   if (calEl) { calEl.textContent = state.calmar || "--"; calEl.style.color = (state.calmar||0) > 1 ? "var(--green)" : (state.calmar||0) > 0 ? "var(--gold)" : "var(--red)"; }
   const irEl = document.getElementById("info-ratio");
-  if (irEl) { irEl.textContent = state.informationRatio || "--"; irEl.style.color = (state.informationRatio||0) > 0.5 ? "var(--green)" : (state.informationRatio||0) > 0 ? "var(--gold)" : "var(--red)"; }
+  if (irEl) {
+    const ir = state.informationRatio;
+    // IR > 20 almost certainly reflects insufficient data (tiny std dev), show with warning
+    const irDisplay = ir === null ? "--" : Math.abs(ir) > 20 ? `${ir} ⚠` : ir;
+    irEl.textContent = irDisplay;
+    irEl.style.color = (ir||0) > 0.5 ? "var(--green)" : (ir||0) > 0 ? "var(--gold)" : "var(--red)";
+    irEl.title = Math.abs(ir||0) > 20 ? "Value may be inflated due to small sample size" : "";
+  }
   const rorEl = document.getElementById("ror");
   // riskOfRuin is always an object { probability, message }
   const rorData = (state.riskOfRuin && typeof state.riskOfRuin === 'object')
@@ -1523,24 +1530,35 @@ function renderMetrics() {
   // Monte Carlo
   const mc = state.monteCarlo || {}; // mc = monteCarlo
   const mcMed = document.getElementById("mc-median");
-  if (mcMed && mc.median !== undefined) {
-    mcMed.textContent = (mc.median >= 0 ? "+" : "") + "$" + Math.abs(mc.median).toFixed(0);
-    mcMed.style.color = mc.median >= 0 ? "var(--green)" : "var(--red)";
-    document.getElementById("mc-prob").textContent = (mc.probProfit || 0) + "% chance of profit";
-    document.getElementById("mc-range").textContent = "$" + (mc.percentile5||0).toFixed(0) + " / +" + "$" + (mc.percentile95||0).toFixed(0);
-    document.getElementById("mc-range").style.color = "var(--muted)";
+  if (mcMed) {
+    if (mc.median !== null && mc.median !== undefined) {
+      mcMed.textContent = (mc.median >= 0 ? "+" : "") + "$" + Math.abs(mc.median).toFixed(0);
+      mcMed.style.color = mc.median >= 0 ? "var(--green)" : "var(--red)";
+      document.getElementById("mc-prob").textContent = (mc.probProfit || 0) + "% chance of profit";
+      const mcRange = document.getElementById("mc-range");
+      if (mcRange) { mcRange.textContent = "$" + (mc.percentile5||0).toFixed(0) + " / +" + "$" + (mc.percentile95||0).toFixed(0); mcRange.style.color = "var(--muted)"; }
+    } else {
+      mcMed.textContent = "--";
+      const mcProb = document.getElementById("mc-prob");
+      if (mcProb) mcProb.textContent = mc.message || "Insufficient data";
+      const mcRange = document.getElementById("mc-range");
+      if (mcRange) mcRange.textContent = "-- / --";
+    }
   }
 
   // Kelly
   const kelly = state.kelly || {};
   const kellyEl = document.getElementById("kelly-contracts");
-  if (kellyEl && kelly.contracts !== undefined) {
-    kellyEl.textContent = kelly.contracts + "x contracts";
-    kellyEl.style.color = kelly.winRate >= 55 ? "var(--green)" : "var(--gold)";
-    document.getElementById("kelly-detail").textContent = kelly.winRate + "% win rate · " + kelly.payoffRatio + "x payoff";
-    document.getElementById("kelly-factor").textContent = kelly.kelly || "--";
-    document.getElementById("kelly-factor").style.color = (kelly.kelly||0) > 0 ? "var(--green)" : "var(--red)";
-    document.getElementById("kelly-half").textContent = "half-Kelly: " + (kelly.halfKelly || "--");
+  if (kellyEl) {
+    const kellyValid = kelly.winRate !== null && kelly.winRate !== undefined && kelly.winRate > 0;
+    kellyEl.textContent = kellyValid ? kelly.contracts + "x contracts" : "--";
+    kellyEl.style.color = kellyValid && kelly.winRate >= 55 ? "var(--green)" : "var(--gold)";
+    const kellyDetail = document.getElementById("kelly-detail");
+    if (kellyDetail) kellyDetail.textContent = kellyValid ? kelly.winRate + "% win rate · " + kelly.payoffRatio + "x payoff" : (kelly.note || "Insufficient data");
+    const kellyFactor = document.getElementById("kelly-factor");
+    if (kellyFactor) { kellyFactor.textContent = kellyValid && kelly.kelly ? kelly.kelly.toFixed(3) : "--"; kellyFactor.style.color = kellyValid && (kelly.kelly||0) > 0 ? "var(--green)" : "var(--red)"; }
+    const kellyHalf = document.getElementById("kelly-half");
+    if (kellyHalf) kellyHalf.textContent = kellyValid ? "half-Kelly: " + (kelly.halfKelly ? kelly.halfKelly.toFixed(3) : "--") : "--";
   }
 
   // Beta-weighted delta
@@ -1677,7 +1695,7 @@ function renderPositions() {
   const wrap = document.getElementById('positions-wrap');
   const positions = state.positions || [];
   if (!positions.length) {
-    wrap.innerHTML = '<div class="no-data">No open positions. ARGO V2.83 will enter trades during market hours (9:30AM–3:00PM ET). SPY/QQQ spreads primary.</div>';
+    wrap.innerHTML = '<div class="no-data">No open positions. ARGO V2.84 will enter trades during market hours (9:30AM–3:45PM ET). SPY/QQQ spreads primary.</div>';
     return;
   }
   wrap.innerHTML = positions.map(p => {
@@ -2263,7 +2281,7 @@ async function triggerDryRun() {
     const resp = await fetch('/api/dry-run-scan', {method:'POST'});
     const data = await resp.json();
     await fetchState();
-    alert('Dry run complete! Check the Server Log tab — look for [DRYRUN] entries showing what ARGO V2.83 would trade.');
+    alert('Dry run complete! Check the Server Log tab — look for [DRYRUN] entries showing what ARGO V2.84 would trade.');
   } catch(e) {
     alert('Dry run error: ' + e.message);
   } finally {
@@ -2310,10 +2328,10 @@ async function resetPDT() {
 }
 
 async function resetCircuit() {
-  if (!confirm('Reset circuit breaker? ARGO V2.83 will resume scanning and entering new trades.')) return;
+  if (!confirm('Reset circuit breaker? ARGO V2.84 will resume scanning and entering new trades.')) return;
   const resp = await fetch('/api/reset-circuit', {method:'POST'});
   const data = await resp.json();
-  alert('Circuit breaker reset. ARGO V2.83 is scanning again.');
+  alert('Circuit breaker reset. ARGO V2.84 is scanning again.');
   await fetchState();
 }
 
@@ -2322,7 +2340,7 @@ async function fullReset() {
   if (!confirm('This cannot be undone. Confirm full reset?')) return;
   const resp = await fetch('/api/full-reset', {method:'POST'});
   const data = await resp.json();
-  alert('Full reset complete. ARGO V2.83 restarted with $10,000.');
+  alert('Full reset complete. ARGO V2.84 restarted with $10,000.');
   location.reload();
 }
 
@@ -2425,13 +2443,13 @@ async function downloadDayReport() {
     const url  = URL.createObjectURL(blob);
     const a    = document.createElement('a');
     a.href     = url;
-    a.download = `ARGO V2.83_DayReport_${today}.json`;
+    a.download = `ARGO V2.84_DayReport_${today}.json`;
     a.click();
     URL.revokeObjectURL(url);
 
     // ── Also show quick summary in alert ─────────────────────────────────
     alert(
-      `ARGO V2.83 Day Report — ${today}\n\n` +
+      `ARGO V2.84 Day Report — ${today}\n\n` +
       `Trades: ${trades.length} | Win Rate: ${winRate}%\n` +
       `Total P&L: $${totalPnL.toFixed(2)}\n` +
       `Best: $${bigWin} | Worst: $${bigLoss}\n` +
@@ -2439,7 +2457,7 @@ async function downloadDayReport() {
       `Exit Reasons:\n` +
       Object.entries(byReason).map(([r,v]) => `  ${r}: ${v.count}x ($${v.pnl.toFixed(2)})`).join('\n') +
       `\n\nOpen Positions: ${openPos.length}\n` +
-      `Report saved as ARGO V2.83_DayReport_${today}.json`
+      `Report saved as ARGO V2.84_DayReport_${today}.json`
     );
   } catch(e) {
     alert('Error generating report: ' + e.message);
@@ -2737,7 +2755,7 @@ function copyMatrixTemplate() {
   const NL = '\n';
   const DIV = '════════════════════════════════════════';
 
-  let out = 'BACKTEST MATRIX — ARGO V2.83' + NL;
+  let out = 'BACKTEST MATRIX — ARGO V2.84' + NL;
   out += DIV + NL;
   out += 'PERIOD:    ' + startDate + ' → ' + endDate + NL;
   out += 'HOLD:      ' + holdDays + 'd | MAX POS: ' + maxPositions + ' | CAPITAL: $' + capital + NL;
@@ -2919,7 +2937,7 @@ async function runBacktest() {
       putOnly:      btCallSize === 0,
     };
     const modeLabel = body.optionType === "both" ? "puts+calls (best direction daily)" : body.optionType + "s";
-    document.getElementById('bt-loading-msg').textContent = `Replaying ARGO V2.83 ${modeLabel} on ${body.ticker} ${body.startDate}→${body.endDate}...`;
+    document.getElementById('bt-loading-msg').textContent = `Replaying ARGO V2.84 ${modeLabel} on ${body.ticker} ${body.startDate}→${body.endDate}...`;
     const res  = await fetch('/api/backtest', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body) });
     const data = await res.json();
     if (data.error) throw new Error(data.error);
@@ -3129,7 +3147,7 @@ function copyBacktestTemplate() {
     `  ${r}: ${c} (${(c/s.totalTrades*100).toFixed(0)}%)`
   ).join('\n');
 
-  const template = `BACKTEST RESULT — ARGO V2.83
+  const template = `BACKTEST RESULT — ARGO V2.84
 ════════════════════════════════════════
 INSTRUMENT: ${s.ticker}
 DIRECTION:  ${s.optionType?.toUpperCase()}
