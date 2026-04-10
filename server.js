@@ -1,5 +1,5 @@
 // -
-// ARGO V2.82 - Systematic SPY/QQQ Options Trading Agent
+// ARGO V2.83 - Systematic SPY/QQQ Options Trading Agent
 // Alpaca Paper Trading Edition
 // -
 const express    = require("express");
@@ -726,11 +726,18 @@ async function initState() {
         const seedMax = Math.max(...seedReadings);
         if (seedMax - seedMin >= 10) {
           // Valid range - seed is meaningful
+          // V2.83: use P5-P95 trimmed range to prevent outlier poisoning
           state._vixRolling = seedReadings.slice(-252);
-          const currentVIX = state.vix || seedReadings[seedReadings.length - 1];
-          state._ivRank = parseFloat(((currentVIX - seedMin) / (seedMax - seedMin) * 100).toFixed(1));
+          const sortedSeed  = [...state._vixRolling].sort((a, b) => a - b);
+          const seedP5  = sortedSeed[Math.floor(sortedSeed.length * 0.05)] || seedMin;
+          const seedP95 = sortedSeed[Math.floor(sortedSeed.length * 0.95)] || seedMax;
+          const currentVIX  = state.vix || seedReadings[seedReadings.length - 1];
+          const clampedVIX  = Math.min(Math.max(currentVIX, seedP5), seedP95);
+          state._ivRank = seedP95 > seedP5
+            ? parseFloat(((clampedVIX - seedP5) / (seedP95 - seedP5) * 100).toFixed(1))
+            : 50;
           state._ivEnv  = state._ivRank >= 70 ? "high" : state._ivRank >= 50 ? "elevated" : state._ivRank >= 30 ? "normal" : "low";
-          console.log(`[IVR SEED] Seeded ${state._vixRolling.length} bars | Range:[${seedMin.toFixed(1)}-${seedMax.toFixed(1)}] | IVR:${state._ivRank} (${state._ivEnv})`);
+          console.log(`[IVR SEED] Seeded ${state._vixRolling.length} bars | P5-P95:[${seedP5.toFixed(1)}-${seedP95.toFixed(1)}] | AbsRange:[${seedMin.toFixed(1)}-${seedMax.toFixed(1)}] | IVR:${state._ivRank} (${state._ivEnv})`);
           seeded = true;
           markDirty();
         } else {
@@ -1044,7 +1051,51 @@ function logEvent(type, message) {
   const entry = { time: new Date().toISOString(), type, message };
   state.tradeLog.unshift(entry);
   if (state.tradeLog.length > 500) state.tradeLog = state.tradeLog.slice(0, 500);
+  // V2.83: also append to daily log buffer for EOD archival to Redis
+  // Separate from tradeLog so the live 500-entry rolling buffer is not affected
+  if (!state._dailyLogBuffer) state._dailyLogBuffer = [];
+  state._dailyLogBuffer.push(entry);
   console.log(`[${type.toUpperCase()}] ${message}`);
+}
+
+// V2.83: Save daily log to Redis at EOD
+// Key format: argo:logs:YYYY-MM-DD -- stores full day's log entries
+// At ~500 entries/day avg 150 chars = ~75KB/day compressed
+// Upstash free tier 256MB = 3+ years of daily logs before hitting limit
+async function saveDailyLogToRedis() {
+  if (!REDIS_URL || !REDIS_TOKEN) return;
+  try {
+    const dateStr  = getETTime().toISOString().slice(0, 10); // YYYY-MM-DD
+    const logKey   = `argo:logs:${dateStr}`;
+    const logData  = JSON.stringify({
+      date:     dateStr,
+      entries:  state._dailyLogBuffer || [],
+      summary: {
+        totalEntries: (state._dailyLogBuffer || []).length,
+        trades:       (state._dailyLogBuffer || []).filter(e => e.type === "trade").length,
+        errors:       (state._dailyLogBuffer || []).filter(e => e.type === "error").length,
+        warns:        (state._dailyLogBuffer || []).filter(e => e.type === "warn").length,
+        closedToday:  (state.closedTrades || []).filter(t => t.closeTime && new Date(t.closeTime).toISOString().slice(0,10) === dateStr).length,
+        cashEOD:      state.cash,
+        positionsEOD: state.positions.length,
+      }
+    });
+    // Save with 90-day TTL (7,776,000 seconds) -- auto-expire old logs
+    const res = await fetch(`${REDIS_URL}/set/${logKey}`, {
+      method:  "POST",
+      headers: { Authorization: `Bearer ${REDIS_TOKEN}`, "Content-Type": "application/json" },
+      body:    JSON.stringify({ value: logData, ex: 7776000 }),
+    });
+    if (res.ok) {
+      logEvent("scan", `[EOD LOG] Daily log saved to Redis: ${logKey} | ${(state._dailyLogBuffer||[]).length} entries`);
+      state._dailyLogBuffer = []; // reset buffer for next day
+      markDirty();
+    } else {
+      console.error("[EOD LOG] Redis save failed:", res.status);
+    }
+  } catch(e) {
+    console.error("[EOD LOG] Daily log save error:", e.message);
+  }
 }
 
 // - Dynamic Signal Calculators -
@@ -7375,15 +7426,33 @@ async function runScan() {
   if (state._vixRolling.length > 252) state._vixRolling.shift(); // 1 year rolling
   const vixMin = Math.min(...state._vixRolling);
   const vixMax = Math.max(...state._vixRolling);
-  state._ivRank = vixMax > vixMin
-    ? parseFloat(((newVIX - vixMin) / (vixMax - vixMin) * 100).toFixed(1))
+  // V2.83: IVR outlier fix - use 95th percentile cap instead of absolute max
+  // Problem: a single VIX spike (e.g. 65+ in April 2025 tariff shock) makes VIX 30
+  // score as 0.2nd percentile, blocking credit spreads and distorting all IV gates
+  // Fix: sort the rolling window and use the 95th percentile as the effective ceiling
+  // This is standard practice in vol surface construction (trim extreme outliers)
+  const sortedVix = [...state._vixRolling].sort((a, b) => a - b);
+  const p5idx  = Math.floor(sortedVix.length * 0.05);
+  const p95idx = Math.floor(sortedVix.length * 0.95);
+  const vixP5  = sortedVix[p5idx]  || vixMin; // 5th percentile floor
+  const vixP95 = sortedVix[p95idx] || vixMax; // 95th percentile ceiling
+  // Clamp newVIX to the trimmed range for rank calculation
+  const vixClamped = Math.min(Math.max(newVIX, vixP5), vixP95);
+  state._ivRank = vixP95 > vixP5
+    ? parseFloat(((vixClamped - vixP5) / (vixP95 - vixP5) * 100).toFixed(1))
     : 50; // default to 50 when insufficient history
+  // Sanity check: if absolute range is very narrow (<5pts) fall back to VIX formula
+  // This catches cold-start edge cases where all readings cluster together
+  if (vixMax - vixMin < 5) {
+    const formulaIVR = Math.min(95, Math.max(5, parseFloat(((newVIX - 12) / 33 * 100).toFixed(1))));
+    state._ivRank = formulaIVR;
+  }
   // IV environment classification
   state._ivEnv = state._ivRank >= 70 ? "high"    // sell premium aggressively
                : state._ivRank >= 50 ? "elevated" // credit spreads allowed
                : state._ivRank >= 30 ? "normal"   // neutral
                : "low";                            // buy premium (debit preferred)
-  logEvent("scan", `[IV] Rank:${state._ivRank} (${state._ivEnv}) | VIX:${newVIX} | Range:[${vixMin.toFixed(1)}-${vixMax.toFixed(1)}] | History:${state._vixRolling.length}d`);
+  logEvent("scan", `[IV] Rank:${state._ivRank} (${state._ivEnv}) | VIX:${newVIX} | P5-P95:[${vixP5.toFixed(1)}-${vixP95.toFixed(1)}] | AbsRange:[${vixMin.toFixed(1)}-${vixMax.toFixed(1)}] | History:${state._vixRolling.length}d`);
 
   // - Confirm any pending mleg order from previous scan -
   // Must run before entry logic - if filled, records position and clears pending
@@ -11064,9 +11133,13 @@ cron.schedule("0 13,14 * * 1-5", async () => {
 });
 
 // EOD email 4:05pm ET - hour-aware to handle EDT/EST
-cron.schedule("5 20,21 * * 1-5", () => {
+// V2.83: also saves daily log to Redis for persistent log history (90-day retention)
+cron.schedule("5 20,21 * * 1-5", async () => {
   const et = getETTime();
-  if (et.getHours() === 16 && et.getMinutes() === 5) sendEmail("eod");
+  if (et.getHours() === 16 && et.getMinutes() === 5) {
+    sendEmail("eod");
+    await saveDailyLogToRedis();
+  }
 });
 
 // 4:15pm ET post-market assessment - ET-hour aware
@@ -11335,6 +11408,45 @@ app.get("/api/logs", (req, res) => {
     positions: (state.positions || []).length,
     vix:       state.vix,
   });
+});
+
+// V2.83: Historical log retrieval from Redis
+// GET /api/logs/history?date=2026-04-09 -- retrieves archived daily log
+// GET /api/logs/history -- lists available log dates (last 90 days)
+app.get("/api/logs/history", async (req, res) => {
+  if (!REDIS_URL || !REDIS_TOKEN) return res.status(503).json({ error: "Redis not configured" });
+  try {
+    const date = req.query.date;
+    if (date) {
+      // Fetch specific day
+      const logKey = `argo:logs:${date}`;
+      const resp   = await fetch(`${REDIS_URL}/get/${logKey}`, {
+        headers: { Authorization: `Bearer ${REDIS_TOKEN}` }
+      });
+      const data = await resp.json();
+      if (!data.result) return res.status(404).json({ error: `No log found for ${date}` });
+      const parsed = JSON.parse(data.result);
+      const filter = req.query.filter;
+      const limit  = Math.min(parseInt(req.query.limit || 500), 2000);
+      const types  = filter ? filter.split(",").map(t => t.trim().toLowerCase()) : null;
+      let entries  = parsed.entries || [];
+      if (types) entries = entries.filter(e => types.includes(e.type));
+      res.json({ date, entries: entries.slice(0, limit), summary: parsed.summary });
+    } else {
+      // List available dates -- scan Redis keys with argo:logs: prefix
+      const resp = await fetch(`${REDIS_URL}/keys/argo:logs:*`, {
+        headers: { Authorization: `Bearer ${REDIS_TOKEN}` }
+      });
+      const data  = await resp.json();
+      const dates = (data.result || [])
+        .map(k => k.replace("argo:logs:", ""))
+        .sort()
+        .reverse(); // most recent first
+      res.json({ available: dates, count: dates.length });
+    }
+  } catch(e) {
+    res.status(500).json({ error: e.message });
+  }
 });
 
 app.post("/api/scan",        async (req,res) => { res.json({ok:true}); runScan(); });
