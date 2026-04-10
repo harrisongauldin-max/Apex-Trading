@@ -7491,10 +7491,19 @@ async function runScan() {
     ? parseFloat(((vixClamped - vixP5) / (vixP95 - vixP5) * 100).toFixed(1))
     : 50; // default to 50 when insufficient history
   // Sanity check: if absolute range is very narrow (<5pts) fall back to VIX formula
-  // This catches cold-start edge cases where all readings cluster together
   if (vixMax - vixMin < 5) {
     const formulaIVR = Math.min(95, Math.max(5, parseFloat(((newVIX - 12) / 33 * 100).toFixed(1))));
     state._ivRank = formulaIVR;
+  }
+  // V2.84 fix: if IVR comes out very low (<=5) but VIX is objectively elevated (>=25),
+  // the rolling window has no low-VIX baseline (fresh start or reset during high-VIX period)
+  // Fall back to formula which is calibrated on full 2012-2024 cycle
+  // VIX 29 = ~52nd percentile historically. VIX 35 = ~70th. VIX 20 = ~24th.
+  if (state._ivRank <= 5 && newVIX >= 20) {
+    const formulaIVR = Math.min(95, Math.max(5, parseFloat(((newVIX - 12) / 33 * 100).toFixed(1))));
+    logEvent("scan", `[IVR] Window has no low-VIX baseline (min:${vixMin.toFixed(1)}) - using formula fallback: VIX ${newVIX} = IVR ${formulaIVR}`);
+    state._ivRank = formulaIVR;
+    state._ivEnv  = formulaIVR >= 70 ? "high" : formulaIVR >= 50 ? "elevated" : formulaIVR >= 30 ? "normal" : "low";
   }
   // IV environment classification
   state._ivEnv = state._ivRank >= 70 ? "high"    // sell premium aggressively
@@ -8743,7 +8752,12 @@ async function runScan() {
   // applyIntradayRegimeOverride updates _dayPlan for the morning context - but scoring
   // uses _agentMacro directly so intraday shifts are immediately reflected.
   const agentRegime       = (state._agentMacro || {}).regime || (state._dayPlan || {}).regime || "neutral";
-  const agentTradeTypeGate = (state._dayPlan || {}).tradeType || (state._agentMacro || {}).tradeType || "spread";
+  // V2.84 fix: agent tradeType takes priority over day plan -- agent updates every 3min with live data
+  // Day plan tradeType was overriding agent causing "choppy" block all day from a stale morning baseline
+  // Only fall back to day plan if agent has never run (null _agentMacro)
+  const agentTradeTypeGate = (state._agentMacro && (state._agentMacro || {}).tradeType)
+    ? (state._agentMacro.tradeType || "spread")
+    : ((state._dayPlan || {}).tradeType || "spread");
   const isChoppyRegime    = agentRegime === "choppy" || agentTradeTypeGate === "none";
   // SKEW elevated = puts doubly overpriced (both fear + tail risk premium)
   // When SKEW >= 130 lower the VIX threshold - SKEW compensates for lower VIX
