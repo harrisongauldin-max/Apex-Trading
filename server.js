@@ -8848,7 +8848,7 @@ async function runScan() {
   //
   const choppyDebitBlock  = isChoppyRegime && !dryRunMode;
   const agentSaysCredit   = agentTradeTypeGate === "credit";
-  const isBearTrend       = agentRegime === "trending_bear" || agentRegime === "breakdown";
+  const isBearTrend       = authRegimeName === "trending_bear" || authRegimeName === "breakdown";
   const ivRankNow         = state._ivRank || 50;
   const ivElevated        = ivRankNow >= 50; // options at least moderately expensive
   const ivHigh            = ivRankNow >= 70; // options expensive - sell premium aggressively
@@ -10060,7 +10060,7 @@ async function runScan() {
     // V2.84: Regime B oversold sizing modifier (Risk Manager recommendation)
     // When RSI <=40 in Regime B, valid but elevated overnight gap risk
     // Apply 0.75x size multiplier to compensate -- trade is right, size conservatively
-    const regimeBOversoldMod = (["trending_bear","breakdown"].includes(agentRegime) &&
+    const regimeBOversoldMod = (["trending_bear","breakdown"].includes(authRegimeName) &&
       (liveStock.dailyRsi || liveStock.rsi || 50) <= 40 &&
       optionType === "put") ? 0.75 : 1.0;
     if (regimeBOversoldMod < 1.0) {
@@ -10148,7 +10148,8 @@ async function runScan() {
     const _scoredTradeType = (creditCallModeActive && optionType === "call") ? "credit_call"
       : (creditModeActive && optionType === "put" && ivRankNow >= 50) ? "credit_put"
       : isMR ? "debit_naked"
-      : "debit";
+      : optionType === "put" ? "debit_put"
+      : "debit_call";
     const _instrumentConstraint = INSTRUMENT_CONSTRAINTS[liveStock.ticker] || null;
     scored.push({
       stock: liveStock, price, score: bestScore, reasons: bestReasons, optionType, isMeanReversion: isMR,
@@ -10279,7 +10280,7 @@ async function runScan() {
     // PANEL FIX: Never re-derive trade type from current gate state - it may have shifted since scoring
     // Honor the decision that was made when this candidate was scored, with full market context
     const intent = tradeIntent || {};
-    const intentType = intent.type || "debit";
+    const intentType = intent.type || (optionType === "put" ? "debit_put" : "debit_call");
     const useCreditSpread     = intentType === "credit_put"  && stock.isIndex && !isMeanReversion;
     const useCreditCallSpread = intentType === "credit_call" && stock.isIndex && !isMeanReversion;
     const useIronCondor       = intentType === "iron_condor" && stock.isIndex && !isMeanReversion && !dryRunMode
