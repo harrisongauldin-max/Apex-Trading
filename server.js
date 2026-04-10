@@ -8797,7 +8797,14 @@ async function runScan() {
   const agentTradeTypeGate = (state._agentMacro && (state._agentMacro || {}).tradeType)
     ? (state._agentMacro.tradeType || "spread")
     : ((state._dayPlan || {}).tradeType || "spread");
-  const isChoppyRegime    = agentRegime === "choppy" || agentTradeTypeGate === "none";
+  // V2.84 fix: use price-based regime classifier for choppy/bear gate decision
+  // Agent calls regime "choppy" on gap-up days in bear markets, wrongly blocking puts
+  // _regimeClass (200MA + VIX + drawdown) is objective -- only use agent regime as fallback
+  const regimeForGate  = state._regimeClass === "B" ? "trending_bear"
+                       : state._regimeClass === "C" ? "breakdown"
+                       : state._regimeClass === "A" ? "trending_bull"
+                       : agentRegime;
+  const isChoppyRegime    = regimeForGate === "choppy" || agentTradeTypeGate === "none";
   // SKEW elevated = puts doubly overpriced (both fear + tail risk premium)
   // When SKEW >= 130 lower the VIX threshold - SKEW compensates for lower VIX
   const skewElevated      = (state._skew?.skew || 0) >= 130;
@@ -9456,9 +9463,16 @@ async function runScan() {
         ? marketContext.breadth * 100
         : parseFloat((marketContext?.breadth || "50").toString()) || 50;
       // Pass credit mode to scoreIndexSetup so RSI block and scoring adjust correctly
+      // V2.84 fix: override agent regime with price-based classifier (_regimeClass)
+      // Agent calls regime "choppy" on gap-up days in bear markets -- this applies -10 to put scores
+      // The price-based classifier (200MA + VIX + drawdown) is more objective and consistent
+      // Agent's signal/confidence/entryBias/tradeType are still used -- only regime is overridden
+      const regimeClassToName = { "B": "trending_bear", "C": "breakdown", "A": "trending_bull" };
+      const priceBasedRegime  = regimeClassToName[state._regimeClass] || (agentMacro || {}).regime || "neutral";
+      const scoringMacroBase  = { ...(agentMacro || {}), regime: priceBasedRegime };
       const scoringMacro = creditModeActive
-        ? { ...agentMacro, tradeType: "credit" }
-        : agentMacro;
+        ? { ...scoringMacroBase, tradeType: "credit" }
+        : scoringMacroBase;
       const putResult  = scoreIndexSetup(liveStock, "put",  spyRSI, spyMACD, spyMomentum, breadthVal, state.vix, scoringMacro);
       const callResult = scoreIndexSetup(liveStock, "call", spyRSI, spyMACD, spyMomentum, breadthVal, state.vix, scoringMacro);
       putSetup  = { score: putResult.score,  reasons: putResult.reasons,  tradeType: putResult.tradeType  || "spread", isMeanReversion: false };
