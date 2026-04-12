@@ -853,6 +853,7 @@ async function runReconciliation() {
         const ghostReason = symbollessGhost ? "no contract symbols stored + Alpaca empty for ticker" : "closed externally";
         logEvent("warn", `[RECONCILE] Ghost: ${pos.ticker} ${pos.contractSymbol||pos.buySymbol||"(no symbol)"} - ${ghostReason}`);
         const idx = state.positions.indexOf(pos);
+        if (idx === -1) { logEvent("warn", `[RECONCILE] splice guard: ${pos.ticker} not found in positions array`); continue; }
         state.positions.splice(idx, 1);
         state.closedTrades.push({
           ticker: pos.ticker, pnl: 0, pct: "0", reason: "reconcile-removed",
@@ -10037,6 +10038,9 @@ async function runScan() {
       logEvent("filter", `${stock.ticker} IVR ${ivrNow} below caution threshold`);
     const effectiveMinScore = MIN_SCORE; // stub -- entryEngine is min score authority
     if (agentStale && !dryRunMode) {
+      const agentStaleMins = agentLastRun
+        ? ((Date.now() - new Date(agentLastRun).getTime()) / 60000)
+        : 999;
       logEvent("filter", `Agent macro stale (${agentStaleMins.toFixed(0)}min) - raising min score. Last signal: ${agentSig || "none"}`);
       if (agentStaleMins > 90 && isMarketHours()) {
         logEvent("warn", `[AGENT] Macro analysis has not run in ${agentStaleMins.toFixed(0)} minutes - check API key and headlines`);
@@ -10166,13 +10170,15 @@ async function runScan() {
     // Merge entry engine result with scan data
     scored.push({
       stock: liveStock, price,
-      score:         eeCandidate.score,
-      reasons:       eeCandidate.reasons,
-      optionType:    eeCandidate.optionType,
+      score:           eeCandidate.score,
+      reasons:         eeCandidate.reasons,
+      optionType:      eeCandidate.optionType,
       isMeanReversion: isMR,
-      tradeIntent:   eeCandidate.tradeIntent,
-      sizeMod:       eeCandidate.sizeMod,
-      constraintPass: eeCandidate.constraintPass,
+      tradeIntent:     eeCandidate.tradeIntent,
+      sizeMod:         eeCandidate.sizeMod,
+      constraintPass:  eeCandidate.constraintPass,
+      constraintReason: eeCandidate.constraintReason || null,
+      heatMultiplier:  eeCandidate.heatMultiplier || 1.0, // Bug 3 fix: was missing, execution loop destructures this
     });
   }
 
