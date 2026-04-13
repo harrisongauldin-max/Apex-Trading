@@ -8807,6 +8807,16 @@ async function runScan() {
   const dayPlanRiskMult = (dayPlan && dayPlan.riskLevel === "high" && !dryRunMode) ? 0.50 : 1.0;
   if (dayPlanRiskMult < 1.0) logEvent("filter", `[DAY PLAN] High risk day - position sizing reduced 50%`);
 
+  // -- ENTRY ENGINE: Regime Rulebook ----------------------------------------
+  // Moved here (before any rb.gates references) to prevent temporal dead zone crash
+  // OPT-7: Compute rulebook once -- dryRun overrides specific gates only
+  const _rbBase = getRegimeRulebook(state);
+  const rb = dryRunMode
+    ? { ..._rbBase, gates: { ..._rbBase.gates,
+        choppyDebitBlock: false, crisisDebitBlock: false, avoidHoldActive: false,
+        postReversalBlock: false, vixFallingPause: false } }
+    : _rbBase;
+
   const macroBullish      = rb.gates.macroBullishBlock; // from rulebook (replaces old derivation)
   const pdtCount      = countRecentDayTrades();
   const pdtBlocked    = !dryRunMode && pdtCount >= PDT_LIMIT;
@@ -8906,16 +8916,7 @@ async function runScan() {
   // _dayPlan.regime is the morning baseline, used only when _agentMacro hasn't run yet.
   // applyIntradayRegimeOverride updates _dayPlan for the morning context - but scoring
   // uses _agentMacro directly so intraday shifts are immediately reflected.
-  // -- ENTRY ENGINE: Regime Rulebook ----------------------------------------
-  // Single source of truth for all entry decisions (panel unanimous 14/14)
-  // Computed once per scan  -- all downstream code reads from rb.gates, never re-derives
-  // OPT-7: Compute rulebook once -- dryRun overrides specific gates only
-  const _rbBase = getRegimeRulebook(state);
-  const rb = dryRunMode
-    ? { ..._rbBase, gates: { ..._rbBase.gates,
-        choppyDebitBlock: false, crisisDebitBlock: false, avoidHoldActive: false,
-        postReversalBlock: false, vixFallingPause: false } }
-    : _rbBase;
+  // (rb rulebook computed earlier in runScan -- before first rb.gates reference)
 
   // Surface key flags for the rest of runScan that references them directly
   const authRegimeName    = rb.regimeName;
