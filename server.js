@@ -8252,8 +8252,10 @@ async function runScan() {
             const callRSIDegrading = pos.optionType === "call" &&
               entryRSI <= 40 && liveRSI > 55 && prevRSI <= 50;
             // 2. MACD turned bearish on a call position - momentum reversing
+            // liveStock not in scope here -- use pos._lastMACD if available (set during scan scoring)
+            const _posLiveMACD = pos._lastMACD || pos.entryMACD || "";
             const callMACDDegrading = pos.optionType === "call" &&
-              (liveStock?.macd || "").includes("bearish crossover") &&
+              _posLiveMACD.includes("bearish crossover") &&
               !(pos.entryMACD || "").includes("bearish");
             const callThesisDegrading = callRSIDegrading || callMACDDegrading;
             if (putThesisDegrading || callThesisDegrading) {
@@ -9459,7 +9461,8 @@ async function runScan() {
         logEvent("scan", `[VWAP] ${stock.ticker} $${price.toFixed(2)} vs VWAP $${vwap.toFixed(2)} (${vwapPct}%) - ${vwapBias}`);
       }
       // Bear call credit: strongly prefer below VWAP (market already weak intraday)
-      if (creditCallModeActive && price > vwap * 1.01 && optionType === "call") {
+      // putSetup/callSetup not yet initialized here -- creditCallModeActive already implies call direction
+      if (creditCallModeActive && price > vwap * 1.01) {
         logEvent("filter", `[VWAP] ${stock.ticker} bear call skipped - price ABOVE VWAP by ${vwapPct}% (wait for intraday weakness)`);
         continue;
       }
