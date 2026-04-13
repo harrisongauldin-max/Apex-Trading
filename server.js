@@ -177,6 +177,9 @@ const SEMIS = ["NVDA", "AMD", "SMCI", "ARM", "AVGO", "MU"];
 const INDIVIDUAL_STOCKS_ENABLED = false;
 const ACCOUNT_THRESHOLD_25K     = 25000; // PDT-free threshold
 
+const PDT_LIMIT = 3;   // max day trades before block (limit is 3, 4th triggers PDT flag)
+const PDT_DAYS  = 5;   // rolling business day window
+
 const WATCHLIST = [
   // - PRIMARY: SPY - macro regime trading -
   {
@@ -4873,6 +4876,347 @@ async function checkSectorETF(stock) {
     }
   }
   return { pass: true, reason: null, putBoost: 0 };
+}
+
+
+
+
+
+function getDeployableCash() {
+  // Everything above the floor is deployable - floor itself is managed separately
+  return Math.max(0, state.cash - CAPITAL_FLOOR);
+}
+
+
+
+async function getWeeklyTrend(ticker) {
+  try {
+    const cached = getCached('weekly:' + ticker);
+    if (cached) return cached;
+    const bars = await getStockBars(ticker, 70); // 70 days = ~14 weeks
+    if (bars.length < 50) return setCache('weekly:' + ticker, { trend: 'neutral', above10wk: null });
+    const ma10w = bars.slice(-50).reduce((s, b) => s + b.c, 0) / 50;
+    const price = bars[bars.length-1].c;
+    const pctFromMA = (price - ma10w) / ma10w;
+    const trend = pctFromMA > 0.02 ? 'above' : pctFromMA < -0.02 ? 'below' : 'at';
+    // TA-W3: MA slope matters more than price position
+    // Rising MA with price below = bullish context; falling MA with price above = bearish
+    const ma10w_prev  = bars.length >= 55 ? bars.slice(-55,-5).reduce((s,b)=>s+b.c,0)/50 : ma10w;
+    const maSlope     = (ma10w - ma10w_prev) / ma10w_prev; // positive = rising, negative = falling
+    const maSlopeDir  = maSlope > 0.005 ? 'rising' : maSlope < -0.005 ? 'falling' : 'flat';
+    // Bullish when: above MA or (below MA but MA rising = pullback in uptrend)
+    // Bearish when: below MA and MA falling (confirmed downtrend)
+    const trendContext = (price > ma10w && maSlopeDir !== 'falling') ? 'aligned_bull'
+                       : (price < ma10w && maSlopeDir === 'rising')  ? 'pullback_bull'
+                       : (price < ma10w && maSlopeDir === 'falling') ? 'confirmed_bear'
+                       : 'neutral';
+    return setCache('weekly:' + ticker, { trend, ma10w: parseFloat(ma10w.toFixed(2)), pctFromMA: parseFloat((pctFromMA*100).toFixed(1)), above10wk: price > ma10w, maSlope: parseFloat((maSlope*100).toFixed(2)), maSlopeDir, trendContext });
+  } catch(e) { return { trend: 'neutral', above10wk: null }; }
+}
+
+
+
+function getDTEExitParams(dte, daysOpen = 0) {
+  // Phase-aware exit tightening — preservation mode locks profits faster
+  const acctPhase = getAccountPhase();
+  // PDT-aware target adjustment
+  const pdtRemaining = Math.max(0, PDT_LIMIT - countRecentDayTrades());
+  const pdtTight     = pdtRemaining <= 1;
+  const pdtLocked    = pdtRemaining === 0;
+
+  // ── Overnight tier adjustment ─────────────────────────────────────────
+  // Monthly options: softer overnight penalty — theta decays slowly, thesis needs time
+  // Weekly options: tighter — theta is racing, exit fast
+  // Partials: sell half at partialPct, close remainder at takeProfitPct
+  let overnightMult = 1.0;
+  let overnightLabel = "";
+  if (dte <= 21) {
+    // Weekly: overnight hurts more — tighten target
+    if (daysOpen >= 2) { overnightMult = 0.65; overnightLabel = "(2D+)"; }
+    else if (daysOpen >= 1) { overnightMult = 0.80; overnightLabel = "(OVERNIGHT)"; }
+  } else {
+    // Monthly 30-45 DTE: much gentler overnight adjustment — holding is the plan
+    if (daysOpen >= 7)  { overnightMult = 0.75; overnightLabel = "(7D+)"; }
+    else if (daysOpen >= 3) { overnightMult = 0.85; overnightLabel = "(3D+)"; }
+    else if (daysOpen >= 1) { overnightMult = 0.92; overnightLabel = "(OVERNIGHT)"; }
+  }
+
+  if (dte <= 21) {
+    // Weekly / short-DTE — tighter targets, faster exits
+    // These should be rare in PDT accounts — mean reversion calls mainly
+    const base = pdtLocked ? 0.12 : pdtTight ? 0.15 : 0.20;
+    const tp   = parseFloat((base * overnightMult).toFixed(3));
+    const part = parseFloat((tp * 0.60).toFixed(3));
+    const ride = parseFloat((tp * 1.30).toFixed(3));
+    return {
+      takeProfitPct:  tp,
+      partialPct:     part,
+      ridePct:        ride,
+      stopLossPct:    0.30, // tighter stop on weeklies — theta risk is real
+      fastStopPct:    0.15,
+      trailActivate:  pdtLocked ? 0.08 : pdtTight ? 0.10 : 0.12,
+      trailStop:      pdtLocked ? 0.05 : 0.07,
+      label:          (pdtLocked ? "SHORT-DTE(PDT-LOCKED)" : pdtTight ? "SHORT-DTE(PDT-TIGHT)" : "SHORT-DTE") + overnightLabel,
+    };
+  } else if (dte <= 45) {
+    // Monthly 30-45 DTE — primary strategy for PDT-constrained accounts
+    // Target 30-50% — give the thesis room to play out over 5-10 days
+    const base = pdtLocked ? 0.25 : pdtTight ? 0.30 : 0.40;
+    const tp   = parseFloat((base * overnightMult).toFixed(3));
+    const part = parseFloat((tp * 0.55).toFixed(3));
+    const ride = parseFloat((tp * 1.40).toFixed(3)); // ride winners longer on monthlies
+    return {
+      takeProfitPct:  tp,
+      partialPct:     part,
+      ridePct:        ride,
+      stopLossPct:    0.35,
+      fastStopPct:    0.20,
+      trailActivate:  pdtLocked ? 0.15 : pdtTight ? 0.18 : 0.22,
+      trailStop:      pdtLocked ? 0.08 : pdtTight ? 0.10 : 0.12,
+      label:          (pdtLocked ? "MONTHLY(PDT-LOCKED)" : pdtTight ? "MONTHLY(PDT-TIGHT)" : "MONTHLY") + overnightLabel,
+    };
+  } else {
+        const base = pdtLocked ? 0.35 : pdtTight ? 0.45 : 0.55;
+    const tp   = parseFloat((base * overnightMult).toFixed(3));
+    const part = parseFloat((tp * 0.55).toFixed(3));
+    const ride = parseFloat((tp * 1.50).toFixed(3));
+    return {
+      takeProfitPct:  tp,
+      partialPct:     part,
+      ridePct:        ride,
+      stopLossPct:    0.35,
+      fastStopPct:    0.20,
+      trailActivate:  pdtLocked ? 0.20 : pdtTight ? 0.25 : 0.30,
+      trailStop:      pdtLocked ? 0.10 : pdtTight ? 0.12 : 0.15,
+      label:          (pdtLocked ? "LEAPS(PDT-LOCKED)" : pdtTight ? "LEAPS(PDT-TIGHT)" : "LEAPS") + overnightLabel,
+    };
+  }
+}
+
+
+
+function getBusinessDaysAgo(n) {
+  // Returns the date n business days ago (skips weekends)
+  let date = new Date();
+  let count = 0;
+  while (count < n) {
+    date.setDate(date.getDate() - 1);
+    const day = date.getDay();
+    if (day !== 0 && day !== 6) count++; // skip Sat/Sun
+  }
+  return date;
+}
+
+
+
+function countRecentDayTrades() {
+  // Prefer Alpaca's authoritative day trade count when available
+  // Alpaca tracks the rolling 5-day window accurately including trades from previous sessions
+  if (state._alpacaDayTradeCount !== undefined && state._alpacaDayTradeCount !== null) {
+    return state._alpacaDayTradeCount;
+  }
+  // Fallback to internal counter if Alpaca count not yet synced
+  const cutoff = getBusinessDaysAgo(PDT_DAYS);
+  const recent = (state.dayTrades || []).filter(dt => new Date(dt.closeTime) >= cutoff);
+  return recent.length;
+}
+
+
+
+function isDayTrade(pos) {
+  // A position is a day trade if it was opened today (same ET calendar date)
+  // Use ET timezone to match market conventions — not server UTC
+  if (!pos || !pos.openDate) return false;
+  const etOptions = { timeZone: "America/New_York", year: "numeric", month: "2-digit", day: "2-digit" };
+  const openDay   = new Date(pos.openDate).toLocaleDateString("en-US", etOptions);
+  const today     = new Date().toLocaleDateString("en-US", etOptions);
+  return openDay === today;
+}
+
+
+
+function recordDayTrade(pos, reason) {
+  if (!state.dayTrades) state.dayTrades = [];
+  state.dayTrades.push({
+    ticker:    pos.ticker,
+    openTime:  pos.openDate,
+    closeTime: new Date().toISOString(),
+    reason,
+    pnl:       0, // will be updated by closePosition
+  });
+  // Keep only last 20 day trade records
+  if (state.dayTrades.length > 20) state.dayTrades = state.dayTrades.slice(-20);
+  const count = countRecentDayTrades();
+  logEvent("warn", `PDT: Day trade recorded for ${pos.ticker} — ${count}/${PDT_LIMIT} in rolling 5-day window`);
+  if (count >= PDT_LIMIT) {
+    logEvent("warn", `PDT LIMIT REACHED (${count}/${PDT_LIMIT}) — no new same-day CLOSES until window resets. New entries still allowed.`);
+  }
+}
+
+
+
+function calcPositionSize(premium, score, vix) {
+  // Step 1: Kelly base from actual trade history (dynamic)
+  const recentTrades = (state.closedTrades || []).slice(0, 30);
+  let kellyBase;
+
+  if (recentTrades.length >= 10) {
+    // Use real historical Kelly when we have enough data
+    const wins    = recentTrades.filter(t => t.pnl > 0);
+    const losses  = recentTrades.filter(t => t.pnl <= 0);
+    const winRate = wins.length / recentTrades.length;
+    const avgWin  = wins.length   ? wins.reduce((s,t) => s+t.pnl,0) / wins.length   : TAKE_PROFIT_PCT * premium * 100;
+    const avgLoss = losses.length ? Math.abs(losses.reduce((s,t) => s+t.pnl,0) / losses.length) : STOP_LOSS_PCT * premium * 100;
+    const payoff  = avgLoss > 0 ? avgWin / avgLoss : 1;
+    const kelly   = winRate - (1 - winRate) / payoff;
+    kellyBase     = Math.max(0.05, Math.min(0.25, kelly * 0.5)); // half-Kelly, capped 5-25% of capital
+  } else {
+    // Bootstrap: hard cap at 1 contract until 30 live trades give real edge data
+    // Paper trade Kelly is inflated — don't let it size up until live fills calibrate it
+    kellyBase = 0.05; // conservative 5% of capital = typically 1 contract
+  }
+
+  // Live trading protection — never exceed 1 contract until 30 real trades recorded
+  const liveTrades = (state.dataQuality || {}).realTrades || 0;
+  if (liveTrades < 30) {
+    // Force single contract sizing until system is calibrated on live fills
+    return 1;
+  }
+
+  // Step 2: Score conviction multiplier
+  // Higher score = more conviction = size up within Kelly bounds
+  const convictionMult = score >= 85 ? 1.25 : score >= 75 ? 1.0 : score >= 70 ? 0.80 : 0.60;
+
+  // Time of day sizing — reduce in first 30 mins (wide spreads, price discovery)
+  // Pros size down at open — market makers widen spreads until order flow stabilizes
+  const etNow  = getETTime();
+  const minsSinceOpen = (etNow.getHours() - 9) * 60 + etNow.getMinutes() - 30;
+  const openingMult   = minsSinceOpen < 30 ? 0.75 : 1.0; // 25% smaller in first 30 mins
+
+  // Step 3: VIX adjustment — Guo & Whitelaw (2006): DEBIT put returns asymmetric to VIX
+  // G&W finding applies to BUYING puts (debit) — premium too high at VIX > 40
+  // SELLING puts (credit) is OPPOSITE — VIX > 40 = maximum premium collection
+  // isCreditEntry is set from useCreditSpread flag passed through
+  const isCreditEntry = (state._lastEntryType === "credit");
+  const vixMult = isCreditEntry
+    ? (vix >= 40 ? 1.25 : vix >= 35 ? 1.10 : 1.0)  // credit: INCREASE size at high VIX
+    : (vix >= 40  ? 0.35                              // debit: G&W — VIX>40 puts overpriced
+    : vix >= VIX_REDUCE50 ? 0.50                      // VIX 35-40: moderate reduction
+    : vix >= VIX_REDUCE25 ? 0.75                      // VIX 25-35: slight reduction
+    : 1.0);
+
+  // Step 4: Drawdown protocol from marketContext
+  const ddMult = (marketContext?.drawdownProtocol?.sizeMultiplier) || 1.0;
+
+  // Step 5: Combine into single sizing decision
+  const effectiveFraction = kellyBase * convictionMult * vixMult * ddMult * openingMult;
+  const maxCost           = Math.min(
+    state.cash * effectiveFraction,
+    state.cash * 0.20,                     // hard cap: never more than 20% per trade
+    MAX_LOSS_PER_TRADE / STOP_LOSS_PCT     // risk-based cap
+  );
+
+  const contracts = Math.max(1, Math.min(5, Math.floor(maxCost / (premium * 100))));
+
+  // If even 1 contract exceeds the risk-based cap, return 0 to signal skip
+  // Caller checks contracts < 1 and skips the trade
+  if (premium * 100 > MAX_LOSS_PER_TRADE / STOP_LOSS_PCT) return 0;
+
+  return contracts;
+}
+
+
+
+async function syncPositionPnLFromAlpaca() {
+  if (!ALPACA_KEY) return;
+  try {
+    const alpacaPositions = await alpacaGet("/positions");
+    if (!alpacaPositions || !Array.isArray(alpacaPositions)) return;
+
+    // Alpaca is the single source of truth for all financial data
+    // Build lookup by symbol
+    const alpacaBySymbol = {};
+    for (const ap of alpacaPositions) {
+      alpacaBySymbol[ap.symbol] = ap;
+    }
+
+    let updated = 0;
+    for (const pos of state.positions) {
+      if (!pos.isSpread || !pos.buySymbol || !pos.sellSymbol) continue;
+
+      const buyLeg  = alpacaBySymbol[pos.buySymbol];
+      const sellLeg = alpacaBySymbol[pos.sellSymbol];
+
+      if (!buyLeg || !sellLeg) continue;
+
+      // ── Contracts: Alpaca is authoritative ─────────────────────────────
+      // Use abs(qty) from the buy leg (long leg always positive qty)
+      const alpacaContracts = Math.abs(parseInt(buyLeg.qty || 1));
+      if (alpacaContracts !== pos.contracts) {
+        logEvent("scan", `[ALPACA SYNC] ${pos.ticker} contracts: ${pos.contracts} → ${alpacaContracts} (Alpaca authoritative)`);
+        pos.contracts = alpacaContracts;
+      }
+
+      // ── Current prices ──────────────────────────────────────────────────
+      const buyPrice  = parseFloat(buyLeg.current_price  || 0);
+      const sellPrice = parseFloat(sellLeg.current_price || 0);
+
+      if (buyPrice > 0 && sellPrice > 0) {
+        const netPrice = pos.isCreditSpread
+          ? parseFloat((sellPrice - buyPrice).toFixed(2))   // cost to close
+          : parseFloat((buyPrice  - sellPrice).toFixed(2)); // current value
+        pos.currentPrice = netPrice;
+        pos.realData     = true;
+      }
+
+      // ── P&L: sum both legs (Alpaca handles sign correctly) ──────────────
+      const netPnL = parseFloat(buyLeg.unrealized_pl || 0) + parseFloat(sellLeg.unrealized_pl || 0);
+      pos.unrealizedPnL = parseFloat(netPnL.toFixed(2));
+
+      // ── Entry price / premium ───────────────────────────────────────────
+      // Do NOT overwrite pos.premium from avg_entry_price — individual leg
+      // avg_entry_price doesn't reflect the net credit/debit received at entry.
+      // pos.premium is set correctly at fill confirmation and must be preserved.
+
+      // ── Cost basis ──────────────────────────────────────────────────────
+      // Credit spread cost = margin reserved = maxLoss (max risk)
+      // Debit spread cost  = net debit paid  = premium × 100 × contracts
+      if (pos.maxLoss > 0) {
+        pos.cost = pos.isCreditSpread ? pos.maxLoss : pos.maxLoss;
+      }
+
+      // ── Max profit / max loss (always recalculate from Alpaca data) ─────
+      const width = Math.abs((pos.buyStrike || 0) - (pos.sellStrike || 0));
+      if (width > 0 && pos.premium > 0) {
+        if (pos.isCreditSpread) {
+          pos.maxProfit = parseFloat((pos.premium          * 100 * pos.contracts).toFixed(2));
+          pos.maxLoss   = parseFloat(((width - pos.premium)* 100 * pos.contracts).toFixed(2));
+        } else {
+          pos.maxProfit = parseFloat(((width - pos.premium)* 100 * pos.contracts).toFixed(2));
+          pos.maxLoss   = parseFloat((pos.premium          * 100 * pos.contracts).toFixed(2));
+        }
+      }
+
+      // ── Breakeven ───────────────────────────────────────────────────────
+      if (!pos.breakeven && pos.premium > 0) {
+        if (pos.isCreditSpread) {
+          pos.breakeven = pos.optionType === "put"
+            ? parseFloat((pos.sellStrike - pos.premium).toFixed(2))
+            : parseFloat((pos.sellStrike + pos.premium).toFixed(2));
+        } else {
+          pos.breakeven = pos.optionType === "put"
+            ? parseFloat((pos.buyStrike  - pos.premium).toFixed(2))
+            : parseFloat((pos.buyStrike  + pos.premium).toFixed(2));
+        }
+      }
+
+      // ── dteLabel cleanup ────────────────────────────────────────────────
+      if (pos.dteLabel === "RECONCILED-SPREAD") pos.dteLabel = "SPREAD-MONTHLY";
+
+      updated++;
+    }
+    if (updated > 0) markDirty();
+  } catch(e) { logEvent("warn", `[ALPACA SYNC] syncPositionPnLFromAlpaca error: ${e.message}`); }
 }
 
 
