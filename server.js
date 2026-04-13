@@ -10244,7 +10244,7 @@ async function runScan() {
 
   // Enter trades - sorted by score, best first
   // heatPct() is live and updates after every executeTrade call
-  for (const { stock, price, score, reasons, optionType, isMeanReversion, tradeIntent, constraintPass, constraintReason, heatMultiplier } of scored) {
+  for (const { stock, price, score, reasons, optionType, isMeanReversion, tradeIntent, constraintPass, constraintReason, heatMultiplier, sizeMod } of scored) {
     // Fix 8 (TR/Kelly panel): correlated instruments (SPY+QQQ) count as 1.5x heat
     // Prevents holding both as two independent bets at 0.95 correlation
     const _heatMult = heatMultiplier || 1.0;
@@ -10370,8 +10370,8 @@ async function runScan() {
       entered = !!icPos;
     } else if (useCreditSpread || useCreditCallSpread) {
       state._lastEntryType = "credit";
-      // Sizing from entryEngine eeCandidate.sizeMod (accounts for oversold, crisis, IV boost)
-      const _sizeMod = (eeCandidate && eeCandidate.sizeMod) || 1.0;
+      // Sizing from entryEngine sizeMod (passed through scored.push from scoring loop)
+      const _sizeMod = sizeMod || 1.0;
       const creditPos = await executeCreditSpread(stock, price, score, reasons, state.vix, optionType, _sizeMod, rb.spreadParams);
       entered = !!creditPos;
     } else if (useSpread) {
@@ -10437,7 +10437,7 @@ async function runScan() {
         logEvent("filter", `${stock.ticker} index trade type unclear (agent: ${agentTradeType}) - skipping`);
         continue;
       }
-      const _sizeModDebit = (eeCandidate && eeCandidate.sizeMod) || 1.0;
+      const _sizeModDebit = sizeMod || 1.0;
       entered = await executeTrade(stock, price, score, reasons, state.vix, optionType, isMeanReversion, _sizeModDebit);
     }
     if (entered) await new Promise(r=>setTimeout(r,500));
