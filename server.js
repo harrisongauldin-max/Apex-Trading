@@ -7596,6 +7596,12 @@ async function runScan() {
   const now    = Date.now();
   const scanET = getETTime(); // single ET time reference for entire scan
 
+  // Scan-level time and volume vars -- declared here so execution loop can access them
+  // Per-stock loop also uses these; declaring at scan scope eliminates TDZ crashes
+  const etHourNow  = scanET.getHours() + scanET.getMinutes() / 60;
+  const isLateDay  = etHourNow >= 14.5;
+  const isLastHour = etHourNow >= 15.0;
+
   // Scan-level memos - computed once, reused throughout scan
   // Prevents repeated iteration over state.positions on every check
   const _totalCap  = totalCap();
@@ -9546,9 +9552,7 @@ async function runScan() {
     //   VIX 30+   after 2:30pm: min score 90
     // IV expansion into close makes last-hour options more expensive in high-VIX environments
     // Execution algo: spread partial fill risk rises significantly after 3:30pm
-    const etHour      = scanET.getHours() + scanET.getMinutes() / 60;
-    const isLastHour  = etHour >= 15.0;   // after 3pm
-    const isLateDay   = etHour >= 14.5;   // after 2:30pm
+    // etHour/isLastHour/isLateDay use scan-level vars (etHourNow/isLastHour/isLateDay)
     const volDecline  = todayVol < avgVol * 0.7;
 
     // Panel fix: flat min score replaces 0.80x multiplier
@@ -9557,7 +9561,7 @@ async function runScan() {
     // Entry window gate: block new entries after 3pm (MR exception handled at execution)
     // Normal entries: 3:00pm cutoff
     // Mean reversion calls: 3:30pm cutoff (capitulation has genuine overnight edge)
-    const entryWindowClosed = etHour >= 15.0; // 3:00pm normal cutoff
+    const entryWindowClosed = etHourNow >= 15.0; // scan-level etHourNow
     // Afternoon minimum handled by evaluateEntry via rb.gates.afternoonMinActive
 
     // - F7: Weekly trend filter -
@@ -10003,7 +10007,7 @@ async function runScan() {
     }
 
     // Agent/regime minimums owned by entryEngine rulebook
-    const etHourNow     = scanET.getHours() + scanET.getMinutes() / 60;
+    // etHourNow/isLateDay/isLastHour use scan-level vars declared at top of runScan
     const agentConf     = (state._agentMacro || {}).confidence || "low";
     const agentSig      = (state._agentMacro || {}).signal || "neutral";
     const agentLastRun  = (state._agentMacro || {}).timestamp || null;
@@ -10088,7 +10092,7 @@ async function runScan() {
     // V2.82: entry window gate - block new entries after 3pm (MR exception below)
     // Mean reversion calls (capitulation bounce) allowed until 3:30pm
     const isMREntry = (callSetup.isMeanReversion || putSetup.isMeanReversion);
-    const mrWindowOpen = etHour < 15.5; // MR entries allowed until 3:30pm
+    const mrWindowOpen = etHourNow < 15.5; // scan-level etHourNow
     if (entryWindowClosed && !dryRunMode) {
       if (!isMREntry) {
         logEvent("filter", `${stock.ticker} entry window closed (after 3pm) - normal entries blocked`);
@@ -10318,13 +10322,16 @@ async function runScan() {
       : 0;
     const ddProtocol = marketContext.drawdownProtocol || { minScore: MIN_SCORE };
 
+    // volDecline is per-stock (today vol < 70% avg) -- not available at execution scope
+    // Pass false as safe default; evaluateEntry only uses it for afternoon gate edge case
+    const _volDeclineExec = false;
     const eeResult = evaluateEntry(
       { ticker: stock.ticker, optionType, tradeType: intentType, score,
         constraintPass: constraintPass !== false,
         constraintReason: constraintReason || null,
         tradeIntent: intent },
       rb, state,
-      { etHour: etHourNow, isLateDay, isLastHour, volDecline,
+      { etHour: etHourNow, isLateDay, isLastHour, volDecline: _volDeclineExec,
         signals: { dailyRsi: liveStock.dailyRsi || liveStock.rsi || 50,
                    macd: liveStock.macd || "neutral" },
         recentSameDir:       recentSameDirMins,
