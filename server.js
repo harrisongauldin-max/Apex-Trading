@@ -10099,9 +10099,9 @@ async function runScan() {
         existingProfitPct,
         drawdownMinScore:    ddProtocol.minScore || MIN_SCORE }
     );
-    if (!eeResult.pass && !dryRunMode) {
+    if (!eeResult.pass) {
       logEvent("filter", `${stock.ticker} entry blocked - ${eeResult.reason}`);
-      recordGateBlock(stock.ticker, eeResult.reason, rb.regimeName, score);
+      if (!dryRunMode) recordGateBlock(stock.ticker, eeResult.reason, rb.regimeName, score);
       continue;
     }
 
