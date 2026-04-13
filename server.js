@@ -4705,6 +4705,178 @@ function calcMAE() {
 }
 
 
+async function getOptionsPrice(symbol) {
+  try {
+    const data = await alpacaGet(`/options/snapshots?symbols=${symbol}&feed=indicative`, ALPACA_OPT_SNAP);
+    if (!data || !data.snapshots || !data.snapshots[symbol]) return null;
+    const snap  = data.snapshots[symbol];
+    const quote = snap.latestQuote || snap.latest_quote || snap.quote || {};
+    const bid   = parseFloat(quote.bp || quote.bid_price || quote.b || 0);
+    const ask   = parseFloat(quote.ap || quote.ask_price || quote.a || 0);
+    return bid > 0 && ask > 0 ? (bid + ask) / 2 : null;
+  } catch(e) { return null; }
+}
+
+
+async function checkAllFilters(stock, price) {
+  const fails = [];
+
+  // 1. Entry window — SPY/QQQ open at 9:30am, individual stocks at 9:45am
+  const isIndexStock     = stock.isIndex || false;
+  const eitherWindowOpen = isEntryWindow("call", isIndexStock) || isEntryWindow("put", isIndexStock);
+  if (!eitherWindowOpen && !dryRunMode) return { pass:false, reason:"Outside entry window" };
+
+  // 2. Circuit breakers
+  if (!state.circuitOpen)       return { pass:false, reason:"Daily circuit breaker tripped" };
+  if (!state.weeklyCircuitOpen) return { pass:false, reason:"Weekly circuit breaker tripped" };
+
+  // 3. Capital floor — halt all operations, not just new entries
+  if (state.cash <= CAPITAL_FLOOR) {
+    if (!state._capitalFloorAlerted) {
+      logEvent("warn", `[CAPITAL FLOOR] Cash $${state.cash.toFixed(0)} at floor $${CAPITAL_FLOOR} — all new entries suspended`);
+      state._capitalFloorAlerted = true;
+    }
+    return { pass:false, reason:`Cash at capital floor (${fmt(CAPITAL_FLOOR)}) — operations suspended` };
+  }
+  state._capitalFloorAlerted = false;
+
+
+  // 5. Consecutive losses — REMOVED: agent handles thesis quality, not a counter
+
+  // 6. Same-ticker limit — allow up to 2 positions per ticker (entry + roll)
+  const existingPositions = state.positions.filter(p => p.ticker === stock.ticker);
+  // Index instruments: allow up to 3 positions (staggered entries on same thesis)
+  // Individual stocks: max 2 (less liquid, more company-specific risk)
+  const maxPerTicker = stock.isIndex ? 3 : 2;
+  if (existingPositions.length >= maxPerTicker) return { pass:false, reason:`Already have ${maxPerTicker} positions in ${stock.ticker}` };
+
+  // 7. Portfolio heat
+  if (heatPct() >= effectiveHeatCap()) return { pass:false, reason:`Portfolio heat at ${(heatPct()*100).toFixed(0)}% max` };
+
+  // 8. Sector exposure
+  const sectorExp = state.positions.filter(p=>p.sector===stock.sector).reduce((s,p)=>s+p.cost,0);
+  if (sectorExp / totalCap() >= MAX_SECTOR_PCT) return { pass:false, reason:`${stock.sector} sector at ${MAX_SECTOR_PCT*100}% limit` };
+
+  // 9. Sector concentration — rely on MAX_SECTOR_PCT and correlation blocks
+  // Hard per-sector count removed — heat % and correlation blocks handle this
+  // (opposite sector bet detection handled by same-ticker opposite direction check in scan loop)
+
+  // 10. Dynamic vol filter — realized vs implied gap (replaces static IVR_MAX)
+  // If implied vol >> realized vol, options are overpriced — skip
+  // If implied vol ≈ realized vol or implied < realized, options are fairly priced or cheap — enter
+  try {
+    const volBars = await getStockBars(stock.ticker, 21);
+    if (volBars.length >= 10) {
+      const closes   = volBars.map(b => b.c);
+      const returns  = closes.slice(1).map((c, i) => Math.log(c / closes[i]));
+      const realized = Math.sqrt(returns.reduce((s, r) => s + r * r, 0) / returns.length) * Math.sqrt(252) * 100;
+      const implied  = stock.ivr * 0.4 + 15; // approximate IV from IVR (IVR=50 → ~35% IV)
+      const volGap   = implied - realized;
+      // Skip if implied vol is more than 20 points above realized (options too expensive)
+      if (volGap > 20) return { pass: false, reason: `Vol gap ${volGap.toFixed(1)}pts — implied ${implied.toFixed(0)}% vs realized ${realized.toFixed(0)}% — options expensive` };
+      // Bonus signal: if realized > implied, options are cheap (underpriced) — log as positive
+      if (realized > implied + 5) logEvent("filter", `${stock.ticker} vol gap FAVORABLE — realized ${realized.toFixed(0)}% > implied ${implied.toFixed(0)}%`);
+    } else {
+      // Fallback to static IVR check if not enough bars
+      if (stock.ivr > IVR_MAX) return { pass: false, reason: `IVR ${stock.ivr} > ${IVR_MAX} (fallback)` };
+    }
+  } catch(e) {
+    if (stock.ivr > IVR_MAX) return { pass: false, reason: `IVR ${stock.ivr} > ${IVR_MAX}` };
+  }
+
+  // 11. Earnings
+  if (stock.earningsDate) {
+    const dte = Math.round((new Date(stock.earningsDate) - new Date()) / MS_PER_DAY);
+    if (dte >= 0 && dte <= EARNINGS_SKIP_DAYS) return { pass:false, reason:`Earnings in ${dte} days` };
+  }
+
+  // 12. Stock price
+  if (price < MIN_STOCK_PRICE) return { pass:false, reason:`Price $${price} below $${MIN_STOCK_PRICE} minimum` };
+
+  // 13. VIX check — nuanced by trade type
+  const vix = state.vix || 15;
+  // Index instruments: no hard VIX block — credit spreads thrive in high VIX
+  // Individual stocks: pause above 35 (wide spreads, unreliable fills)
+  if (!stock.isIndex && vix >= VIX_PAUSE) return { pass:false, reason:`VIX ${vix} above pause threshold (${VIX_PAUSE}) for individual stocks` };
+  // Extreme VIX (50+): pause everything — market is in crisis, fills impossible
+  if (vix >= 50) return { pass:false, reason:`VIX ${vix} extreme — all entries paused above 50` };
+
+  // 14. Correlation group - max 1 position per correlated group
+  const corrGroup = getCorrelatedGroup(stock.ticker);
+  if (corrGroup) return { pass:false, reason:`Correlated position already open (group: ${corrGroup.join(", ")})` };
+
+  // 15. Sector ETF confirmation
+  const etfCheck = await checkSectorETF(stock);
+  if (!etfCheck.pass) return { pass:false, reason:etfCheck.reason };
+
+  // 16. Support/resistance check
+  // Panel decision (7/7): index instruments skip S/R entirely.
+  // 20-day high on an index in a bear regime IS the ceiling of each bounce — ideal PUT entry.
+  // Blocking puts near resistance is a direction inversion for index instruments.
+  // Individual stocks: keep check but direction-aware — near resistance bad for calls, near support bad for puts.
+  if (!stock.isIndex) {
+    try {
+      const bars = await getStockBars(stock.ticker, 20);
+      if (bars.length >= 10) {
+        const sr = getSupportResistance(bars);
+        if (price >= sr.resistance * (1 - RESISTANCE_BUFFER)) {
+          return { pass:false, reason:`Price within ${(RESISTANCE_BUFFER*100).toFixed(0)}% of 20-day resistance ($${sr.resistance.toFixed(2)}) — calls blocked at resistance` };
+        }
+        if (price <= sr.support * (1 + SUPPORT_BUFFER)) {
+          return { pass:false, reason:`Price near 20-day support ($${sr.support.toFixed(2)}) — puts blocked at support` };
+        }
+      }
+    } catch(e) { /* skip if data unavailable */ }
+  }
+
+  // 17. Pre-market check (only relevant in first 90 mins of session)
+  const etHour = new Date().toLocaleString("en-US", {timeZone:"America/New_York", hour:"numeric", hour12:false});
+  if (parseInt(etHour) < 12) {
+    const priceYest = (await getStockBars(stock.ticker, 2))[0]?.c;
+    if (priceYest) {
+      const premarketMove = (price - priceYest) / priceYest;
+      if (premarketMove <= PREMARKET_NEGATIVE) {
+        return { pass:false, reason:`Pre-market negative (${(premarketMove*100).toFixed(1)}%) - bearish open` };
+      }
+      if (premarketMove >= PREMARKET_STRONG_MOVE) {
+        logEvent("scan", `${stock.ticker} strong pre-market +${(premarketMove*100).toFixed(1)}% - boost signal`);
+        stock._premarketBoost = true;
+      }
+    }
+  }
+
+  return { pass:true, reason:null };
+}
+
+
+
+// - Sector ETF Confirmation -
+async function checkSectorETF(stock) {
+  const etfMap = { "Technology":"XLK", "Financial":"XLF", "Consumer":"XLY" };
+  const etfs   = [];
+
+  if (etfMap[stock.sector]) etfs.push(etfMap[stock.sector]);
+  if (SEMIS.includes(stock.ticker)) etfs.push("SMH");
+  if (!etfs.length) return { pass: true, reason: null, putBoost: 0 };
+
+  // Fetch all sector ETFs in parallel
+  const allEtfBars = await Promise.all(etfs.map(etf => getStockBars(etf, 5)));
+  for (let i = 0; i < etfs.length; i++) {
+    const etf  = etfs[i];
+    const bars = allEtfBars[i];
+    if (bars.length < 2) continue;
+    const etfReturn = (bars[bars.length-1].c - bars[0].o) / bars[0].o;
+    if (etfReturn < -0.015) {
+      return { pass: false, reason: `${etf} sector ETF down ${(etfReturn*100).toFixed(1)}% - sector headwind`, putBoost: 20, etfReturn };
+    } else if (etfReturn < -0.01) {
+      return { pass: false, reason: `${etf} sector ETF down ${(etfReturn*100).toFixed(1)}% - sector headwind`, putBoost: 12, etfReturn };
+    }
+  }
+  return { pass: true, reason: null, putBoost: 0 };
+}
+
+
+
 // =======================================================================
 // ARGO CONTRACT SELECTION - v3.0
 // One shared primitive: findContract()
@@ -10259,6 +10431,62 @@ setInterval(() => {
 }, 15 * 1000);
 
 // - F4: Alpaca account balance sync every 60 seconds -
+// syncCashFromAlpaca() syncs state.cash from Alpaca account after every trade
+// and every 30 seconds. This eliminates cash drift between ARGO and Alpaca.
+async function syncCashFromAlpaca() {
+  if (!ALPACA_KEY) return;
+  try {
+    const acct = await alpacaGet("/account");
+    if (!acct || !acct.cash) return;
+    const alpacaCash      = parseFloat(acct.cash);
+    const alpacaBuyPower  = parseFloat(acct.buying_power || acct.cash);
+    const alpacaOptBP     = parseFloat(acct.options_buying_power || acct.buying_power || acct.cash);
+    state.alpacaCash      = alpacaCash;
+    state.alpacaBuyPower  = alpacaBuyPower;
+    state.alpacaOptBP     = alpacaOptBP; // options-specific buying power — gates new option entries
+    // Store full portfolio value (cash + open position market value) for profit lock
+    const alpacaEquity    = parseFloat(acct.equity || acct.portfolio_value || alpacaCash);
+    if (alpacaEquity > 0) state.alpacaEquity = alpacaEquity;
+
+    // Alpaca tracks day trades authoritatively — use their count as source of truth
+    // acct.daytrade_count = rolling 5-day day trade count (resets as old trades age out)
+    // acct.pattern_day_trader = true if account has been flagged as PDT
+    if (acct.daytrade_count !== undefined) {
+      const alpacaDTCount = parseInt(acct.daytrade_count, 10);
+      if (!isNaN(alpacaDTCount)) {
+        const dtLeft = Math.max(0, PDT_LIMIT - alpacaDTCount);
+        if (alpacaDTCount !== (state._alpacaDayTradeCount || 0)) {
+          logEvent("scan", `[PDT] Alpaca count: ${alpacaDTCount}/3 — ${dtLeft} day trade${dtLeft===1?'':'s'} remaining (rolling 5-day window)`);
+        }
+        state._alpacaDayTradeCount = alpacaDTCount;
+        state._alpacaDayTradesLeft = dtLeft;
+      }
+    }
+    if (acct.pattern_day_trader !== undefined) {
+      state._patternDayTrader = acct.pattern_day_trader;
+    }
+    // Set accountBaseline on first sync if not already established
+    if (!state.accountBaseline) state.accountBaseline = alpacaCash;
+    const hasCustomBudget = state.customBudget && state.customBudget > 0 && state.customBudget !== MONTHLY_BUDGET;
+    if (!hasCustomBudget) {
+      const drift = Math.abs(alpacaCash - state.cash);
+      if (drift > 1.00) {
+        if (drift > 500) {
+          // Large drift = account reset — update all baselines
+          logEvent("scan", `[CASH SYNC] Large drift $${drift.toFixed(2)} — resetting baselines to $${alpacaCash.toFixed(2)}`);
+          state.dayStartCash  = alpacaCash;
+          state.weekStartCash = alpacaCash;
+          state.peakCash      = Math.max(state.peakCash || 0, alpacaCash);
+        } else {
+          logEvent("scan", `[CASH SYNC] Alpaca: $${alpacaCash.toFixed(2)} | ARGO: $${state.cash.toFixed(2)} | drift: $${drift.toFixed(2)} — syncing`);
+        }
+        state.cash = alpacaCash;
+        markDirty();
+      }
+    }
+  } catch(e) {} // silent
+}
+
 // - Alpaca cash sync interval - calls syncCashFromAlpaca every 30s -
 setInterval(syncCashFromAlpaca, 30 * 1000); // every 30 seconds
 
