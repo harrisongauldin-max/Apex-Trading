@@ -4824,10 +4824,11 @@ async function getRealOptionsContract(ticker, price, optionType, score, vix, ear
     let best       = null;
     let bestScore  = -1;
     let skipped    = 0;
+    let _skipNoSnap = 0, _skipNoPrice = 0, _skipDTE = 0, _skipCreditDTE = 0, _skipDelta = 0, _passed = 0;
 
     for (const contract of sortedContracts) {
       const snap = snapshots[contract.symbol];
-      if (!snap) { skipped++; continue; }
+      if (!snap) { skipped++; _skipNoSnap++; continue; }
 
       // Handle both v1 and v2 Alpaca options snapshot field names
       // Confirmed field structure from Alpaca v1beta1 snapshots
@@ -4850,32 +4851,29 @@ async function getRealOptionsContract(ticker, price, optionType, score, vix, ear
       // Only hard filter: contract must have a tradeable price
       // In crash/high-VIX conditions, use ask alone if bid is stale (market making breaks down)
       const effectiveMid = mid > 0 ? mid : (ask > 0 && vix >= 30 ? ask * 0.85 : 0); // 15% discount on ask-only fills
-      if (effectiveMid <= 0) { skipped++; continue; }
+      if (effectiveMid <= 0) { skipped++; _skipNoPrice++; continue; }
       const priceToUse = effectiveMid;
-      // Only hard filter on delta - everything else is a scoring factor not a gate
+      // DTE filters first — before delta, so delta range is evaluated on valid-DTE contracts only
+      // isIndexTicker declared here -- used for minDTE and liquidScore below
+      const isIndexTicker = ["SPY","QQQ","GLD","TLT","XLE","DIA"].includes(ticker);
+      const minDTE = isIndexTicker ? 3 : isMeanReversion ? 14 : 21;
+      if (contractDTE < minDTE) { skipped++; _skipDTE++; continue; }
+
+      // Hard minimum DTE for credit spreads — enforce entryEngine targetDTE
+      // Must run before delta filter: at 8 DTE, 5% OTM has delta ~0.12 (edge of range)
+      // At 18 DTE, 5% OTM has delta ~0.19 (clearly inside range)
+      // Filtering by DTE first ensures delta check sees the right contracts
+      if (creditStrikeTarget && creditDeltaParams && creditDeltaParams.minDTE) {
+        const creditMinDTE = creditDeltaParams.minDTE; // 14 in B, 7 in C
+        if (contractDTE < creditMinDTE) { skipped++; _skipCreditDTE++; continue; }
+      }
+
+      // Delta filter — runs after DTE so short-dated contracts don't corrupt the delta pool
       if (delta < deltaMin || delta > deltaMax) {
-        skipped++;
+        skipped++; _skipDelta++;
         // Log first rejection in crash mode for visibility
         if (inCrash && skipped <= 3) logEvent("filter", `${ticker} contract delta ${delta.toFixed(3)} outside crash range ${deltaMin}-${deltaMax} - skipped`);
         continue;
-      }
-      // Hard DTE floor - spreads need 21+ DTE for PDT accounts
-      // PDT forces overnight holds - short DTE means theta destroys value before exit
-      // MR calls can use 14 DTE (quick bounce play)
-      // Index instruments (SPY/QQQ etc) have liquid weeklies at any DTE
-      // PDT 21 DTE floor only applies to single stocks where theta decay is a real risk
-      // isIndexTicker declared here -- used for both minDTE and liquidScore below
-      const isIndexTicker = ["SPY","QQQ","GLD","TLT","XLE","DIA"].includes(ticker);
-      const minDTE = isIndexTicker ? 3 : isMeanReversion ? 14 : 21;
-      if (contractDTE < minDTE) { skipped++; continue; }
-
-      // Hard minimum DTE for credit spreads — enforce entryEngine targetDTE
-      // Without this, scoring picks nearest expiry (e.g. Apr 22 at 9 DTE)
-      // which produces near-zero credit at 5% OTM, failing R/R gate every time.
-      // creditStrikeTarget is only set for credit spread calls from executeCreditSpread.
-      if (creditStrikeTarget && creditDeltaParams && creditDeltaParams.minDTE) {
-        const creditMinDTE = creditDeltaParams.minDTE; // 14 in B, 7 in C
-        if (contractDTE < creditMinDTE) { skipped++; continue; }
       }
 
       // - CONTRACT SCORING - higher = better -
@@ -4926,6 +4924,7 @@ async function getRealOptionsContract(ticker, price, optionType, score, vix, ear
         ? strikeProximityScore * 0.60 + expiryScore * 0.15 + liquidScore * 0.15 + spreadScore * 0.10
         : deltaScore * 0.50 + expiryScore * 0.20 + liquidScore * 0.15 + spreadScore * 0.15;
 
+      _passed++;
       if (contractScore > bestScore) {
         bestScore = contractScore;
         best = {
@@ -4955,7 +4954,9 @@ async function getRealOptionsContract(ticker, price, optionType, score, vix, ear
       if (best.oi > 0 && best.oi < 50) {
         logEvent("warn", `${ticker} LOW OI WARNING: best contract OI=${best.oi} - fills may be difficult in live trading`);
       }
+      const _bestDTE = Math.round((new Date(best.expDate || best.symbol.slice(3,9)) - new Date()) / 86400000) || best.expDays || "?";
       logEvent("scan", `${ticker} best contract: ${best.symbol} | $${best.premium} bid/ask $${best.bid}/$${best.ask} | delta:${best.greeks.delta} | spread:${(best.spread*100).toFixed(1)}% | OI:${best.oi}${oiTag} [REAL DATA]${earlyTag}`);
+      if (creditStrikeTarget) logEvent("filter", `${ticker} credit short leg selected: strike $${best.strike} | DTE ${best.expDays} | delta ${best.greeks.delta} | passed: snap:${sortedContracts.length - _skipNoSnap} price:${sortedContracts.length - _skipNoSnap - _skipNoPrice} dte:${sortedContracts.length - _skipNoSnap - _skipNoPrice - _skipDTE - _skipCreditDTE} delta:${_passed}`);
     } else {
       // Debug: only two hard filters now - mid>0 and delta range
       // Everything else is scoring. Show what delta range we found.
@@ -4978,7 +4979,7 @@ async function getRealOptionsContract(ticker, price, optionType, score, vix, ear
         if (d < deltaMin || d > deltaMax) { deltaOutOfRange++; continue; } // skip out-of-range
       }
       const cdStr = closestDelta >= 0 ? closestDelta.toFixed(3) : "none";
-      logEvent("warn", `${ticker} no valid contract | closest delta:${cdStr} (need ${deltaMin}-${deltaMax}) | no-price:${noPrice} | delta-out:${deltaOutOfRange} | total:${sortedContracts.length}`);
+      logEvent("warn", `${ticker} no valid contract | closest delta:${cdStr} (need ${deltaMin.toFixed(2)}-${deltaMax.toFixed(2)}) | no-snap:${_skipNoSnap} no-price:${_skipNoPrice} dte:${_skipDTE} creditDTE:${_skipCreditDTE} delta:${_skipDelta} passed:${_passed} | total:${sortedContracts.length}`);
       if      (closestDelta > deltaMax)  logEvent("warn", `${ticker} all priced contracts are ITM - stock crashed below put liquidity zone`);
       else if (closestDelta >= 0 && closestDelta < deltaMin) logEvent("warn", `${ticker} all priced contracts are far OTM - stock already moved too far`);
       else if (closestDelta < 0)         logEvent("warn", `${ticker} no priced contracts found - complete liquidity failure on this chain`);
@@ -5614,7 +5615,7 @@ async function getSpreadSellLeg(ticker, optionType, buyContract, targetWidth = 1
     for (const c of contracts) {
       const strike = parseFloat(c.strike_price);
       const dist   = Math.abs(strike - targetStrike);
-      if (dist > Math.max(targetWidth * 0.5, 5)) continue; // limit search range
+      if (dist > Math.max(targetWidth, 8)) continue; // search within 1x width (wider for low-priced underlyings)
 
       // Score by strike proximity (primary) + delta quality (secondary, if available)
       const strikeScore = 1 - (dist / Math.max(targetWidth * 0.5, 5));
@@ -5635,7 +5636,7 @@ async function getSpreadSellLeg(ticker, optionType, buyContract, targetWidth = 1
       }
     }
 
-    const maxDist = Math.max(3, targetWidth * 0.15); // allow 15% of width as tolerance
+    const maxDist = Math.max(5, targetWidth * 0.40); // allow 40% of width tolerance — TLT has wider strike spacing
     if (!best || Math.abs(parseFloat(best.strike_price) - targetStrike) > maxDist) {
       logEvent("warn", `${ticker} spread: no sell leg within $${maxDist.toFixed(0)} of target $${targetStrike} (width $${targetWidth})`);
       return null;
