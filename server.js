@@ -4743,13 +4743,20 @@ async function getRealOptionsContract(ticker, price, optionType, score, vix, ear
 
     // Format date for API: YYYY-MM-DD
     const today      = getETTime();
-    const minExpiry  = new Date(today.getTime() + 3   * MS_PER_DAY).toISOString().split("T")[0]; // 3 day floor
     const maxDays    = expiryType === "monthly" ? 65 : expiryType === "leaps" ? 400 : 35; // weekly=35, monthly=65, leaps=400
-    const maxExpiry  = new Date(today.getTime() + maxDays * MS_PER_DAY).toISOString().split("T")[0];
 
-    // Fetch ALL contracts with no filters - paginate until we have everything
-    // No strike filters, no sort tricks - get the full chain and let delta scoring decide
-    // This is the only approach that never breaks regardless of market conditions
+    // For credit spreads: use a TIGHT expiry window starting at minDTE
+    // QQQ/SPY have 200-400 strikes per expiration. With a 3-day floor, the
+    // 1000-contract chain limit is hit by Apr weeklies and May contracts never appear.
+    // Fetching only the target DTE window ensures we get the right expirations.
+    const creditFetch = !!(creditStrikeTarget && creditDeltaParams && creditDeltaParams.minDTE);
+    const fetchMinDTE = creditFetch ? creditDeltaParams.minDTE : 3;
+    const fetchMaxDTE = creditFetch ? Math.min(maxDays, (creditDeltaParams.targetDTE || 21) + 14) : maxDays;
+    const minExpiry  = new Date(today.getTime() + fetchMinDTE * MS_PER_DAY).toISOString().split("T")[0];
+    const maxExpiry  = new Date(today.getTime() + fetchMaxDTE * MS_PER_DAY).toISOString().split("T")[0];
+
+    // Fetch contracts - for credit spreads, the tight window means far fewer contracts
+    // and all within the target DTE range. For debit/directional, fetch full window.
     const baseUrl = `/options/contracts?underlying_symbol=${ticker}` +
       `&expiration_date_gte=${minExpiry}&expiration_date_lte=${maxExpiry}` +
       `&type=${optionType}&limit=200`;
@@ -5944,7 +5951,11 @@ async function executeCreditSpread(stock, price, score, scoreReasons, vix, optio
     // Fix: minimum $12 at all VIX levels, wider at high VIX to capture more premium
     // Use entryEngine spreadParams when available (professional calibration v2.0)
     // Fallback to VIX-based heuristics if called without rb context (e.g. iron condor legs)
-    const spreadWidth = (spreadParamsOverride && spreadParamsOverride.creditWidth) || (vix >= 35 ? 15 : vix >= 25 ? 12 : 12);
+    // creditWidth scales with underlying price to ensure long leg exists in chain
+    // Flat $15 works for SPY/QQQ ($600+) but is physically impossible for TLT ($84)
+    // 2.5% of underlying: SPY→$17, QQQ→$15, TLT→$5, GLD→$8
+    const _baseWidth = (spreadParamsOverride && spreadParamsOverride.creditWidth) || (vix >= 35 ? 15 : 12);
+    const spreadWidth = Math.max(5, Math.min(_baseWidth, Math.round(price * 0.025)));
     const baseOTM     = (spreadParamsOverride && spreadParamsOverride.creditOTMpct) || (vix >= 30 ? 0.07 : vix >= 25 ? 0.06 : 0.05);
     logEvent("filter", `${stock.ticker} credit spread: $${spreadWidth} wide, ${(baseOTM*100).toFixed(0)}% OTM (VIX ${vix.toFixed(1)}${spreadParamsOverride ? " | rb-calibrated" : ""})`);
     const otmPct     = optionType === "put" ? -baseOTM : baseOTM;
