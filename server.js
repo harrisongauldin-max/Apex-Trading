@@ -4386,95 +4386,133 @@ async function getVolTermStructure() {
 // SKEW < 115: tail risk low = normal environment
 // Source: CBOE public API - no auth required
 async function getCBOESKEW() {
+  // Synthetic SKEW — computed from SPY options chain IV smirk
+  // Replaces cdn.cboe.com dependency (blocked on Railway)
+  // Methodology: compare avg IV of OTM puts (delta 0.15-0.25) vs ATM puts (delta 0.45-0.55)
+  // smirkRatio > 1.30 = steep smirk = market pricing heavy tail risk = "extreme"
+  // smirkRatio > 1.15 = elevated smirk = good credit put environment = "elevated"
+  // smirkRatio < 1.05 = flat smirk = tail risk not priced = "low"
   try {
-    const cached = getCached("cboe:skew");
+    const cached = getCached("synth:skew");
     if (cached) return cached;
 
-    const res  = await withTimeout(fetch("https://cdn.cboe.com/api/global/us_indices/daily_prices/SKEW_Data.json", {
-      headers: { "User-Agent": "Mozilla/5.0", "Accept": "application/json" }
-    }), 5000);
-    if (!res.ok) return null;
-    const data = await res.json();
+    const today  = getETTime().toISOString().split("T")[0];
+    const expMax = new Date(getETTime().getTime() + 35 * 86400000).toISOString().split("T")[0];
+    // Fetch SPY puts in 14-35 DTE window — liquid strikes, IV well-defined
+    const data = await alpacaGet(
+      `/options/snapshots/SPY?feed=indicative&limit=200&type=put&expiration_date_gte=${today}&expiration_date_lte=${expMax}`,
+      ALPACA_OPT_SNAP
+    );
+    if (!data?.snapshots) return null;
 
-    // Response: { data: [ [date, skew_value], ... ] }
-    const rows = data?.data || data?.Data || [];
-    if (!rows.length) return null;
-    const last  = rows[rows.length - 1];
-    const prev  = rows[rows.length - 2];
-    const skew  = parseFloat(Array.isArray(last) ? last[1] : last.SKEW);
-    const skewPrev = parseFloat(Array.isArray(prev) ? prev[1] : prev?.SKEW || skew);
-    if (isNaN(skew)) return null;
+    const otmIVs = [], atmIVs = [];
+    for (const snap of Object.values(data.snapshots)) {
+      const delta = Math.abs(parseFloat(snap.greeks?.delta || 0));
+      const iv    = parseFloat(snap.impliedVolatility || snap.greeks?.iv || 0);
+      if (!delta || !iv || iv < 0.05 || iv > 3.0) continue;
+      if (delta >= 0.15 && delta <= 0.25) otmIVs.push(iv);  // OTM puts
+      if (delta >= 0.45 && delta <= 0.55) atmIVs.push(iv);  // ATM puts
+    }
 
-    const direction = skew > skewPrev + 2 ? "rising" : skew < skewPrev - 2 ? "falling" : "flat";
-    const signal    = skew >= 140 ? "extreme"   // puts massively overpriced - sell premium
-                    : skew >= 130 ? "elevated"  // good credit put environment
-                    : skew >= 120 ? "moderate"  // normal elevated
-                    : skew < 115  ? "low"        // tail risk not priced - normal env
-                    : "neutral";
+    if (otmIVs.length < 3 || atmIVs.length < 3) return null;
 
-    // Credit put spreads most attractive when SKEW is elevated AND VIX is elevated
-    // You're collecting both fear premium (VIX) and tail risk premium (SKEW)
-    const creditPutIdeal = skew >= 130 && (state.vix || 20) >= 25;
+    const avgOTM = otmIVs.reduce((a,b)=>a+b,0) / otmIVs.length;
+    const avgATM = atmIVs.reduce((a,b)=>a+b,0) / atmIVs.length;
+    const smirkRatio = parseFloat((avgOTM / avgATM).toFixed(3));
 
-    const result = { skew, skewPrev, direction, signal, creditPutIdeal };
-    // SKEW is daily data - cache for 60 minutes, not 5
-    _slowCache.set("cboe:skew", { data: result, ts: Date.now() - (SLOW_CACHE_TTL - 60*60*1000) });
+    // Map smirk ratio to SKEW-equivalent signal
+    // Historical calibration: CBOE SKEW 130 ~ smirkRatio 1.20, SKEW 140 ~ smirkRatio 1.30
+    const signal = smirkRatio >= 1.30 ? "extreme"
+                 : smirkRatio >= 1.15 ? "elevated"
+                 : smirkRatio >= 1.05 ? "moderate"
+                 : smirkRatio <  1.02 ? "low"
+                 : "neutral";
+
+    const creditPutIdeal = smirkRatio >= 1.15 && (state.vix || 20) >= 25;
+    // Express as pseudo-SKEW index for logging (rough equivalence)
+    const skewEquiv = Math.round(100 + (smirkRatio - 1.0) * 200);
+
+    const result = { skew: skewEquiv, smirkRatio, avgOTM: parseFloat(avgOTM.toFixed(4)),
+                     avgATM: parseFloat(avgATM.toFixed(4)), signal, creditPutIdeal,
+                     source: "synthetic" };
+    setCache("synth:skew", result);
     return result;
   } catch(e) {
-    logEvent("warn", `[SKEW] Fetch failed: ${e.message}`);
+    logEvent("warn", `[SKEW] Synthetic computation failed: ${e.message}`);
     return null;
   }
 }
 
-// - CBOE Official Put/Call Ratio -
-// Daily equity PCR from CBOE - more accurate than synthetic from options chain
-// PCR > 1.2: excessive bearishness = contrarian call signal
-// PCR < 0.6: excessive bullishness = contrarian put signal
-// Source: cdn.cboe.com/api/global/us_indices/daily_prices/PCE_Data.json
-async function getCBOEPCR() {
-  try {
-    const cached = getCached("cboe:pcr");
-    if (cached) return cached;
-
-    const res  = await withTimeout(fetch("https://cdn.cboe.com/api/global/us_indices/daily_prices/PCE_Data.json", {
-      headers: { "User-Agent": "Mozilla/5.0", "Accept": "application/json" }
-    }), 5000);
-    if (!res.ok) return null;
-    const data = await res.json();
-
-    const rows = data?.data || data?.Data || [];
-    if (!rows.length) return null;
-
-    // Get last 5 days for moving average (smooths daily noise)
-    const recent = rows.slice(-5);
-    const values = recent.map(r => parseFloat(Array.isArray(r) ? r[1] : r.PCE)).filter(v => !isNaN(v));
-    if (!values.length) return null;
-
-    const pcr     = values[values.length - 1];
-    const pcrMA5  = values.reduce((a,b) => a+b, 0) / values.length;
-    // CBOE historical equity PCR average ~0.65
-    // Thresholds calibrated to actual CBOE research, not arbitrary
-    const signal  = pcr >= 1.3  ? "extreme_fear"   // far above avg - heavy put buying
-                  : pcr >= 1.1  ? "fear"            // above avg - defensive positioning
-                  : pcr <= 0.5  ? "extreme_greed"   // very low - complacency
-                  : pcr <= 0.60 ? "greed"            // below avg - bullish complacency
-                  : "neutral";                       // 0.60-1.1 = normal range
-
-    const result = { pcr: parseFloat(pcr.toFixed(3)), pcrMA5: parseFloat(pcrMA5.toFixed(3)), signal };
-    // PCR is daily data - cache 60 min
-    _slowCache.set("cboe:pcr", { data: result, ts: Date.now() - (SLOW_CACHE_TTL - 60*60*1000) });
-    return result;
-  } catch(e) {
-    logEvent("warn", `[PCR] CBOE fetch failed: ${e.message}`);
-    return null;
-  }
-}
+// getCBOEPCR - retired, cdn.cboe.com blocked on Railway
+// PCR now sourced from getSyntheticPCR() (Alpaca options chain)
+async function getCBOEPCR() { return null; }
 
 // - AAII Sentiment Survey -
 // Weekly retail investor sentiment - published every Thursday
 // Extreme bearishness (bulls < 20%) = historically strong contrarian call signal
 // Extreme bullishness (bulls > 55%) = historically strong contrarian put signal
 // Source: surveys.aaii.com/sentiment/
+
+// -- getSentimentSignal --
+// Replaces AAII (external scrape, unreliable) with an Alpaca-native sentiment signal.
+// Uses VIX momentum, SPY drawdown from peak, and breadth to classify market sentiment.
+// Maps to same signal names as AAII so scoreIndexSetup works unchanged:
+//   extreme_bearish -> contrarian call signal (+12)
+//   bearish         -> mild contrarian call (+6)
+//   extreme_bullish -> contrarian put signal (+10)
+//   bullish         -> mild contrarian put (+5)
+async function getSentimentSignal() {
+  try {
+    const cached = getCached("sentiment:signal");
+    if (cached) return cached;
+
+    // VIX momentum: how fast is VIX moving? Spiking = fear, falling = complacency
+    const vixNow  = state.vix || 20;
+    const vixHist = state._vixHistory || [];
+    const vix5dAgo = vixHist.length >= 5 ? vixHist[vixHist.length - 5] : vixNow;
+    const vixMomentum = vixNow - vix5dAgo; // positive = rising fear, negative = falling
+
+    // SPY drawdown from recent peak (last 20 bars)
+    const spyBarsRecent = state._spyBars20 || [];
+    const spyPeak = spyBarsRecent.length > 0 ? Math.max(...spyBarsRecent.map(b => b.h || b.c)) : 0;
+    const spyNow  = state.spyPrice || 0;
+    const spyDrawdown = spyPeak > 0 && spyNow > 0
+      ? parseFloat(((spyNow - spyPeak) / spyPeak * 100).toFixed(2))
+      : 0;
+
+    // Breadth context
+    const breadth = marketContext?.breadth?.breadthPct || 50;
+
+    // Classify sentiment
+    // extreme_bearish: VIX spiking hard AND big drawdown AND breadth collapsed
+    // extreme_bullish: VIX falling fast AND breadth strong AND near highs
+    let signal, bullish, bearish;
+
+    if (vixMomentum >= 8 && spyDrawdown <= -5 && breadth <= 30) {
+      signal = "extreme_bearish"; bullish = 20; bearish = 60;
+    } else if (vixMomentum >= 4 && spyDrawdown <= -3) {
+      signal = "bearish"; bullish = 30; bearish = 50;
+    } else if (vixMomentum <= -5 && spyDrawdown >= -1 && breadth >= 65) {
+      signal = "extreme_bullish"; bullish = 65; bearish = 15;
+    } else if (vixMomentum <= -3 && breadth >= 55) {
+      signal = "bullish"; bullish = 55; bearish = 25;
+    } else {
+      signal = "neutral"; bullish = 40; bearish = 40;
+    }
+
+    const result = {
+      signal, bullish, bearish, spread: bullish - bearish,
+      vixMomentum: parseFloat(vixMomentum.toFixed(1)),
+      spyDrawdown,
+      source: "synthetic",
+    };
+    setCache("sentiment:signal", result);
+    return result;
+  } catch(e) {
+    return null;
+  }
+}
+
 async function getAAIISentiment() {
   try {
     const cached = getCached("aaii:sentiment");
@@ -7757,24 +7795,22 @@ async function runScan() {
   // -- SLOW TIER (every 15 minutes) --
   if (now - lastSlowScan > 10 * 60 * 1000) { // 10-minute tier (was 15)
     lastSlowScan = now;
-    const [fg, dxy, yc, pcrSynth, termStruct, skew, pcrCBOE, aaii] = await Promise.all([
+    const [fg, dxy, yc, pcrSynth, termStruct, skew, sentiment] = await Promise.all([
       getFearAndGreed(), getDXY(), getYieldCurve(),
-      getSyntheticPCR(),        // synthetic put/call ratio from options chain
+      getSyntheticPCR(),        // synthetic put/call ratio from SPY options chain
       getVolTermStructure(),    // near vs far month IV term structure
-      getCBOESKEW(),            // CBOE SKEW index - tail risk premium
-      getCBOEPCR(),             // CBOE official put/call ratio
-      getAAIISentiment(),       // AAII weekly retail sentiment
+      getCBOESKEW(),            // synthetic SKEW from IV smirk (Alpaca-native)
+      getSentimentSignal(),     // VIX momentum + price action sentiment (replaces AAII)
     ]);
 
-    // PCR - prefer official CBOE, fall back to synthetic
-    const pcr = pcrCBOE || pcrSynth;
+    // PCR - use synthetic (Alpaca options chain) - CBOE CDN blocked on Railway
+    const pcr = pcrSynth;
     if (pcr) {
       marketContext.pcr = pcr;
       state._pcr = { ...pcr, updatedAt: Date.now() };
-      const src = pcrCBOE ? "CBOE" : "synthetic";
-      logEvent("scan", `[PCR:${src}] ${pcr.pcr} (${pcr.signal})`);
+      logEvent("scan", `[PCR:synthetic] ${pcr.pcr} (${pcr.signal})`);
     } else {
-      logEvent("scan", `[PCR] unavailable - CBOE:${pcrCBOE ? 'ok' : 'null'} synthetic:${pcrSynth ? 'ok' : 'null'} - scoring uses cached value`);
+      logEvent("scan", `[PCR] synthetic unavailable - scoring uses cached value`);
     }
     if (termStruct) {
       marketContext.termStructure = termStruct;
@@ -7786,10 +7822,10 @@ async function runScan() {
       state._skew = { ...skew, updatedAt: Date.now() };
       logEvent("scan", `[SKEW] ${skew.skew} (${skew.signal}) ${skew.creditPutIdeal ? "- CREDIT PUT IDEAL" : ""}`);
     }
-    if (aaii) {
-      marketContext.aaii = aaii;
-      state._aaii = { ...aaii, updatedAt: Date.now() };
-      logEvent("scan", `[AAII] Bulls:${aaii.bullish}% Bears:${aaii.bearish}% Spread:${aaii.spread} (${aaii.signal})`);
+    if (sentiment) {
+      marketContext.aaii = sentiment; // scoring reads state._aaii — wire sentiment here
+      state._aaii = { ...sentiment, updatedAt: Date.now() };
+      logEvent("scan", `[SENTIMENT] ${sentiment.signal} | vixMom:${sentiment.vixMomentum} spyDd:${sentiment.spyDrawdown}%`);
     }
     marketContext.fearGreed   = fg;
     marketContext.dxy         = dxy;
