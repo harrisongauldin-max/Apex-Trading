@@ -9213,6 +9213,10 @@ async function runScan() {
   // This is the key performance optimization: instead of sequential API calls
   // per stock (~70s total), we fetch everything in parallel (~4s total)
   logEvent("scan", `Prefetching data for ${WATCHLIST.length} instruments in parallel...`);
+  // OPT-4: declare before prefetch loop -- used in aggregate log after prefetch completes
+  const scored = []; // moved here to avoid TDZ with the OPT-4 log
+  let _zeroScoreCount = 0;
+
   const prefetchStart = Date.now();
 
   // OPT-8: Pre-filter -- skip full prefetch for stocks with no realistic path to entry
@@ -9291,9 +9295,6 @@ async function runScan() {
 
   if (_zeroScoreCount > 0) logEvent("filter", `[OPT-4] ${_zeroScoreCount} stocks scored 0 (no price/filtered before scoring) -- skipped verbose logs`);
   logEvent("scan", `Prefetch complete in ${((Date.now()-prefetchStart)/1000).toFixed(1)}s for ${WATCHLIST.length} instruments`);
-
-  const scored = [];
-  let _zeroScoreCount = 0; // OPT-4: aggregate zero-score stocks instead of logging individually
   for (const { stock, price, bars, intradayBars, sectorResult, preMarket, newsArticles, analystData, eqScore } of stockData) {
     // Skip if already at max positions for this ticker
     // Allow stagger entries (up to maxPerTicker) - don't skip entirely if one position open
@@ -10082,11 +10083,7 @@ async function runScan() {
       logEvent("filter", `${liveStock.ticker} MACD bypass - RSI ${dailyRsiNow.toFixed(0)} overbought + bullish MACD in Regime B = bounce fade`);
     if (macdContradicts) logEvent("filter", `${liveStock.ticker} MACD ${macdSignal} contradicts ${optionType} - evaluateEntry raises minimum`);
 
-    // Sizing modifier from entryEngine (eeCandidate.sizeMod) -- replaces regimeBOversoldMod
-    // eeCandidate.sizeMod already accounts for oversold reduction, crisis sizing, IV boost
-    if (eeCandidate && eeCandidate.sizeMod < 1.0) {
-      logEvent("filter", `${stock.ticker} size modifier ${eeCandidate.sizeMod.toFixed(2)}x applied (entryEngine: oversold/crisis/IV)`)
-    }
+    // Sizing modifier logged after EE_scoreCandidate runs (eeCandidate declared below)
 
     // V2.82: entry window gate - block new entries after 3pm (MR exception below)
     // Mean reversion calls (capitulation bounce) allowed until 3:30pm
@@ -10168,6 +10165,10 @@ async function runScan() {
         spyRecovering: !!(spyRecovering) },
       rb, state
     );
+    // Size modifier log (eeCandidate now declared above)
+    if (eeCandidate.sizeMod < 1.0) {
+      logEvent("filter", `${stock.ticker} size modifier ${eeCandidate.sizeMod.toFixed(2)}x (entryEngine: oversold/crisis/IV)`);
+    }
     // Merge entry engine result with scan data
     scored.push({
       stock: liveStock, price,
