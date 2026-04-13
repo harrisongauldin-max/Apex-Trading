@@ -4869,6 +4869,15 @@ async function getRealOptionsContract(ticker, price, optionType, score, vix, ear
       const minDTE = isIndexTicker ? 3 : isMeanReversion ? 14 : 21;
       if (contractDTE < minDTE) { skipped++; continue; }
 
+      // Hard minimum DTE for credit spreads — enforce entryEngine targetDTE
+      // Without this, scoring picks nearest expiry (e.g. Apr 22 at 9 DTE)
+      // which produces near-zero credit at 5% OTM, failing R/R gate every time.
+      // creditStrikeTarget is only set for credit spread calls from executeCreditSpread.
+      if (creditStrikeTarget && creditDeltaParams && creditDeltaParams.minDTE) {
+        const creditMinDTE = creditDeltaParams.minDTE; // 14 in B, 7 in C
+        if (contractDTE < creditMinDTE) { skipped++; continue; }
+      }
+
       // - CONTRACT SCORING - higher = better -
       // Delta match (50%) - how close to target delta midpoint
       const deltaTarget  = (deltaMin + deltaMax) / 2;
@@ -4911,9 +4920,10 @@ async function getRealOptionsContract(ticker, price, optionType, score, vix, ear
         strikeProximityScore = Math.max(0, 1 - strikeDiff / 20); // 0 pts if >$20 away, 1.0 if exact
         strikeWeightAdj = 0.25; // reallocate 25% weight to strike proximity for credit spreads
       }
-      // Combined score -- credit spreads weight strike proximity heavily
+      // Combined score -- credit spreads: strike proximity is primary (delta already enforced
+      // by hard deltaMin/deltaMax filter above; scoring delta again fights the OTM% target)
       const contractScore = creditStrikeTarget
-        ? deltaScore * 0.25 + expiryScore * 0.15 + liquidScore * 0.15 + spreadScore * 0.20 + strikeProximityScore * 0.25
+        ? strikeProximityScore * 0.60 + expiryScore * 0.15 + liquidScore * 0.15 + spreadScore * 0.10
         : deltaScore * 0.50 + expiryScore * 0.20 + liquidScore * 0.15 + spreadScore * 0.15;
 
       if (contractScore > bestScore) {
@@ -5949,11 +5959,13 @@ async function executeCreditSpread(stock, price, score, scoreReasons, vix, optio
     if (!shortContract) { logEvent("filter", `${stock.ticker} credit spread: no short leg found`); return null; }
 
     // Get long leg (further OTM - we buy this as protection)
+    // Pass creditWidth from entryEngine spreadParams (default $15, crisis $7)
+    const _creditWidth = (spreadParamsOverride && spreadParamsOverride.creditWidth) || 15;
     const longContract = await getSpreadSellLeg(stock.ticker, optionType, {
       ...shortContract,
       strike: shortContract.strike,
-    });
-    // getSpreadSellLeg finds $10 away from shortContract.strike
+    }, _creditWidth);
+    // getSpreadSellLeg finds _creditWidth away from shortContract.strike
     if (!longContract) { logEvent("filter", `${stock.ticker} credit spread: no long leg found`); return null; }
 
     const actualWidth = Math.abs(shortContract.strike - longContract.strike);
