@@ -4716,14 +4716,16 @@ function calcMAE() {
 // Returns the strike where a put (or call) has the given delta.
 // Uses Abramowitz & Stegun rational approximation for invPhi.
 function bsStrikeForDelta(price, targetDelta, T, sigma, optionType = "put", r = 0.05) {
+  // Put:  |delta| = N(-d1) = targetDelta  =>  d1 = -normInv(targetDelta)
+  // Call: |delta| = N(d1)  = targetDelta  =>  d1 = +normInv(targetDelta)
+  // normInv via Beasley-Springer-Moro rational approximation
   const d = Math.max(0.01, Math.min(0.99, targetDelta));
-  const p = optionType === "put" ? d : (1 - d);          // N(-d1) for put, N(d1) for call
-  const q = Math.min(p, 1 - p);
+  const q = Math.min(d, 1 - d);
   const t = Math.sqrt(-2 * Math.log(q));
-  const z = (p < 0.5 ? -1 : 1) * (t - (2.515517 + 0.802853*t + 0.010328*t*t) /
-            (1 + 1.432788*t + 0.189269*t*t + 0.001308*t*t*t));
-  // d1 = z for puts (N(-d1)=delta), -z for calls (N(d1)=delta)
-  const d1 = optionType === "put" ? z : -z;
+  const normInvD = (d < 0.5 ? -1 : 1) * (t - (2.515517 + 0.802853*t + 0.010328*t*t) /
+                   (1 + 1.432788*t + 0.189269*t*t + 0.001308*t*t*t));
+  // d1: negative for puts (strike below spot), positive for calls (strike above spot)
+  const d1 = optionType === "put" ? -normInvD : normInvD;
   const lnSK = d1 * sigma * Math.sqrt(T) - (r + sigma*sigma/2) * T;
   const strikeRaw = price * Math.exp(-lnSK);
   const inc = price < 200 ? 0.5 : 1;
