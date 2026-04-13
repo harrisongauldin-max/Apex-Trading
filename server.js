@@ -10335,8 +10335,8 @@ async function runScan() {
         tradeIntent: intent },
       rb, state,
       { etHour: etHourNow, isLateDay, isLastHour, volDecline: _volDeclineExec,
-        signals: { dailyRsi: liveStock.dailyRsi || liveStock.rsi || 50,
-                   macd: liveStock.macd || "neutral" },
+        signals: { dailyRsi: stock.dailyRsi || stock.rsi || 50,
+                   macd: stock.macd || "neutral" },
         recentSameDir:       recentSameDirMins,
         existingProfitPct,
         drawdownMinScore:    ddProtocol.minScore || MIN_SCORE }
