@@ -4704,1284 +4704,452 @@ function calcMAE() {
   return losses.length ? Math.max(...losses) : 0;
 }
 
-// - Sector Rotation -
-async function getRealOptionsContract(ticker, price, optionType, score, vix, earningsDate, isMeanReversion = false, creditStrikeTarget = null, creditDeltaParams = null) {
+
+// =======================================================================
+// ARGO CONTRACT SELECTION - v3.0
+// One shared primitive: findContract()
+// Replaces: getRealOptionsContract, getSpreadSellLeg, selectExpiry
+// Used by: executeDebitSpread, executeIronCondor (executeCreditSpread has its own)
+// =======================================================================
+
+// -- B-S delta inversion -----------------------------------------------
+// Returns the strike where a put (or call) has the given delta.
+// Uses Abramowitz & Stegun rational approximation for invPhi.
+function bsStrikeForDelta(price, targetDelta, T, sigma, optionType = "put", r = 0.05) {
+  const d = Math.max(0.01, Math.min(0.99, targetDelta));
+  const p = optionType === "put" ? d : (1 - d);          // N(-d1) for put, N(d1) for call
+  const q = Math.min(p, 1 - p);
+  const t = Math.sqrt(-2 * Math.log(q));
+  const z = (p < 0.5 ? -1 : 1) * (t - (2.515517 + 0.802853*t + 0.010328*t*t) /
+            (1 + 1.432788*t + 0.189269*t*t + 0.001308*t*t*t));
+  // d1 = z for puts (N(-d1)=delta), -z for calls (N(d1)=delta)
+  const d1 = optionType === "put" ? z : -z;
+  const lnSK = d1 * sigma * Math.sqrt(T) - (r + sigma*sigma/2) * T;
+  const strikeRaw = price * Math.exp(-lnSK);
+  const inc = price < 200 ? 0.5 : 1;
+  return Math.round(strikeRaw / inc) * inc;
+}
+
+// -- findContract ------------------------------------------------------
+// The one shared primitive. Fetches a tight DTE window, sorts by strike
+// proximity, batch-fetches snapshots, returns the best match.
+//
+// params:
+//   ticker       - "SPY", "QQQ", etc.
+//   optionType   - "put" | "call"
+//   targetDelta  - 0.35 debit put/call, 0.20 credit short leg, 0.40 MR call
+//   targetDTE    - calendar days to target expiry (21, 28, etc.)
+//   vix          - current VIX (for IV fallback)
+//   stock        - stock object (for _realIV)
+//   fixedExpiry  - (optional) ISO date string - forces same-expiry lookup for protection legs
+//
+async function findContract(ticker, optionType, targetDelta, targetDTE, vix, stock, fixedExpiry = null) {
   try {
-    // Determine target expiry window
-    const { expDate: targetExpDate, expDays: targetExpDays, expiryType } = selectExpiry(score, vix, optionType, earningsDate, ticker, isMeanReversion, creditDeltaParams?.targetDTE || null);
-    const isLeaps      = expiryType === "leaps"; // true only for LEAPS (400 DTE), NOT monthly
-    const isPut        = optionType === "put";
-    const isExpensive  = price > 400;  // high-priced stocks need wider delta range
-    const isCheap      = price < 100;  // low-priced stocks have fewer strikes, need wider range
+    const today = getETTime();
+    const sigma = (stock && stock._realIV && stock._realIV > 0.05) ? stock._realIV : vix / 100;
+    const T     = Math.max(0.01, targetDTE / 365);
 
-  // Delta range by stock price tier:
-  // Cheap (<$100): 0.28-0.50 - fewer strikes, liquid ones are closer to ATM
-  // Normal: 0.28-0.42 - standard target
-  // Expensive (>$400): 0.20-0.55 - wide range needed to find liquid OTM puts
-    // In crash conditions (VIX > 35), delta range shifts higher - all contracts become ITM
-    // Widen to 0.28-0.65 in crash mode to still find valid put entries
-    // Crash mode: VIX >= 30 in a put entry - chain shifts as market drops
-    // At VIX 34 with SPY down 15%, the entire delta distribution moves ITM
-    // Widen range aggressively so ARGO can find something tradeable
-    const inCrash  = (state.vix || 0) >= 30 && optionType === "put"; // lowered from 35 to 30
-    const crashMax = 0.72; // raised from 0.65 - deep drops push all puts ITM
-    const crashMin = 0.15; // allow more OTM when crash distorts the chain
-    // For CALLS: always use standard range (0.25-0.45 for bear call spread short leg)
-    // Calls don't suffer the crash chain dislocation problem - they go OTM as market drops
-    const isCall   = optionType === "call";
-    // Fix 6 (PM2/QS panel): credit spreads use professional delta targets from entryEngine
-    // shortDeltaTarget 0.17 (range 0.12-0.20) replaces retail TARGET_DELTA_MIN/MAX (0.28-0.42)
-    // Debit spreads and all non-credit entries continue using existing TARGET_DELTA ranges
-    const _creditDelta  = creditDeltaParams && !inCrash;
-    const deltaMin = isLeaps ? 0.65
-                   : _creditDelta ? (creditDeltaParams.shortDeltaMin || 0.12)
-                   : (inCrash && !isCall ? crashMin : isPut && isExpensive ? 0.20 : TARGET_DELTA_MIN);
-    const deltaMax = isLeaps ? 0.85
-                   : _creditDelta ? (creditDeltaParams.shortDeltaMax || 0.20)
-                   : (inCrash && !isCall ? crashMax : isPut && isCheap ? 0.50 : isPut && isExpensive ? 0.55 : TARGET_DELTA_MAX);
-  const strikeRange = 0; // unused - delta now selects contracts, not strike range
+    // Step 1: compute target strike via B-S inversion
+    const targetStrike = bsStrikeForDelta(stock ? stock.price || 0 : 0, targetDelta, T, sigma, optionType);
+    if (!targetStrike || targetStrike <= 0) return null;
 
-    // Format date for API: YYYY-MM-DD
-    const today      = getETTime();
-    const maxDays    = expiryType === "monthly" ? 65 : expiryType === "leaps" ? 400 : 35; // weekly=35, monthly=65, leaps=400
+    // Step 2: fetch contract list
+    // If fixedExpiry: fetch only that single expiry (for protection legs)
+    // Otherwise: fetch [targetDTE-7, targetDTE+14] window
+    let fetchMin, fetchMax;
+    if (fixedExpiry) {
+      fetchMin = fixedExpiry;
+      fetchMax = fixedExpiry;
+    } else {
+      const minDays = Math.max(7, targetDTE - 7);
+      const maxDays = Math.min(60, targetDTE + 14);
+      fetchMin = new Date(today.getTime() + minDays * 86400000).toISOString().split("T")[0];
+      fetchMax = new Date(today.getTime() + maxDays * 86400000).toISOString().split("T")[0];
+    }
 
-    // For credit spreads: use a TIGHT expiry window starting at minDTE
-    // QQQ/SPY have 200-400 strikes per expiration. With a 3-day floor, the
-    // 1000-contract chain limit is hit by Apr weeklies and May contracts never appear.
-    // Fetching only the target DTE window ensures we get the right expirations.
-    const creditFetch = !!(creditStrikeTarget && creditDeltaParams && creditDeltaParams.minDTE);
-    const fetchMinDTE = creditFetch ? creditDeltaParams.minDTE : 3;
-    const fetchMaxDTE = creditFetch ? Math.min(maxDays, (creditDeltaParams.targetDTE || 21) + 14) : maxDays;
-    const minExpiry  = new Date(today.getTime() + fetchMinDTE * MS_PER_DAY).toISOString().split("T")[0];
-    const maxExpiry  = new Date(today.getTime() + fetchMaxDTE * MS_PER_DAY).toISOString().split("T")[0];
-
-    // Fetch contracts - for credit spreads, the tight window means far fewer contracts
-    // and all within the target DTE range. For debit/directional, fetch full window.
-    const baseUrl = `/options/contracts?underlying_symbol=${ticker}` +
-      `&expiration_date_gte=${minExpiry}&expiration_date_lte=${maxExpiry}` +
-      `&type=${optionType}&limit=200`;
-
-    // Paginate through all contracts using next_page_token
-    let allContracts = [];
-    let pageToken = null;
-    let pageCount = 0;
-    const MAX_PAGES = 5; // cap at 1000 contracts total - enough for any chain
-
+    const baseUrl = `/options/contracts?underlying_symbol=${ticker}&expiration_date_gte=${fetchMin}&expiration_date_lte=${fetchMax}&type=${optionType}&limit=200`;
+    let allC = [], tok = null, pages = 0;
     do {
-      const pageUrl = pageToken ? `${baseUrl}&page_token=${pageToken}` : baseUrl;
-      const pageData = await alpacaGet(pageUrl, ALPACA_OPTIONS);
-      if (!pageData || !pageData.option_contracts) break;
-      allContracts = allContracts.concat(pageData.option_contracts);
-      pageToken = pageData.next_page_token || null;
-      pageCount++;
-    } while (pageToken && pageCount < MAX_PAGES);
-
-    if (!allContracts.length) return null;
-    logEvent("scan", `${ticker} options chain: ${allContracts.length} contracts across ${pageCount} page(s)`);
-
-    // For expensive stocks, weekly options have near-zero OI - prioritize monthly expiries
-    // Sort contracts: monthly expiries (3rd Friday) first, then weeklies
-    // This ensures the 200-snapshot limit hits the liquid contracts first
-    const getMonthlyExpiries = () => {
-      const months = new Set();
-      const todayMs = today.getTime();
-      for (let m = 0; m <= 4; m++) {
-        const d = new Date(todayMs);
-        d.setMonth(d.getMonth() + m);
-        // Find 3rd Friday of this month
-        const first = new Date(d.getFullYear(), d.getMonth(), 1);
-        const firstFri = (5 - first.getDay() + 7) % 7;
-        const thirdFri = new Date(d.getFullYear(), d.getMonth(), firstFri + 15);
-        months.add(thirdFri.toISOString().split('T')[0]);
-      }
-      return months;
-    };
-    const monthlyDates = getMonthlyExpiries();
-    const sortedContracts = [...allContracts].sort((a, b) => {
-      const aMonthly = monthlyDates.has(a.expiration_date) ? 0 : 1;
-      const bMonthly = monthlyDates.has(b.expiration_date) ? 0 : 1;
-      return aMonthly - bMonthly; // monthly expiries first
-    });
-
-    // Get snapshots for ALL contracts - batch into groups of 25 to avoid URL length limits
-    const allSymbols = sortedContracts.map(c => c.symbol);
-    const batches    = [];
-    for (let i = 0; i < allSymbols.length; i += 25) {
-      batches.push(allSymbols.slice(i, i + 25).join(","));
-    }
-    // Try indicative feed first (faster), fall back to opra if greeks are missing
-    const snapResults = await Promise.all(
-      batches.map(async b => {
-        const res = await alpacaGet(`/options/snapshots?symbols=${b}&feed=indicative`, ALPACA_OPT_SNAP);
-        // Check if greeks are populated - if not, try opra feed
-        const snaps = res?.snapshots || {};
-        const hasGreeks = Object.values(snaps).some(s => s?.greeks?.delta);
-        if (!hasGreeks && Object.keys(snaps).length > 0) {
-          const opra = await alpacaGet(`/options/snapshots?symbols=${b}&feed=opra`, ALPACA_OPT_SNAP);
-          return opra || res;
-        }
-        return res;
-      })
-    );
-    const snapshots = snapResults.reduce((acc, r) => ({ ...acc, ...(r?.snapshots || {}) }), {});
-
-    logEvent("scan", `${ticker} options chain: ${allContracts.length} contracts | ${Object.keys(snapshots).length} snapshots with greeks`);
-
-    // Score each contract - find best delta match in 0.28-0.42 range
-    let best       = null;
-    let bestScore  = -1;
-    let skipped    = 0;
-    let _skipNoSnap = 0, _skipNoPrice = 0, _skipDTE = 0, _skipCreditDTE = 0, _skipDelta = 0, _passed = 0;
-
-    for (const contract of sortedContracts) {
-      const snap = snapshots[contract.symbol];
-      if (!snap) { skipped++; _skipNoSnap++; continue; }
-
-      // Handle both v1 and v2 Alpaca options snapshot field names
-      // Confirmed field structure from Alpaca v1beta1 snapshots
-      const greeks = snap.greeks || {};
-      const quote  = snap.latestQuote || {};
-      const day    = snap.dailyBar || snap.day || {};
-
-      const delta  = Math.abs(parseFloat(greeks.delta || 0));
-      const iv     = parseFloat(snap.impliedVolatility || greeks.impliedVolatility || 0.3);
-      const bid    = parseFloat(quote.bp || 0);
-      const ask    = parseFloat(quote.ap || 0);
-      const mid    = bid > 0 && ask > 0 ? (bid + ask) / 2 : 0;
-      const spread = ask > 0 ? (ask - bid) / ask : (bid > 0 ? 0.5 : 1); // estimate spread if one-sided
-      const oi     = parseInt(snap.openInterest || quote.as || 0); // use ask size as OI proxy if needed
-      const vol    = parseInt(day.v || day.volume || 0);
-
-      // Contract DTE - needed for expiry scoring
-      const contractDTE = Math.round((new Date(contract.expiration_date) - today) / MS_PER_DAY);
-
-      // Only hard filter: contract must have a tradeable price
-      // In crash/high-VIX conditions, use ask alone if bid is stale (market making breaks down)
-      const effectiveMid = mid > 0 ? mid : (ask > 0 && vix >= 30 ? ask * 0.85 : 0); // 15% discount on ask-only fills
-      if (effectiveMid <= 0) { skipped++; _skipNoPrice++; continue; }
-      const priceToUse = effectiveMid;
-      // DTE filters first — before delta, so delta range is evaluated on valid-DTE contracts only
-      // isIndexTicker declared here -- used for minDTE and liquidScore below
-      const isIndexTicker = ["SPY","QQQ","GLD","TLT","XLE","DIA"].includes(ticker);
-      const minDTE = isIndexTicker ? 3 : isMeanReversion ? 14 : 21;
-      if (contractDTE < minDTE) { skipped++; _skipDTE++; continue; }
-
-      // Hard minimum DTE for credit spreads — enforce entryEngine targetDTE
-      // Must run before delta filter: at 8 DTE, 5% OTM has delta ~0.12 (edge of range)
-      // At 18 DTE, 5% OTM has delta ~0.19 (clearly inside range)
-      // Filtering by DTE first ensures delta check sees the right contracts
-      if (creditStrikeTarget && creditDeltaParams && creditDeltaParams.minDTE) {
-        const creditMinDTE = creditDeltaParams.minDTE; // 14 in B, 7 in C
-        if (contractDTE < creditMinDTE) { skipped++; _skipCreditDTE++; continue; }
-      }
-
-      // Delta filter — runs after DTE so short-dated contracts don't corrupt the delta pool
-      if (delta < deltaMin || delta > deltaMax) {
-        skipped++; _skipDelta++;
-        // Log first rejection in crash mode for visibility
-        if (inCrash && skipped <= 3) logEvent("filter", `${ticker} contract delta ${delta.toFixed(3)} outside crash range ${deltaMin}-${deltaMax} - skipped`);
-        continue;
-      }
-
-      // - CONTRACT SCORING - higher = better -
-      // Delta match (50%) - how close to target delta midpoint
-      const deltaTarget  = (deltaMin + deltaMax) / 2;
-      const deltaRange   = (deltaMax - deltaMin) / 2;
-      const deltaScore   = Math.max(0, 1 - Math.abs(delta - deltaTarget) / deltaRange);
-
-      // Expiry proximity (20%) - prefer contracts closest to target DTE
-      const dteDistance  = Math.abs(contractDTE - targetExpDays);
-      const expiryScore  = Math.max(0, 1 - dteDistance / 30);
-
-      // Liquidity (15%) - OI as proxy, unknown OI gets neutral score
-      // SPY/QQQ index instruments: always liquid regardless of single-strike OI
-      // Monthly expirations have lower OI per strike but the market is deep
-      const liquidScore  = isIndexTicker && contractDTE > 14 ? 0.8  // index monthly = liquid
-                         : oi === 0 ? 0.5                    // unknown = neutral
-                         : oi < 10  ? 0.02                   // essentially no market
-                         : oi < 50  ? 0.30                   // thin but index = ok
-                         : oi < 200 ? Math.min(oi / 500, 0.7)   // thin but tradeable
-                         : Math.min(oi / 5000, 1.0);         // normal
-
-      // Spread quality (15%) - tighter spread = better fill = higher score
-      // Wide spread on high-VIX days is expected - penalize but don't exclude
-      const spreadScore  = Math.max(0, 1 - spread / 0.30); // 0% spread = 1.0, 30%+ = 0
-
-      // Vol/OI ratio - unusual activity signal
-      const volOIRatio   = oi > 0 && vol > 0 ? vol / oi : 0;
-
-      // Theta - stored for position tracking, not used as filter
-      const theta        = Math.abs(parseFloat(greeks.theta || 0));
-      const thetaPct     = mid > 0 ? theta / mid : 0;
-
-      // Strike proximity score -- only for credit spreads where OTM% target matters
-      // Without this, delta selection picks the nearest 0.30-delta contract which can be
-      // very close to the money on gap-up days, destroying the credit spread's safety buffer
-      let strikeProximityScore = 0;
-      let strikeWeightAdj = 0;
-      if (creditStrikeTarget && creditStrikeTarget > 0) {
-        const contractStrike = parseFloat(contract.strike_price);
-        const strikeDiff = Math.abs(contractStrike - creditStrikeTarget);
-        strikeProximityScore = Math.max(0, 1 - strikeDiff / 20); // 0 pts if >$20 away, 1.0 if exact
-        strikeWeightAdj = 0.25; // reallocate 25% weight to strike proximity for credit spreads
-      }
-      // Combined score -- credit spreads: strike proximity is primary (delta already enforced
-      // by hard deltaMin/deltaMax filter above; scoring delta again fights the OTM% target)
-      const contractScore = creditStrikeTarget
-        ? strikeProximityScore * 0.60 + expiryScore * 0.15 + liquidScore * 0.15 + spreadScore * 0.10
-        : deltaScore * 0.50 + expiryScore * 0.20 + liquidScore * 0.15 + spreadScore * 0.15;
-
-      _passed++;
-      if (contractScore > bestScore) {
-        bestScore = contractScore;
-        best = {
-          symbol:  contract.symbol,
-          strike:  parseFloat(contract.strike_price),
-          expDate: new Date(contract.expiration_date).toLocaleDateString("en-US", {month:"short",day:"2-digit",year:"numeric"}),
-          expDays: Math.round((new Date(contract.expiration_date) - today) / MS_PER_DAY),
-          expiryType,
-          premium: parseFloat((mid > 0 ? mid : effectiveMid).toFixed(2)),
-          bid, ask, spread,
-          greeks: {
-            delta: parseFloat(greeks.delta || 0).toFixed(3),
-            theta: parseFloat(greeks.theta || 0).toFixed(3),
-            gamma: parseFloat(greeks.gamma || 0).toFixed(4),
-            vega:  parseFloat(greeks.vega  || 0).toFixed(3),
-          },
-          iv, oi, vol, volOIRatio, theta: thetaPct, optionType,
-        };
-      }
-    }
-
-    if (best) {
-      const etH2 = today.getHours() + today.getMinutes() / 60;
-      const earlyTag = optionType === "put" && etH2 >= 9.75 && etH2 < 10.0 ? " [EARLY WINDOW]" : "";
-      // Low OI warning - OI < 50 means very thin market, fills will be difficult in live trading
-      const oiTag = best.oi > 0 && best.oi < 50 ? ` -LOW-OI:${best.oi}` : '';
-      if (best.oi > 0 && best.oi < 50) {
-        logEvent("warn", `${ticker} LOW OI WARNING: best contract OI=${best.oi} - fills may be difficult in live trading`);
-      }
-      const _bestDTE = Math.round((new Date(best.expDate || best.symbol.slice(3,9)) - new Date()) / 86400000) || best.expDays || "?";
-      logEvent("scan", `${ticker} best contract: ${best.symbol} | $${best.premium} bid/ask $${best.bid}/$${best.ask} | delta:${best.greeks.delta} | spread:${(best.spread*100).toFixed(1)}% | OI:${best.oi}${oiTag} [REAL DATA]${earlyTag}`);
-      if (creditStrikeTarget) logEvent("filter", `${ticker} credit short leg selected: strike $${best.strike} | DTE ${best.expDays} | delta ${best.greeks.delta} | passed: snap:${sortedContracts.length - _skipNoSnap} price:${sortedContracts.length - _skipNoSnap - _skipNoPrice} dte:${sortedContracts.length - _skipNoSnap - _skipNoPrice - _skipDTE - _skipCreditDTE} delta:${_passed}`);
-    } else {
-      // Debug: only two hard filters now - mid>0 and delta range
-      // Everything else is scoring. Show what delta range we found.
-      let noPrice = 0, deltaOutOfRange = 0, closestDelta = -1;
-      for (const c of sortedContracts) {
-        const s = snapshots[c.symbol];
-        if (!s) continue;
-        const greeks2 = s.greeks || {};
-        const quote2  = s.latestQuote || {};
-        const d  = Math.abs(parseFloat(greeks2.delta || 0));
-        const b  = parseFloat(quote2.bp || 0);
-        const a  = parseFloat(quote2.ap || 0);
-        const m2 = b > 0 && a > 0 ? (b + a) / 2 : 0;
-        if (m2 <= 0) { noPrice++; continue; }
-        // Track closest delta to our range among priced contracts
-        // Track closest delta for diagnostic logging only
-        if (closestDelta < 0 || Math.abs(d - (deltaMin+deltaMax)/2) < Math.abs(closestDelta - (deltaMin+deltaMax)/2)) {
-          closestDelta = d;
-        }
-        if (d < deltaMin || d > deltaMax) { deltaOutOfRange++; continue; } // skip out-of-range
-      }
-      const cdStr = closestDelta >= 0 ? closestDelta.toFixed(3) : "none";
-      logEvent("warn", `${ticker} no valid contract | closest delta:${cdStr} (need ${deltaMin.toFixed(2)}-${deltaMax.toFixed(2)}) | no-snap:${_skipNoSnap} no-price:${_skipNoPrice} dte:${_skipDTE} creditDTE:${_skipCreditDTE} delta:${_skipDelta} passed:${_passed} | total:${sortedContracts.length}`);
-      if      (closestDelta > deltaMax)  logEvent("warn", `${ticker} all priced contracts are ITM - stock crashed below put liquidity zone`);
-      else if (closestDelta >= 0 && closestDelta < deltaMin) logEvent("warn", `${ticker} all priced contracts are far OTM - stock already moved too far`);
-      else if (closestDelta < 0)         logEvent("warn", `${ticker} no priced contracts found - complete liquidity failure on this chain`);
-    }
-
-    return best;
-  } catch(e) {
-    logEvent("error", `getRealOptionsContract(${ticker}): ${e.message}`);
-    return null;
-  }
-}
-
-// Get current market price of an options contract
-async function getOptionsPrice(symbol) {
-  try {
-    const data = await alpacaGet(`/options/snapshots?symbols=${symbol}&feed=indicative`, ALPACA_OPT_SNAP);
-    if (!data || !data.snapshots || !data.snapshots[symbol]) return null;
-    const snap  = data.snapshots[symbol];
-    const quote = snap.latestQuote || snap.latest_quote || snap.quote || {};
-    const bid   = parseFloat(quote.bp || quote.bid_price || quote.b || 0);
-    const ask   = parseFloat(quote.ap || quote.ask_price || quote.a || 0);
-    return bid > 0 && ask > 0 ? (bid + ask) / 2 : null;
-  } catch(e) { return null; }
-}
-
-// - Cash ETF Management -
-// Target: park 50% of deployable idle cash in BIL, keep 50% liquid
-// Deployable = cash above (floor + buffer)
-
-function getDeployableCash() {
-  // Everything above the floor is deployable - floor itself is managed separately
-  return Math.max(0, state.cash - CAPITAL_FLOOR);
-}
-
-
-// - Sector ETF Confirmation -
-async function checkSectorETF(stock) {
-  const etfMap = { "Technology":"XLK", "Financial":"XLF", "Consumer":"XLY" };
-  const etfs   = [];
-
-  if (etfMap[stock.sector]) etfs.push(etfMap[stock.sector]);
-  if (SEMIS.includes(stock.ticker)) etfs.push("SMH");
-  if (!etfs.length) return { pass: true, reason: null, putBoost: 0 };
-
-  // Fetch all sector ETFs in parallel
-  const allEtfBars = await Promise.all(etfs.map(etf => getStockBars(etf, 5)));
-  for (let i = 0; i < etfs.length; i++) {
-    const etf  = etfs[i];
-    const bars = allEtfBars[i];
-    if (bars.length < 2) continue;
-    const etfReturn = (bars[bars.length-1].c - bars[0].o) / bars[0].o;
-    if (etfReturn < -0.015) {
-      return { pass: false, reason: `${etf} sector ETF down ${(etfReturn*100).toFixed(1)}% - sector headwind`, putBoost: 20, etfReturn };
-    } else if (etfReturn < -0.01) {
-      return { pass: false, reason: `${etf} sector ETF down ${(etfReturn*100).toFixed(1)}% - sector headwind`, putBoost: 12, etfReturn };
-    }
-  }
-  return { pass: true, reason: null, putBoost: 0 };
-}
-
-// Weekly trend check - is stock above or below its 10-week MA?
-async function getWeeklyTrend(ticker) {
-  try {
-    const cached = getCached('weekly:' + ticker);
-    if (cached) return cached;
-    const bars = await getStockBars(ticker, 70); // 70 days = ~14 weeks
-    if (bars.length < 50) return setCache('weekly:' + ticker, { trend: 'neutral', above10wk: null });
-    const ma10w = bars.slice(-50).reduce((s, b) => s + b.c, 0) / 50;
-    const price = bars[bars.length-1].c;
-    const pctFromMA = (price - ma10w) / ma10w;
-    const trend = pctFromMA > 0.02 ? 'above' : pctFromMA < -0.02 ? 'below' : 'at';
-    // TA-W3: MA slope matters more than price position
-    // Rising MA with price below = bullish context; falling MA with price above = bearish
-    const ma10w_prev  = bars.length >= 55 ? bars.slice(-55,-5).reduce((s,b)=>s+b.c,0)/50 : ma10w;
-    const maSlope     = (ma10w - ma10w_prev) / ma10w_prev; // positive = rising, negative = falling
-    const maSlopeDir  = maSlope > 0.005 ? 'rising' : maSlope < -0.005 ? 'falling' : 'flat';
-    // Bullish when: above MA or (below MA but MA rising = pullback in uptrend)
-    // Bearish when: below MA and MA falling (confirmed downtrend)
-    const trendContext = (price > ma10w && maSlopeDir !== 'falling') ? 'aligned_bull'
-                       : (price < ma10w && maSlopeDir === 'rising')  ? 'pullback_bull'
-                       : (price < ma10w && maSlopeDir === 'falling') ? 'confirmed_bear'
-                       : 'neutral';
-    return setCache('weekly:' + ticker, { trend, ma10w: parseFloat(ma10w.toFixed(2)), pctFromMA: parseFloat((pctFromMA*100).toFixed(1)), above10wk: price > ma10w, maSlope: parseFloat((maSlope*100).toFixed(2)), maSlopeDir, trendContext });
-  } catch(e) { return { trend: 'neutral', above10wk: null }; }
-}
-
-// - Pre-trade Filters -
-async function checkAllFilters(stock, price, tradeType = null) {
-  const fails = [];
-
-  // 1. Entry window - SPY/QQQ open at 9:30am, individual stocks at 9:45am
-  const isIndexStock     = stock.isIndex || false;
-  const eitherWindowOpen = isEntryWindow("call", isIndexStock) || isEntryWindow("put", isIndexStock);
-  if (!eitherWindowOpen && !dryRunMode) return { pass:false, reason:"Outside entry window" };
-
-  // 2. Circuit breakers
-  if (!state.circuitOpen)       return { pass:false, reason:"Daily circuit breaker tripped" };
-  if (!state.weeklyCircuitOpen) return { pass:false, reason:"Weekly circuit breaker tripped" };
-
-  // 3. Capital floor - halt all operations, not just new entries
-  if (state.cash <= CAPITAL_FLOOR) {
-    if (!state._capitalFloorAlerted) {
-      logEvent("warn", `[CAPITAL FLOOR] Cash $${state.cash.toFixed(0)} at floor $${CAPITAL_FLOOR} - all new entries suspended`);
-      state._capitalFloorAlerted = true;
-    }
-    return { pass:false, reason:`Cash at capital floor (${fmt(CAPITAL_FLOOR)}) - operations suspended` };
-  }
-  state._capitalFloorAlerted = false;
-
-
-  // 5. Consecutive losses - REMOVED: agent handles thesis quality, not a counter
-
-  // 6. Same-ticker limit - allow up to 2 positions per ticker (entry + roll)
-  const existingPositions = state.positions.filter(p => p.ticker === stock.ticker);
-  // Index instruments: allow up to 3 positions (staggered entries on same thesis)
-  // Individual stocks: max 2 (less liquid, more company-specific risk)
-  const maxPerTicker = stock.isIndex ? 3 : 2;
-  if (existingPositions.length >= maxPerTicker) return { pass:false, reason:`Already have ${maxPerTicker} positions in ${stock.ticker}` };
-
-  // 7. Portfolio heat
-  if (heatPct() >= effectiveHeatCap()) return { pass:false, reason:`Portfolio heat at ${(heatPct()*100).toFixed(0)}% max` };
-
-  // 8. Sector exposure
-  const sectorExp = state.positions.filter(p=>p.sector===stock.sector).reduce((s,p)=>s+p.cost,0);
-  if (sectorExp / totalCap() >= MAX_SECTOR_PCT) return { pass:false, reason:`${stock.sector} sector at ${MAX_SECTOR_PCT*100}% limit` };
-
-  // 9. Sector concentration - rely on MAX_SECTOR_PCT and correlation blocks
-  // Hard per-sector count removed - heat % and correlation blocks handle this
-  // (opposite sector bet detection handled by same-ticker opposite direction check in scan loop)
-
-  // 10. Dynamic vol filter - realized vs implied gap (replaces static IVR_MAX)
-  // If implied vol >> realized vol, options are overpriced - skip
-  // If implied vol - realized vol or implied < realized, options are fairly priced or cheap - enter
-  try {
-    const volBars = await getStockBars(stock.ticker, 21);
-    if (volBars.length >= 10) {
-      const closes   = volBars.map(b => b.c);
-      const returns  = closes.slice(1).map((c, i) => Math.log(c / closes[i]));
-      const realized = Math.sqrt(returns.reduce((s, r) => s + r * r, 0) / returns.length) * Math.sqrt(252) * 100;
-      const implied  = stock.ivr * 0.4 + 15; // approximate IV from IVR (IVR=50 - ~35% IV)
-      const volGap   = implied - realized;
-      // Skip if implied vol is more than 20 points above realized (options too expensive)
-      // CREDIT trades: high IV is FAVORABLE (we are the seller) — skip the block, log as positive
-      const isCredit = tradeType && tradeType.startsWith('credit');
-      if (volGap > 20) {
-        if (isCredit) {
-          logEvent("filter", `${stock.ticker} vol gap ${volGap.toFixed(1)}pts - IV rich vs realized - favorable for credit seller`);
-        } else {
-          return { pass: false, reason: `Vol gap ${volGap.toFixed(1)}pts - implied ${implied.toFixed(0)}% vs realized ${realized.toFixed(0)}% - options expensive` };
-        }
-      }
-      // Bonus signal: if realized > implied, options are cheap (underpriced) - log as positive
-      if (realized > implied + 5) logEvent("filter", `${stock.ticker} vol gap FAVORABLE - realized ${realized.toFixed(0)}% > implied ${implied.toFixed(0)}%`);
-    } else {
-      // Fallback to static IVR check if not enough bars
-      if (stock.ivr > IVR_MAX) return { pass: false, reason: `IVR ${stock.ivr} > ${IVR_MAX} (fallback)` };
-    }
-  } catch(e) {
-    if (stock.ivr > IVR_MAX) return { pass: false, reason: `IVR ${stock.ivr} > ${IVR_MAX}` };
-  }
-
-  // 11. Earnings
-  if (stock.earningsDate) {
-    const dte = Math.round((new Date(stock.earningsDate) - new Date()) / MS_PER_DAY);
-    if (dte >= 0 && dte <= EARNINGS_SKIP_DAYS) return { pass:false, reason:`Earnings in ${dte} days` };
-  }
-
-  // 12. Stock price
-  if (price < MIN_STOCK_PRICE) return { pass:false, reason:`Price $${price} below $${MIN_STOCK_PRICE} minimum` };
-
-  // 13. VIX check - nuanced by trade type
-  const vix = state.vix || 15;
-  // Index instruments: no hard VIX block - credit spreads thrive in high VIX
-  // Individual stocks: pause above 35 (wide spreads, unreliable fills)
-  if (!stock.isIndex && vix >= VIX_PAUSE) return { pass:false, reason:`VIX ${vix} above pause threshold (${VIX_PAUSE}) for individual stocks` };
-  // Extreme VIX (50+): pause everything - market is in crisis, fills impossible
-  if (vix >= 50) return { pass:false, reason:`VIX ${vix} extreme - all entries paused above 50` };
-
-  // 14. Correlation group - max 1 position per correlated group
-  const corrGroup = getCorrelatedGroup(stock.ticker);
-  if (corrGroup) return { pass:false, reason:`Correlated position already open (group: ${corrGroup.join(", ")})` };
-
-  // 15. Sector ETF confirmation
-  const etfCheck = await checkSectorETF(stock);
-  if (!etfCheck.pass) return { pass:false, reason:etfCheck.reason };
-
-  // 16. Support/resistance check
-  // Panel decision (7/7): index instruments skip S/R entirely.
-  // 20-day high on an index in a bear regime IS the ceiling of each bounce - ideal PUT entry.
-  // Blocking puts near resistance is a direction inversion for index instruments.
-  // Individual stocks: keep check but direction-aware - near resistance bad for calls, near support bad for puts.
-  if (!stock.isIndex) {
-    try {
-      const bars = await getStockBars(stock.ticker, 20);
-      if (bars.length >= 10) {
-        const sr = getSupportResistance(bars);
-        if (price >= sr.resistance * (1 - RESISTANCE_BUFFER)) {
-          return { pass:false, reason:`Price within ${(RESISTANCE_BUFFER*100).toFixed(0)}% of 20-day resistance ($${sr.resistance.toFixed(2)}) - calls blocked at resistance` };
-        }
-        if (price <= sr.support * (1 + SUPPORT_BUFFER)) {
-          return { pass:false, reason:`Price near 20-day support ($${sr.support.toFixed(2)}) - puts blocked at support` };
-        }
-      }
-    } catch(e) { /* skip if data unavailable */ }
-  }
-
-  // 17. Pre-market check (only relevant in first 90 mins of session)
-  const etHour = new Date().toLocaleString("en-US", {timeZone:"America/New_York", hour:"numeric", hour12:false});
-  if (parseInt(etHour) < 12) {
-    const priceYest = (await getStockBars(stock.ticker, 2))[0]?.c;
-    if (priceYest) {
-      const premarketMove = (price - priceYest) / priceYest;
-      if (premarketMove <= PREMARKET_NEGATIVE) {
-        return { pass:false, reason:`Pre-market negative (${(premarketMove*100).toFixed(1)}%) - bearish open` };
-      }
-      if (premarketMove >= PREMARKET_STRONG_MOVE) {
-        logEvent("scan", `${stock.ticker} strong pre-market +${(premarketMove*100).toFixed(1)}% - boost signal`);
-        stock._premarketBoost = true;
-      }
-    }
-  }
-
-  return { pass:true, reason:null };
-}
-
-// - DTE-Tiered Exit Parameters -
-// Returns appropriate exit levels based on days to expiry
-// Short DTE = take profits fast, trail tight (theta kills you)
-// Monthly   = moderate targets, standard trail
-function getDTEExitParams(dte, daysOpen = 0) {
-  // Phase-aware exit tightening - preservation mode locks profits faster
-  const acctPhase = getAccountPhase();
-  // PDT-aware target adjustment
-  const pdtRemaining = Math.max(0, PDT_LIMIT - countRecentDayTrades());
-  const pdtTight     = pdtRemaining <= 1;
-  const pdtLocked    = pdtRemaining === 0;
-
-  // - Overnight tier adjustment -
-  // Monthly options: softer overnight penalty - theta decays slowly, thesis needs time
-  // Weekly options: tighter - theta is racing, exit fast
-  // Partials: sell half at partialPct, close remainder at takeProfitPct
-  let overnightMult = 1.0;
-  let overnightLabel = "";
-  if (dte <= 21) {
-    // Weekly: overnight hurts more - tighten target
-    if (daysOpen >= 2) { overnightMult = 0.65; overnightLabel = "(2D+)"; }
-    else if (daysOpen >= 1) { overnightMult = 0.80; overnightLabel = "(OVERNIGHT)"; }
-  } else {
-    // Monthly 30-45 DTE: much gentler overnight adjustment - holding is the plan
-    if (daysOpen >= 7)  { overnightMult = 0.75; overnightLabel = "(7D+)"; }
-    else if (daysOpen >= 3) { overnightMult = 0.85; overnightLabel = "(3D+)"; }
-    else if (daysOpen >= 1) { overnightMult = 0.92; overnightLabel = "(OVERNIGHT)"; }
-  }
-
-  if (dte <= 21) {
-    // Weekly / short-DTE - tighter targets, faster exits
-    // These should be rare in PDT accounts - mean reversion calls mainly
-    const base = pdtLocked ? 0.12 : pdtTight ? 0.15 : 0.20;
-    const tp   = parseFloat((base * overnightMult).toFixed(3));
-    const part = parseFloat((tp * 0.60).toFixed(3));
-    const ride = parseFloat((tp * 1.30).toFixed(3));
-    return {
-      takeProfitPct:  tp,
-      partialPct:     part,
-      ridePct:        ride,
-      stopLossPct:    0.30, // tighter stop on weeklies - theta risk is real
-      fastStopPct:    0.15,
-      trailActivate:  pdtLocked ? 0.08 : pdtTight ? 0.10 : 0.12,
-      trailStop:      pdtLocked ? 0.05 : 0.07,
-      label:          (pdtLocked ? "SHORT-DTE(PDT-LOCKED)" : pdtTight ? "SHORT-DTE(PDT-TIGHT)" : "SHORT-DTE") + overnightLabel,
-    };
-  } else if (dte <= 45) {
-    // Monthly 30-45 DTE - primary strategy for PDT-constrained accounts
-    // Target 30-50% - give the thesis room to play out over 5-10 days
-    const base = pdtLocked ? 0.25 : pdtTight ? 0.30 : 0.40;
-    const tp   = parseFloat((base * overnightMult).toFixed(3));
-    const part = parseFloat((tp * 0.55).toFixed(3));
-    const ride = parseFloat((tp * 1.40).toFixed(3)); // ride winners longer on monthlies
-    return {
-      takeProfitPct:  tp,
-      partialPct:     part,
-      ridePct:        ride,
-      stopLossPct:    STOP_LOSS_PCT,
-      fastStopPct:    0.20,
-      trailActivate:  pdtLocked ? 0.15 : pdtTight ? 0.18 : 0.22,
-      trailStop:      pdtLocked ? 0.08 : pdtTight ? 0.10 : 0.12,
-      label:          (pdtLocked ? "MONTHLY(PDT-LOCKED)" : pdtTight ? "MONTHLY(PDT-TIGHT)" : "MONTHLY") + overnightLabel,
-    };
-  } else {
-        const base = pdtLocked ? 0.35 : pdtTight ? 0.45 : 0.55;
-    const tp   = parseFloat((base * overnightMult).toFixed(3));
-    const part = parseFloat((tp * 0.55).toFixed(3));
-    const ride = parseFloat((tp * 1.50).toFixed(3));
-    return {
-      takeProfitPct:  tp,
-      partialPct:     part,
-      ridePct:        ride,
-      stopLossPct:    STOP_LOSS_PCT,
-      fastStopPct:    0.20,
-      trailActivate:  pdtLocked ? 0.20 : pdtTight ? 0.25 : 0.30,
-      trailStop:      pdtLocked ? 0.10 : pdtTight ? 0.12 : 0.15,
-      label:          (pdtLocked ? "LEAPS(PDT-LOCKED)" : pdtTight ? "LEAPS(PDT-TIGHT)" : "LEAPS") + overnightLabel,
-    };
-  }
-}
-
-// - PDT (Pattern Day Trader) Tracking -
-// SEC rule: 4+ day trades in 5 rolling business days = PDT flag on margin accounts <$25k
-// A day trade = opening AND closing the same security on the same calendar day
-// APEX tracks this and blocks new entries when at 3/3 to preserve the last day trade
-
-const PDT_LIMIT     = 3;   // max day trades before block (limit is 3, 4th triggers PDT flag)
-const PDT_DAYS      = 5;   // rolling business day window
-
-function getBusinessDaysAgo(n) {
-  // Returns the date n business days ago (skips weekends)
-  let date = new Date();
-  let count = 0;
-  while (count < n) {
-    date.setDate(date.getDate() - 1);
-    const day = date.getDay();
-    if (day !== 0 && day !== 6) count++; // skip Sat/Sun
-  }
-  return date;
-}
-
-function countRecentDayTrades() {
-  // Prefer Alpaca's authoritative day trade count when available
-  // Alpaca tracks the rolling 5-day window accurately including trades from previous sessions
-  if (state._alpacaDayTradeCount !== undefined && state._alpacaDayTradeCount !== null) {
-    return state._alpacaDayTradeCount;
-  }
-  // Fallback to internal counter if Alpaca count not yet synced
-  const cutoff = getBusinessDaysAgo(PDT_DAYS);
-  const recent = (state.dayTrades || []).filter(dt => new Date(dt.closeTime) >= cutoff);
-  return recent.length;
-}
-
-function isDayTrade(pos) {
-  // A position is a day trade if it was opened today (same ET calendar date)
-  // Use ET timezone to match market conventions - not server UTC
-  if (!pos || !pos.openDate) return false;
-  const etOptions = { timeZone: "America/New_York", year: "numeric", month: "2-digit", day: "2-digit" };
-  const openDay   = new Date(pos.openDate).toLocaleDateString("en-US", etOptions);
-  const today     = new Date().toLocaleDateString("en-US", etOptions);
-  return openDay === today;
-}
-
-function recordDayTrade(pos, reason) {
-  if (!state.dayTrades) state.dayTrades = [];
-  state.dayTrades.push({
-    ticker:    pos.ticker,
-    openTime:  pos.openDate,
-    closeTime: new Date().toISOString(),
-    reason,
-    pnl:       0, // will be updated by closePosition
-  });
-  // Keep only last 20 day trade records
-  if (state.dayTrades.length > 20) state.dayTrades = state.dayTrades.slice(-20);
-  const count = countRecentDayTrades();
-  logEvent("warn", `PDT: Day trade recorded for ${pos.ticker} - ${count}/${PDT_LIMIT} in rolling 5-day window`);
-  if (count >= PDT_LIMIT) {
-    logEvent("warn", `PDT LIMIT REACHED (${count}/${PDT_LIMIT}) - no new same-day CLOSES until window resets. New entries still allowed.`);
-  }
-}
-
-// - Position Sizing -
-// - Unified Kelly-Primary Sizing -
-// Single source of truth for position sizing. Kelly is primary.
-// Standard sizing is removed - Kelly adapts to actual edge automatically.
-function calcPositionSize(premium, score, vix) {
-  // Step 1: Kelly base from actual trade history (dynamic)
-  const recentTrades = (state.closedTrades || []).slice(0, 30);
-  let kellyBase;
-
-  if (recentTrades.length >= 10) {
-    // Use real historical Kelly when we have enough data
-    const wins    = recentTrades.filter(t => t.pnl > 0);
-    const losses  = recentTrades.filter(t => t.pnl <= 0);
-    const winRate = wins.length / recentTrades.length;
-    const avgWin  = wins.length   ? wins.reduce((s,t) => s+t.pnl,0) / wins.length   : TAKE_PROFIT_PCT * premium * 100;
-    const avgLoss = losses.length ? Math.abs(losses.reduce((s,t) => s+t.pnl,0) / losses.length) : STOP_LOSS_PCT * premium * 100;
-    const payoff  = avgLoss > 0 ? avgWin / avgLoss : 1;
-    const kelly   = winRate - (1 - winRate) / payoff;
-    kellyBase     = Math.max(0.05, Math.min(0.25, kelly * 0.5)); // half-Kelly, capped 5-25% of capital
-  } else {
-    // Bootstrap: hard cap at 1 contract until 30 live trades give real edge data
-    // Paper trade Kelly is inflated - don't let it size up until live fills calibrate it
-    kellyBase = 0.05; // conservative 5% of capital = typically 1 contract
-  }
-
-  // Live trading protection - never exceed 1 contract until 30 real trades recorded
-  const liveTrades = (state.dataQuality || {}).realTrades || 0;
-  if (liveTrades < 30) {
-    // Force single contract sizing until system is calibrated on live fills
-    return 1;
-  }
-
-  // Step 2: Score conviction multiplier
-  // Higher score = more conviction = size up within Kelly bounds
-  const convictionMult = score >= 85 ? 1.25 : score >= 75 ? 1.0 : score >= 70 ? 0.80 : 0.60;
-
-  // Time of day sizing - reduce in first 30 mins (wide spreads, price discovery)
-  // Pros size down at open - market makers widen spreads until order flow stabilizes
-  const etNow  = getETTime();
-  const minsSinceOpen = (etNow.getHours() - 9) * 60 + etNow.getMinutes() - 30;
-  const openingMult   = minsSinceOpen < 30 ? 0.75 : 1.0; // 25% smaller in first 30 mins
-
-  // Step 3: VIX adjustment - Guo & Whitelaw (2006): DEBIT put returns asymmetric to VIX
-  // G&W finding applies to BUYING puts (debit) - premium too high at VIX > 40
-  // SELLING puts (credit) is OPPOSITE - VIX > 40 = maximum premium collection
-  // isCreditEntry is set from useCreditSpread flag passed through
-  const isCreditEntry = (state._lastEntryType === "credit");
-  const vixMult = isCreditEntry
-    ? (vix >= 40 ? 1.25 : vix >= 35 ? 1.10 : 1.0)  // credit: INCREASE size at high VIX
-    : (vix >= 40  ? 0.35                              // debit: G&W - VIX>40 puts overpriced
-    : vix >= VIX_REDUCE50 ? 0.50                      // VIX 35-40: moderate reduction
-    : vix >= VIX_REDUCE25 ? 0.75                      // VIX 25-35: slight reduction
-    : 1.0);
-
-  // Step 4: Drawdown protocol from marketContext
-  const ddMult = (marketContext?.drawdownProtocol?.sizeMultiplier) || 1.0;
-
-  // Step 5: Combine into single sizing decision
-  const effectiveFraction = kellyBase * convictionMult * vixMult * ddMult * openingMult;
-  const maxCost           = Math.min(
-    state.cash * effectiveFraction,
-    state.cash * 0.20,                     // hard cap: never more than 20% per trade
-    MAX_LOSS_PER_TRADE / STOP_LOSS_PCT     // risk-based cap
-  );
-
-  const contracts = Math.max(1, Math.min(5, Math.floor(maxCost / (premium * 100))));
-
-  // If even 1 contract exceeds the risk-based cap, return 0 to signal skip
-  // Caller checks contracts < 1 and skips the trade
-  if (premium * 100 > MAX_LOSS_PER_TRADE / STOP_LOSS_PCT) return 0;
-
-  return contracts;
-}
-
-// - Build Trade Card -
-// - Expiration Date Calculator -
-// Returns the next real options expiry Friday on or after targetDate
-function getNextExpiryFriday(targetDate) {
-  const d = new Date(targetDate);
-  // Find the next Friday on or after targetDate
-  const day = d.getDay(); // 0=Sun, 6=Sat
-  const daysUntilFriday = day <= 5 ? (5 - day) : 6; // days until next Friday
-  d.setDate(d.getDate() + daysUntilFriday);
-  return d;
-}
-
-// Returns the third Friday of a given month/year (standard monthly expiry)
-function getThirdFriday(year, month) {
-  const d = new Date(year, month, 1);
-  // Find first Friday
-  const firstFriday = (5 - d.getDay() + 7) % 7;
-  // Third Friday = first Friday + 14 days
-  d.setDate(firstFriday + 15);
-  return d;
-}
-
-// Smart expiry selection based on score, VIX, and option type
-
-// Returns { expDate: string, expDays: number, expiryType: "weekly"|"monthly"|"leaps" }
-function selectExpiry(score, vix, optionType, earningsDate, ticker = null, isMeanReversion = false, targetDTEOverride = null) {
-  const today  = getETTime();
-  const now    = today.getTime();
-
-  // Regime duration - declared at top so ALL paths (put, call, MR) can access it
-  const regimeDuration = (state._agentMacro || {}).regimeDuration || "1-3 days";
-  const regimeDurMult  = regimeDuration === "intraday"   ? 0.5
-                       : regimeDuration === "1-3 days"   ? 0.75
-                       : regimeDuration === "3-7 days"   ? 1.0
-                       : regimeDuration === "1-2 weeks"  ? 1.2
-                       : regimeDuration === "multi-week" ? 1.5
-                       : 1.0;
-
-  let targetDays;
-  let expiryType;
-
-  // - MEAN REVERSION CALLS - 21 DTE minimum -
-  // PDT accounts can't close same-day - need buffer for bounce to develop
-  // 21 DTE gives 3 weeks for mean reversion to play out without theta cliff
-  if (isMeanReversion && optionType === "call") {
-    targetDays = 21;
-    expiryType = "weekly";
-    const targetDate = new Date(now + targetDays * MS_PER_DAY);
-    let expiry = getNextExpiryFriday(targetDate);
-    const minDate = new Date(now + 14 * MS_PER_DAY);
-    if (expiry < minDate) expiry = getNextExpiryFriday(new Date(expiry.getTime() + 7 * MS_PER_DAY));
-    const expDays = Math.round((expiry - new Date(now)) / MS_PER_DAY);
-    const expDate = expiry.toLocaleDateString("en-US", { month: "short", day: "2-digit", year: "numeric" });
-    return { expDate, expDays: Math.max(expDays, 14), expiryType: "weekly" };
-  }
-
-  // - PUT tiers - PDT-aware monthly targeting -
-  if (optionType === "put") {
-    const vixRevDays = getVIXReversionDays(vix);
-    if (targetDTEOverride) {
-      // entryEngine v2.0: regime-calibrated DTE (21 in B, 14 in C, 28 in A)
-      // Professional standard per Natenberg Ch.8  -- optimal theta/vega ratio window
-      targetDays = targetDTEOverride;
-      expiryType = "weekly";
-    } else if (score >= 90 && vix >= 30) {
-      targetDays = Math.max(21, Math.min(35, Math.round(vixRevDays * 0.6)));
-      expiryType = "monthly";
-    } else if (score >= 75) {
-      targetDays = vix >= 35 ? 25 : 35;
-      expiryType = "monthly";
-    } else {
-      targetDays = 35;
-      expiryType = "monthly";
-    }
-
-  // - Regime duration adjusts DTE - agent knows how long regime lasts -
-  // "intraday" - short DTE regardless of option type
-  // "multi-week" - go further out for trend plays
-  // Apply duration multiplier to targetDays at the end of selection
-
-  // - CALL tiers - two distinct theses need different DTE -
-  // Mean reversion (high VIX, deeply oversold): 14-21 DTE - quick bounce
-  // Trending bull (VIX falling, regime=bull): 30 DTE - ride the trend
-  } else if (vix >= 28 && score >= 70) {
-    // Mean reversion call in high VIX - quick bounce play
-    // High VIX = cheap calls, but thesis is short-term bounce, not a trend
-    targetDays = 21;
-    expiryType = "weekly";
-  } else if (score >= 85 && vix < 25) {
-    // High conviction trending bull call in calm market - 30 DTE, ride the move
-    targetDays = 30;
-    expiryType = "monthly";
-  } else if (score >= 70 && vix < 25) {
-    // Standard trending bull call - 30 DTE gives thesis time to develop
-    targetDays = 30;
-    expiryType = "monthly";
-  } else if (vix >= 25 && vix < 28) {
-    // Transitional VIX - moderate, 30 DTE gives flexibility
-    targetDays = 30;
-    expiryType = "monthly";
-  } else {
-    targetDays = 30;
-    expiryType = "monthly";
-  }
-
-  // Apply regime duration multiplier - agent knows how long regime lasts
-  // Intraday regime = mean reversion play - should use MR DTE path, not just multiply
-  if (regimeDuration === "intraday" && !isMeanReversion) {
-    // Override to MR path - intraday thesis needs quick resolution
-    return selectExpiry(score, vix, optionType, earningsDate, ticker, true);
-  }
-  targetDays = Math.round(Math.max(14, Math.min(60, targetDays * (regimeDurMult || 1.0))));
-
-  // Calculate target date
-  const targetDate = new Date(now + targetDays * MS_PER_DAY);
-
-  let expiry;
-  if (expiryType === "weekly") {
-    expiry = getNextExpiryFriday(targetDate);
-    const minDate = new Date(now + 7 * MS_PER_DAY);
-    if (expiry < minDate) expiry = getNextExpiryFriday(new Date(expiry.getTime() + 7 * MS_PER_DAY));
-  } else {
-    // Monthly - find third Friday of target month
-    expiry = getThirdFriday(targetDate.getFullYear(), targetDate.getMonth());
-    const minDate = new Date(now + 21 * MS_PER_DAY);
-    if (expiry < minDate) {
-      const nextMonth = targetDate.getMonth() === 11 ? 0 : targetDate.getMonth() + 1;
-      const nextYear  = targetDate.getMonth() === 11 ? targetDate.getFullYear() + 1 : targetDate.getFullYear();
-      expiry = getThirdFriday(nextYear, nextMonth);
-    }
-  }
-
-  // If earnings date is within our expiry window, extend past earnings
-  if (earningsDate) {
-    const eDays = Math.round((new Date(earningsDate) - new Date(now)) / MS_PER_DAY);
-    if (eDays > 0 && eDays < Math.round((expiry - new Date(now)) / MS_PER_DAY)) {
-      // Earnings before expiry - extend to next monthly after earnings
-      const postEarnings = new Date(new Date(earningsDate).getTime() + 7 * MS_PER_DAY);
-      expiry = getThirdFriday(postEarnings.getFullYear(), postEarnings.getMonth());
-    }
-  }
-
-  const expDays = Math.round((expiry - new Date(now)) / MS_PER_DAY);
-  const expDate = expiry.toLocaleDateString("en-US", { month: "short", day: "2-digit", year: "numeric" });
-
-  return { expDate, expDays: Math.max(expDays, 7), expiryType };
-}
-
-// - Spread Sell Leg Lookup -
-// Finds the sell leg for a spread by looking for the contract closest to
-// targetStrike on the SAME expiry as the buy leg. Does not use delta scoring.
-// This ensures $10-wide spreads actually work as intended.
-async function getSpreadSellLeg(ticker, optionType, buyContract, targetWidth = 10) {
-  try {
-    const targetStrike = optionType === "put"
-      ? buyContract.strike - targetWidth
-      : buyContract.strike + targetWidth;
-
-    // Use same expiry date as buy leg
-    const today     = getETTime();
-    const expDate   = new Date(buyContract.expDate);
-    const expStr    = expDate.toISOString().split("T")[0];
-
-    const url = `/options/contracts?underlying_symbol=${ticker}` +
-      `&expiration_date_gte=${expStr}&expiration_date_lte=${expStr}` +
-      `&type=${optionType}&limit=200`;
-
-    let contracts = [];
-    let nextPage  = url;
-    while (nextPage) {
-      const page = await alpacaGet(nextPage, ALPACA_OPTIONS);
-      if (!page || !page.option_contracts) break;
-      contracts = contracts.concat(page.option_contracts);
-      nextPage = page.next_page_token
-        ? url + '&page_token=' + page.next_page_token
-        : null;
-      if (contracts.length >= 500) break;
-    }
-
-    if (!contracts.length) return null;
-
-    // Find contract closest to target strike, with delta preference
-    // Protection leg should ideally be 0.15-0.20 delta (further OTM than short leg)
-    // This gives real protection without paying too much for the hedge
-    const TARGET_PROTECTION_DELTA_MIN = 0.10;
-    const TARGET_PROTECTION_DELTA_MAX = 0.25;
-
-    // First pass: try to find a contract at target strike with good delta
-    // Second pass: fall back to closest strike if no delta match
-    let best = null;
-    let bestScore = -1;
-
-    for (const c of contracts) {
-      const strike = parseFloat(c.strike_price);
-      const dist   = Math.abs(strike - targetStrike);
-      if (dist > Math.max(targetWidth, 8)) continue; // search within 1x width (wider for low-priced underlyings)
-
-      // Score by strike proximity (primary) + delta quality (secondary, if available)
-      const strikeScore = 1 - (dist / Math.max(targetWidth * 0.5, 5));
-      const score = strikeScore; // delta scored below after snapshot fetch
-      if (score > bestScore || best === null) {
-        bestScore = score;
-        best = c;
-      }
-    }
-
-    // Fallback: find absolute closest if search range too tight
-    if (!best) {
-      let bestDist = 999;
-      for (const c of contracts) {
-        const strike = parseFloat(c.strike_price);
-        const dist   = Math.abs(strike - targetStrike);
-        if (dist < bestDist) { bestDist = dist; best = c; }
-      }
-    }
-
-    const maxDist = Math.max(5, targetWidth * 0.40); // allow 40% of width tolerance — TLT has wider strike spacing
-    if (!best || Math.abs(parseFloat(best.strike_price) - targetStrike) > maxDist) {
-      logEvent("warn", `${ticker} spread: no sell leg within $${maxDist.toFixed(0)} of target $${targetStrike} (width $${targetWidth})`);
+      const pg = await alpacaGet(tok ? `${baseUrl}&page_token=${tok}` : baseUrl, ALPACA_OPTIONS);
+      if (!pg || !pg.option_contracts) break;
+      allC = allC.concat(pg.option_contracts);
+      tok = pg.next_page_token || null;
+      pages++;
+    } while (tok && pages < 5);
+
+    if (!allC.length) {
+      logEvent("filter", `${ticker} findContract: no contracts ${fetchMin}->${fetchMax}`);
       return null;
     }
 
-    // Fetch snapshot for price/greeks
-    const snap = await alpacaGet(
-      `/options/snapshots?symbols=${best.symbol}&feed=indicative`,
-      ALPACA_OPT_SNAP
+    // Step 3: sort by strike proximity (tiebreak: DTE proximity to targetDTE)
+    allC.sort((a, b) => {
+      const da = Math.abs(parseFloat(a.strike_price) - targetStrike);
+      const db = Math.abs(parseFloat(b.strike_price) - targetStrike);
+      if (Math.abs(da - db) > 0.01) return da - db;
+      const aDTE = Math.round((new Date(a.expiration_date) - today) / 86400000);
+      const bDTE = Math.round((new Date(b.expiration_date) - today) / 86400000);
+      return Math.abs(aDTE - targetDTE) - Math.abs(bDTE - targetDTE);
+    });
+
+    // Step 4: batch-fetch snapshots for top 50 candidates
+    const symbols = allC.slice(0, 50).map(c => c.symbol);
+    const batches = [];
+    for (let i = 0; i < symbols.length; i += 25) batches.push(symbols.slice(i, i+25).join(","));
+    const snapResults = await Promise.all(
+      batches.map(b => alpacaGet(`/options/snapshots?symbols=${b}&feed=indicative`, ALPACA_OPT_SNAP).catch(() => null))
     );
-    const snapData = snap?.snapshots?.[best.symbol];
-    if (!snapData) return null;
+    const snaps = snapResults.reduce((acc, r) => ({ ...acc, ...(r?.snapshots || {}) }), {});
 
-    const quote  = snapData.latestQuote || {};
-    const greeks = snapData.greeks || {};
-    const bid    = parseFloat(quote.bp || 0);
-    const ask    = parseFloat(quote.ap || 0);
-    const mid    = bid > 0 && ask > 0 ? (bid + ask) / 2 : 0;
-    if (mid <= 0) return null;
+    // Step 5: pick first contract with price and delta in acceptable range
+    const deltaMin = Math.max(0.05, targetDelta - 0.12);
+    const deltaMax = Math.min(0.65, targetDelta + 0.12);
 
-    const strike = parseFloat(best.strike_price);
-    const actualWidth = Math.abs(buyContract.strike - strike);
-    const protectionDelta = Math.abs(parseFloat(greeks.delta || 0));
+    for (const c of allC.slice(0, 50)) {
+      const snap = snaps[c.symbol];
+      if (!snap) continue;
+      const q   = snap.latestQuote || {};
+      const g   = snap.greeks || {};
+      const bid = parseFloat(q.bp || 0);
+      const ask = parseFloat(q.ap || 0);
+      const mid = bid > 0 && ask > 0 ? (bid + ask) / 2 : 0;
+      if (mid <= 0) continue;
+      const delta = Math.abs(parseFloat(g.delta || 0));
+      if (delta < deltaMin || delta > deltaMax) continue;
+      const strike = parseFloat(c.strike_price);
+      const expDTE = Math.round((new Date(c.expiration_date) - today) / 86400000);
+      const otm    = Math.abs((targetStrike - strike) / targetStrike * 100);
+      logEvent("filter", `${ticker} findContract: ${optionType} $${strike} | ${expDTE}DTE | delta${delta.toFixed(3)} | $${mid.toFixed(2)} | target delta${targetDelta} strike $${targetStrike}`);
+      return {
+        symbol:  c.symbol,
+        strike,
+        expDate: c.expiration_date,
+        expDays: expDTE,
+        premium: parseFloat(mid.toFixed(2)),
+        bid, ask,
+        spread:  ask > 0 ? (ask - bid) / ask : 1,
+        greeks:  { delta: parseFloat(g.delta || 0).toFixed(3),
+                   theta: parseFloat(g.theta || 0).toFixed(3),
+                   gamma: parseFloat(g.gamma || 0).toFixed(4),
+                   vega:  parseFloat(g.vega  || 0).toFixed(3) },
+        oi:      parseInt(snap.openInterest || 0),
+        iv:      parseFloat(snap.impliedVolatility || sigma),
+      };
+    }
 
-    // Log delta quality of protection leg
-    const deltaQuality = protectionDelta >= TARGET_PROTECTION_DELTA_MIN && protectionDelta <= TARGET_PROTECTION_DELTA_MAX
-      ? "good" : protectionDelta > 0 ? `outside target ${TARGET_PROTECTION_DELTA_MIN}-${TARGET_PROTECTION_DELTA_MAX}` : "unknown";
-    logEvent("filter", `${ticker} sell leg: $${strike} | mid $${mid.toFixed(2)} | width $${actualWidth} from buy $${buyContract.strike} | delta ${protectionDelta.toFixed(3)} (${deltaQuality})`);
-
-    return {
-      symbol:    best.symbol,
-      strike,
-      expDate:   buyContract.expDate,
-      expDays:   buyContract.expDays,
-      expiryType:buyContract.expiryType,
-      premium:   parseFloat(mid.toFixed(2)),
-      bid, ask,
-      spread:    ask > 0 ? (ask - bid) / ask : 1,
-      greeks: {
-        delta: parseFloat(greeks.delta || 0).toFixed(3),
-        theta: parseFloat(greeks.theta || 0).toFixed(3),
-        gamma: parseFloat(greeks.gamma || 0).toFixed(4),
-        vega:  parseFloat(greeks.vega  || 0).toFixed(3),
-      },
-      oi:      parseInt(snapData.openInterest || 0),
-      iv:      parseFloat(snapData.impliedVolatility || 0.3),
-    };
+    logEvent("filter", `${ticker} findContract: no valid ${optionType} found (target delta${targetDelta} strike $${targetStrike} window ${fetchMin}->${fetchMax})`);
+    return null;
   } catch(e) {
-    logEvent("error", `getSpreadSellLeg(${ticker}): ${e.message}`);
+    logEvent("error", `findContract(${ticker}): ${e.message}`);
     return null;
   }
 }
 
-
-// - Credit Spread Execution -
-// Sell the near strike, buy the far strike as protection
-// Collect net credit upfront - profit if underlying stays away from short strike
-// Used in choppy/high-VIX regimes where theta decay works in our favor
-// Put credit spread: sell higher put, buy lower put (below current price)
-// Call credit spread: sell lower call, buy higher call (above current price)
-// - Alpaca as source of truth for cash -
-// syncCashFromAlpaca() syncs state.cash from Alpaca account after every trade
-// and every 30 seconds. This eliminates cash drift between ARGO and Alpaca.
-async function syncCashFromAlpaca() {
-  if (!ALPACA_KEY) return;
+// -- executeDebitSpread ------------------------------------------------
+// Handles directional debit spreads (paths 3 + 4 in execution loop).
+// Replaces all the inline contract-fetching in the execution loop.
+//
+async function executeDebitSpread(stock, price, optionType, vix, score, scoreReasons, sizeMod, isMR = false) {
   try {
-    const acct = await alpacaGet("/account");
-    if (!acct || !acct.cash) return;
-    const alpacaCash      = parseFloat(acct.cash);
-    const alpacaBuyPower  = parseFloat(acct.buying_power || acct.cash);
-    const alpacaOptBP     = parseFloat(acct.options_buying_power || acct.buying_power || acct.cash);
-    state.alpacaCash      = alpacaCash;
-    state.alpacaBuyPower  = alpacaBuyPower;
-    state.alpacaOptBP     = alpacaOptBP; // options-specific buying power - gates new option entries
-    // Store full portfolio value (cash + open position market value) for profit lock
-    const alpacaEquity    = parseFloat(acct.equity || acct.portfolio_value || alpacaCash);
-    if (alpacaEquity > 0) state.alpacaEquity = alpacaEquity;
+    const targetDelta = optionType === "call" ? (isMR ? 0.40 : 0.35) : 0.35;
+    const targetDTE   = isMR ? 21 : 28;
+    // Spread width: price-relative (SPY->$15, QQQ->$13, TLT->$5)
+    const spreadWidth = Math.max(5, Math.round(price * 0.022));
 
-    // Alpaca tracks day trades authoritatively - use their count as source of truth
-    // acct.daytrade_count = rolling 5-day day trade count (resets as old trades age out)
-    // acct.pattern_day_trader = true if account has been flagged as PDT
-    if (acct.daytrade_count !== undefined) {
-      const alpacaDTCount = parseInt(acct.daytrade_count, 10);
-      if (!isNaN(alpacaDTCount)) {
-        const dtLeft = Math.max(0, PDT_LIMIT - alpacaDTCount);
-        if (alpacaDTCount !== (state._alpacaDayTradeCount || 0)) {
-          logEvent("scan", `[PDT] Alpaca count: ${alpacaDTCount}/3 - ${dtLeft} day trade${dtLeft===1?'':'s'} remaining (rolling 5-day window)`);
-        }
-        state._alpacaDayTradeCount = alpacaDTCount;
-        state._alpacaDayTradesLeft = dtLeft;
-      }
+    // Find buy (primary direction) leg
+    const buyLeg = await findContract(stock.ticker, optionType, targetDelta, targetDTE, vix, stock);
+    if (!buyLeg) {
+      logEvent("filter", `${stock.ticker} debit spread: no buy leg found (delta${targetDelta} DTE~${targetDTE})`);
+      return null;
     }
-    if (acct.pattern_day_trader !== undefined) {
-      state._patternDayTrader = acct.pattern_day_trader;
+
+    // Find sell (protection) leg on same expiry, spreadWidth away
+    const sellStrike = optionType === "put" ? buyLeg.strike - spreadWidth : buyLeg.strike + spreadWidth;
+    const sellDelta  = Math.max(0.05, parseFloat(buyLeg.greeks.delta) - 0.15);  // approx further OTM
+    const sellLeg    = await findContract(stock.ticker, optionType, sellDelta, targetDTE, vix, stock, buyLeg.expDate);
+    if (!sellLeg) {
+      logEvent("filter", `${stock.ticker} debit spread: no sell leg found on ${buyLeg.expDate}`);
+      return null;
     }
-    // Set accountBaseline on first sync if not already established
-    if (!state.accountBaseline) state.accountBaseline = alpacaCash;
-    const hasCustomBudget = state.customBudget && state.customBudget > 0 && state.customBudget !== MONTHLY_BUDGET;
-    if (!hasCustomBudget) {
-      const drift = Math.abs(alpacaCash - state.cash);
-      if (drift > 1.00) {
-        if (drift > 500) {
-          // Large drift = account reset - update all baselines
-          logEvent("scan", `[CASH SYNC] Large drift $${drift.toFixed(2)} - resetting baselines to $${alpacaCash.toFixed(2)}`);
-          state.dayStartCash  = alpacaCash;
-          state.weekStartCash = alpacaCash;
-          state.peakCash      = Math.max(state.peakCash || 0, alpacaCash);
-        } else {
-          logEvent("scan", `[CASH SYNC] Alpaca: $${alpacaCash.toFixed(2)} | ARGO: $${state.cash.toFixed(2)} | drift: $${drift.toFixed(2)} - syncing`);
-        }
-        state.cash = alpacaCash;
-        markDirty();
-      }
+
+    const actualWidth = Math.abs(buyLeg.strike - sellLeg.strike);
+    if (actualWidth < spreadWidth * 0.5) {
+      logEvent("filter", `${stock.ticker} debit spread: width $${actualWidth} too narrow`);
+      return null;
     }
-  } catch(e) {} // silent
+
+    const netDebit = parseFloat((buyLeg.premium - sellLeg.premium).toFixed(2));
+    if (netDebit <= 0) {
+      logEvent("filter", `${stock.ticker} debit spread: no debit (${netDebit}) - legs mispriced`);
+      return null;
+    }
+
+    const rrRatio = actualWidth > 0 ? netDebit / actualWidth : 1;
+    if (rrRatio > 0.40) {
+      logEvent("filter", `${stock.ticker} debit spread R/R ${(rrRatio*100).toFixed(0)}% (debit $${netDebit} / width $${actualWidth}) - above 40% max`);
+      return null;
+    }
+
+    logEvent("filter", `${stock.ticker} debit spread: buy $${buyLeg.strike} / sell $${sellLeg.strike} | width $${actualWidth} | net $${netDebit} | R/R ${(rrRatio*100).toFixed(0)}%`);
+    return await executeSpreadTrade(stock, price, score, scoreReasons, vix, optionType, buyLeg, sellLeg, false);
+  } catch(e) {
+    logEvent("error", `executeDebitSpread(${stock.ticker}): ${e.message}`);
+    return null;
+  }
 }
 
-
-
-// - Sync spread P&L from Alpaca positions -
-// Alpaca already calculates unrealized P&L correctly for each leg.
-// For spreads: net P&L = sum of unrealized_pl across buy + sell legs
-// Net current price = shortLeg.current_price - longLeg.current_price (credit)
-//                   = longLeg.current_price - shortLeg.current_price (debit)
-async function syncPositionPnLFromAlpaca() {
-  if (!ALPACA_KEY) return;
-  try {
-    const alpacaPositions = await alpacaGet("/positions");
-    if (!alpacaPositions || !Array.isArray(alpacaPositions)) return;
-
-    // Alpaca is the single source of truth for all financial data
-    // Build lookup by symbol
-    const alpacaBySymbol = {};
-    for (const ap of alpacaPositions) {
-      alpacaBySymbol[ap.symbol] = ap;
-    }
-
-    let updated = 0;
-    for (const pos of state.positions) {
-      if (!pos.isSpread || !pos.buySymbol || !pos.sellSymbol) continue;
-
-      const buyLeg  = alpacaBySymbol[pos.buySymbol];
-      const sellLeg = alpacaBySymbol[pos.sellSymbol];
-
-      if (!buyLeg || !sellLeg) continue;
-
-      // - Contracts: Alpaca is authoritative -
-      // Use abs(qty) from the buy leg (long leg always positive qty)
-      const alpacaContracts = Math.abs(parseInt(buyLeg.qty || 1));
-      if (alpacaContracts !== pos.contracts) {
-        logEvent("scan", `[ALPACA SYNC] ${pos.ticker} contracts: ${pos.contracts} - ${alpacaContracts} (Alpaca authoritative)`);
-        pos.contracts = alpacaContracts;
-      }
-
-      // - Current prices -
-      const buyPrice  = parseFloat(buyLeg.current_price  || 0);
-      const sellPrice = parseFloat(sellLeg.current_price || 0);
-
-      if (buyPrice > 0 && sellPrice > 0) {
-        const netPrice = pos.isCreditSpread
-          ? parseFloat((sellPrice - buyPrice).toFixed(2))   // cost to close
-          : parseFloat((buyPrice  - sellPrice).toFixed(2)); // current value
-        pos.currentPrice = netPrice;
-        pos.realData     = true;
-      }
-
-      // - P&L: sum both legs (Alpaca handles sign correctly) -
-      const netPnL = parseFloat(buyLeg.unrealized_pl || 0) + parseFloat(sellLeg.unrealized_pl || 0);
-      pos.unrealizedPnL = parseFloat(netPnL.toFixed(2));
-
-      // - Entry price / premium -
-      // Do NOT overwrite pos.premium from avg_entry_price - individual leg
-      // avg_entry_price doesn't reflect the net credit/debit received at entry.
-      // pos.premium is set correctly at fill confirmation and must be preserved.
-
-      // - Cost basis -
-      // Credit spread cost = margin reserved = maxLoss (max risk)
-      // Debit spread cost  = net debit paid  = premium - 100 - contracts
-      if (pos.maxLoss > 0) {
-        pos.cost = pos.isCreditSpread ? pos.maxLoss : pos.maxLoss;
-      }
-
-      // - Max profit / max loss (always recalculate from Alpaca data) -
-      const width = Math.abs((pos.buyStrike || 0) - (pos.sellStrike || 0));
-      if (width > 0 && pos.premium > 0) {
-        if (pos.isCreditSpread) {
-          pos.maxProfit = parseFloat((pos.premium          * 100 * pos.contracts).toFixed(2));
-          pos.maxLoss   = parseFloat(((width - pos.premium)* 100 * pos.contracts).toFixed(2));
-        } else {
-          pos.maxProfit = parseFloat(((width - pos.premium)* 100 * pos.contracts).toFixed(2));
-          pos.maxLoss   = parseFloat((pos.premium          * 100 * pos.contracts).toFixed(2));
-        }
-      }
-
-      // - Breakeven -
-      if (!pos.breakeven && pos.premium > 0) {
-        if (pos.isCreditSpread) {
-          pos.breakeven = pos.optionType === "put"
-            ? parseFloat((pos.sellStrike - pos.premium).toFixed(2))
-            : parseFloat((pos.sellStrike + pos.premium).toFixed(2));
-        } else {
-          pos.breakeven = pos.optionType === "put"
-            ? parseFloat((pos.buyStrike  - pos.premium).toFixed(2))
-            : parseFloat((pos.buyStrike  + pos.premium).toFixed(2));
-        }
-      }
-
-      // - dteLabel cleanup -
-      if (pos.dteLabel === "RECONCILED-SPREAD") pos.dteLabel = "SPREAD-MONTHLY";
-
-      updated++;
-    }
-    if (updated > 0) markDirty();
-  } catch(e) { logEvent("warn", `[ALPACA SYNC] syncPositionPnLFromAlpaca error: ${e.message}`); }
-}
-
-// - 3A: IRON CONDOR EXECUTION -
-// Iron condor = bull put spread (sell OTM put) + bear call spread (sell OTM call)
-// Profits when underlying stays within a range (ideal in choppy/low-vol regime)
-// Entry conditions: Regime A + IVR > 60 + VIX 18-28 (not too high, not too low)
+// -- executeIronCondor (rebuilt) ---------------------------------------
+// Calls findContractx4: put short/long + call short/long, same expiry.
+//
 async function executeIronCondor(stock, price, score, scoreReasons, vix) {
   try {
     const ivRankNow = state._ivRank || 50;
-    // Gate: only in choppy/low-vol regime with elevated IV
-    if (ivRankNow < 60) {
-      logEvent("filter", `${stock.ticker} iron condor blocked - IVR ${ivRankNow} < 60 (need elevated IV to collect enough premium both sides)`);
-      return null;
-    }
-    if (vix > 35) {
-      logEvent("filter", `${stock.ticker} iron condor blocked - VIX ${vix} too high (gap risk excessive for iron condors)`);
-      return null;
-    }
-    logEvent("filter", `${stock.ticker} iron condor: VIX ${vix.toFixed(1)} | IVR ${ivRankNow} - executing`);
+    if (ivRankNow < 60) { logEvent("filter", `${stock.ticker} iron condor: IVR ${ivRankNow} < 60`); return null; }
+    if (vix > 35)        { logEvent("filter", `${stock.ticker} iron condor: VIX ${vix} too high`); return null; }
 
-    // Spread width: tighter in moderate VIX (more premium per dollar of risk)
-    const spreadWidth = vix >= 25 ? 12 : 10;
-    const otmPct      = vix >= 25 ? 0.06 : 0.05; // how far OTM each side
+    const targetDTE   = 21;
+    const spreadWidth = Math.max(5, Math.round(price * 0.022));
 
-    // Bull put side: sell OTM put, buy lower put
-    const putShortTarget  = price * (1 - otmPct);
-    const putShortContract = await getRealOptionsContract(stock.ticker, putShortTarget, "put", score, vix, stock.earningsDate, false);
-    if (!putShortContract) { logEvent("filter", `${stock.ticker} iron condor: no put short leg`); return null; }
-    const putLongContract  = await getSpreadSellLeg(stock.ticker, "put", putShortContract);
-    if (!putLongContract)  { logEvent("filter", `${stock.ticker} iron condor: no put long leg`);  return null; }
+    logEvent("filter", `${stock.ticker} iron condor: VIX ${vix.toFixed(1)} | IVR ${ivRankNow} | width $${spreadWidth}`);
 
-    // Bear call side: sell OTM call, buy higher call
-    const callShortTarget  = price * (1 + otmPct);
-    const callShortContract = await getRealOptionsContract(stock.ticker, callShortTarget, "call", score, vix, stock.earningsDate, false);
-    if (!callShortContract) { logEvent("filter", `${stock.ticker} iron condor: no call short leg`); return null; }
-    const callLongContract  = await getSpreadSellLeg(stock.ticker, "call", callShortContract);
-    if (!callLongContract)  { logEvent("filter", `${stock.ticker} iron condor: no call long leg`);  return null; }
+    // Put side short leg
+    const putShort = await findContract(stock.ticker, "put", 0.20, targetDTE, vix, stock);
+    if (!putShort) { logEvent("filter", `${stock.ticker} iron condor: no put short leg`); return null; }
+    // Put side long leg (same expiry, spreadWidth below)
+    const putLong = await findContract(stock.ticker, "put", 0.08, targetDTE, vix, stock, putShort.expDate);
+    if (!putLong)  { logEvent("filter", `${stock.ticker} iron condor: no put long leg`); return null; }
+    // Call side short leg
+    const callShort = await findContract(stock.ticker, "call", 0.20, targetDTE, vix, stock);
+    if (!callShort) { logEvent("filter", `${stock.ticker} iron condor: no call short leg`); return null; }
+    // Call side long leg (same expiry, spreadWidth above)
+    const callLong = await findContract(stock.ticker, "call", 0.08, targetDTE, vix, stock, callShort.expDate);
+    if (!callLong)  { logEvent("filter", `${stock.ticker} iron condor: no call long leg`); return null; }
 
-    const putCredit   = parseFloat((putShortContract.premium  - putLongContract.premium).toFixed(2));
-    const callCredit  = parseFloat((callShortContract.premium - callLongContract.premium).toFixed(2));
+    const putCredit   = parseFloat((putShort.premium  - putLong.premium).toFixed(2));
+    const callCredit  = parseFloat((callShort.premium - callLong.premium).toFixed(2));
     const totalCredit = parseFloat((putCredit + callCredit).toFixed(2));
-
     if (totalCredit <= 0.50) { logEvent("filter", `${stock.ticker} iron condor: total credit $${totalCredit} too low`); return null; }
 
-    const putWidth    = Math.abs(putShortContract.strike  - putLongContract.strike);
-    const callWidth   = Math.abs(callShortContract.strike - callLongContract.strike);
-    const maxLoss     = parseFloat((Math.max(putWidth, callWidth) - totalCredit).toFixed(2)); // max loss is on one side
-    const marginReq   = parseFloat((maxLoss * 100).toFixed(2)); // 1 contract
+    const putWidth  = Math.abs(putShort.strike  - putLong.strike);
+    const callWidth = Math.abs(callShort.strike - callLong.strike);
+    const maxLoss   = Math.max(putWidth, callWidth) - totalCredit;
+    if (maxLoss <= 0) { logEvent("filter", `${stock.ticker} iron condor: invalid max loss`); return null; }
+    const rrRatio   = totalCredit / maxLoss;
+    if (rrRatio < 0.20) { logEvent("filter", `${stock.ticker} iron condor: R/R ${(rrRatio*100).toFixed(0)}% below 20%`); return null; }
 
-    if (marginReq > state.cash * 0.15) { logEvent("filter", `${stock.ticker} iron condor margin $${marginReq} exceeds 15% limit`); return null; }
-    if (state.cash - marginReq < CAPITAL_FLOOR) { logEvent("filter", `${stock.ticker} iron condor would breach capital floor`); return null; }
-
+    const marginRequired = parseFloat((maxLoss * 100).toFixed(2));
+    const creditCapPct   = (state.closedTrades||[]).filter(t=>t.pnl>0).length >= 20 ? 0.25 : 0.15;
+    if (marginRequired > state.cash * creditCapPct) { logEvent("filter", `${stock.ticker} iron condor: margin $${marginRequired} exceeds limit`); return null; }
     if (dryRunMode) {
-      logEvent("dryrun", `WOULD SELL IRON CONDOR ${stock.ticker} | puts $${putShortContract.strike}/$${putLongContract.strike} | calls $${callShortContract.strike}/$${callLongContract.strike} | total credit $${totalCredit} | max loss $${maxLoss} | margin $${marginReq} | score ${score}`);
+      logEvent("dryrun", `WOULD IRON CONDOR ${stock.ticker} put $${putShort.strike}/$${putLong.strike} call $${callShort.strike}/$${callLong.strike} | credit $${totalCredit} | R/R ${(rrRatio*100).toFixed(0)}%`);
       return null;
     }
 
-    // Execute as two separate credit spreads submitted together
-    // Store as special position type for tracking
-    logEvent("trade", `[IRON CONDOR] ${stock.ticker} | PUT $${putShortContract.strike}/$${putLongContract.strike} credit $${putCredit} | CALL $${callShortContract.strike}/$${callLongContract.strike} credit $${callCredit} | total $${totalCredit} | max loss $${maxLoss}`);
-
-    // Execute put credit spread leg
-    const putPos  = await executeCreditSpread(stock, price, score, scoreReasons, vix, "put");
-    // Execute call credit spread leg
-    const callPos = await executeCreditSpread(stock, price, score, scoreReasons, vix, "call");
-
-    if (putPos && callPos) {
-      logEvent("trade", `[IRON CONDOR] ${stock.ticker} both legs filled - iron condor complete`);
-      return { ironCondor: true, putLeg: putPos, callLeg: callPos, totalCredit, maxLoss };
-    }
-    logEvent("warn", `[IRON CONDOR] ${stock.ticker} partial fill - put:${!!putPos} call:${!!callPos}`);
-    return putPos || callPos || null;
+    logEvent("trade", `[IRON CONDOR] ${stock.ticker} put $${putShort.strike}/$${putLong.strike} | call $${callShort.strike}/$${callLong.strike} | credit $${totalCredit}`);
+    const _clientOrderId = `argo-ic-${stock.ticker}-${Math.floor(Date.now()/10000)}`;
+    const mlegBody = {
+      order_class: "mleg", type: "limit", time_in_force: "day", qty: "1",
+      limit_price: String(-totalCredit),
+      client_order_id: _clientOrderId,
+      legs: [
+        { symbol: putShort.symbol,  side: "sell", ratio_qty: "1", position_intent: "sell_to_open" },
+        { symbol: putLong.symbol,   side: "buy",  ratio_qty: "1", position_intent: "buy_to_open"  },
+        { symbol: callShort.symbol, side: "sell", ratio_qty: "1", position_intent: "sell_to_open" },
+        { symbol: callLong.symbol,  side: "buy",  ratio_qty: "1", position_intent: "buy_to_open"  },
+      ],
+    };
+    const resp = await alpacaPost("/orders", mlegBody);
+    if (!resp || resp.code || !resp.id) { logEvent("warn", `${stock.ticker} iron condor order failed: ${JSON.stringify(resp)?.slice(0,200)}`); return null; }
+    logEvent("trade", `[IRON CONDOR] submitted: ${resp.id}`);
+    return { pending: true };
   } catch(e) {
-    logEvent("error", `[IRON CONDOR] ${stock.ticker} error: ${e.message}`);
+    logEvent("error", `executeIronCondor(${stock.ticker}): ${e.message}`);
     return null;
   }
 }
 
 async function executeCreditSpread(stock, price, score, scoreReasons, vix, optionType, sizeMod = 1.0, spreadParamsOverride = null) {
   try {
-    // For put credit spread: sell ~0.30 delta put (OTM), buy ~0.20 delta put (further OTM)
-    // Target: sell strike ~5% below current price, buy $10 lower
-    // For call credit spread: sell ~0.30 delta call (OTM), buy ~0.20 delta call (further OTM)
-    // Spread width scales with VIX - wider = more profit potential
-    // Credit spreads: NARROW at high VIX (less tail risk exposure per contract)
-    // Market maker principle: sell premium when it's rich, but reduce max loss
-    // High VIX = tail events more likely = tighter protection = less max loss
-    // Debit spreads (executeSpreadTrade) correctly WIDEN at high VIX - different thesis
-    // OT-W1: At VIX 35, daily expected move is ~1.5% - $8 spread on $430 GLD = $6.45/day expected
-    // A spread narrower than one daily expected move will be crossed by normal vol
-    // Fix: minimum $12 at all VIX levels, wider at high VIX to capture more premium
-    // Use entryEngine spreadParams when available (professional calibration v2.0)
-    // Fallback to VIX-based heuristics if called without rb context (e.g. iron condor legs)
-    // creditWidth scales with underlying price to ensure long leg exists in chain
-    // Flat $15 works for SPY/QQQ ($600+) but is physically impossible for TLT ($84)
-    // 2.5% of underlying: SPY→$17, QQQ→$15, TLT→$5, GLD→$8
-    const _baseWidth = (spreadParamsOverride && spreadParamsOverride.creditWidth) || (vix >= 35 ? 15 : 12);
-    const spreadWidth = Math.max(5, Math.min(_baseWidth, Math.round(price * 0.025)));
-    const baseOTM     = (spreadParamsOverride && spreadParamsOverride.creditOTMpct) || (vix >= 30 ? 0.07 : vix >= 25 ? 0.06 : 0.05);
-    logEvent("filter", `${stock.ticker} credit spread: $${spreadWidth} wide, ${(baseOTM*100).toFixed(0)}% OTM (VIX ${vix.toFixed(1)}${spreadParamsOverride ? " | rb-calibrated" : ""})`);
-    const otmPct     = optionType === "put" ? -baseOTM : baseOTM;
-    logEvent("filter", `${stock.ticker} credit spread: ${(baseOTM*100).toFixed(0)}% OTM target (VIX ${vix.toFixed(1)})`);
-    const shortStrikeTarget = price * (1 + otmPct);
-    const longStrikeTarget  = optionType === "put"
-      ? shortStrikeTarget - spreadWidth
-      : shortStrikeTarget + spreadWidth;
+    // -- CREDIT SPREAD CONTRACT SELECTION -------------------------------------
+    // Rebuilt from scratch. Simple, direct, no layered abstraction.
+    //
+    // Step 1: Compute target short strike from delta (not OTM%)
+    // Step 2: Fetch the options chain for the target expiry window only
+    // Step 3: Find the contract closest to the target strike with valid price
+    // Step 4: Find the long leg protection contract on the same expiry
+    // Step 5: Validate width, credit, and R/R
+    // -------------------------------------------------------------------------
 
-    // Get short leg -- pass strikeTarget so contract selection honors OTM% target
-    // Credit spreads must use strike-proximity scoring, not just delta matching
-    const shortContract = await getRealOptionsContract(stock.ticker, shortStrikeTarget, optionType, score, vix, stock.earningsDate, false, shortStrikeTarget, spreadParamsOverride);
-    if (!shortContract) { logEvent("filter", `${stock.ticker} credit spread: no short leg found`); return null; }
+    // Parameters from entryEngine or sensible defaults
+    const targetDelta  = (spreadParamsOverride && spreadParamsOverride.shortDeltaTarget) || 0.20;
+    const targetDTE    = (spreadParamsOverride && spreadParamsOverride.targetDTE)        || 21;
+    const minDTE       = (spreadParamsOverride && spreadParamsOverride.minDTE)           || 14;
+    const minCreditRR  = (spreadParamsOverride && spreadParamsOverride.minCreditRatio)   || 0.20;
+    // Spread width: price-relative so TLT($86)->$5, SPY($675)->$15
+    const baseWidth    = (spreadParamsOverride && spreadParamsOverride.creditWidth)      || 15;
+    const spreadWidth  = Math.max(5, Math.min(baseWidth, Math.round(price * 0.025)));
 
-    // Get long leg (further OTM - we buy this as protection)
-    // Pass creditWidth from entryEngine spreadParams (default $15, crisis $7)
-    const _creditWidth = (spreadParamsOverride && spreadParamsOverride.creditWidth) || 15;
-    const longContract = await getSpreadSellLeg(stock.ticker, optionType, {
-      ...shortContract,
-      strike: shortContract.strike,
-    }, _creditWidth);
-    // getSpreadSellLeg finds _creditWidth away from shortContract.strike
-    if (!longContract) { logEvent("filter", `${stock.ticker} credit spread: no long leg found`); return null; }
+    // -- STEP 1: Target strike via B-S delta inversion ----------------------
+    // Use live IV from prefetch, fallback to VIX/100
+    const sigma = (stock._realIV && stock._realIV > 0.05) ? stock._realIV : vix / 100;
+    const T     = Math.max(0.01, targetDTE / 365);
+    const r     = 0.05;
+    // invPhi(1 - targetDelta) via A&S rational approximation
+    const _p = 1 - targetDelta;
+    const _q = Math.min(_p, 1 - _p);
+    const _t = Math.sqrt(-2 * Math.log(_q));
+    const _num = 2.515517 + 0.802853*_t + 0.010328*_t*_t;
+    const _den = 1 + 1.432788*_t + 0.189269*_t*_t + 0.001308*_t*_t*_t;
+    const _z   = (_p < 0.5 ? -1 : 1) * (_t - _num/_den);  // invPhi(1-delta)
+    const shortStrikeRaw = price * Math.exp(-(_z * sigma * Math.sqrt(T) - (r + sigma*sigma/2) * T));
+    const inc = price < 200 ? 0.5 : 1;  // $0.50 increments for TLT/GLD, $1 for SPY/QQQ
+    const shortStrike = Math.round(shortStrikeRaw / inc) * inc;
+    const longStrike  = optionType === "put" ? shortStrike - spreadWidth : shortStrike + spreadWidth;
+    const actualOTM   = Math.abs((price - shortStrike) / price * 100);
+    logEvent("filter", `${stock.ticker} credit spread: $${spreadWidth} wide | target delta ${targetDelta} -> short $${shortStrike} (${actualOTM.toFixed(1)}% OTM) / long $${longStrike} | ?=${(sigma*100).toFixed(0)}% DTE~${targetDTE}`);
+
+    // -- STEP 2: Fetch options chain for target expiry window only -----------
+    // Fetch minDTE->(targetDTE+14) window so short-dated weeklies don't fill the 1000-cap.
+    // This is the fix that stopped May contracts being crowded out by Apr weeklies.
+    const today      = getETTime();
+    const fetchMin   = new Date(today.getTime() + minDTE * 86400000).toISOString().split("T")[0];
+    const fetchMax   = new Date(today.getTime() + Math.min(45, targetDTE + 14) * 86400000).toISOString().split("T")[0];
+    const chainUrl   = `/options/contracts?underlying_symbol=${stock.ticker}&expiration_date_gte=${fetchMin}&expiration_date_lte=${fetchMax}&type=${optionType}&limit=200`;
+
+    let chainContracts = [];
+    let pageToken  = null;
+    let pages = 0;
+    do {
+      const url  = pageToken ? `${chainUrl}&page_token=${pageToken}` : chainUrl;
+      const page = await alpacaGet(url, ALPACA_OPTIONS);
+      if (!page || !page.option_contracts) break;
+      chainContracts = chainContracts.concat(page.option_contracts);
+      pageToken = page.next_page_token || null;
+      pages++;
+    } while (pageToken && pages < 5);
+
+    if (!chainContracts.length) {
+      logEvent("filter", `${stock.ticker} credit spread: no contracts in window ${fetchMin}->${fetchMax}`);
+      return null;
+    }
+    logEvent("filter", `${stock.ticker} credit spread: ${chainContracts.length} contracts in window (${fetchMin}->${fetchMax})`);
+
+    // -- STEP 3: Find short leg - closest contract to shortStrike, on best expiry -
+    // Sort by closeness to shortStrike, then by closeness to targetDTE
+    chainContracts.sort((a, b) => {
+      const aDist  = Math.abs(parseFloat(a.strike_price) - shortStrike);
+      const bDist  = Math.abs(parseFloat(b.strike_price) - shortStrike);
+      if (Math.abs(aDist - bDist) > 0.01) return aDist - bDist; // prefer closer strike
+      // Tiebreak: prefer expiry closer to targetDTE
+      const aExpDTE = Math.round((new Date(a.expiration_date) - today) / 86400000);
+      const bExpDTE = Math.round((new Date(b.expiration_date) - today) / 86400000);
+      return Math.abs(aExpDTE - targetDTE) - Math.abs(bExpDTE - targetDTE);
+    });
+
+    // Fetch snapshots for top candidates (sorted by strike proximity)
+    const candidateSymbols = chainContracts.slice(0, 50).map(c => c.symbol);
+    const snapBatches = [];
+    for (let i = 0; i < candidateSymbols.length; i += 25)
+      snapBatches.push(candidateSymbols.slice(i, i+25).join(","));
+
+    const snapResults = await Promise.all(snapBatches.map(b =>
+      alpacaGet(`/options/snapshots?symbols=${b}&feed=indicative`, ALPACA_OPT_SNAP)
+    ));
+    const snapshots = snapResults.reduce((acc, r) => ({ ...acc, ...(r?.snapshots || {}) }), {});
+
+    // Find best short leg contract: has price, delta in range, closest to target strike
+    let shortContract = null;
+    for (const c of chainContracts.slice(0, 50)) {
+      const snap   = snapshots[c.symbol];
+      if (!snap) continue;
+      const quote  = snap.latestQuote || {};
+      const greeks = snap.greeks || {};
+      const bid    = parseFloat(quote.bp || 0);
+      const ask    = parseFloat(quote.ap || 0);
+      const mid    = bid > 0 && ask > 0 ? (bid + ask) / 2 : 0;
+      if (mid <= 0) continue;
+      const delta  = Math.abs(parseFloat(greeks.delta || 0));
+      if (delta < 0.10 || delta > 0.35) continue;  // loose range - let R/R gate be the enforcer
+      const strike = parseFloat(c.strike_price);
+      const expDTE = Math.round((new Date(c.expiration_date) - today) / 86400000);
+      shortContract = {
+        symbol:  c.symbol,
+        strike,
+        expDate: c.expiration_date,
+        expDays: expDTE,
+        premium: parseFloat(mid.toFixed(2)),
+        bid, ask,
+        spread:  ask > 0 ? (ask - bid) / ask : 1,
+        greeks:  { delta: parseFloat(greeks.delta || 0).toFixed(3) },
+        oi:      parseInt(snap.openInterest || 0),
+        iv:      parseFloat(snap.impliedVolatility || sigma),
+      };
+      logEvent("filter", `${stock.ticker} short leg: $${strike} | ${expDTE}DTE | delta${delta.toFixed(3)} | $${mid.toFixed(2)}`);
+      break;
+    }
+
+    if (!shortContract) {
+      logEvent("filter", `${stock.ticker} credit spread: no valid short leg found in window`);
+      return null;
+    }
+
+    // -- STEP 4: Find long leg - same expiry, spreadWidth away --------------
+    const longStrikeActual = optionType === "put"
+      ? shortContract.strike - spreadWidth
+      : shortContract.strike + spreadWidth;
+
+    // Filter chain to same expiry, find closest to longStrikeActual
+    const sameExpiry = chainContracts.filter(c => c.expiration_date === shortContract.expDate);
+    sameExpiry.sort((a, b) =>
+      Math.abs(parseFloat(a.strike_price) - longStrikeActual) -
+      Math.abs(parseFloat(b.strike_price) - longStrikeActual)
+    );
+
+    // Pre-fetch snapshots for long leg candidates in one batch (avoids serial Alpaca calls)
+    const longCandidates = sameExpiry.slice(0, 20);
+    const longSymbolsNeeded = longCandidates.map(c => c.symbol).filter(s => !snapshots[s]);
+    if (longSymbolsNeeded.length > 0) {
+      const longBatches = [];
+      for (let i = 0; i < longSymbolsNeeded.length; i += 25)
+        longBatches.push(longSymbolsNeeded.slice(i, i+25).join(","));
+      const longSnaps = await Promise.all(longBatches.map(b =>
+        alpacaGet(`/options/snapshots?symbols=${b}&feed=indicative`, ALPACA_OPT_SNAP).catch(() => null)
+      ));
+      longSnaps.forEach(r => { if (r?.snapshots) Object.assign(snapshots, r.snapshots); });
+    }
+
+    let longContract = null;
+    for (const c of longCandidates) {
+      const snap   = snapshots[c.symbol];
+      if (!snap) continue;
+      const quote  = snap.latestQuote || {};
+      const bid    = parseFloat(quote.bp || 0);
+      const ask    = parseFloat(quote.ap || 0);
+      const mid    = bid > 0 && ask > 0 ? (bid + ask) / 2 : 0;
+      if (mid <= 0) continue;
+      const strike = parseFloat(c.strike_price);
+      longContract = {
+        symbol:  c.symbol,
+        strike,
+        expDate: c.expiration_date,
+        expDays: shortContract.expDays,
+        premium: parseFloat(mid.toFixed(2)),
+        bid, ask,
+      };
+      break;
+    }
+
+    if (!longContract) {
+      logEvent("filter", `${stock.ticker} credit spread: no long leg found at $${longStrikeActual} on ${shortContract.expDate}`);
+      return null;
+    }
 
     const actualWidth = Math.abs(shortContract.strike - longContract.strike);
-    if (actualWidth < 8) { logEvent("filter", `${stock.ticker} credit spread: width ${actualWidth} too narrow`); return null; }
+    if (actualWidth < spreadWidth * 0.5) {
+      logEvent("filter", `${stock.ticker} credit spread: width $${actualWidth} too narrow (need ? $${(spreadWidth * 0.5).toFixed(0)})`);
+      return null;
+    }
+    logEvent("filter", `${stock.ticker} long leg: $${longContract.strike} | width $${actualWidth} | $${longContract.premium.toFixed(2)}`);
 
     const netCredit  = parseFloat((shortContract.premium - longContract.premium).toFixed(2));
     if (netCredit <= 0) { logEvent("filter", `${stock.ticker} credit spread: no credit available (${netCredit})`); return null; }
@@ -5994,7 +5162,7 @@ async function executeCreditSpread(stock, price, score, scoreReasons, vix, optio
     // This requires ~80% win rate to break even -- achievable with proper strike selection
     // Worse than 4:1 (e.g. TLT $97 profit / $903 loss = 9.3:1) is not a viable strategy
     const rrRatioCred = maxLoss > 0 ? maxProfit / maxLoss : 0;
-    const MIN_CREDIT_RR = (spreadParamsOverride && spreadParamsOverride.minCreditRatio) || 0.20; // corrected: 0.20 floor matches entryEngine (was 0.30 — too high for delta 0.17 spreads)
+    const MIN_CREDIT_RR = (spreadParamsOverride && spreadParamsOverride.minCreditRatio) || 0.20; // corrected: 0.20 floor matches entryEngine (was 0.30 - too high for delta 0.17 spreads)
     if (rrRatioCred < MIN_CREDIT_RR) {
       logEvent("filter", `${stock.ticker} credit spread R/R ${(rrRatioCred*100).toFixed(0)}% (credit $${netCredit} / risk $${maxLoss}) - below ${(MIN_CREDIT_RR*100).toFixed(0)}% minimum - skip`);
       return null;
@@ -6522,7 +5690,7 @@ async function executeTrade(stock, price, score, scoreReasons, vix, optionType =
   }
 
   // Use cached contract from parallel prefetch if available, else fetch now
-  let contract = stock._cachedContract || await getRealOptionsContract(stock.ticker, price, optionType, score, vix, stock.earningsDate, isMeanReversion);
+  let contract = stock._cachedContract || await findContract(stock.ticker, optionType, isMeanReversion ? 0.40 : 0.35, isMeanReversion ? 21 : 28, vix, stock);
   delete stock._cachedContract; // clean up cache after use
 
   // Fallback to estimated contract if real data unavailable
@@ -6534,7 +5702,11 @@ async function executeTrade(stock, price, score, scoreReasons, vix, optionType =
     state.dataQuality.estimatedTrades++;
     state.dataQuality.totalTrades++;
     const iv       = 0.25 + stock.ivr * 0.003;
-    const { expDate, expDays, expiryType } = selectExpiry(score, vix, optionType, stock.earningsDate, stock.ticker);
+    // Simple fallback DTE: 28 days for directional, 21 for MR
+    const expDays = isMeanReversion ? 21 : 28;
+    const _expDate = new Date(Date.now() + expDays * 86400000);
+    const expDate = _expDate.toLocaleDateString('en-US', { month: 'short', day: '2-digit', year: 'numeric' });
+    const expiryType = 'weekly';
     const otmPct   = stock.momentum === "strong" ? 0.035 : 0.045;
     const strike   = optionType === "put"
       ? Math.round(price * (1 - otmPct) / 5) * 5
@@ -10261,7 +9433,7 @@ async function runScan() {
       await Promise.all(batch.map(async ({ stock, price, optionType, score }) => {
         try {
           const isMR = optionType === "call" && (stock._isMeanReversion || false);
-        const contract = await getRealOptionsContract(stock.ticker, price, optionType, score, state.vix, stock.earningsDate, isMR);
+        const contract = await findContract(stock.ticker, optionType, isMR ? 0.40 : 0.35, isMR ? 21 : 28, state.vix, stock);
           if (contract) {
             stock._cachedContract = contract;
             // Store real IV from options market for use in scoring
@@ -10406,60 +9578,11 @@ async function runScan() {
       const _sizeMod = sizeMod || 1.0;
       const creditPos = await executeCreditSpread(stock, price, score, reasons, state.vix, optionType, _sizeMod, rb.spreadParams);
       entered = !!creditPos;
-    } else if (useSpread) {
-      // Trending regime: buy direction via debit spread
-      const buyContract  = await getRealOptionsContract(stock.ticker, price, optionType, score, state.vix, stock.earningsDate, false);
-      if (!buyContract) { logEvent("filter", `${stock.ticker} spread: no buy leg found`); continue; }
-
-      // Use dedicated sell leg lookup - VIX-scaled spread width
-      const targetSpreadWidth = state.vix >= 35 ? 20 : state.vix >= 25 ? 15 : 10;
-      const sellContract = await getSpreadSellLeg(stock.ticker, optionType, buyContract, targetSpreadWidth);
-      const spreadActualWidth = sellContract ? Math.abs(buyContract.strike - sellContract.strike) : 0;
-
-      if (sellContract && spreadActualWidth >= targetSpreadWidth - 2) {
-        const netDebitCheck = parseFloat((buyContract.premium - sellContract.premium).toFixed(2));
-        const rrRatio = spreadActualWidth > 0 ? netDebitCheck / spreadActualWidth : 1;
-        // Panel fix: validate risk/reward - netDebit must be -40% of spread width
-        // e.g. $15 wide spread: max debit = $6.00 (risk $600 to make $900)
-        // If ratio > 0.40 you're risking more than you can make - skip
-        if (rrRatio > 0.40) {
-          logEvent("filter", `${stock.ticker} spread r/r rejected: net $${netDebitCheck} / width $${spreadActualWidth} = ${(rrRatio*100).toFixed(0)}% (max 40%) - skipping`);
-          continue;
-        }
-        logEvent("filter", `${stock.ticker} spread: buy $${buyContract.strike} / sell $${sellContract.strike} | net $${netDebitCheck} | width $${spreadActualWidth} | r/r ${(rrRatio*100).toFixed(0)}%`);
-        const spreadPos = await executeSpreadTrade(stock, price, score, reasons, state.vix, optionType, buyContract, sellContract, rb.gates.choppyDebitBlock);
-        entered = !!spreadPos;
-      } else {
-        // Sell leg not found - SKIP entirely, never fall through to naked
-        // Naked puts have unlimited downside - not acceptable for defined-risk strategy
-        logEvent("warn", `${stock.ticker} spread: sell leg not found or too narrow (width $${spreadActualWidth}) - SKIPPING (no naked fallthrough)`);
-        continue;
-      }
-    } else if (isMeanReversion) {
-      // Mean reversion call - use debit spread, not naked
-      // Panel unanimous (7/7): naked MR calls violate defined-risk strategy.
-      // The "full leverage" argument doesn't hold for PDT sub-$25k accounts.
-      // Expected MR bounce (4-6%) is fully captured within a $10-wide spread.
-      // Spread also hedges vega risk - both legs lose on IV expansion if bounce fails.
-      // Use $10 wide (tighter than trending spreads) since MR is a shorter-term thesis.
-      const mrBuyContract = await getRealOptionsContract(stock.ticker, price, optionType, score, state.vix, stock.earningsDate, true); // isMeanReversion=true for DTE
-      if (!mrBuyContract) { logEvent("filter", `${stock.ticker} MR spread: no buy leg found`); continue; }
-      const mrSpreadWidth = state.vix >= 35 ? 12 : 10; // tighter than trending spreads
-      const mrSellContract = await getSpreadSellLeg(stock.ticker, optionType, mrBuyContract, mrSpreadWidth);
-      if (mrSellContract && Math.abs(mrBuyContract.strike - mrSellContract.strike) >= mrSpreadWidth - 2) {
-        const mrActualWidth = Math.abs(mrBuyContract.strike - mrSellContract.strike);
-        const mrNetDebit = parseFloat((mrBuyContract.premium - mrSellContract.premium).toFixed(2));
-        const mrRR = mrActualWidth > 0 ? mrNetDebit / mrActualWidth : 1;
-        if (mrRR > 0.40) {
-          logEvent("filter", `${stock.ticker} MR spread r/r rejected: net $${mrNetDebit} / width $${mrActualWidth} = ${(mrRR*100).toFixed(0)}% (max 40%) - skipping`);
-          continue;
-        }
-        logEvent("filter", `${stock.ticker} MR spread: buy $${mrBuyContract.strike} / sell $${mrSellContract.strike} | net $${mrNetDebit} | width $${mrActualWidth} | r/r ${(mrRR*100).toFixed(0)}%`);
-        const mrSpreadPos = await executeSpreadTrade(stock, price, score, reasons, state.vix, optionType, mrBuyContract, mrSellContract, false);
-        entered = !!mrSpreadPos;
-      } else {
-        // No sell leg found - skip, do not fall back to naked
-        logEvent("warn", `${stock.ticker} MR spread: no sell leg within $${mrSpreadWidth} - skipping (no naked fallback per panel decision)`);
+    } else if (useSpread || isMeanReversion) {
+      // Debit spread (directional) or MR call spread - both handled by executeDebitSpread
+      const debitPos = await executeDebitSpread(stock, price, optionType, state.vix, score, reasons, sizeMod || 1.0, isMeanReversion);
+      entered = !!debitPos;
+      if (!debitPos) {
         continue;
       }
     } else {
