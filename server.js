@@ -5056,7 +5056,7 @@ async function getWeeklyTrend(ticker) {
 }
 
 // - Pre-trade Filters -
-async function checkAllFilters(stock, price) {
+async function checkAllFilters(stock, price, tradeType = null) {
   const fails = [];
 
   // 1. Entry window - SPY/QQQ open at 9:30am, individual stocks at 9:45am
@@ -5111,7 +5111,15 @@ async function checkAllFilters(stock, price) {
       const implied  = stock.ivr * 0.4 + 15; // approximate IV from IVR (IVR=50 - ~35% IV)
       const volGap   = implied - realized;
       // Skip if implied vol is more than 20 points above realized (options too expensive)
-      if (volGap > 20) return { pass: false, reason: `Vol gap ${volGap.toFixed(1)}pts - implied ${implied.toFixed(0)}% vs realized ${realized.toFixed(0)}% - options expensive` };
+      // CREDIT trades: high IV is FAVORABLE (we are the seller) — skip the block, log as positive
+      const isCredit = tradeType && tradeType.startsWith('credit');
+      if (volGap > 20) {
+        if (isCredit) {
+          logEvent("filter", `${stock.ticker} vol gap ${volGap.toFixed(1)}pts - IV rich vs realized - favorable for credit seller`);
+        } else {
+          return { pass: false, reason: `Vol gap ${volGap.toFixed(1)}pts - implied ${implied.toFixed(0)}% vs realized ${realized.toFixed(0)}% - options expensive` };
+        }
+      }
       // Bonus signal: if realized > implied, options are cheap (underpriced) - log as positive
       if (realized > implied + 5) logEvent("filter", `${stock.ticker} vol gap FAVORABLE - realized ${realized.toFixed(0)}% > implied ${implied.toFixed(0)}%`);
     } else {
@@ -5962,7 +5970,7 @@ async function executeCreditSpread(stock, price, score, scoreReasons, vix, optio
     // This requires ~80% win rate to break even -- achievable with proper strike selection
     // Worse than 4:1 (e.g. TLT $97 profit / $903 loss = 9.3:1) is not a viable strategy
     const rrRatioCred = maxLoss > 0 ? maxProfit / maxLoss : 0;
-    const MIN_CREDIT_RR = (spreadParamsOverride && spreadParamsOverride.minCreditRatio) || 0.30; // entryEngine v2.0: 0.30 floor (was 0.25)
+    const MIN_CREDIT_RR = (spreadParamsOverride && spreadParamsOverride.minCreditRatio) || 0.20; // corrected: 0.20 floor matches entryEngine (was 0.30 — too high for delta 0.17 spreads)
     if (rrRatioCred < MIN_CREDIT_RR) {
       logEvent("filter", `${stock.ticker} credit spread R/R ${(rrRatioCred*100).toFixed(0)}% (credit $${netCredit} / risk $${maxLoss}) - below ${(MIN_CREDIT_RR*100).toFixed(0)}% minimum - skip`);
       return null;
@@ -10254,7 +10262,7 @@ async function runScan() {
     }
     if (state.cash <= CAPITAL_FLOOR) break;
 
-    const { pass, reason } = await checkAllFilters(stock, price);
+    const { pass, reason } = await checkAllFilters(stock, price, tradeIntent?.type || null);
     if (!pass) {
       const putBypassReasons = ["sector ETF", "support", "VWAP", "breakdown"];
       const canBypassForPut  = optionType === "put" && putBypassReasons.some(r => reason?.includes(r));
