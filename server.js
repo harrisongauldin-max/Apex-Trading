@@ -1612,7 +1612,14 @@ function scoreIndexSetup(stock, optionType, spyRSI, spyMACD, spyMomentum, breadt
   const regime     = (agentMacro || {}).regime     || "neutral";
   const entryBias  = (agentMacro || {}).entryBias  || "neutral";
   const tradeType  = (agentMacro || {}).tradeType  || "spread";
-  const vixOutlook = (agentMacro || {}).vixOutlook || "unknown";
+  // Derive vixOutlook deterministically when agent returns unknown/missing
+  // Agent is often right but can omit this field — VIX level is objective
+  const rawVixOutlook = (agentMacro || {}).vixOutlook || "unknown";
+  const vixOutlook = rawVixOutlook !== "unknown" ? rawVixOutlook
+    : vix >= 32 ? "spiking"
+    : vix >= 25 ? "elevated_stable"
+    : vix >= 20 ? "mean_reverting"
+    : "falling";
 
   // Supplementary signals - capped at +25 total, declared at function scope
   // so both put and call branches can use it
@@ -1623,19 +1630,22 @@ function scoreIndexSetup(stock, optionType, spyRSI, spyMACD, spyMomentum, breadt
   // 1-2 signals: full weight. 3rd signal: 70%. 4th+: 50%.
   // Primary signals = agent, regime, RSI, MACD, breadth. Supplementary are separate.
   // Count the number of primary pro-entry reasons already in the score
-  const proEntryKeywords = optionType === "put"
-    ? ["Agent strongly bearish","Agent bearish","Agent mild bearish","Regime: trending_bear","Regime: breakdown","RSI","MACD bearish","Breadth","VIX spiking"]
-    : ["Agent strongly bullish","Agent bullish","Agent mild bullish","Regime: recovery","Regime: trending_bull","RSI","MACD bullish","Breadth","VIX compressing","VIX mean reverting"];
-  const primaryFired = reasons.filter(r => proEntryKeywords.some(kw => r.includes(kw))).length;
-  if (primaryFired >= 4) {
-    // 4+ macro signals all firing together = likely same event counted multiple times
-    const discountPct = 15;
+  // QS-W1: Correlation discount — only apply to EVENT-driven signals, not structural ones.
+  // Structural signals (regime, entryBias, VIX level) legitimately co-fire in Regime B by definition.
+  // Event signals (agent bearish + MACD crossover + breadth crash) may reflect one macro event.
+  // Threshold raised 4→5: Regime B routinely has 4 valid independent signals.
+  const eventKeywords = optionType === "put"
+    ? ["Agent strongly bearish","Agent bearish","Agent mild bearish","MACD bearish","Breadth"]
+    : ["Agent strongly bullish","Agent bullish","Agent mild bullish","MACD bullish","Breadth"];
+  const primaryFired = reasons.filter(r => eventKeywords.some(kw => r.includes(kw))).length;
+  if (primaryFired >= 5) {
+    const discountPct = 10;
     score = Math.round(score * (1 - discountPct/100));
-    reasons.push(`Macro correlation discount: ${primaryFired} correlated signals (-${discountPct}% on total)`);
-  } else if (primaryFired === 3) {
-    const discountPct = 8;
+    reasons.push(`Macro correlation discount: ${primaryFired} event signals (-${discountPct}% on total)`);
+  } else if (primaryFired >= 4) {
+    const discountPct = 5;
     score = Math.round(score * (1 - discountPct/100));
-    reasons.push(`Macro correlation discount: ${primaryFired} correlated signals (-${discountPct}% on total)`);
+    reasons.push(`Macro correlation discount: ${primaryFired} event signals (-${discountPct}% on total)`);
   }
 
   let supplementScore = 0;
@@ -1778,13 +1788,27 @@ function scoreIndexSetup(stock, optionType, spyRSI, spyMACD, spyMomentum, breadt
     // The longer the bear trend is confirmed, the higher confidence puts are the right trade
     // Research: sustained regime (3+ days below 200MA) has higher directional accuracy than intraday regime calls
     // _regimeDuration tracks days SPY has been below 200MA (incremented daily in regime classifier)
-    const regimeDuration = state._regimeDuration || 0;
-    if (["trending_bear","breakdown"].includes(regime) && regimeDuration >= 10) {
-      score += 15; reasons.push(`Bear trend confirmed ${regimeDuration}d - sustained regime high confidence (+15)`);
-    } else if (["trending_bear","breakdown"].includes(regime) && regimeDuration >= 5) {
-      score += 10; reasons.push(`Bear trend confirmed ${regimeDuration}d - sustained regime (+10)`);
-    } else if (["trending_bear","breakdown"].includes(regime) && regimeDuration >= 3) {
-      score += 5; reasons.push(`Bear trend confirmed ${regimeDuration}d - regime establishing (+5)`);
+    // Regime duration bonus — two paths:
+    // 1. SPY below 200MA for N days (classic bear regime duration, tracked by _regimeDuration)
+    // 2. VIX 5-day rolling average >= 25 (sustained fear — Regime B can exist above 200MA)
+    // _vixHistory is a 5-entry intraday window (not days). Use _vixSustained (actual 5-day avg).
+    // _vixSustained is computed once per scan: avg of _vixHistory entries. Already maintained.
+    const regimeDuration    = state._regimeDuration || 0;
+    const vixSustainedAvg   = state._vixSustained   || 0;  // actual 5-day rolling average
+    const vixSustainedBonus = vixSustainedAvg >= 28 ? 5    // sustained elevated fear
+                            : vixSustainedAvg >= 25 ? 3    // moderate sustained fear
+                            : 0;
+    const effectiveDuration = regimeDuration; // 200MA days remains the primary metric
+    if (["trending_bear","breakdown"].includes(regime) && effectiveDuration >= 5) {
+      score += 15; reasons.push(`Bear trend ${effectiveDuration}d below 200MA - high confidence (+15)`);
+    } else if (["trending_bear","breakdown"].includes(regime) && effectiveDuration >= 3) {
+      score += 10; reasons.push(`Bear trend ${effectiveDuration}d below 200MA - regime confirmed (+10)`);
+    } else if (["trending_bear","breakdown"].includes(regime) && effectiveDuration >= 1) {
+      score += 5; reasons.push(`Bear trend ${effectiveDuration}d below 200MA - regime establishing (+5)`);
+    }
+    // Separate VIX sustained bonus — additive but capped independently
+    if (["trending_bear","breakdown"].includes(regime) && vixSustainedBonus > 0) {
+      score += vixSustainedBonus; reasons.push(`VIX 5d avg ${vixSustainedAvg.toFixed(1)} sustained elevated (+${vixSustainedBonus})`);
     }
 
     // - SPY technicals (V2.81 - all thresholds now use daily RSI) -
@@ -1806,6 +1830,10 @@ function scoreIndexSetup(stock, optionType, spyRSI, spyMACD, spyMomentum, breadt
       }
     }
     else if (spyRSI >= 60)                                                        { score += 10; reasons.push(`SPY RSI ${spyRSI} elevated (+10)`); }
+    else if (spyRSI >= 45 && spyRSI < 60 && inBearOrChoppy && entryBias === "puts_on_bounces") {
+      // RSI 45-60 in Regime B bounce-fade = mild overbought recovery — valid put entry zone
+      score += 8; reasons.push(`SPY RSI ${spyRSI} in bounce zone - puts_on_bounces Regime B (+8)`);
+    }
     else if (spyRSI <= 35)                                                        {
       // Credit spreads: oversold = sell fear premium (survivable, not ideal) - reduced bonus
       // Debit put spreads: oversold = stock already crashed - hard zero
@@ -1845,12 +1873,20 @@ function scoreIndexSetup(stock, optionType, spyRSI, spyMACD, spyMomentum, breadt
     // V2.81 change 4: RSI velocity penalty
     // Fast RSI moves are statistically less reliable than sustained readings
     // If daily RSI moved 20+ points in recent sessions, the signal is a fast bounce/crash not a regime condition
+    // RSI velocity penalty — exempt Regime B: wide RSI swings are normal in bear trends
+    // This penalty was designed for Regime A (bull) where fast RSI moves indicate chasing
     const rsiHistRaw = state._rsiHistory?.[stock.ticker] || [];
     const rsiHistory = rsiHistRaw.map(r => typeof r === 'object' ? (r?.rsi || 50) : r);
-    if (rsiHistory.length >= 3) {
+    const inBearForVelocity = ["trending_bear","breakdown"].includes(regime);
+    if (rsiHistory.length >= 3 && !inBearForVelocity) {
       const rsiChange = Math.abs(spyRSI - rsiHistory[rsiHistory.length - 3]);
       if (rsiChange >= 20) {
         score -= 8; reasons.push(`RSI velocity: ${rsiChange.toFixed(0)}pt move in 3 sessions - fast moves less reliable (-8)`);
+      }
+    } else if (rsiHistory.length >= 3 && inBearForVelocity) {
+      const rsiChange = Math.abs(spyRSI - rsiHistory[rsiHistory.length - 3]);
+      if (rsiChange >= 30) { // higher threshold in bear regime - wide swings are normal
+        score -= 4; reasons.push(`RSI velocity: ${rsiChange.toFixed(0)}pt swing - extreme even for bear trend (-4)`);
       }
     }
 
@@ -1866,6 +1902,7 @@ function scoreIndexSetup(stock, optionType, spyRSI, spyMACD, spyMomentum, breadt
     // - Breadth confirmation -
     if (breadth <= 30)       { score += 15; reasons.push(`Breadth ${breadth}% - severe weakness (+15)`); }
     else if (breadth <= 45)  { score += 8;  reasons.push(`Breadth ${breadth}% - weak (+8)`); }
+    else if (breadth <= 65 && inBearOrChoppy) { score += 4; reasons.push(`Breadth ${breadth}% - below neutral in bear regime (+4)`); }
     else if (breadth >= 70)  { score -= 15; reasons.push(`Breadth ${breadth}% - strong, wrong for puts (-15)`); }
 
     // - VIX context -
@@ -1902,9 +1939,22 @@ function scoreIndexSetup(stock, optionType, spyRSI, spyMACD, spyMomentum, breadt
     // - IV Percentile for puts - high IVR is partially favorable (richer premium)
     // but very high IVR means move already happened (less upside)
     const ivpPut = stock.ivPercentile || 50;
-    if (ivpPut < 25)       { score += 8;  reasons.push(`IVP ${ivpPut}% - cheap puts, favorable entry (+8)`); }
-    else if (ivpPut >= 70) { score += 5;  reasons.push(`IVP ${ivpPut}% - elevated IV, rich put premium (+5)`); }
-    else if (ivpPut >= 90) { score -= 5;  reasons.push(`IVP ${ivpPut}% - extreme IV, move may be priced in (-5)`); }
+    if (ivpPut < 25)        { score += 8;  reasons.push(`IVP ${ivpPut}% - cheap puts, favorable entry (+8)`); }
+    else if (ivpPut >= 90)  {
+      // IVP 90%+: extreme IV. For debit puts: move may already be priced in (-5).
+      // For credit spreads: ideal — collect extremely rich premium (+12).
+      if (creditModeActive) {
+        supplementScore += 12; reasons.push(`IVP ${ivpPut}% - extreme IV, ideal credit premium collection (+12)`);
+      } else {
+        score -= 5; reasons.push(`IVP ${ivpPut}% - extreme IV, debit put risk: move priced in (-5)`);
+      }
+    }
+    else if (ivpPut >= 70)  {
+      // Credit spreads: high IVP = selling overpriced premium = MORE favorable
+      const ivpBonus = creditModeActive ? 10 : 5;
+      supplementScore += ivpBonus;
+      reasons.push(`IVP ${ivpPut}% - ${creditModeActive ? "credit spread premium rich" : "elevated IV"} (+${ivpBonus})`);
+    }
 
     // - QQQ secondary - only when tech thesis clear -
     // Panel fix: in Regime B/C with only 4 instruments, agent.bearishTickers is
@@ -7617,8 +7667,8 @@ async function runScan() {
 
     // 5-day breadth direction
     const bHist = state._breadthHistory;
-    if (bHist.length >= 3) {
-      const bRecent = bHist.slice(-3).map(b=>b.v);
+    if (bHist.length >= 2) {  // lowered from 3 — 2 readings enough to establish direction
+      const bRecent = bHist.slice(-Math.min(3, bHist.length)).map(b=>b.v);
       const bOld    = bHist.slice(0, Math.min(3, bHist.length)).map(b=>b.v);
       const bAvgRecent = bRecent.reduce((a,b)=>a+b,0)/bRecent.length;
       const bAvgOld    = bOld.reduce((a,b)=>a+b,0)/bOld.length;
@@ -7901,6 +7951,25 @@ async function runScan() {
       marketContext.skew = skew;
       state._skew = { ...skew, updatedAt: Date.now() };
       logEvent("scan", `[SKEW] ${skew.skew} (${skew.signal}) ${skew.creditPutIdeal ? "- CREDIT PUT IDEAL" : ""}`);
+    } else {
+      // Fix #8: Fallback synthetic SKEW from VIX when options chain fetch returns null
+      // VIX 30+ ≈ SKEW 130+ (extreme), VIX 25-30 ≈ SKEW 120-130 (elevated), VIX <25 ≈ normal
+      // This ensures _skew is never empty during elevated VIX environments
+      const vixNow = state.vix || 20;
+      if (!state._skew && vixNow >= 25) {
+        const synthSkew = vixNow >= 32 ? 135 : vixNow >= 28 ? 128 : vixNow >= 25 ? 122 : 110;
+        const synthSignal = synthSkew >= 130 ? "extreme" : synthSkew >= 120 ? "elevated" : "moderate";
+        const synthSmirk  = parseFloat(((synthSkew - 100) / 200 + 1).toFixed(3));
+        const synthResult = {
+          skew: synthSkew, smirkRatio: synthSmirk, signal: synthSignal,
+          creditPutIdeal: synthSkew >= 120 && vixNow >= 25,
+          synthetic: true, vixBased: true,
+          updatedAt: Date.now(),
+        };
+        state._skew = synthResult;
+        marketContext.skew = synthResult;
+        logEvent("scan", `[SKEW] VIX-based fallback: ${synthSkew} (${synthSignal}) - chain fetch returned null`);
+      }
     }
     if (sentiment) {
       marketContext.aaii = sentiment; // scoring reads state._aaii — wire sentiment here
@@ -9419,9 +9488,11 @@ async function runScan() {
       const spyRSI      = liveStock.dailyRsi || liveStock.rsi || 50;
       const spyMACD     = liveStock.macd || "neutral";
       const spyMomentum = liveStock.momentum || "steady";
+      // FIX B: breadth is now an object {breadthPct, advancing, declining, breadthStrength}
+      // Previous code returned NaN→50 because parseFloat({object}) = NaN
       const breadthVal  = typeof marketContext?.breadth === "number"
         ? marketContext.breadth * 100
-        : parseFloat((marketContext?.breadth || "50").toString()) || 50;
+        : marketContext?.breadth?.breadthPct ?? 50;
       // Pass credit mode to scoreIndexSetup so RSI block and scoring adjust correctly
       // Scoring uses authRegimeName (price-based, computed once at scan top)
       // Agent signal/confidence/entryBias used for magnitude -- regime overridden by price classifier
@@ -9566,9 +9637,14 @@ async function runScan() {
       putSetup.score = Math.min(100, putSetup.score + 8);
       putSetup.reasons.push(`High volume confirms selling pressure (+8)`);
     } else if (volRatio < 0.6) {
-      // Very low volume selloff - weak conviction, slight penalty
-      putSetup.score = Math.max(0, putSetup.score - 3);
-      putSetup.reasons.push(`Low volume selloff (-3)`);
+      // Low volume selloff - exempt Regime B: low vol pullbacks are normal in bear trends
+      const inBearForVol = ["B","C"].includes(state._regimeClass);
+      if (!inBearForVol) {
+        putSetup.score = Math.max(0, putSetup.score - 3);
+        putSetup.reasons.push(`Low volume selloff (-3)`);
+      } else {
+        putSetup.reasons.push(`Low volume selloff - Regime B exempt (+0)`);
+      }
     }
 
     // V2.82: time of day multiplier replaced by flat min score gate (see timeOfDayMinScore above)
@@ -9760,9 +9836,19 @@ async function runScan() {
     // Puts only benefit from genuinely bearish macro - neutral is not a put signal
     // If macro is neutral (modifier = 0), puts get 0 boost not a bonus
     // If macro is bullish (modifier > 0), puts get penalized
+    // EXCEPTION: puts_on_bounces in Regime B — mild bullish IS the fade setup, no penalty
     const agentMacroForScoring = (state._agentMacro || {}).signal || "neutral";
     const isBearishMacro = ["bearish", "strongly bearish", "mild bearish"].includes(agentMacroForScoring);
-    let macroPutMod = isBearishMacro ? Math.abs(macro.scoreModifier || 0) : -(macro.scoreModifier || 0);
+    const entryBiasNow   = (state._agentMacro || {}).entryBias || "neutral";
+    // Belt-and-suspenders: check regime class directly in case entryBias is stale between agent runs
+    const putsOnBouncesFade = (entryBiasNow === "puts_on_bounces" || ["B","C"].includes(state._regimeClass))
+      && agentMacroForScoring === "mild bullish";
+    // puts_on_bounces + mild bullish = bounce fade thesis — treat macro as neutral (0), not penalty
+    let macroPutMod = isBearishMacro
+      ? Math.abs(macro.scoreModifier || 0)
+      : putsOnBouncesFade
+        ? 0
+        : -(macro.scoreModifier || 0);
 
     // Extra sector-specific adjustment
     if (macro.sectorBearish.includes(stock.sector)) { macroCallMod -= 10; macroPutMod += 10; }
@@ -11898,7 +11984,7 @@ app.get("/api/score-debug", (req, res) => {
         bestScore,
         bestType,
         effectiveMin: snap.effectiveMin,
-        wouldEnter:  blocks.length === 0 || (blocks.length === 1 && (blocks[0].includes("credit") && bestScore >= snap.effectiveMin)),
+        wouldEnter:  bestScore >= snap.effectiveMin && (blocks.length === 0 || (blocks.length === 1 && blocks[0].includes("credit"))),
         blocks,
         constraint:  instrConstraint ? `${instrConstraint.allowedTypes.join("/")} only${instrConstraint.reason ? " - " + instrConstraint.reason : ""}` : null,
         putReasons:  snap.putReasons  || [],
