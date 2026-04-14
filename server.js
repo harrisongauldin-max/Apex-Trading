@@ -4774,10 +4774,16 @@ function isGLDEntryAllowed(optionType, dxy, spyReturn5d, vix, gldRSI, gldPrice, 
 //            best call entries: XLE RSI oversold + oil stabilizing/recovering
 // Oil trend approximated from XLE's own 20MA slope (oil ETFs track closely)
 // Panel: gate is intentionally lighter than GLD/TLT - XLE uses standard scoring
-function isXLEEntryAllowed(optionType, xleRSI, xleMomentum, vix, xlePrice, xleMA20) {
+function isXLEEntryAllowed(optionType, xleRSI, xleMomentum, vix, xlePrice, xleMA20, xleDailyRSI) {
   // XLE puts: need RSI elevated (not deeply oversold - that's a call, not put, setup)
+  // Panel C3/M4: XLE RSI hard block now requires BOTH intraday RSI <= 35 AND dailyRSI <= 40.
+  // During energy sector selloffs, intraday RSI can hit 25-30 while dailyRSI stays 55+.
+  // If dailyRSI >= 40, the intraday crash is noise within a valid daily trend — allow entry.
+  // If dailyRSI <= 40, the selloff is a genuine trend move — block debit put (already crashed).
   if (optionType === "put") {
-    if (xleRSI && xleRSI <= 35) return { allowed: false, reason: `XLE put blocked - RSI ${xleRSI?.toFixed(0)} deeply oversold (energy capitulation - wrong for puts)` };
+    const dailyRsiOversold = !xleDailyRSI || xleDailyRSI <= 40; // conservative: block if unknown
+    if (xleRSI && xleRSI <= 35 && dailyRsiOversold) return { allowed: false, reason: `XLE put blocked - RSI ${xleRSI?.toFixed(0)} intraday oversold + dailyRSI ${xleDailyRSI?.toFixed(0)||"?"} confirms trend exhaustion` };
+    if (xleRSI && xleRSI <= 35 && !dailyRsiOversold) { logEvent("filter", `XLE intraday RSI ${xleRSI?.toFixed(0)} oversold but dailyRSI ${xleDailyRSI?.toFixed(0)} valid — intraday noise, allowing put entry`); }
     // Oil confirmed uptrend (XLE above 20MA by >3%) - puts into strong uptrend discouraged
     const xleAbove20MA = xleMA20 > 0 && xlePrice > xleMA20 * 1.03;
     if (xleAbove20MA) return { allowed: false, reason: `XLE put blocked - price $${xlePrice?.toFixed(2)} >3% above 20MA $${xleMA20?.toFixed(2)} (oil uptrend - don't fade)` };
@@ -5666,7 +5672,7 @@ async function executeCreditSpread(stock, price, score, scoreReasons, vix, optio
     const targetDelta  = (spreadParamsOverride && spreadParamsOverride.shortDeltaTarget) || 0.20;
     const targetDTE    = (spreadParamsOverride && spreadParamsOverride.targetDTE)        || 21;
     const minDTE       = (spreadParamsOverride && spreadParamsOverride.minDTE)           || 14;
-    const minCreditRR  = (spreadParamsOverride && spreadParamsOverride.minCreditRatio)   || 0.20;
+    const minCreditRR  = (spreadParamsOverride && spreadParamsOverride.minCreditRatio)   || 0.25;  // panel CRITICAL #1: 0.20 is breakeven, 0.25 is true EV-positive floor
     // Spread width: price-relative so TLT($86)->$5, SPY($675)->$15
     const baseWidth    = (spreadParamsOverride && spreadParamsOverride.creditWidth)      || 15;
     const spreadWidth  = Math.max(5, Math.min(baseWidth, Math.round(price * 0.025)));
@@ -5850,7 +5856,7 @@ async function executeCreditSpread(stock, price, score, scoreReasons, vix, optio
     // This requires ~80% win rate to break even -- achievable with proper strike selection
     // Worse than 4:1 (e.g. TLT $97 profit / $903 loss = 9.3:1) is not a viable strategy
     const rrRatioCred = maxLoss > 0 ? maxProfit / maxLoss : 0;
-    const MIN_CREDIT_RR = (spreadParamsOverride && spreadParamsOverride.minCreditRatio) || 0.20; // corrected: 0.20 floor matches entryEngine (was 0.30 - too high for delta 0.17 spreads)
+    const MIN_CREDIT_RR = (spreadParamsOverride && spreadParamsOverride.minCreditRatio) || 0.25; // panel CRITICAL #1: 0.25 is true EV-positive minimum at delta 0.20 (0.20 was breakeven)
     if (rrRatioCred < MIN_CREDIT_RR) {
       logEvent("filter", `${stock.ticker} credit spread R/R ${(rrRatioCred*100).toFixed(0)}% (credit $${netCredit} / risk $${maxLoss}) - below ${(MIN_CREDIT_RR*100).toFixed(0)}% minimum - skip`);
       return null;
@@ -6762,7 +6768,7 @@ function getTimeAdjustedStop(pos) {
 }
 
 // - Close Position -
-async function closePosition(ticker, reason, exitPremium = null, contractSym = null) {
+async function closePosition(ticker, reason, exitPremium = null, contractSym = null, opts = {}) {
   try {
     // If contractSym provided, find exact position - handles multiple same-ticker positions
     const idx = contractSym
@@ -6938,8 +6944,13 @@ async function closePosition(ticker, reason, exitPremium = null, contractSym = n
   state.monthlyProfit = parseFloat((state.monthlyProfit + pnl).toFixed(2));
   state.positions.splice(idx, 1);
   // PDT tracking - record if this is a day trade (opened and closed same day)
-  if (isDayTrade(pos)) {
+  // Emergency exits (macro-reversal, VIX spike) bypass PDT counting — protective closures
+  // are not strategic day trades and should not consume PDT bandwidth
+  const bypassPDT = opts.bypassPDT === true;
+  if (isDayTrade(pos) && !bypassPDT) {
     recordDayTrade(pos, reason);
+  } else if (isDayTrade(pos) && bypassPDT) {
+    logEvent("scan", `[PDT] Emergency exit (${reason}) - day trade NOT counted (bypassPDT)`);
   }
   // - Trade Outcome Tracker - full data for post-30 analysis -
   // Derive tradeType from position structure - isSpread may be false if state was corrupted
@@ -7672,7 +7683,7 @@ async function runScan() {
 
   // Emergency close all on VIX velocity spike
   if (isBlackSwan) {
-    for (const pos of [...state.positions]) await closePosition(pos.ticker, "vix-spike");
+    for (const pos of [...state.positions]) await closePosition(pos.ticker, "vix-spike", null, pos.contractSymbol || pos.buySymbol, { bypassPDT: true }); // emergency exit — bypasses PDT day-trade counting
     await saveStateNow();
     scanRunning = false;
     return;
@@ -8968,7 +8979,7 @@ async function runScan() {
             ? (pos.currentPrice - pos.premium) / pos.premium : 0;
           if (chgPct <= -0.10) {
             logEvent("warn", `[VIX SPIKE] VIX +${vixMove.toFixed(1)}pts, call ${pos.ticker} down ${(chgPct*100).toFixed(0)}% - closing`);
-            await closePosition(pos.ticker, "vix-spike", null, pos.contractSymbol || pos.buySymbol);
+            await closePosition(pos.ticker, "vix-spike", null, pos.contractSymbol || pos.buySymbol, { bypassPDT: true }); // emergency exit
           } else {
             logEvent("warn", `[VIX SPIKE] VIX +${vixMove.toFixed(1)}pts, call ${pos.ticker} at ${(chgPct*100).toFixed(0)}% - monitoring`);
           }
@@ -9004,20 +9015,22 @@ async function runScan() {
     const spyDayMove = (curSPY - prevClose) / prevClose;
     if (spyDayMove > 0.025) { // SPY up 2.5%+ = genuine macro reversal
       let reversalCount = 0;
+      // Panel CRITICAL #4: close ALL puts on macro-reversal, not just losing ones.
+      // A 2.5% SPY spike breaks the puts-on-bounces thesis categorically.
+      // A winning put left open through a genuine reversal can rapidly become a loss.
+      // P&L at reversal time is not predictive of P&L after continuation.
       for (const pos of [...state.positions]) {
         if (pos.optionType !== "put") continue;
         const snap = posSnapshots[pos.contractSymbol];
-        if (!snap) continue;
-        const quote  = snap.latestQuote || {};
+        const quote  = snap ? (snap.latestQuote || {}) : {};
         const bid    = parseFloat(quote.bp || 0);
         const ask    = parseFloat(quote.ap || 0);
         const curP   = bid > 0 && ask > 0 ? (bid + ask) / 2 : pos.premium;
         const chg    = pos.premium > 0 ? (curP - pos.premium) / pos.premium : 0;
-        if (chg < -0.05) {
-          logEvent("scan", `${pos.ticker} SPY macro reversal +${(spyDayMove*100).toFixed(1)}% - closing losing put (${(chg*100).toFixed(0)}%)`);
-          await closePosition(pos.ticker, "macro-reversal");
-          reversalCount++;
-        }
+        const pnlLabel = chg >= 0 ? `+${(chg*100).toFixed(0)}%` : `${(chg*100).toFixed(0)}%`;
+        logEvent("scan", `${pos.ticker} SPY macro reversal +${(spyDayMove*100).toFixed(1)}% - closing ALL puts (${pnlLabel}) - thesis broken`);
+        await closePosition(pos.ticker, "macro-reversal", null, pos.contractSymbol || pos.buySymbol, { bypassPDT: true });
+        reversalCount++;
       }
       // Record reversal event for condition-based cooldown
       if (reversalCount > 0) {
@@ -9603,8 +9616,8 @@ async function runScan() {
         const xleMA20Live = (state._xleBars && state._xleBars.length >= 20)
           ? state._xleBars.slice(-20).reduce((s,b) => s + b.c, 0) / 20
           : 0;
-        const xleCallGate = isXLEEntryAllowed("call", liveStock.rsi, liveStock.momentum, state.vix, liveStock.price || 0, xleMA20Live);
-        const xlePutGate  = isXLEEntryAllowed("put",  liveStock.rsi, liveStock.momentum, state.vix, liveStock.price || 0, xleMA20Live);
+        const xleCallGate = isXLEEntryAllowed("call", liveStock.rsi, liveStock.momentum, state.vix, liveStock.price || 0, xleMA20Live, liveStock.dailyRsi);
+        const xlePutGate  = isXLEEntryAllowed("put",  liveStock.rsi, liveStock.momentum, state.vix, liveStock.price || 0, xleMA20Live, liveStock.dailyRsi); // panel M4: passes dailyRsi for dual-condition block
         if (!xleCallGate.allowed) { callSetup.score = 0; logEvent("filter", xleCallGate.reason); }
         if (!xlePutGate.allowed)  { putSetup.score  = 0; logEvent("filter", xlePutGate.reason);  }
         // XLE is NOT correlated with SPY/QQQ group - independent oil driver
@@ -10112,7 +10125,10 @@ async function runScan() {
     // Fast RSI gate uses INTRADAY RSI which is noisy. Exempt when dailyRSI is in valid range.
     // V2.81 established daily RSI as the regime signal — a fast intraday drop with healthy
     // daily RSI (35-65) is the puts_on_bounces setup, not a warning sign.
-    const dailyRsiValid = (stock.dailyRsi || 50) >= 35 && (stock.dailyRsi || 50) <= 65;
+    // Panel HIGH #2: tightened exemption band from 35-65 to 40-60.
+    // At daily RSI edges (35-40 or 60-65), a fast intraday drop is more likely
+    // trend-confirming than noise — the gate should still enforce there.
+    const dailyRsiValid = (stock.dailyRsi || 50) >= 40 && (stock.dailyRsi || 50) <= 60;
     const fastRSIMove = rsiMove >= 15 && !creditModeActive && !isCreditOnlyInstr && !dailyRsiValid;
     if (fastRSIMove) {
       const putsOnBouncesBias = (state._agentMacro || {}).entryBias === "puts_on_bounces";
@@ -10292,6 +10308,16 @@ async function runScan() {
     const existingProfitPct = sameTickerSameDirPos.length > 0
       ? Math.max(...sameTickerSameDirPos.map(p => parseFloat(p.pnlPct || 0)))
       : 0;
+    // Panel M3: credit spread profit % = (premium - currentSpreadValue) / maxProfit
+    // pnlPct for credit is negative when profitable (inverted), so compute separately
+    const existingCreditProfitPct = sameTickerSameDirPos.length > 0
+      ? Math.max(...sameTickerSameDirPos.map(p => {
+          if (!p.isCreditSpread) return 0;
+          const earned = (p.premium || 0) - (p.currentPrice || p.premium || 0);
+          const maxP   = p.maxProfit || p.premium || 0;
+          return maxP > 0 ? Math.min(1, Math.max(-1, earned / maxP)) : 0; // clamped -100% to +100%, 0.01 fallback removed (unsafe)
+        }))
+      : 0;
     const ddProtocol = marketContext.drawdownProtocol || { minScore: MIN_SCORE };
 
     // volDecline is per-stock (today vol < 70% avg) -- not available at execution scope
@@ -10306,8 +10332,9 @@ async function runScan() {
       { etHour: etHourNow, isLateDay, isLastHour, volDecline: _volDeclineExec,
         signals: { dailyRsi: stock.dailyRsi || stock.rsi || 50,
                    macd: stock.macd || "neutral" },
-        recentSameDir:       recentSameDirMins,
+        recentSameDir:          recentSameDirMins,
         existingProfitPct,
+        existingCreditProfitPct, // panel M3: % of max profit earned on credit spreads
         drawdownMinScore:    ddProtocol.minScore || MIN_SCORE }
     );
     if (!eeResult.pass) {
@@ -13263,7 +13290,7 @@ async function runBacktest(config) {
       const xleMA20bt = bars.length >= 20
         ? bars.slice(Math.max(0,i-19), i+1).reduce((s,b) => s + b.c, 0) / Math.min(20, i+1)
         : 0;
-      const xleGate = isXLEEntryAllowed(entryType, btRSI, null, vixEst, price, xleMA20bt);
+      const xleGate = isXLEEntryAllowed(entryType, btRSI, null, vixEst, price, xleMA20bt, btRSI); // backtest: use same RSI as dailyRSI proxy (best available in backtester)
       if (!xleGate.allowed) {
         if (!gateSkips["xleOilTrend"]) gateSkips["xleOilTrend"] = 0;
         gateSkips["xleOilTrend"]++;
