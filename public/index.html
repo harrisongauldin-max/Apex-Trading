@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8"/>
 <meta name="viewport" content="width=device-width,initial-scale=1"/>
-<title>ARGO V2.84b — Professional Options Agent</title>
+<title>ARGO V3.0 — Professional Options Agent</title>
 <style>
 :root{
   --bg:#07101f;--panel:#0a1628;--border:#0d3050;--text:#cce8ff;--muted:#336688;
@@ -23,8 +23,8 @@ body{background:var(--bg);color:var(--text);font-family:var(--font);font-size:13
 .pill-red{background:rgba(255,85,85,.15);border:1px solid rgba(255,85,85,.3);color:var(--red)}
 .pill-blue{background:rgba(0,196,255,.15);border:1px solid rgba(0,196,255,.3);color:var(--blue)}
 .pill-orange{background:rgba(255,153,68,.15);border:1px solid rgba(255,153,68,.3);color:var(--orange)}
-.tabs{display:flex;flex-wrap:nowrap;overflow-x:auto;gap:4px;padding:12px 20px 0;border-bottom:1px solid var(--border);background:var(--panel)}
-.tab{padding:8px 16px;border-radius:6px 6px 0 0;cursor:pointer;font-size:11px;letter-spacing:1px;color:var(--muted);border:1px solid transparent;border-bottom:none;transition:.2s;flex-shrink:0;white-space:nowrap}
+.tabs{display:flex;gap:4px;padding:12px 20px 0;border-bottom:1px solid var(--border);background:var(--panel)}
+.tab{padding:8px 16px;border-radius:6px 6px 0 0;cursor:pointer;font-size:11px;letter-spacing:1px;color:var(--muted);border:1px solid transparent;border-bottom:none;transition:.2s}
 .tab.active{background:var(--bg);color:var(--green);border-color:var(--border)}
 .tab:hover:not(.active){color:var(--text)}
 .content{padding:16px 20px;display:none}
@@ -127,7 +127,7 @@ input[type=text]:focus{border-color:var(--blue)}
       </svg>
     </div>
     <div class="logo-text">
-      <h1>ARGO V2.84 <span id="account-phase-pill" style="font-size:9px;padding:2px 7px;border-radius:10px;letter-spacing:1px;vertical-align:middle;display:none"></span></h1>
+      <h1>ARGO V3.0 <span id="account-phase-pill" style="font-size:9px;padding:2px 7px;border-radius:10px;letter-spacing:1px;vertical-align:middle;display:none"></span></h1>
       <p>PROFESSIONAL OPTIONS AGENT v2.0 · ALPACA PAPER</p>
     </div>
   </div>
@@ -150,7 +150,6 @@ input[type=text]:focus{border-color:var(--blue)}
   <div class="tab" onclick="switchTab('report')">REPORT</div>
   <div class="tab" onclick="switchTab('backtest')">BACKTEST</div>
   <div class="tab" onclick="switchTab('log')">SERVER LOG</div>
-  <div class="tab" onclick="switchTab('score')">SCORE DEBUG</div>
 </div>
 
 <!-- ═══════════════ TRADING TAB ═══════════════ -->
@@ -208,7 +207,7 @@ input[type=text]:focus{border-color:var(--blue)}
 
     <!-- Day Plan Row — populated from _dayPlan -->
     <div id="day-plan-row" style="display:none;margin-bottom:8px;padding:8px;background:rgba(0,100,200,.08);border-radius:6px;border:1px solid rgba(0,100,200,.2)">
-      <div style="font-size:9px;color:var(--blue);letter-spacing:1px;margin-bottom:6px">📋 DAY PLAN <span style="font-size:8px;opacity:0.7;font-weight:400;letter-spacing:0">(morning baseline)</span></div>
+      <div style="font-size:9px;color:var(--blue);letter-spacing:1px;margin-bottom:6px">📋 DAY PLAN</div>
       <div style="display:flex;gap:16px;flex-wrap:wrap">
         <div><div style="font-size:9px;color:var(--muted)">REGIME</div><div id="dp-regime" style="font-size:11px;font-weight:700;color:var(--text)">--</div></div>
         <div><div style="font-size:9px;color:var(--muted)">ENTRY BIAS</div><div id="dp-bias" style="font-size:11px;font-weight:700;color:var(--text)">--</div></div>
@@ -472,8 +471,14 @@ input[type=text]:focus{border-color:var(--blue)}
   </div>
 
   <div class="section-title">Open Positions</div>
+  <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
+    <div style="font-size:10px;color:var(--muted);letter-spacing:1px">OPEN POSITIONS</div>
+    <button id="copy-positions-btn" onclick="copyOpenPositions()" style="font-size:10px;padding:3px 10px;background:rgba(0,196,255,.08);border:1px solid rgba(0,196,255,.3);border-radius:4px;color:var(--blue);cursor:pointer;display:flex;align-items:center;gap:4px">
+      <span id="copy-pos-icon">⎘</span> <span id="copy-pos-label">Copy positions</span>
+    </button>
+  </div>
   <div id="positions-wrap">
-    <div class="no-data">No open positions. ARGO V2.84 will enter trades during market hours (Puts 9:45AM / Calls 10AM–3:30PM ET).</div>
+    <div class="no-data">No open positions. ARGO V3.0 will enter trades during market hours (Puts 9:45AM / Calls 10AM–3:30PM ET).</div>
   </div>
 
   <div class="section-title">Portfolio Greeks</div>
@@ -654,7 +659,7 @@ input[type=text]:focus{border-color:var(--blue)}
     <div class="no-data">Loading correlation data...</div>
   </div>
 
-  <div class="section-title">V2.5 Risk Controls</div>
+  <div class="section-title">V3.0 Risk Controls</div>
   <div class="grid4" style="margin-bottom:12px">
     <div class="card">
       <div class="card-title">ACCOUNT PHASE</div>
@@ -751,7 +756,7 @@ input[type=text]:focus{border-color:var(--blue)}
 <div id="tab-journal" class="content">
   <div class="section-title" style="margin-top:0">Trade Journal — Entry Reasoning</div>
   <div id="journal-wrap">
-    <div class="no-data">No journal entries yet. ARGO V2.84 logs detailed reasoning for every trade.</div>
+    <div class="no-data">No journal entries yet. ARGO V3.0 logs detailed reasoning for every trade.</div>
   </div>
 </div>
 
@@ -776,7 +781,7 @@ input[type=text]:focus{border-color:var(--blue)}
   </div>
 
   <div class="alert alert-orange" style="margin-bottom:12px">
-    ARGO V2.84 auto-buys stocks when monthly options profit exceeds $1,000. 20% of profits above threshold are allocated to high-scoring stocks (85+). Stop loss: -15% from entry.
+    ARGO V3.0 auto-buys stocks when monthly options profit exceeds $1,000. 20% of profits above threshold are allocated to high-scoring stocks (85+). Stop loss: -15% from entry.
   </div>
 
   <div class="section-title">Stock Holdings</div>
@@ -804,7 +809,7 @@ input[type=text]:focus{border-color:var(--blue)}
 <div id="tab-backtest" class="content">
   <div style="margin-bottom:14px">
     <span style="font-size:13px;color:#00ff88;letter-spacing:2px;font-weight:700">⚙ BACKTEST ENGINE</span>
-    <span style="font-size:10px;color:#336688;margin-left:10px">Walk-forward simulation · ARGO V2.84 scoring · Alpaca historical data</span>
+    <span style="font-size:10px;color:#336688;margin-left:10px">Walk-forward simulation · ARGO V3.0 scoring · Alpaca historical data</span>
     <div style="font-size:10px;color:#4a6a8a;margin-top:4px">⚠ Conservative estimates — backtest enters one position at a time (walk-forward). Live ARGO holds multiple simultaneous positions, so live returns will typically exceed backtest figures.</div>
   </div>
 
@@ -969,35 +974,12 @@ input[type=text]:focus{border-color:var(--blue)}
       <option value="macro">macro</option>
     </select>
     <input id="log-search" type="text" placeholder="search..." oninput="renderServerLog()" style="background:var(--panel);border:1px solid var(--border);color:var(--text);padding:4px 8px;border-radius:6px;font-family:var(--font);font-size:11px;width:160px" />
-    <select id="log-limit" onchange="fetchLogs()" style="background:var(--panel);border:1px solid var(--border);color:var(--text);padding:4px 8px;border-radius:6px;font-family:var(--font);font-size:11px">
-      <option value="200">200 rows</option>
-      <option value="500">500 rows</option>
-      <option value="1000">1000 rows</option>
-      <option value="2000">2000 rows</option>
-    </select>
     <button class="btn" id="log-live-btn" onclick="toggleLogLive()" style="font-size:11px">PAUSE</button>
     <button class="btn" onclick="fetchLogs()" style="font-size:11px">REFRESH</button>
-    <button class="btn" onclick="copyLog()" style="font-size:11px">COPY LOG</button>
     <button class="btn" onclick="clearLog()" style="font-size:11px">CLEAR</button>
   </div>
   <!-- ── Log box ── -->
-  <div class="log-box" id="server-log" style="height:800px;overflow-y:auto"></div>
-</div>
-
-<!-- ═══════════════ SCORE DEBUG TAB ═══════════════ -->
-<div id="tab-score" class="content">
-  <div style="display:flex;align-items:center;gap:8px;margin-bottom:12px;flex-wrap:wrap">
-    <button class="btn" onclick="fetchScoreDebug()" style="font-size:11px">REFRESH</button>
-    <button class="btn" onclick="copyScoreDebug()" style="font-size:11px">COPY</button>
-    <label style="font-size:11px;color:var(--muted)">Auto-refresh every 30s while tab is open</label>
-    <span id="score-updated" style="font-size:10px;color:var(--muted);margin-left:auto"></span>
-  </div>
-
-  <!-- Gates summary -->
-  <div id="score-gates" style="background:var(--panel);border:1px solid var(--border);border-radius:8px;padding:12px;margin-bottom:12px;font-size:11px;font-family:var(--font)"></div>
-
-  <!-- Per-instrument breakdown -->
-  <div id="score-results"></div>
+  <div class="log-box" id="server-log" style="height:560px;overflow-y:auto"></div>
 </div>
 
 
@@ -1325,7 +1307,7 @@ function renderMetrics() {
     document.getElementById('alpaca-cash').textContent = fmt(state.alpacaCash);
     const customBudget = state.customBudget && state.customBudget > 0 ? state.customBudget : null;
     document.getElementById('alpaca-cash-sub').textContent = customBudget
-      ? `ARGO V2.84 using ${fmt(customBudget)} of this`
+      ? `ARGO V3.0 using ${fmt(customBudget)} of this`
       : 'paper balance · synced on boot';
   }
   document.getElementById('heat').style.color = heat > 50 ? 'var(--red)' : heat > 35 ? 'var(--orange)' : 'var(--green)';
@@ -1457,7 +1439,7 @@ function renderMetrics() {
   if (alphaEl && bm) {
     alphaEl.textContent = (bm.alpha >= 0 ? "+" : "") + bm.alpha + "%";
     alphaEl.style.color = bm.alpha >= 0 ? "var(--green)" : "var(--red)";
-    document.getElementById("benchmark-sub").textContent = `ARGO V2.84:${bm.apexReturn >= 0 ? "+" : ""}${bm.apexReturn}% SPY:${bm.spyReturn >= 0 ? "+" : ""}${bm.spyReturn}%`;
+    document.getElementById("benchmark-sub").textContent = `ARGO V3.0:${bm.apexReturn >= 0 ? "+" : ""}${bm.apexReturn}% SPY:${bm.spyReturn >= 0 ? "+" : ""}${bm.spyReturn}%`;
   }
 
   // Drawdown protocol
@@ -1498,14 +1480,7 @@ function renderMetrics() {
   const calEl = document.getElementById("calmar");
   if (calEl) { calEl.textContent = state.calmar || "--"; calEl.style.color = (state.calmar||0) > 1 ? "var(--green)" : (state.calmar||0) > 0 ? "var(--gold)" : "var(--red)"; }
   const irEl = document.getElementById("info-ratio");
-  if (irEl) {
-    const ir = state.informationRatio;
-    // IR > 20 almost certainly reflects insufficient data (tiny std dev), show with warning
-    const irDisplay = ir === null ? "--" : Math.abs(ir) > 20 ? `${ir} ⚠` : ir;
-    irEl.textContent = irDisplay;
-    irEl.style.color = (ir||0) > 0.5 ? "var(--green)" : (ir||0) > 0 ? "var(--gold)" : "var(--red)";
-    irEl.title = Math.abs(ir||0) > 20 ? "Value may be inflated due to small sample size" : "";
-  }
+  if (irEl) { irEl.textContent = state.informationRatio || "--"; irEl.style.color = (state.informationRatio||0) > 0.5 ? "var(--green)" : (state.informationRatio||0) > 0 ? "var(--gold)" : "var(--red)"; }
   const rorEl = document.getElementById("ror");
   // riskOfRuin is always an object { probability, message }
   const rorData = (state.riskOfRuin && typeof state.riskOfRuin === 'object')
@@ -1554,35 +1529,24 @@ function renderMetrics() {
   // Monte Carlo
   const mc = state.monteCarlo || {}; // mc = monteCarlo
   const mcMed = document.getElementById("mc-median");
-  if (mcMed) {
-    if (mc.median !== null && mc.median !== undefined) {
-      mcMed.textContent = (mc.median >= 0 ? "+" : "") + "$" + Math.abs(mc.median).toFixed(0);
-      mcMed.style.color = mc.median >= 0 ? "var(--green)" : "var(--red)";
-      document.getElementById("mc-prob").textContent = (mc.probProfit || 0) + "% chance of profit";
-      const mcRange = document.getElementById("mc-range");
-      if (mcRange) { mcRange.textContent = "$" + (mc.percentile5||0).toFixed(0) + " / +" + "$" + (mc.percentile95||0).toFixed(0); mcRange.style.color = "var(--muted)"; }
-    } else {
-      mcMed.textContent = "--";
-      const mcProb = document.getElementById("mc-prob");
-      if (mcProb) mcProb.textContent = mc.message || "Insufficient data";
-      const mcRange = document.getElementById("mc-range");
-      if (mcRange) mcRange.textContent = "-- / --";
-    }
+  if (mcMed && mc.median !== undefined) {
+    mcMed.textContent = (mc.median >= 0 ? "+" : "") + "$" + Math.abs(mc.median).toFixed(0);
+    mcMed.style.color = mc.median >= 0 ? "var(--green)" : "var(--red)";
+    document.getElementById("mc-prob").textContent = (mc.probProfit || 0) + "% chance of profit";
+    document.getElementById("mc-range").textContent = "$" + (mc.percentile5||0).toFixed(0) + " / +" + "$" + (mc.percentile95||0).toFixed(0);
+    document.getElementById("mc-range").style.color = "var(--muted)";
   }
 
   // Kelly
   const kelly = state.kelly || {};
   const kellyEl = document.getElementById("kelly-contracts");
-  if (kellyEl) {
-    const kellyValid = kelly.winRate !== null && kelly.winRate !== undefined && kelly.winRate > 0;
-    kellyEl.textContent = kellyValid ? kelly.contracts + "x contracts" : "--";
-    kellyEl.style.color = kellyValid && kelly.winRate >= 55 ? "var(--green)" : "var(--gold)";
-    const kellyDetail = document.getElementById("kelly-detail");
-    if (kellyDetail) kellyDetail.textContent = kellyValid ? kelly.winRate + "% win rate · " + kelly.payoffRatio + "x payoff" : (kelly.note || "Insufficient data");
-    const kellyFactor = document.getElementById("kelly-factor");
-    if (kellyFactor) { kellyFactor.textContent = kellyValid && kelly.kelly ? kelly.kelly.toFixed(3) : "--"; kellyFactor.style.color = kellyValid && (kelly.kelly||0) > 0 ? "var(--green)" : "var(--red)"; }
-    const kellyHalf = document.getElementById("kelly-half");
-    if (kellyHalf) kellyHalf.textContent = kellyValid ? "half-Kelly: " + (kelly.halfKelly ? kelly.halfKelly.toFixed(3) : "--") : "--";
+  if (kellyEl && kelly.contracts !== undefined) {
+    kellyEl.textContent = kelly.contracts + "x contracts";
+    kellyEl.style.color = kelly.winRate >= 55 ? "var(--green)" : "var(--gold)";
+    document.getElementById("kelly-detail").textContent = kelly.winRate + "% win rate · " + kelly.payoffRatio + "x payoff";
+    document.getElementById("kelly-factor").textContent = kelly.kelly || "--";
+    document.getElementById("kelly-factor").style.color = (kelly.kelly||0) > 0 ? "var(--green)" : "var(--red)";
+    document.getElementById("kelly-half").textContent = "half-Kelly: " + (kelly.halfKelly || "--");
   }
 
   // Beta-weighted delta
@@ -1719,7 +1683,7 @@ function renderPositions() {
   const wrap = document.getElementById('positions-wrap');
   const positions = state.positions || [];
   if (!positions.length) {
-    wrap.innerHTML = '<div class="no-data">No open positions. ARGO V2.84 will enter trades during market hours (9:30AM–3:45PM ET). SPY/QQQ spreads primary.</div>';
+    wrap.innerHTML = '<div class="no-data">No open positions. ARGO V3.0 will enter trades during market hours (9:30AM–3:45PM ET). SPY/QQQ spreads primary.</div>';
     return;
   }
   wrap.innerHTML = positions.map(p => {
@@ -1838,6 +1802,72 @@ function renderPositions() {
       <div style="font-size:10px;color:var(--muted);margin-top:8px">Opened: ${new Date(p.openDate).toLocaleString()}</div>
     </div>`;
   }).join('');
+}
+
+function copyOpenPositions() {
+  const positions = state.positions || [];
+  const btn = document.getElementById('copy-pos-icon');
+  const lbl = document.getElementById('copy-pos-label');
+  if (!positions.length) {
+    lbl.textContent = 'No positions';
+    setTimeout(() => lbl.textContent = 'Copy positions', 2000);
+    return;
+  }
+  const lines = ['ARGO V3.0 — Open Positions — ' + new Date().toLocaleString(), ''];
+  positions.forEach(p => {
+    const curPrice = p.currentPrice || p.premium;
+    let chgDollar, chgPct;
+    if (p.isCreditSpread) {
+      chgDollar = p.unrealizedPnL !== undefined ? p.unrealizedPnL : (p.premium - curPrice) * 100 * (p.contracts||1);
+      chgPct = p.maxProfit ? (chgDollar / p.maxProfit * 100) : 0;
+    } else {
+      chgDollar = p.unrealizedPnL !== undefined ? p.unrealizedPnL : (curPrice - p.premium) * 100 * (p.contracts||1);
+      chgPct = p.maxLoss ? (chgDollar / p.maxLoss * 100) : 0;
+    }
+    const dte = p.expDate ? Math.max(1, Math.round((new Date(p.expDate) - new Date()) / 86400000)) : '?';
+    const pnlSign = chgDollar >= 0 ? '+' : '';
+    const typeLabel = p.isCreditSpread ? 'CREDIT' : p.isSpread ? 'DEBIT' : 'NAKED';
+    const strikeLabel = p.isSpread
+      ? `$${p.isCreditSpread?(p.shortStrike||p.sellStrike):p.buyStrike}/$${p.isCreditSpread?(p.longStrike||p.buyStrike):p.sellStrike}`
+      : `$${p.strike}`;
+    lines.push(`${p.ticker} ${p.optionType.toUpperCase()} ${strikeLabel} ${p.expDate} [${typeLabel}]`);
+    lines.push(`  Entry: $${p.premium} | Current: $${curPrice.toFixed(2)} | Contracts: ${p.contracts||1}x | DTE: ${dte}d`);
+    lines.push(`  P&L: ${pnlSign}$${Math.abs(chgDollar).toFixed(2)} (${pnlSign}${chgPct.toFixed(1)}%) | Score: ${p.score||'--'}/100`);
+    if (p.isCreditSpread) {
+      lines.push(`  Max Profit: $${(p.maxProfit||0).toFixed(0)} | Max Loss: $${(p.maxLoss||0).toFixed(0)} | Breakeven: $${p.breakeven||'--'}`);
+    }
+    if (p.entryReasons && p.entryReasons.length) {
+      lines.push(`  Entry reasons: ${p.entryReasons.slice(0,3).join(' | ')}`);
+    }
+    lines.push('');
+  });
+  lines.push(`Total positions: ${positions.length}`);
+  const totalPnL = positions.reduce((s, p) => {
+    const cur = p.currentPrice || p.premium;
+    if (p.isCreditSpread) return s + (p.unrealizedPnL !== undefined ? p.unrealizedPnL : (p.premium - cur) * 100 * (p.contracts||1));
+    return s + (p.unrealizedPnL !== undefined ? p.unrealizedPnL : (cur - p.premium) * 100 * (p.contracts||1));
+  }, 0);
+  lines.push(`Total unrealized P&L: ${totalPnL >= 0 ? '+' : ''}$${totalPnL.toFixed(2)}`);
+
+  const text = lines.join('\n');
+  navigator.clipboard.writeText(text).then(() => {
+    btn.textContent = '✓';
+    lbl.textContent = 'Copied!';
+    setTimeout(() => { btn.textContent = '⎘'; lbl.textContent = 'Copy positions'; }, 2500);
+  }).catch(() => {
+    // Fallback for browsers that block clipboard
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    ta.style.position = 'fixed';
+    ta.style.opacity = '0';
+    document.body.appendChild(ta);
+    ta.select();
+    document.execCommand('copy');
+    document.body.removeChild(ta);
+    btn.textContent = '✓';
+    lbl.textContent = 'Copied!';
+    setTimeout(() => { btn.textContent = '⎘'; lbl.textContent = 'Copy positions'; }, 2500);
+  });
 }
 
 function renderGreeks() {
@@ -2026,7 +2056,7 @@ function renderJournal() {
   const wrap = document.getElementById('journal-wrap');
   const journal = state.tradeJournal || [];
   if (!journal.length) { wrap.innerHTML = '<div class="no-data">No journal entries yet.</div>'; return; }
-  wrap.innerHTML = journal.slice(0, 50).map(e => {
+  wrap.innerHTML = journal.slice(0, 30).map(e => {
     const isOpen  = e.action === 'OPEN';
     const color   = isOpen ? 'var(--green)' : (e.pnl >= 0 ? 'var(--blue)' : 'var(--red)');
     const score   = e.score;
@@ -2039,7 +2069,7 @@ function renderJournal() {
           <span style="font-size:10px;padding:2px 8px;border-radius:10px;background:${isOpen?'rgba(0,255,136,.1)':'rgba(0,196,255,.1)'};color:${color}">${e.action}</span>
           ${isOpen ? `<span style="font-size:10px;color:var(--muted)">${
             e.isSpread && e.buyStrike && e.sellStrike
-              ? '$'+e.buyStrike+'/'+'$'+e.sellStrike+' '+(e.optionType==='put'?'PUT':'CALL')+' SPRD'
+              ? '$'+e.buyStrike+'/'+'$'+e.sellStrike+(e.isCreditSpread?'P-SPRD':'P-SPRD')
               : e.strike
                 ? '$'+e.strike+(e.optionType==='put'?'P':'C')+' · '+(e.expDate||'?')
                 : e.optionType
@@ -2062,11 +2092,7 @@ function renderJournal() {
       }).join('') + '</div>') : ''}
       <div class="journal-meta">
         <span>${new Date(e.time).toLocaleString()}</span>
-        ${isOpen
-          ? (e.delta != null
-              ? `<span>delta ${e.delta}</span><span>IV ${e.iv||'--'}%</span><span>VIX ${e.vix||'--'}</span>`
-              : `<span>contracts ${e.contracts||'--'}</span><span>premium $${e.premium||'--'}</span><span>VIX ${e.vix||'--'}</span>`)
-          : `<span>Reason: ${e.reason}</span><span style="font-size:9px;padding:1px 5px;border-radius:8px;background:${e.tradeType==='credit_spread'?'rgba(0,255,136,.12)':e.tradeType==='debit_spread'?'rgba(0,150,255,.12)':'rgba(100,100,100,.1)'};color:${e.tradeType==='credit_spread'?'var(--green)':e.tradeType==='debit_spread'?'var(--blue)':'var(--muted)'}">${(e.tradeType||'naked').replace('_',' ').toUpperCase()}</span>`}
+        ${isOpen ? `<span>δ ${e.delta}</span><span>IV ${e.iv}%</span><span>VIX ${e.vix}</span>` : `<span>Reason: ${e.reason}</span><span style="font-size:9px;padding:1px 5px;border-radius:8px;background:${e.tradeType==='credit_spread'?'rgba(0,255,136,.12)':e.tradeType==='debit_spread'?'rgba(0,150,255,.12)':'rgba(100,100,100,.1)'};color:${e.tradeType==='credit_spread'?'var(--green)':e.tradeType==='debit_spread'?'var(--blue)':'var(--muted)'}">${(e.tradeType||'naked').replace('_',' ').toUpperCase()}</span>`}
         ${e.catalyst ? `<span>Catalyst: ${e.catalyst}</span>` : ''}
       </div>
     </div>`;
@@ -2309,7 +2335,7 @@ async function triggerDryRun() {
     const resp = await fetch('/api/dry-run-scan', {method:'POST'});
     const data = await resp.json();
     await fetchState();
-    alert('Dry run complete! Check the Server Log tab — look for [DRYRUN] entries showing what ARGO V2.84 would trade.');
+    alert('Dry run complete! Check the Server Log tab — look for [DRYRUN] entries showing what ARGO V3.0 would trade.');
   } catch(e) {
     alert('Dry run error: ' + e.message);
   } finally {
@@ -2356,10 +2382,10 @@ async function resetPDT() {
 }
 
 async function resetCircuit() {
-  if (!confirm('Reset circuit breaker? ARGO V2.84 will resume scanning and entering new trades.')) return;
+  if (!confirm('Reset circuit breaker? ARGO V3.0 will resume scanning and entering new trades.')) return;
   const resp = await fetch('/api/reset-circuit', {method:'POST'});
   const data = await resp.json();
-  alert('Circuit breaker reset. ARGO V2.84 is scanning again.');
+  alert('Circuit breaker reset. ARGO V3.0 is scanning again.');
   await fetchState();
 }
 
@@ -2368,7 +2394,7 @@ async function fullReset() {
   if (!confirm('This cannot be undone. Confirm full reset?')) return;
   const resp = await fetch('/api/full-reset', {method:'POST'});
   const data = await resp.json();
-  alert('Full reset complete. ARGO V2.84 restarted with $10,000.');
+  alert('Full reset complete. ARGO V3.0 restarted with $10,000.');
   location.reload();
 }
 
@@ -2471,13 +2497,13 @@ async function downloadDayReport() {
     const url  = URL.createObjectURL(blob);
     const a    = document.createElement('a');
     a.href     = url;
-    a.download = `ARGO V2.84_DayReport_${today}.json`;
+    a.download = `ARGO V3.0_DayReport_${today}.json`;
     a.click();
     URL.revokeObjectURL(url);
 
     // ── Also show quick summary in alert ─────────────────────────────────
     alert(
-      `ARGO V2.84 Day Report — ${today}\n\n` +
+      `ARGO V3.0 Day Report — ${today}\n\n` +
       `Trades: ${trades.length} | Win Rate: ${winRate}%\n` +
       `Total P&L: $${totalPnL.toFixed(2)}\n` +
       `Best: $${bigWin} | Worst: $${bigLoss}\n` +
@@ -2485,7 +2511,7 @@ async function downloadDayReport() {
       `Exit Reasons:\n` +
       Object.entries(byReason).map(([r,v]) => `  ${r}: ${v.count}x ($${v.pnl.toFixed(2)})`).join('\n') +
       `\n\nOpen Positions: ${openPos.length}\n` +
-      `Report saved as ARGO V2.84_DayReport_${today}.json`
+      `Report saved as ARGO V3.0_DayReport_${today}.json`
     );
   } catch(e) {
     alert('Error generating report: ' + e.message);
@@ -2498,9 +2524,7 @@ let _allLogs  = [];
 
 async function fetchLogs(silent=false) {
   try {
-    const limitEl = document.getElementById('log-limit');
-    const limit = limitEl ? limitEl.value : 200;
-    const r = await fetch('/api/logs?limit=' + limit);
+    const r = await fetch('/api/logs?limit=200');
     if (!r.ok) throw new Error('HTTP ' + r.status);
     const data = await r.json();
     _allLogs = data.logs || [];
@@ -2571,29 +2595,6 @@ function clearLog() {
   if (log) log.innerHTML = '<div style="color:var(--muted);padding:12px;font-size:11px">cleared</div>';
 }
 
-function copyLog() {
-  const filterVal = (document.getElementById('log-filter')?.value || '').trim();
-  const search    = (document.getElementById('log-search')?.value || '').toLowerCase();
-  const types     = filterVal ? filterVal.split(',') : null;
-  let logs = _allLogs.length ? _allLogs : (state.tradeLog || []);
-  if (types)  logs = logs.filter(e => types.includes(e.type));
-  if (search) logs = logs.filter(e => (e.message||'').toLowerCase().includes(search));
-  const text = logs.map(e => {
-    const t = new Date(e.time).toLocaleTimeString();
-    return `[${t}] [${(e.type||'').toUpperCase()}] ${e.message||''}`;
-  }).join('\n');
-  navigator.clipboard.writeText(text).then(() => {
-    const btn = document.querySelector('button[onclick="copyLog()"]');
-    if (btn) { const orig = btn.textContent; btn.textContent = 'COPIED!'; setTimeout(() => btn.textContent = orig, 1500); }
-  }).catch(() => {
-    // Fallback for older browsers
-    const ta = document.createElement('textarea');
-    ta.value = text; document.body.appendChild(ta); ta.select(); document.execCommand('copy'); document.body.removeChild(ta);
-    const btn = document.querySelector('button[onclick="copyLog()"]');
-    if (btn) { const orig = btn.textContent; btn.textContent = 'COPIED!'; setTimeout(() => btn.textContent = orig, 1500); }
-  });
-}
-
 function toggleLogLive() {
   _logLive = !_logLive;
   const btn = document.getElementById('log-live-btn');
@@ -2614,154 +2615,6 @@ function startLogPolling() {
   _logTimer = setInterval(() => { if (_logLive) fetchLogs(true); }, 15000);
 }
 startLogPolling();
-
-// ── SCORE DEBUG ───────────────────────────────────────────────────────────────
-let _scoreTimer = null;
-
-async function fetchScoreDebug() {
-  const updEl = document.getElementById('score-updated');
-  if (updEl) updEl.textContent = 'loading...';
-  try {
-    const r    = await fetch('/api/score-debug');
-    const data = await r.json();
-    renderScoreDebug(data);
-    window._lastScoreDebugData = data; // store for copy
-    if (updEl) updEl.textContent = 'updated ' + new Date().toLocaleTimeString();
-  } catch(e) {
-    const gEl = document.getElementById('score-gates');
-    if (gEl) gEl.innerHTML = '<span style="color:var(--red)">fetch error: ' + e.message + '</span>';
-  }
-}
-
-function copyScoreDebug() {
-  const data = window._lastScoreDebugData;
-  if (!data) { alert('No score data yet — click REFRESH first'); return; }
-
-  const g = data.gates || {};
-  const lines = [];
-
-  lines.push(`ARGO SCORE DEBUG — ${new Date().toLocaleString()}`);
-  lines.push(`Last scan: ${data.lastScan ? new Date(data.lastScan).toLocaleTimeString() : '--'}`);
-  lines.push('');
-  lines.push('=== GATES ===');
-  lines.push(`Agent:       ${data.agentSignal} (${data.agentConf}) | Bias: ${data.agentBias}`);
-  lines.push(`Price regime: ${g.priceRegime} (${g.regimeDuration || 0}d) | Agent regime: ${g.agentRegime}${g.agentRegime !== g.priceRegime ? ' [OVERRIDDEN]' : ''}`);
-  lines.push(`VIX: ${(g.vix||0).toFixed(1)} | IVR: ${(g.ivr||0).toFixed(0)} ${g.ivElevated ? '(elevated)' : '(low)'} | SPY: $${(g.spyPrice||0).toFixed(2)}`);
-  lines.push(`Agent tradeType: ${g.agentTradeType} | Choppy block: ${g.isChoppyRegime ? 'YES' : 'no'} | Credit PUT: ${g.creditModeActive ? 'YES' : 'no'} | Credit CALL: ${g.creditCallModeActive ? 'YES' : 'no'}`);
-  lines.push(`200MA call block: ${g.below200MACallBlock ? 'YES' : 'no'} | Macro bullish: ${g.macroBullish ? 'YES' : 'no'} | VIX falling: ${g.vixFallingPause ? 'YES' : 'no'} | Avoid hold: ${g.avoidHoldActive ? 'YES' : 'no'}`);
-  if (data.agentReasoning) lines.push(`Agent: "${data.agentReasoning}"`);
-  lines.push('');
-  lines.push('=== SCORES ===');
-
-  for (const item of (data.results || [])) {
-    if (item.noData) { lines.push(`${item.ticker}: no data yet`); continue; }
-    if (item.error)  { lines.push(`${item.ticker}: ERROR - ${item.error}`); continue; }
-
-    const status = item.wouldEnter ? 'WOULD ENTER' : 'BLOCKED';
-    lines.push(`${item.ticker.padEnd(4)} PUT:${String(item.putScore).padStart(3)} CALL:${String(item.callScore).padStart(3)} MIN:${item.effectiveMin} [${status}] $${(item.price||0).toFixed(2)} | ${item.ageSec}s ago`);
-    if (item.signals) {
-      lines.push(`     RSI:${(item.signals.rsi||0).toFixed(1)}i/${(item.signals.dailyRsi||0).toFixed(1)}d MACD:${item.signals.macd||'--'} MOM:${item.signals.momentum||'--'} IVP:${item.signals.ivPercentile||'--'}%`);
-    }
-    if (item.blocks?.length) {
-      lines.push(`     BLOCKS: ${item.blocks.join(' | ')}`);
-    }
-    // Best setup reasons
-    const reasons = item.bestType === 'put' ? item.putReasons : item.callReasons;
-    if (reasons?.length) {
-      lines.push(`     ${item.bestType?.toUpperCase()} REASONS:`);
-      for (const r of reasons) lines.push(`       ${r}`);
-    }
-    lines.push('');
-  }
-
-  const text = lines.join('\n');
-  navigator.clipboard.writeText(text).then(() => {
-    const btn = document.querySelector('button[onclick="copyScoreDebug()"]');
-    if (btn) { const orig = btn.textContent; btn.textContent = 'COPIED!'; setTimeout(() => btn.textContent = orig, 1500); }
-  }).catch(() => {
-    const ta = document.createElement('textarea');
-    ta.value = text; document.body.appendChild(ta); ta.select(); document.execCommand('copy'); document.body.removeChild(ta);
-    const btn = document.querySelector('button[onclick="copyScoreDebug()"]');
-    if (btn) { const orig = btn.textContent; btn.textContent = 'COPIED!'; setTimeout(() => btn.textContent = orig, 1500); }
-  });
-}
-
-function renderScoreDebug(data) {
-  const gEl = document.getElementById('score-gates');
-  const rEl = document.getElementById('score-results');
-  if (!gEl || !rEl) return;
-
-  const g = data.gates || {};
-  const GATE_COLOR = v => v ? 'var(--red)' : 'var(--green)';
-  const FLAG = v => `<span style="color:${GATE_COLOR(v)};font-weight:700">${v ? 'YES' : 'NO'}</span>`;
-
-  gEl.innerHTML = `
-    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:8px;margin-bottom:8px">
-      <div><span style="color:var(--muted)">Agent signal:</span> <strong style="color:var(--blue)">${data.agentSignal} (${data.agentConf})</strong></div>
-      <div><span style="color:var(--muted)">Entry bias:</span> <strong>${data.agentBias}</strong></div>
-      <div><span style="color:var(--muted)">Price regime:</span> <strong>${g.priceRegime}</strong> <span style="font-size:10px;color:var(--muted)">${g.regimeDuration||0}d</span></div>
-      <div><span style="color:var(--muted)">Agent regime:</span> <strong style="color:${g.agentRegime !== g.priceRegime ? 'var(--orange)' : 'var(--text)'}">${g.agentRegime}${g.agentRegime !== g.priceRegime ? ' ⚠ overridden' : ''}</strong></div>
-      <div><span style="color:var(--muted)">VIX:</span> <strong>${(g.vix||0).toFixed(1)}</strong> &nbsp; <span style="color:var(--muted)">IVR:</span> <strong>${(g.ivr||0).toFixed(0)} ${g.ivElevated ? '✓' : '✗'}</strong></div>
-      <div><span style="color:var(--muted)">Agent tradeType:</span> <strong style="color:${g.agentTradeType==='none'?'var(--red)':'var(--text)'}">${g.agentTradeType}</strong></div>
-      <div><span style="color:var(--muted)">SPY:</span> <strong>$${(g.spyPrice||0).toFixed(2)}</strong> &nbsp; <span style="color:var(--muted)">50MA:</span> $${(g.spy50MA||0).toFixed(0)} &nbsp; <span style="color:var(--muted)">200MA:</span> $${(g.spy200MA||0).toFixed(0)}</div>
-      <div><span style="color:var(--muted)">Last scan:</span> <strong style="font-size:10px">${data.lastScan ? new Date(data.lastScan).toLocaleTimeString() : '--'}</strong></div>
-    </div>
-    ${data.agentReasoning ? `<div style="font-size:10px;color:var(--muted);padding:6px 0;border-top:1px solid var(--border);border-bottom:1px solid var(--border);margin-bottom:8px;font-style:italic">"${data.agentReasoning}"</div>` : ''}
-    <div style="display:flex;flex-wrap:wrap;gap:8px;font-size:10px;padding-top:6px">
-      <span>Choppy block: ${FLAG(g.isChoppyRegime)}</span>
-      <span>Credit PUT mode: ${FLAG(g.creditModeActive)}</span>
-      <span>Credit CALL mode: ${FLAG(g.creditCallModeActive)}</span>
-      <span>200MA call block: ${FLAG(g.below200MACallBlock)}</span>
-      <span>Macro bullish: ${FLAG(g.macroBullish)}</span>
-      <span>VIX falling pause: ${FLAG(g.vixFallingPause)}</span>
-      <span>Avoid hold: ${FLAG(g.avoidHoldActive)}</span>
-    </div>`;
-
-  const scoreColor = s => s >= 80 ? 'var(--green)' : s >= 65 ? 'var(--blue)' : s >= 50 ? 'var(--gold)' : 'var(--muted)';
-  const reasonColor = r => {
-    if (r.includes('(-')) return '#ff7766';
-    if (r.includes('(+') && !r.includes('+0)')) return '#88dd88';
-    if (r.includes('BLOCK') || r.includes('block') || r.includes('hard zero')) return '#ff5544';
-    return 'var(--muted)';
-  };
-
-  rEl.innerHTML = (data.results || []).map(item => {
-    if (item.noData) return `<div class="card" style="margin-bottom:8px;padding:10px;opacity:0.5">
-      <strong>${item.ticker}</strong> <span style="color:var(--muted);font-size:11px">no scan data yet — waiting for first scan</span></div>`;
-
-    if (item.error) return `<div class="card" style="margin-bottom:8px;padding:10px;border-color:var(--red)">
-      <strong style="color:var(--red)">${item.ticker}</strong> <span style="color:var(--muted);font-size:11px">error: ${item.error}</span></div>`;
-
-    const wouldEnter = item.wouldEnter;
-    const best = item.bestType === 'put' ? item.putScore : item.callScore;
-    const bestReasons = item.bestType === 'put' ? item.putReasons : item.callReasons;
-
-    return `<div class="card" style="margin-bottom:10px;padding:12px;border-color:${wouldEnter?'var(--green)':item.bestScore>=item.effectiveMin?'var(--gold)':'var(--border)'}">
-      <div style="display:flex;align-items:center;gap:10px;margin-bottom:8px;flex-wrap:wrap">
-        <span style="font-size:15px;font-weight:700;color:var(--blue)">${item.ticker}</span>
-        <span style="font-size:12px;color:var(--muted)">$${(item.price||0).toFixed(2)}</span>
-        <span style="font-size:10px;color:${item.ageSec > 120 ? 'var(--orange)' : 'var(--muted)'}">${item.ageSec}s ago</span>
-        <span style="font-size:11px;padding:2px 8px;border-radius:10px;background:rgba(0,196,255,.1);color:var(--blue)">PUT: <strong style="color:${scoreColor(item.putScore)}">${item.putScore}</strong></span>
-        <span style="font-size:11px;padding:2px 8px;border-radius:10px;background:rgba(0,196,255,.1);color:var(--blue)">CALL: <strong style="color:${scoreColor(item.callScore)}">${item.callScore}</strong></span>
-        <span style="font-size:11px;color:var(--muted)">min: ${item.effectiveMin}</span>
-        <span style="margin-left:auto;font-size:11px;font-weight:700;color:${wouldEnter?'var(--green)':'var(--red)'}">${wouldEnter ? '✓ WOULD ENTER' : '✗ BLOCKED'}</span>
-      </div>
-      <div style="font-size:10px;color:var(--muted);margin-bottom:6px">
-        RSI: ${(item.signals?.rsi||0).toFixed(1)} intra / ${(item.signals?.dailyRsi||0).toFixed(1)} daily &nbsp;|&nbsp;
-        MACD: ${item.signals?.macd||'--'} &nbsp;|&nbsp;
-        MOM: ${item.signals?.momentum||'--'} &nbsp;|&nbsp;
-        IVP: ${item.signals?.ivPercentile||'--'}%
-      </div>
-      ${item.blocks.length ? `<div style="margin-bottom:6px">${item.blocks.map(b=>`<span style="font-size:10px;background:rgba(255,80,80,.12);color:var(--red);padding:1px 6px;border-radius:4px;margin-right:4px">${b}</span>`).join('')}</div>` : ''}
-      <div style="border-top:1px solid var(--border);padding-top:6px;margin-top:4px">
-        <div style="font-size:10px;color:var(--muted);margin-bottom:4px">BEST SETUP (${item.bestType?.toUpperCase()}):</div>
-        ${(bestReasons||[]).map(r=>`<div style="font-size:10px;color:${reasonColor(r)};line-height:1.6">${r}</div>`).join('')}
-      </div>
-    </div>`;
-  }).join('');
-}
-
-// Score tab auto-refresh handled inside switchTab directly
 
 // ── BACKTEST ENGINE JS ───────────────────────────────────────────────────────
 async function runMacroMatrix() {
@@ -2956,7 +2809,7 @@ function copyMatrixTemplate() {
   const NL = '\n';
   const DIV = '════════════════════════════════════════';
 
-  let out = 'BACKTEST MATRIX — ARGO V2.84' + NL;
+  let out = 'BACKTEST MATRIX — ARGO V3.0' + NL;
   out += DIV + NL;
   out += 'PERIOD:    ' + startDate + ' → ' + endDate + NL;
   out += 'HOLD:      ' + holdDays + 'd | MAX POS: ' + maxPositions + ' | CAPITAL: $' + capital + NL;
@@ -3138,7 +2991,7 @@ async function runBacktest() {
       putOnly:      btCallSize === 0,
     };
     const modeLabel = body.optionType === "both" ? "puts+calls (best direction daily)" : body.optionType + "s";
-    document.getElementById('bt-loading-msg').textContent = `Replaying ARGO V2.84 ${modeLabel} on ${body.ticker} ${body.startDate}→${body.endDate}...`;
+    document.getElementById('bt-loading-msg').textContent = `Replaying ARGO V3.0 ${modeLabel} on ${body.ticker} ${body.startDate}→${body.endDate}...`;
     const res  = await fetch('/api/backtest', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body) });
     const data = await res.json();
     if (data.error) throw new Error(data.error);
@@ -3348,7 +3201,7 @@ function copyBacktestTemplate() {
     `  ${r}: ${c} (${(c/s.totalTrades*100).toFixed(0)}%)`
   ).join('\n');
 
-  const template = `BACKTEST RESULT — ARGO V2.84
+  const template = `BACKTEST RESULT — ARGO V3.0
 ════════════════════════════════════════
 INSTRUMENT: ${s.ticker}
 DIRECTION:  ${s.optionType?.toUpperCase()}
@@ -3505,13 +3358,6 @@ function switchTab(name) {
   if (name==='theta')       loadTheta();
   if (name==='attribution') loadAttribution();
   if (name==='tax')         loadTaxLog();
-  if (name==='score') {
-    clearInterval(_scoreTimer);
-    fetchScoreDebug();
-    _scoreTimer = setInterval(fetchScoreDebug, 30000);
-  } else {
-    clearInterval(_scoreTimer); // stop polling when leaving score tab
-  }
 }
 
 // ── Init ──────────────────────────────────────────────────────────────────
