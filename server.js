@@ -284,6 +284,10 @@ const INDIVIDUAL_STOCK_WATCHLIST = [
   { ticker:"JPM",   sector:"Financial",   momentum:"strong",     rsi:57, macd:"bullish",            catalyst:"Net interest income strength",  ivr:28, beta:1.1, earningsDate:null },
   { ticker:"MS",    sector:"Financial",   momentum:"steady",     rsi:52, macd:"mild bullish",       catalyst:"Investment banking cycle",      ivr:28, beta:1.4, earningsDate:null },
   { ticker:"NFLX",  sector:"Consumer",    momentum:"strong",     rsi:60, macd:"bullish",            catalyst:"Ad-supported tier growth",      ivr:38, beta:1.4, earningsDate:null },
+  // TODO #10: New additions — panel approved April 14, 2026 (data-only, not tradeable)
+  { ticker:"UNH",   sector:"Healthcare",  momentum:"steady",     rsi:50, macd:"neutral",             catalyst:"ACA policy + Medicare/Medicaid cycle", ivr:30, beta:0.6, earningsDate:null, dataOnly:true },
+  { ticker:"CAT",   sector:"Industrial",  momentum:"steady",     rsi:50, macd:"neutral",             catalyst:"Global capex + infrastructure spend",   ivr:28, beta:1.1, earningsDate:null, dataOnly:true },
+  { ticker:"COIN",  sector:"Crypto",      momentum:"recovering", rsi:45, macd:"neutral",             catalyst:"Crypto risk appetite proxy",            ivr:85, beta:2.5, earningsDate:null, dataOnly:true },
 ];
 
 // - Default State -
@@ -2104,6 +2108,40 @@ function scoreIndexSetup(stock, optionType, spyRSI, spyMACD, spyMomentum, breadt
     if (stock.ticker === "IWM" && ["trending_bull","recovery"].includes(regime)) {
       score += 8; reasons.push("IWM in bull/recovery regime - small cap confirmation (+8)");
     }
+  }
+
+  // TODO #9: Wire data ETF sector signals into scoring
+  // XLF: financial sector health → SPY put signal
+  // SMH: semiconductor leading indicator → QQQ put signal
+  // IWM: market breadth quality → put/call modifier
+  // HYG credit stress: both HYG+TLT falling → bear regime confidence boost
+  const sectorData = state._sectorRelStr || {};
+  if (optionType === "put") {
+    const xlfRelStr = sectorData.XLF?.relStr || 0;
+    const smhRelStr = sectorData.SMH?.relStr || 0;
+    const iwmRelStr = sectorData.IWM?.relStr || 0;
+    // XLF underperforming SPY = financial stress = bearish signal for SPY puts
+    if (xlfRelStr < -2.0) { score += 8; reasons.push(`XLF underperforming SPY by ${Math.abs(xlfRelStr).toFixed(1)}% - financial stress (+8)`); }
+    else if (xlfRelStr < -1.0) { score += 4; reasons.push(`XLF lagging SPY by ${Math.abs(xlfRelStr).toFixed(1)}% (+4)`); }
+    else if (xlfRelStr > 2.0)  { score -= 5; reasons.push(`XLF outperforming SPY by ${xlfRelStr.toFixed(1)}% - financials strong (-5)`); }
+    // SMH underperforming QQQ = tech weakness is broad, QQQ puts more valid
+    if (stock.ticker === "QQQ" || stock.ticker === "SPY") {
+      if (smhRelStr < -3.0) { score += 10; reasons.push(`SMH underperforming by ${Math.abs(smhRelStr).toFixed(1)}% - semi weakness leading QQQ down (+10)`); }
+      else if (smhRelStr < -1.5) { score += 5; reasons.push(`SMH lagging ${Math.abs(smhRelStr).toFixed(1)}% - tech breadth narrowing (+5)`); }
+      else if (smhRelStr > 3.0)  { score -= 5; reasons.push(`SMH outperforming - semis strong, QQQ puts less valid (-5)`); }
+    }
+    // IWM underperforming = narrow market = puts more valid
+    if (iwmRelStr < -2.0)  { score += 5; reasons.push(`IWM lagging SPY ${Math.abs(iwmRelStr).toFixed(1)}% - narrow rally, puts valid (+5)`); }
+    else if (iwmRelStr > 2.0) { score -= 5; reasons.push(`IWM outperforming - broad participation, puts less valid (-5)`); }
+    // Credit stress flag — HYG + TLT both falling = forced liquidation
+    if (state._creditStress) { score += 8; reasons.push("Credit stress: HYG+TLT both falling - forced liquidation, bear regime confirmed (+8)"); }
+  }
+  if (optionType === "call") {
+    const xlfRelStr = sectorData.XLF?.relStr || 0;
+    const iwmRelStr = sectorData.IWM?.relStr || 0;
+    if (xlfRelStr > 2.0)   { score += 5; reasons.push(`XLF outperforming SPY - financial strength, calls favorable (+5)`); }
+    if (iwmRelStr > 2.0)   { score += 5; reasons.push(`IWM outperforming - broad participation, calls favorable (+5)`); }
+    if (state._creditStress) { score -= 8; reasons.push("Credit stress: HYG+TLT falling - calls risky in liquidation (-8)"); }
   }
 
   // Apply supplementary signals - capped at +25 total to prevent domination
@@ -4260,21 +4298,33 @@ async function getFearAndGreed() {
 
 // - Market Breadth -
 async function getMarketBreadth() {
+  // TODO #1 FIX: Use intraday bars (open vs current) instead of daily bars
+  // Daily bars don't update during the session — stale during sharp intraday reversals
+  // This was causing breadth to show 80% while RSI had already collapsed to 18-34
+  // Fix: compare current price to open price using intraday bars — updates every scan
   try {
     const sectors = ["XLK","XLF","XLE","XLV","XLI","XLY","XLP","XLU","XLB","XLRE"];
-    // Fetch all breadth ETFs in parallel
-    const allBars = await Promise.all(sectors.map(etf => getStockBars(etf, 2)));
-    let advancing = 0, declining = 0;
+    // Also include new data tickers for richer breadth signal
+    const breadthTickers = [...sectors, "SMH", "IWM", "HYG"];
+    const allBars = await Promise.all(breadthTickers.map(etf =>
+      getIntradayBars(etf, 1).catch(() => [])
+    ));
+    let advancing = 0, declining = 0, strength = 0;
     allBars.forEach(bars => {
-      if (bars.length >= 2) {
-        if (bars[bars.length-1].c > bars[bars.length-2].c) advancing++;
-        else declining++;
+      if (bars && bars.length > 0) {
+        const bar = bars[bars.length - 1];
+        if (bar && bar.o > 0 && bar.c > 0) {
+          if (bar.c > bar.o) { advancing++; strength += (bar.c - bar.o) / bar.o; }
+          else { declining++; strength -= (bar.o - bar.c) / bar.o; }
+        }
       }
     });
     const total      = advancing + declining;
     const breadthPct = total > 0 ? (advancing / total) * 100 : 50;
-    return { advancing, declining, breadthPct: parseFloat(breadthPct.toFixed(0)) };
-  } catch(e) { return { advancing: 5, declining: 5, breadthPct: 50 }; }
+    // breadthStrength: magnitude of move, useful for scoring (positive = broad strength)
+    const breadthStrength = parseFloat((strength * 100).toFixed(2));
+    return { advancing, declining, breadthPct: parseFloat(breadthPct.toFixed(0)), breadthStrength };
+  } catch(e) { return { advancing: 5, declining: 5, breadthPct: 50, breadthStrength: 0 }; }
 }
 
 // - DXY proxy via UUP ETF -
@@ -4825,7 +4875,12 @@ async function checkAllFilters(stock, price) {
       const implied  = stock.ivr * 0.4 + 15; // approximate IV from IVR (IVR=50 → ~35% IV)
       const volGap   = implied - realized;
       // Skip if implied vol is more than 20 points above realized (options too expensive)
-      if (volGap > 20) return { pass: false, reason: `Vol gap ${volGap.toFixed(1)}pts — implied ${implied.toFixed(0)}% vs realized ${realized.toFixed(0)}% — options expensive` };
+      // TODO #8 FIX: Credit spreads benefit from high IV (collect richer premium)
+      // Only block debit trades where expensive IV hurts the buyer
+      // Credit spreads: high IV = good, we're selling the overpriced premium
+      const isCreditEntry = creditModeActive || (stock._tradeType || "").startsWith("credit");
+      if (volGap > 20 && !isCreditEntry) return { pass: false, reason: `Vol gap ${volGap.toFixed(1)}pts — implied ${implied.toFixed(0)}% vs realized ${realized.toFixed(0)}% — options expensive` };
+      if (volGap > 20 && isCreditEntry) logEvent("filter", `${stock.ticker} vol gap ${volGap.toFixed(1)}pts — credit spread, collecting rich premium (favorable)`);
       // Bonus signal: if realized > implied, options are cheap (underpriced) — log as positive
       if (realized > implied + 5) logEvent("filter", `${stock.ticker} vol gap FAVORABLE — realized ${realized.toFixed(0)}% > implied ${implied.toFixed(0)}%`);
     } else {
@@ -7468,15 +7523,28 @@ async function runScan() {
         const spyChange = spySnap?.dailyBar?.c && spySnap?.prevDailyBar?.c
           ? (spySnap.dailyBar.c - spySnap.prevDailyBar.c) / spySnap.prevDailyBar.c * 100
           : 0;
-        for (const sector of ["XLE","KRE","XOP"]) {
-          const snap = await alpacaGet(`/stocks/${sector}/snapshot`, ALPACA_DATA);
-          if (!snap?.dailyBar?.c || !snap?.prevDailyBar?.c) continue;
+        // TODO #9: Expanded sector tracking — XLF/SMH/IWM/HYG added as data-only signals
+        // Each wired to specific scoring modifiers (applied in scoreIndexSetup)
+        const dataSectors = ["XLE","KRE","XOP","XLF","SMH","IWM","HYG","UNH","CAT"];
+        const sectorSnaps = await Promise.all(
+          dataSectors.map(s => alpacaGet(`/stocks/${s}/snapshot`, ALPACA_DATA).catch(() => null))
+        );
+        dataSectors.forEach((sector, i) => {
+          const snap = sectorSnaps[i];
+          if (!snap?.dailyBar?.c || !snap?.prevDailyBar?.c) return;
           const sectorChange = (snap.dailyBar.c - snap.prevDailyBar.c) / snap.prevDailyBar.c * 100;
           const relStr = parseFloat((sectorChange - spyChange).toFixed(2));
           state._sectorRelStr[sector] = { relStr, sectorPct: parseFloat(sectorChange.toFixed(2)), spyPct: parseFloat(spyChange.toFixed(2)) };
           if (Math.abs(relStr) > 2.0) {
             logEvent("scan", `[SECTOR] ${sector} ${relStr > 0 ? "outperforming" : "underperforming"} SPY by ${relStr.toFixed(1)}% today - rotation signal`);
           }
+        });
+        // Credit stress flag: HYG and TLT both falling = forced liquidation signal
+        const hygRelStr  = state._sectorRelStr?.HYG?.sectorPct || 0;
+        const tltRelStr  = state._sectorRelStr?.TLT?.sectorPct || 0;
+        state._creditStress = hygRelStr < -1.0 && tltRelStr < -0.5;
+        if (state._creditStress) {
+          logEvent("scan", `[CREDIT STRESS] HYG ${hygRelStr.toFixed(1)}% + TLT ${tltRelStr.toFixed(1)}% both falling — forced liquidation signal`);
         }
       } catch(e) { /* non-critical */ }
     })();
@@ -9918,16 +9986,22 @@ async function runScan() {
 
     // Fast RSI move gate - rapid RSI moves signal potential reversals for DEBIT entries
     // Credit spreads: fast RSI crash = ideal (max fear premium) - bypass gate
+    // TODO #2 FIX: Regime B exception — in bear regime, a fast RSI drop IS the puts_on_bounces setup
+    // not a warning sign. Lower required score from 85→75 when entryBias=puts_on_bounces and RSI falling.
     const prevRSI = bars.length >= 2 ? calcRSI(bars.slice(0, -1)) : signals.rsi;
     const rsiMove = Math.abs(signals.rsi - prevRSI);
     const fastRSIMove = rsiMove >= 15 && !creditModeActive;
     if (fastRSIMove) {
-      const fastRSIMin = 85;
+      const putsOnBouncesBias = (state._agentMacro || {}).entryBias === "puts_on_bounces";
+      const rsiIsFalling      = signals.rsi < prevRSI; // reversal, not momentum chase
+      // Regime B bounce-fade: fast RSI drop + puts_on_bounces = exactly the setup
+      const regimeBException  = putsOnBouncesBias && rsiIsFalling && optionType === "put";
+      const fastRSIMin = regimeBException ? 75 : 85;
       if (bestScore < fastRSIMin) {
-        logEvent("filter", `${stock.ticker} fast RSI move ${prevRSI.toFixed(0)}-${signals.rsi.toFixed(0)} (+${rsiMove.toFixed(0)}pts) - need score ${fastRSIMin}, have ${bestScore} - skip`);
+        logEvent("filter", `${stock.ticker} fast RSI move ${prevRSI.toFixed(0)}-${signals.rsi.toFixed(0)} (+${rsiMove.toFixed(0)}pts) - need score ${fastRSIMin}${regimeBException ? " (Regime B exception)" : ""}, have ${bestScore} - skip`);
         continue;
       }
-      logEvent("filter", `${stock.ticker} fast RSI move ${rsiMove.toFixed(0)}pts - requiring high conviction (score ${bestScore} - 85 -)`);
+      logEvent("filter", `${stock.ticker} fast RSI move ${rsiMove.toFixed(0)}pts - requiring high conviction (score ${bestScore} >= ${fastRSIMin}${regimeBException ? " Regime B" : ""})`);
     }
     logEvent("filter", `${stock.ticker} best setup: ${optionType.toUpperCase()} score ${bestScore} | RSI:${signals.rsi} MACD:${signals.macd} MOM:${signals.momentum}`);
     // Queue for execution - heat is rechecked live in the execution loop below
@@ -10191,6 +10265,71 @@ async function runScan() {
     // Gap > 2min - log but don't pollute interval stats (restart gap, not scan drift)
     logEvent("scan", `[PERF] Scan gap ${(lastScanMs/1000/60).toFixed(1)}min since last scan (boot/restart)`);
   }
+  // TODO #10: Data-only scoring pass for individual stocks
+  // Scores all panel-approved stocks every scan but NEVER executes trades on them
+  // Purpose: (1) validation data on scoring model, (2) surface manual opportunities,
+  //          (3) provide scoring context signals (NVDA leading QQQ, JPM credit stress, etc.)
+  // Panel hard cap: 10 stocks max. dataOnly:true stocks are always excluded from execution.
+  const DATA_ONLY_STOCKS = INDIVIDUAL_STOCK_WATCHLIST.filter(s =>
+    ["NVDA","JPM","TSLA","META","AMZN","PLTR","CRWD","UNH","CAT","COIN"].includes(s.ticker)
+  );
+  if (DATA_ONLY_STOCKS.length > 0 && isMarketHours()) {
+    (async () => {
+      try {
+        if (!state._dataOnlyScores) state._dataOnlyScores = {};
+        const agentMacro   = state._agentMacro || {};
+        const regime       = agentMacro.regime || "neutral";
+        const entryBias    = agentMacro.entryBias || "neutral";
+        const dataFetches  = await Promise.all(
+          DATA_ONLY_STOCKS.map(async stock => {
+            try {
+              const [price, bars, intradayBars] = await Promise.all([
+                getStockQuote(stock.ticker),
+                getStockBars(stock.ticker, 14).catch(() => []),
+                getIntradayBars(stock.ticker, 78).catch(() => []),
+              ]);
+              if (!price || !bars || bars.length < 5) return null;
+              const signals  = await getLiveSignals(stock.ticker, bars, intradayBars).catch(() => null);
+              if (!signals) return null;
+              const optionType  = entryBias === "calls_on_dips" ? "call" : "put";
+              const spyRelStr   = price && state._liveSPY
+                ? price / state._liveSPY
+                : 1.0;
+              // Use simplified scoring — no sector ETF fetch, just RSI/MACD/momentum
+              const baseScore   = optionType === "put"
+                ? scorePutSetup(stock, spyRelStr, signals.adx || 25, 1, 1, state.vix || 20)
+                : scoreMeanReversionCall(stock, spyRelStr, signals.adx || 25, bars, state.vix || 20);
+              const scoreVal    = baseScore?.score || 0;
+              state._dataOnlyScores[stock.ticker] = {
+                score: scoreVal,
+                optionType,
+                rsi:   signals.rsi,
+                macd:  signals.macd,
+                momentum: signals.momentum,
+                updatedAt: Date.now(),
+              };
+              if (scoreVal >= 70) {
+                logEvent("scan", `[DATA] ${stock.ticker} ${optionType.toUpperCase()} score ${scoreVal} — data-only signal (not trading)`);
+              }
+            } catch(e) { /* non-critical — don't let data pass crash main scan */ }
+          })
+        );
+        // Wire key individual stock signals into scoring context
+        // NVDA vs QQQ: if NVDA underperforms QQQ significantly, tech weakness is leading
+        const nvdaScore = state._dataOnlyScores?.NVDA;
+        const jpmScore  = state._dataOnlyScores?.JPM;
+        if (nvdaScore?.rsi && nvdaScore.rsi < 35) {
+          state._nvdaWeakness = true;
+          logEvent("scan", `[DATA] NVDA RSI ${nvdaScore.rsi.toFixed(0)} — AI capex weakness signal, QQQ puts more valid`);
+        } else { state._nvdaWeakness = false; }
+        if (jpmScore?.rsi && jpmScore.rsi < 35) {
+          state._jpmStress = true;
+          logEvent("scan", `[DATA] JPM RSI ${jpmScore.rsi.toFixed(0)} — credit/banking stress signal`);
+        } else { state._jpmStress = false; }
+      } catch(e) { /* non-critical */ }
+    })();
+  }
+
   state.lastScan    = new Date().toISOString();
   state._scanFailures = 0;
   // Single Redis write at scan end - with timeout so a Redis hang can't block the scanner
