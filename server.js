@@ -2005,17 +2005,23 @@ function scoreIndexSetup(stock, optionType, spyRSI, spyMACD, spyMomentum, breadt
     if (["trending_bull","recovery"].includes(regime))                            { score += 20; reasons.push(`Regime: ${regime} (+20)`); }
     else if (regime === "choppy")                                                  { score -= 10; reasons.push("Choppy regime - calls risky (-10)"); }
     else if (["trending_bear","breakdown"].includes(regime)) {
-      // V2.81 change 5: Capitulation bypass for mean reversion calls
-      // When daily RSI <=30 for 2+ consecutive DAYS and VIX is not spiking,
-      // capitulation has genuinely occurred - reduce regime B penalty from -25 to -10
-      // Research basis: daily RSI <=35 for 2+ days has +1.2% excess 5-day forward return on SPY
-      const oversoldDays = state._oversoldCount?.[stock.ticker] || 0;
-      const vixNotSpiking = (state._agentMacro?.vixOutlook || "") !== "spiking";
-      const capitulationConfirmed = spyRSI <= 30 && oversoldDays >= 2 && vixNotSpiking;
-      if (capitulationConfirmed) {
-        score -= 10; reasons.push(`Regime: ${regime} - capitulation bypass active (RSI ${spyRSI} for ${oversoldDays}d + VIX stabilizing) (-10 vs normal -25)`);
+      // Credit calls (bear call spreads) in Regime B: legitimate directional premium trade
+      // Debit calls in bear regime: wrong — fighting the trend
+      // tradeType === "credit" when creditModeActive (scoringMacro has tradeType:"credit")
+      const isCreditCallMode = tradeType === "credit";
+      if (isCreditCallMode) {
+        // Bear call spread: structural alignment bonus — selling calls above a falling market
+        score += 5; reasons.push(`Regime: ${regime} - bear call spread aligned with downtrend (+5)`);
       } else {
-        score -= 25; reasons.push(`Regime: ${regime} - wrong for calls (-25)`);
+        // Capitulation bypass for mean reversion debit calls
+        const oversoldDays = state._oversoldCount?.[stock.ticker] || 0;
+        const vixNotSpiking = (state._agentMacro?.vixOutlook || "") !== "spiking";
+        const capitulationConfirmed = spyRSI <= 30 && oversoldDays >= 2 && vixNotSpiking;
+        if (capitulationConfirmed) {
+          score -= 10; reasons.push(`Regime: ${regime} - capitulation bypass active (RSI ${spyRSI} for ${oversoldDays}d + VIX stabilizing) (-10 vs normal -25)`);
+        } else {
+          score -= 25; reasons.push(`Regime: ${regime} - wrong for debit calls (-25)`);
+        }
       }
     }
 
@@ -5711,15 +5717,21 @@ async function executeCreditSpread(stock, price, score, scoreReasons, vix, optio
     logEvent("filter", `${stock.ticker} credit spread: ${chainContracts.length} contracts in window (${fetchMin}->${fetchMax})`);
 
     // -- STEP 3: Find short leg - closest contract to shortStrike, on best expiry -
-    // Sort by closeness to shortStrike, then by closeness to targetDTE
+    // Sort by DTE closeness FIRST, then strike proximity within that expiry.
+    // Critical: wrong expiry at same strike = wrong delta = wrong premium.
+    // A near-dated (14DTE) contract at $649 has delta 0.09 vs a 21DTE having delta 0.21.
+    // Prior sort (strike first) was picking the wrong expiry causing delta mismatch.
     chainContracts.sort((a, b) => {
-      const aDist  = Math.abs(parseFloat(a.strike_price) - shortStrike);
-      const bDist  = Math.abs(parseFloat(b.strike_price) - shortStrike);
-      if (Math.abs(aDist - bDist) > 0.01) return aDist - bDist; // prefer closer strike
-      // Tiebreak: prefer expiry closer to targetDTE
       const aExpDTE = Math.round((new Date(a.expiration_date) - today) / 86400000);
       const bExpDTE = Math.round((new Date(b.expiration_date) - today) / 86400000);
-      return Math.abs(aExpDTE - targetDTE) - Math.abs(bExpDTE - targetDTE);
+      const aDTEDist = Math.abs(aExpDTE - targetDTE);
+      const bDTEDist = Math.abs(bExpDTE - targetDTE);
+      // Primary sort: prefer expiry closest to targetDTE (within 7 days = same group)
+      if (Math.abs(aDTEDist - bDTEDist) > 7) return aDTEDist - bDTEDist;
+      // Secondary sort: within same expiry group, prefer strike closest to target
+      const aDist = Math.abs(parseFloat(a.strike_price) - shortStrike);
+      const bDist = Math.abs(parseFloat(b.strike_price) - shortStrike);
+      return aDist - bDist;
     });
 
     // Fetch snapshots for top candidates (sorted by strike proximity)
@@ -10135,13 +10147,16 @@ async function runScan() {
   // Prevents entering 8 positions simultaneously on a broad selloff day
   // where every stock scores 90+ just because the market is down
   if (scored.length >= 5) {
-    const topN       = Math.max(1, Math.ceil(scored.length * 0.20));
+    // For small watchlists (<=7), keep top 40% with minimum 2 candidates
+    // For larger lists, keep top 20% — prevents flooding on broad selloffs
+    // With only 5 instruments, 20% = 1 candidate which is too restrictive
+    const pct  = scored.length <= 7 ? 0.40 : 0.20;
+    const topN = Math.max(2, Math.ceil(scored.length * pct));
     const cutoffScore = scored[topN - 1]?.score || 0;
     const aboveCutoff = scored.filter(s => s.score >= cutoffScore);
-    // Only keep top 20% - but always keep at least 1 candidate
     scored.length = 0;
     aboveCutoff.forEach(s => scored.push(s));
-    logEvent("filter", `Score ranking: keeping top ${aboveCutoff.length} of candidates (cutoff: ${cutoffScore})`);
+    logEvent("filter", `Score ranking: keeping top ${aboveCutoff.length} of ${scored.length + aboveCutoff.length} (cutoff: ${cutoffScore}, pct: ${Math.round(pct*100)}%)`);
   }
 
   // - PARALLEL OPTIONS PREFETCH -
