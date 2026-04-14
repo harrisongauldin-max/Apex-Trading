@@ -1943,7 +1943,9 @@ function scoreIndexSetup(stock, optionType, spyRSI, spyMACD, spyMomentum, breadt
     else if (ivpPut >= 90)  {
       // IVP 90%+: extreme IV. For debit puts: move may already be priced in (-5).
       // For credit spreads: ideal — collect extremely rich premium (+12).
-      if (creditModeActive) {
+      // tradeType === "credit" is passed in via scoringMacro when creditModeActive
+      const isInCreditMode90 = tradeType === "credit";
+      if (isInCreditMode90) {
         supplementScore += 12; reasons.push(`IVP ${ivpPut}% - extreme IV, ideal credit premium collection (+12)`);
       } else {
         score -= 5; reasons.push(`IVP ${ivpPut}% - extreme IV, debit put risk: move priced in (-5)`);
@@ -1951,9 +1953,11 @@ function scoreIndexSetup(stock, optionType, spyRSI, spyMACD, spyMomentum, breadt
     }
     else if (ivpPut >= 70)  {
       // Credit spreads: high IVP = selling overpriced premium = MORE favorable
-      const ivpBonus = creditModeActive ? 10 : 5;
+      // Derive credit mode from agentMacro.tradeType (passed into scoreIndexSetup)
+      const isInCreditMode = tradeType === "credit";
+      const ivpBonus = isInCreditMode ? 10 : 5;
       supplementScore += ivpBonus;
-      reasons.push(`IVP ${ivpPut}% - ${creditModeActive ? "credit spread premium rich" : "elevated IV"} (+${ivpBonus})`);
+      reasons.push(`IVP ${ivpPut}% - ${isInCreditMode ? "credit spread premium rich" : "elevated IV"} (+${ivpBonus})`);
     }
 
     // - QQQ secondary - only when tech thesis clear -
@@ -11858,9 +11862,13 @@ function render(d) {
     html += '<div class="score-box"><div class="label">MIN</div><div class="val blue">' + min + '</div></div>';
     html += '<div class="score-box"><div class="label">BEST</div><div class="val ' + scoreColor(best,min) + '">' + best + ' ' + type.toUpperCase() + '</div></div>';
     if (r.wouldEnter) html += '<div class="would-enter">✓ WOULD ENTER</div>';
+    if (!r.wouldEnter && (r.blocks||[]).length === 0 && r.bestScore < (r.effectiveMin||70)) {
+      html += '<div style="background:#fff8e1;border:0.5px solid #fcd34d;border-radius:4px;padding:4px 8px;font-size:11px;color:#713f12">⚡ Score ' + r.bestScore + ' below min ' + (r.effectiveMin||70) + '</div>';
+    }
     html += '</div>';
     if (r.constraint) html += '<div class="blocked">CONSTRAINT: ' + r.constraint + '</div>';
     (r.blocks||[]).forEach(b => { html += '<div class="blocked">⊘ ' + b + '</div>'; });
+    (r.modeIndicators||[]).forEach(m => { html += '<div style="background:#e3f2fd;border:0.5px solid #90caf9;border-radius:4px;padding:3px 8px;font-size:11px;color:#1565c0;margin-bottom:3px">◈ MODE: ' + m + '</div>'; });
     const sigs = r.signals || {};
     if (Object.keys(sigs).length) {
       html += '<div class="signals">';
@@ -11966,13 +11974,16 @@ app.get("/api/score-debug", (req, res) => {
       // Reconstruct gate blocks for display
       const blocks = [...(snap.blocked || [])];
       // Use gates object — variables from outer scope aren't available here
+      // NOTE: credit mode active is a MODE indicator, not a block — shown in gates section
       if (gates.isChoppyRegime && !gates.creditModeActive) blocks.push("choppy regime - debit blocked");
-      if (gates.creditModeActive)                           blocks.push("credit put mode active");
-      if (gates.creditCallModeActive)                       blocks.push("credit call mode active");
       if (gates.below200MACallBlock)                        blocks.push("SPY below 200MA - calls blocked");
       if (gates.macroBullish)                               blocks.push("macro aggressive - puts blocked");
       if (gates.vixFallingPause)                            blocks.push("VIX falling - puts paused");
       if (gates.avoidHoldActive)                            blocks.push(`avoid hold until ${gates.avoidUntilStr || "?"}`);
+      // Mode indicators (shown separately, not as blocks)
+      const modeIndicators = [];
+      if (gates.creditModeActive)     modeIndicators.push("credit PUT mode");
+      if (gates.creditCallModeActive) modeIndicators.push("credit CALL mode");
 
       const instrConstraint = INSTRUMENT_CONSTRAINTS[stock.ticker] || null;
       return {
@@ -11984,7 +11995,8 @@ app.get("/api/score-debug", (req, res) => {
         bestScore,
         bestType,
         effectiveMin: snap.effectiveMin,
-        wouldEnter:  bestScore >= snap.effectiveMin && (blocks.length === 0 || (blocks.length === 1 && blocks[0].includes("credit"))),
+        wouldEnter:  bestScore >= snap.effectiveMin && blocks.length === 0,
+      modeIndicators,
         blocks,
         constraint:  instrConstraint ? `${instrConstraint.allowedTypes.join("/")} only${instrConstraint.reason ? " - " + instrConstraint.reason : ""}` : null,
         putReasons:  snap.putReasons  || [],
