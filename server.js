@@ -4166,11 +4166,16 @@ async function getMacroNews() {
             // AG-9: schemaVersion - backward compat
             schemaVersion:    agentResult.schemaVersion    || 1,
           };
-                    if (state._regimeClass === "B" && state._agentMacro.signal === "mild bullish") {
+                    const _r = state._regimeClass;
+          const _s = state._agentMacro.signal;
+          if (_r === "B" || _r === "C") {
             state._agentMacro.entryBias = "puts_on_bounces";
-          }
-          if (state._regimeClass === "B" && state._agentMacro.signal === "mild bearish") {
-            state._agentMacro.entryBias = "puts_on_bounces";
+          } else if (_r === "A") {
+            state._agentMacro.entryBias = "calls_on_dips";
+          } else {
+            if (_s.includes("bearish")) state._agentMacro.entryBias = "puts_on_bounces";
+            else if (_s.includes("bullish")) state._agentMacro.entryBias = "calls_on_dips";
+            else state._agentMacro.entryBias = "neutral";
           }
           // Apply intraday regime override if signal is strong enough
           applyIntradayRegimeOverride(agentResult);
