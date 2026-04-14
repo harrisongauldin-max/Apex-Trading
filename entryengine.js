@@ -290,8 +290,15 @@ function scoreCandidate(stock, rawPutScore, rawCallScore, putReasons, callReason
   const instrConstraint = rb.instrumentConstraints[ticker];
   const allowsCredit    = !instrConstraint || instrConstraint.allowedTypes.some(t => t.startsWith("credit"));
   let tradeType;
+  // TODO #5 FIX: Iron condor now reachable — activates when regime is choppy + IVR >= 60
+  // Choppy regime = no clear directional bias = ideal for premium collection on both sides
+  // IVR >= 60 = elevated IV makes both legs rich enough to collect meaningful premium
+  const isChoppy     = (rb.regimeName || "").includes("choppy") || rb.isChoppy;
+  const ironCondorOk = isIndex && isChoppy && rb.ivRank >= 60 && allowsCredit && !stock.isMeanReversion;
   if (stock.isMeanReversion)
     tradeType = "debit_naked";
+  else if (ironCondorOk && instrConstraint?.allowedTypes?.includes("iron_condor"))
+    tradeType = "iron_condor";
   else if (optionType === "put" && rb.gates.creditPutActive && isIndex && rb.ivRank >= 50 && allowsCredit)
     tradeType = "credit_put";
   else if (optionType === "call" && rb.gates.creditCallActive && isIndex && allowsCredit)
