@@ -1944,7 +1944,7 @@ function copyOpenPositions() {
 
   const totSign = totalPnL >= 0 ? '+' : '';
   lines.push('─────────────────────────────');
-  lines.push(`${positions.length} leg${positions.length!==1?'s':''} across ${groups.length} position${groups.length!==1?'s':''} | Total P&L: ${totSign}$${Math.abs(totalPnL).toFixed(2)}`);
+  lines.push(`${groups.length} position${groups.length!==1?'s':''} | Total P&L: ${totSign}$${Math.abs(totalPnL).toFixed(2)}`);
 
   const text = lines.join('\n');
 
