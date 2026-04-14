@@ -303,7 +303,8 @@ function scoreCandidate(stock, rawPutScore, rawCallScore, putReasons, callReason
     tradeType = "debit_naked";
   else if (ironCondorOk && instrConstraint?.allowedTypes?.includes("iron_condor"))
     tradeType = "iron_condor";
-  else if (optionType === "put" && rb.gates.creditPutActive && isIndex && rb.ivRank >= 50 && allowsCredit)
+  // Use rb.creditAllowedVIX which respects the lowered 45 threshold with VIX belt (Fix #13)
+  else if (optionType === "put" && rb.gates.creditPutActive && isIndex && rb.creditAllowedVIX && allowsCredit)
     tradeType = "credit_put";
   else if (optionType === "call" && rb.gates.creditCallActive && isIndex && allowsCredit)
     tradeType = "credit_call";
@@ -460,7 +461,11 @@ function evaluateEntry(candidate, rulebook, state, context = {}) {
   // Afternoon minimum [Regime A only]
   // Late-day entries in bull market have elevated overnight gap risk
   // In Regime B, afternoon is when bounces run out of steam — best put timing
-  if (g.afternoonMinActive && isLateDay) {
+  // Afternoon minimum: Regime A only, debit puts/calls only
+  // Credit spreads don't have overnight gap risk (defined risk structure)
+  // and don't need the afternoon bar raise
+  const isCredit = tradeType && tradeType.startsWith("credit");
+  if (g.afternoonMinActive && isLateDay && !isCredit) {
     const afternoonMin = rb.vix >= 30 ? 90 : rb.vix >= 25 ? 85 : minScore;
     minScore = Math.max(minScore, afternoonMin);
   }
