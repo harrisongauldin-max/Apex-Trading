@@ -87,10 +87,14 @@ function getRegimeRulebook(state) {
   //   Raw VIX >= 25 retained as structural floor (prevents credit entries in
   //   calm low-vol markets where IV can keep falling post-entry)
   const skewElevated      = (state._skew?.skew || 0) >= 130;
-  const ivElevated        = ivRank >= 50;         // primary credit gate (IVR percentile)
+  // IVR threshold lowered 50→45: at IVR 45-50 with VIX >= 25, options are expensive enough
+  // for credit spreads. The hard 50 cutoff was too rigid — IVR 49 with VIX 28 is credit-favorable.
+  // Belt: require VIX >= 27 when IVR is in the 45-50 borderline zone for extra confirmation.
+  const ivElevated        = ivRank >= 45;         // primary credit gate (was 50 — too rigid)
   const ivHigh            = ivRank >= 70;         // aggressive credit sizing
   const vixFloor          = vix >= 25 || (skewElevated && vix >= 22); // structural floor
-  const creditAllowedVIX  = ivElevated && vixFloor; // BOTH required — percentile + level
+  const vixEnhanced       = vix >= 27;            // extra confirmation when IVR borderline
+  const creditAllowedVIX  = (ivElevated && vixFloor) && (ivRank >= 50 || vixEnhanced); // IVR>=50 OR (IVR>=45 AND VIX>=27)
 
   // ── Credit mode flags ─────────────────────────────────────
   // Credit PUT: direction is uncertain (choppy) OR bear regime with elevated premium
@@ -439,8 +443,15 @@ function evaluateEntry(candidate, rulebook, state, context = {}) {
   }
 
   // ── Effective minimum score ───────────────────────────────
-  let minScore = tradeType.startsWith("credit") ? rb.minScoreCredit
-               : optionType === "put"           ? rb.minScorePut
+  // Regime B debit puts in puts_on_bounces mode: structural regime conviction replaces
+  // the RSI overbought signal that score minimum was designed to ensure.
+  // Lower to 65 (same as credit) — regime provides the edge, not just RSI.
+  const isPutsOnBouncesDebit = tradeType === "debit_put"
+    && (rb.regimeClass === "B" || rb.regimeClass === "C")
+    && rb.gates.putsOnBounceMode;
+  let minScore = tradeType.startsWith("credit")   ? rb.minScoreCredit
+               : isPutsOnBouncesDebit             ? rb.minScoreCredit  // 65 in Regime B fade mode
+               : optionType === "put"             ? rb.minScorePut
                : rb.minScoreCall;
 
   // Agent confidence raises bar when weak — does not lower when strong
