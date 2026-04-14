@@ -176,18 +176,18 @@ function getRegimeRulebook(state) {
   // Black-Scholes verified at VIX 29, 21 DTE:
   //   4% OTM = delta -0.25  |  5% OTM = delta -0.21  |  6% OTM = delta -0.17
   // Target delta 0.15-0.20 on short leg.
-  // With minCreditRatio now 0.20, 5-6% OTM collects enough premium to pass.
+  // With minCreditRatio now 0.25, need 5-6% OTM spread to collect enough premium.
   const creditOTMpct = isCrisis     ? 0.06          // C: VIX 35+, 6% OTM ~ delta 0.17-0.20
                      : isBearRegime ? (vix >= 35 ? 0.06 : 0.05)  // B: 5-6% OTM ~ delta 0.17-0.21
                      : 0.04;                         // A: 4% OTM ~ delta 0.25, mean rev
 
-  // Change 2 (RM/QS): credit ratio floor — CORRECTED to 0.20
-  //   At delta 0.17 short (5-6% OTM), Black-Scholes gives 20-25% R/R on $15 spread.
-  //   EV at 80% win rate: 0.80 * 0.22 - 0.20 * 0.78 = +$0.02/dollar risked.
-  //   The 0.30 floor was calibrated for naked options (delta 0.30), not defined-risk
-  //   spreads. Lowering to 0.20 allows entries at the professional delta range.
-  //   Absolute minimum for positive EV at 80% WR: 0.20 R/R (breakeven at 80%).
-  const minCreditRatio  = 0.20;  // floor — EV positive at 80% WR (tastytrade research)
+  // Panel correction (CRITICAL #1): minCreditRatio raised 0.20 → 0.25.
+  //   EV math: at delta 0.20 (80% win rate): EV = 0.80*0.20 - 0.20*0.80 = 0.00 (breakeven).
+  //   Need >20% R/R for positive EV after commissions and slippage.
+  //   0.25 floor provides ~4% EV buffer above breakeven at delta 0.20.
+  //   Breakeven R/R formula: loss_prob / win_prob = delta / (1-delta)
+  //   At delta 0.20: breakeven = 0.20/0.80 = 25%. So 0.25 is the TRUE minimum.
+  const minCreditRatio  = 0.25;  // floor — EV-positive minimum at delta 0.20 (panel CRITICAL #1)
   const targetCreditRatio = 0.30; // target — seek 30% when conditions allow
 
   // Change 3 (OT + Natenberg 1994 Ch.8): DTE targets per regime
@@ -436,11 +436,27 @@ function evaluateEntry(candidate, rulebook, state, context = {}) {
   // ── Stagger gate ──────────────────────────────────────────
   // Prevents pile-ons: entering same-ticker same-direction within 30min
   // requires existing position to be profitable (thesis confirmation)
+  // Panel M3: stagger gate threshold split by trade type.
+  // Debit spreads: 5% profit = meaningful confirmation (spread moved $0.30+ on a $6 spread).
+  // Credit spreads: pnlPct is NEGATIVE when profitable (spread value decays toward 0).
+  //   For credit, profit = (premium - currentSpreadValue). 5% on pnlPct = noise within bid-ask.
+  //   Use maxProfitPct (% of max profit earned) instead. 15% of max profit = genuine confirmation.
+  // existingProfitPct: for debit = positive when profitable. For credit = negative (inverted).
+  // existingCreditProfitPct: provided by context as (premium - currentValue) / maxProfit.
   const recentSameDir = context.recentSameDir ?? null;
   if (recentSameDir !== null && recentSameDir < 30) {
-    const existingProfit = context.existingProfitPct ?? 0;
-    if (existingProfit < 0.05)
-      return { pass: false, reason: `stagger — ${recentSameDir.toFixed(0)}min since last ${optionType} on ${ticker} (need 30min gap or >5% profit to add)` };
+    const isCredit = tradeType && tradeType.startsWith("credit");
+    if (isCredit) {
+      // Credit: use % of max profit earned (positive when profitable)
+      const creditProfitPct = context.existingCreditProfitPct ?? 0;
+      if (creditProfitPct < 0.15)
+        return { pass: false, reason: `stagger — ${recentSameDir.toFixed(0)}min since last credit ${optionType} on ${ticker} (need 30min gap or >15% of max profit to add)` };
+    } else {
+      // Debit: standard pnlPct (positive when profitable)
+      const existingProfit = context.existingProfitPct ?? 0;
+      if (existingProfit < 0.05)
+        return { pass: false, reason: `stagger — ${recentSameDir.toFixed(0)}min since last ${optionType} on ${ticker} (need 30min gap or >5% profit to add)` };
+    }
   }
 
   // ── Effective minimum score ───────────────────────────────
