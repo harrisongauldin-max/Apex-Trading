@@ -1811,101 +1811,155 @@ function copyOpenPositions() {
 
   if (!positions.length) {
     lbl.textContent = 'No positions';
-    setTimeout(() => lbl.textContent = 'Copy positions', 2000);
+    setTimeout(() => { btn.textContent = '⎘'; lbl.textContent = 'Copy positions'; }, 2000);
     return;
   }
 
+  // ── pair same-ticker / same-expiry / same-optionType into spreads ──────────
+  const used = new Set();
+  const groups = [];
+
+  positions.forEach((p, i) => {
+    if (used.has(i)) return;
+    // Check for a matching leg: same ticker, expiry, optionType but different strike
+    let partner = -1;
+    if (!p.isSpread && !p.isCreditSpread && p.strike) {
+      for (let j = i + 1; j < positions.length; j++) {
+        if (used.has(j)) continue;
+        const q = positions[j];
+        if (q.ticker === p.ticker && q.expDate === p.expDate &&
+            q.optionType === p.optionType && q.strike && q.strike !== p.strike) {
+          partner = j;
+          break;
+        }
+      }
+    }
+    if (partner >= 0) {
+      used.add(i); used.add(partner);
+      groups.push({ type: 'paired', legs: [p, positions[partner]] });
+    } else {
+      used.add(i);
+      groups.push({ type: 'single', pos: p });
+    }
+  });
+
+  // ── build output lines ─────────────────────────────────────────────────────
   const lines = ['ARGO V3.0 — Open Positions — ' + new Date().toLocaleString(), ''];
   let totalPnL = 0;
 
-  positions.forEach(p => {
-    const curPrice  = parseFloat(p.currentPrice || p.premium || 0);
-    const premium   = parseFloat(p.premium || 0);
-    const contracts = p.contracts || 1;
-    const dte       = p.expDate ? Math.max(0, Math.round((new Date(p.expDate) - new Date()) / 86400000)) : '?';
+  groups.forEach(g => {
+    if (g.type === 'paired') {
+      // Sort: higher strike = short leg (sold, received premium), lower = long leg (bought)
+      const legs = g.legs.slice().sort((a, b) => b.strike - a.strike);
+      const shortLeg = legs[0]; // higher strike put = short (credit received)
+      const longLeg  = legs[1]; // lower strike put  = long (debit paid)
+      const contracts = shortLeg.contracts || 1;
+      const dte = shortLeg.expDate
+        ? Math.max(0, Math.round((new Date(shortLeg.expDate) - new Date()) / 86400000)) : '?';
 
-    // Detect type from position fields
-    const isCredit = !!p.isCreditSpread;
-    const isDebit  = p.isSpread && !p.isCreditSpread;
-    const typeLabel = isCredit ? 'CREDIT SPREAD' : isDebit ? 'DEBIT SPREAD' : 'DEBIT PUT';
+      // Determine if credit (short put has qty < 0 / sellSymbol set) or debit
+      const isCredit = !!(shortLeg.sellSymbol) || (parseFloat(shortLeg.premium) > parseFloat(longLeg.premium));
+      const label = isCredit ? 'CREDIT SPREAD' : 'DEBIT SPREAD';
 
-    // Strike display
-    let strikeDisplay;
-    if (isCredit || isDebit) {
-      const short = p.shortStrike || p.sellStrike || '?';
-      const long  = p.longStrike  || p.buyStrike  || '?';
-      strikeDisplay = isCredit ? `$${short}/$${long}` : `$${long}/$${short}`;
+      // Net P&L: short leg P&L + long leg P&L
+      const shortPnL = shortLeg.unrealizedPnL !== undefined
+        ? parseFloat(shortLeg.unrealizedPnL)
+        : (parseFloat(shortLeg.premium) - parseFloat(shortLeg.currentPrice || shortLeg.premium)) * 100 * contracts;
+      const longPnL = longLeg.unrealizedPnL !== undefined
+        ? parseFloat(longLeg.unrealizedPnL)
+        : (parseFloat(longLeg.currentPrice || longLeg.premium) - parseFloat(longLeg.premium)) * 100 * contracts;
+      const netPnL = shortPnL + longPnL;
+
+      const netCredit = parseFloat(shortLeg.premium) - parseFloat(longLeg.premium);
+      const width     = shortLeg.strike - longLeg.strike;
+      const maxProfit = netCredit * 100 * contracts;
+      const maxLoss   = (width - netCredit) * 100 * contracts;
+      const chgPct    = maxProfit > 0 ? (netPnL / maxProfit * 100) : 0;
+      const pnlSign   = netPnL >= 0 ? '+' : '';
+      const pctSign   = chgPct  >= 0 ? '+' : '';
+
+      totalPnL += netPnL;
+
+      lines.push(`${shortLeg.ticker} ${(shortLeg.optionType||'put').toUpperCase()} $${shortLeg.strike}/$${longLeg.strike} exp ${shortLeg.expDate} [${label}]`);
+      lines.push(`  Net credit: $${netCredit.toFixed(2)} | Width: $${width} | ${contracts}x | ${dte}d DTE`);
+      lines.push(`  P&L: ${pnlSign}$${Math.abs(netPnL).toFixed(2)} (${pctSign}${chgPct.toFixed(1)}% of max profit)`);
+      lines.push(`  Max profit: $${maxProfit.toFixed(0)} | Max loss: $${maxLoss.toFixed(0)} | Breakeven: $${(shortLeg.strike - netCredit).toFixed(2)}`);
+      if (shortLeg.score) lines.push(`  Entry score: ${shortLeg.score}/100`);
+      lines.push('');
+
     } else {
-      strikeDisplay = `$${p.strike || p.buyStrike || '?'}`;
+      const p = g.pos;
+      const contracts = p.contracts || 1;
+      const dte = p.expDate
+        ? Math.max(0, Math.round((new Date(p.expDate) - new Date()) / 86400000)) : '?';
+
+      // Type label — check all possible flags
+      let typeLabel;
+      if (p.isCreditSpread)             typeLabel = 'CREDIT SPREAD';
+      else if (p.isSpread)              typeLabel = 'DEBIT SPREAD';
+      else if (p.dteLabel === 'RECONCILED') typeLabel = 'RECONCILED';
+      else                               typeLabel = (p.optionType || 'put').toUpperCase() + ' OPTION';
+
+      // Strike display
+      const strikeDisplay = (p.isSpread || p.isCreditSpread)
+        ? `$${p.shortStrike||p.sellStrike||'?'}/$${p.longStrike||p.buyStrike||'?'}`
+        : `$${p.strike || '?'}`;
+
+      // P&L — prefer Alpaca unrealizedPnL
+      let chgDollar;
+      if (p.unrealizedPnL !== undefined && p.unrealizedPnL !== null) {
+        chgDollar = parseFloat(p.unrealizedPnL);
+      } else if (p.isCreditSpread) {
+        chgDollar = (parseFloat(p.premium) - parseFloat(p.currentPrice || p.premium)) * 100 * contracts;
+      } else {
+        chgDollar = (parseFloat(p.currentPrice || p.premium) - parseFloat(p.premium)) * 100 * contracts;
+      }
+
+      // P&L %
+      let chgPct = 0;
+      if (p.isCreditSpread && p.maxProfit) {
+        chgPct = (chgDollar / parseFloat(p.maxProfit)) * 100;
+      } else if (parseFloat(p.premium) > 0) {
+        chgPct = (chgDollar / (parseFloat(p.premium) * 100 * contracts)) * 100;
+      }
+
+      totalPnL += chgDollar;
+
+      const pnlSign = chgDollar >= 0 ? '+' : '';
+      const pctSign = chgPct   >= 0 ? '+' : '';
+
+      lines.push(`${p.ticker} ${(p.optionType||'put').toUpperCase()} ${strikeDisplay} exp ${p.expDate} [${typeLabel}]`);
+      lines.push(`  Entry: $${parseFloat(p.premium).toFixed(2)} | Current: $${parseFloat(p.currentPrice||p.premium).toFixed(2)} | ${contracts}x contract${contracts!==1?'s':''} | ${dte}d DTE`);
+      lines.push(`  P&L: ${pnlSign}$${Math.abs(chgDollar).toFixed(2)} (${pctSign}${chgPct.toFixed(1)}%)`);
+      if (p.isCreditSpread && p.maxProfit) {
+        lines.push(`  Max profit: $${parseFloat(p.maxProfit).toFixed(0)} | Max loss: $${parseFloat(p.maxLoss||0).toFixed(0)} | Breakeven: $${p.breakeven||'--'}`);
+      }
+      if (p.score) lines.push(`  Entry score: ${p.score}/100`);
+      if (p.reasons && p.reasons.length) {
+        lines.push(`  Reasons: ${p.reasons.slice(0,3).join(' · ')}`);
+      }
+      lines.push('');
     }
-
-    // P&L — prefer unrealizedPnL from Alpaca (already correctly signed)
-    let chgDollar;
-    if (p.unrealizedPnL !== undefined && p.unrealizedPnL !== null) {
-      chgDollar = parseFloat(p.unrealizedPnL);
-    } else if (isCredit) {
-      chgDollar = (premium - curPrice) * 100 * contracts;
-    } else {
-      chgDollar = (curPrice - premium) * 100 * contracts;
-    }
-
-    // P&L % — relative to max profit (credit) or cost paid (debit)
-    let chgPct = 0;
-    if (isCredit && p.maxProfit) {
-      chgPct = (chgDollar / parseFloat(p.maxProfit)) * 100;
-    } else if (premium > 0) {
-      chgPct = (chgDollar / (premium * 100 * contracts)) * 100;
-    }
-
-    totalPnL += chgDollar;
-
-    const pnlSign  = chgDollar >= 0 ? '+' : '';
-    const pctSign  = chgPct  >= 0 ? '+' : '';
-
-    lines.push(`${p.ticker} ${(p.optionType||'put').toUpperCase()} ${strikeDisplay} exp ${p.expDate} [${typeLabel}]`);
-    lines.push(`  Entry: $${premium.toFixed(2)} | Current: $${curPrice.toFixed(2)} | ${contracts}x contract${contracts!==1?'s':''} | ${dte}d DTE`);
-    lines.push(`  P&L: ${pnlSign}$${Math.abs(chgDollar).toFixed(2)} (${pctSign}${chgPct.toFixed(1)}%)`);
-
-    if (isCredit) {
-      const maxP = parseFloat(p.maxProfit || 0);
-      const maxL = parseFloat(p.maxLoss   || 0);
-      const be   = p.breakeven || '--';
-      const pop  = p.probabilityOfProfit != null ? p.probabilityOfProfit + '%' : '--';
-      lines.push(`  Max profit: $${maxP.toFixed(0)} | Max loss: $${maxL.toFixed(0)} | Breakeven: $${be} | PoP: ${pop}`);
-    }
-
-    if (p.score)          lines.push(`  Entry score: ${p.score}/100`);
-    if (p.entryReasons && p.entryReasons.length) {
-      lines.push(`  Reasons: ${p.entryReasons.slice(0,3).join(' · ')}`);
-    }
-    lines.push('');
   });
 
   const totSign = totalPnL >= 0 ? '+' : '';
-  lines.push(`─────────────────────────────`);
-  lines.push(`${positions.length} position${positions.length!==1?'s':''} | Total unrealized P&L: ${totSign}$${Math.abs(totalPnL).toFixed(2)}`);
+  lines.push('─────────────────────────────');
+  lines.push(`${positions.length} leg${positions.length!==1?'s':''} across ${groups.length} position${groups.length!==1?'s':''} | Total P&L: ${totSign}$${Math.abs(totalPnL).toFixed(2)}`);
 
   const text = lines.join('\n');
 
-  const doCopy = (t) => {
-    if (navigator.clipboard && navigator.clipboard.writeText) {
-      return navigator.clipboard.writeText(t);
-    }
-    // fallback
-    const ta = document.createElement('textarea');
-    ta.value = t; ta.style.cssText = 'position:fixed;opacity:0';
-    document.body.appendChild(ta); ta.select();
-    document.execCommand('copy'); document.body.removeChild(ta);
+  const doCopy = t => {
+    if (navigator.clipboard && navigator.clipboard.writeText) return navigator.clipboard.writeText(t);
+    const ta = Object.assign(document.createElement('textarea'), { value: t });
+    ta.style.cssText = 'position:fixed;opacity:0';
+    document.body.appendChild(ta); ta.select(); document.execCommand('copy'); ta.remove();
     return Promise.resolve();
   };
 
-  doCopy(text).then(() => {
-    btn.textContent = '✓'; lbl.textContent = 'Copied!';
-    setTimeout(() => { btn.textContent = '⎘'; lbl.textContent = 'Copy positions'; }, 2500);
-  }).catch(() => {
-    btn.textContent = '!'; lbl.textContent = 'Copy failed';
-    setTimeout(() => { btn.textContent = '⎘'; lbl.textContent = 'Copy positions'; }, 2500);
-  });
+  doCopy(text)
+    .then(() => { btn.textContent = '✓'; lbl.textContent = 'Copied!'; })
+    .catch(() => { btn.textContent = '!'; lbl.textContent = 'Failed'; })
+    .finally(() => setTimeout(() => { btn.textContent = '⎘'; lbl.textContent = 'Copy positions'; }, 2500));
 }
 
 function renderGreeks() {
