@@ -7554,9 +7554,22 @@ async function runScan() {
   // VIX 29 = ~52nd percentile historically. VIX 35 = ~70th. VIX 20 = ~24th.
   if (state._ivRank <= 5 && newVIX >= 20) {
     const formulaIVR = Math.min(95, Math.max(5, parseFloat(((newVIX - 12) / 33 * 100).toFixed(1))));
-    logEvent("scan", `[IVR] Window has no low-VIX baseline (min:${vixMin.toFixed(1)}) - using formula fallback: VIX ${newVIX} = IVR ${formulaIVR}`);
-    state._ivRank = formulaIVR;
-    state._ivEnv  = formulaIVR >= 70 ? "high" : formulaIVR >= 50 ? "elevated" : formulaIVR >= 30 ? "normal" : "low";
+    // Critical: if VIX is BELOW the rolling window P5, IV is at a relative LOW.
+    // Premium is contracting — credit spreads are less attractive, not more.
+    // Don't let a formula-inflated IVR activate credit mode when vol is falling.
+    // vixFallingPause already handles the directional block; this ensures IVR reflects reality.
+    const vixBelowRecentLow = newVIX < vixP5 && vixP5 > 25; // genuine elevated-regime, VIX falling
+    if (vixBelowRecentLow) {
+      // VIX below recent P5 = premium contracting. Cap IVR at 40 (below credit threshold).
+      const cappedIVR = Math.min(40, formulaIVR);
+      logEvent("scan", `[IVR] Window has no low-VIX baseline (min:${vixMin.toFixed(1)}) - VIX ${newVIX} below recent P5 ${vixP5.toFixed(1)} (IV contracting) - IVR capped at ${cappedIVR}`);
+      state._ivRank = cappedIVR;
+      state._ivEnv  = cappedIVR >= 50 ? "elevated" : cappedIVR >= 30 ? "normal" : "low";
+    } else {
+      logEvent("scan", `[IVR] Window has no low-VIX baseline (min:${vixMin.toFixed(1)}) - using formula fallback: VIX ${newVIX} = IVR ${formulaIVR}`);
+      state._ivRank = formulaIVR;
+      state._ivEnv  = formulaIVR >= 70 ? "high" : formulaIVR >= 50 ? "elevated" : formulaIVR >= 30 ? "normal" : "low";
+    }
   }
   // IV environment classification
   state._ivEnv = state._ivRank >= 70 ? "high"    // sell premium aggressively
@@ -10092,11 +10105,15 @@ async function runScan() {
     // TODO #2 FIX: Regime B exception — in bear regime, a fast RSI drop IS the puts_on_bounces setup
     // not a warning sign. Lower required score from 85→75 when entryBias=puts_on_bounces and RSI falling.
     const prevRSI = bars.length >= 2 ? calcRSI(bars.slice(0, -1)) : signals.rsi;
-    const rsiMove = Math.abs(signals.rsi - prevRSI);
+    const rsiMove = Math.abs(signals.rsi - prevRSI);  // intraday RSI move
     // Credit-only instruments (TLT) benefit from fast RSI moves — high IV = rich premium
     const instrAllowedTypes = (INSTRUMENT_CONSTRAINTS[stock.ticker] || {}).allowedTypes || [];
     const isCreditOnlyInstr = instrAllowedTypes.length > 0 && instrAllowedTypes.every(t => t.startsWith("credit"));
-    const fastRSIMove = rsiMove >= 15 && !creditModeActive && !isCreditOnlyInstr;
+    // Fast RSI gate uses INTRADAY RSI which is noisy. Exempt when dailyRSI is in valid range.
+    // V2.81 established daily RSI as the regime signal — a fast intraday drop with healthy
+    // daily RSI (35-65) is the puts_on_bounces setup, not a warning sign.
+    const dailyRsiValid = (stock.dailyRsi || 50) >= 35 && (stock.dailyRsi || 50) <= 65;
+    const fastRSIMove = rsiMove >= 15 && !creditModeActive && !isCreditOnlyInstr && !dailyRsiValid;
     if (fastRSIMove) {
       const putsOnBouncesBias = (state._agentMacro || {}).entryBias === "puts_on_bounces";
       const rsiIsFalling      = signals.rsi < prevRSI; // reversal, not momentum chase
@@ -10322,10 +10339,12 @@ async function runScan() {
       entered = !!icPos;
     } else if (useCreditSpread || useCreditCallSpread) {
       state._lastEntryType = "credit";
-      // Sizing from entryEngine sizeMod (passed through scored.push from scoring loop)
       const _sizeMod = sizeMod || 1.0;
       const creditPos = await executeCreditSpread(stock, price, score, reasons, state.vix, optionType, _sizeMod, rb.spreadParams);
       entered = !!creditPos;
+      // No debit fallback here — credit and debit are mutually exclusive strategies.
+      // If credit R/R fails, the market is saying premium isn't rich enough to sell.
+      // The correct response is to wait, not switch to buying puts into a crashed market.
     } else if (useSpread || isMeanReversion) {
       // Debit spread (directional) or MR call spread - both handled by executeDebitSpread
       const debitPos = await executeDebitSpread(stock, price, optionType, state.vix, score, reasons, sizeMod || 1.0, isMeanReversion);
