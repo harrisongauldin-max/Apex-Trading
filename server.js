@@ -7611,6 +7611,7 @@ async function runScan() {
     // Track last 10 breadth readings for momentum and Zweig Thrust detection
     if (!state._breadthHistory) state._breadthHistory = [];
     const bPct = parseFloat((marketContext.breadth.breadthPct || 50).toString());
+    state._lastBreadthPct = bPct; // persisted for score-debug endpoint
     state._breadthHistory.push({ t: now, v: bPct });
     if (state._breadthHistory.length > 10) state._breadthHistory = state._breadthHistory.slice(-10);
 
@@ -9990,7 +9991,10 @@ async function runScan() {
     // not a warning sign. Lower required score from 85→75 when entryBias=puts_on_bounces and RSI falling.
     const prevRSI = bars.length >= 2 ? calcRSI(bars.slice(0, -1)) : signals.rsi;
     const rsiMove = Math.abs(signals.rsi - prevRSI);
-    const fastRSIMove = rsiMove >= 15 && !creditModeActive;
+    // Credit-only instruments (TLT) benefit from fast RSI moves — high IV = rich premium
+    const instrAllowedTypes = (INSTRUMENT_CONSTRAINTS[stock.ticker] || {}).allowedTypes || [];
+    const isCreditOnlyInstr = instrAllowedTypes.length > 0 && instrAllowedTypes.every(t => t.startsWith("credit"));
+    const fastRSIMove = rsiMove >= 15 && !creditModeActive && !isCreditOnlyInstr;
     if (fastRSIMove) {
       const putsOnBouncesBias = (state._agentMacro || {}).entryBias === "puts_on_bounces";
       const rsiIsFalling      = signals.rsi < prevRSI; // reversal, not momentum chase
@@ -11618,6 +11622,209 @@ app.post("/api/test-morning-review", async (req, res) => {
 
 // - Score Debug API - reads score snapshots saved during last real scan -
 // Zero extra API calls - data is always from the most recent scan pass
+// ── Score Debug HTML Page ────────────────────────────────────
+// Self-contained score debugger served at /score-debug
+// Replaces any broken static file in public/ that previously served this
+app.get("/score-debug", (req, res) => {
+  res.send(`<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ARGO Score Debug</title>
+<style>
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{font-family:monospace;background:#080f1a;color:#c8dff0;font-size:12px;padding:12px}
+  h1{font-size:14px;color:#00c4ff;letter-spacing:2px;margin-bottom:12px;border-bottom:1px solid #0d2a42;padding-bottom:8px}
+  .ts{font-size:10px;color:#4a7a9a;margin-bottom:12px}
+  .section{background:#0a1628;border:1px solid #0d2a42;border-radius:6px;padding:10px;margin-bottom:10px}
+  .section-title{font-size:10px;color:#336688;letter-spacing:1px;text-transform:uppercase;margin-bottom:8px}
+  .gate-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:6px}
+  .gate{background:#071020;border-radius:4px;padding:6px 8px}
+  .gate-label{font-size:10px;color:#4a7a9a;margin-bottom:2px}
+  .gate-val{font-size:12px;font-weight:500}
+  .yes{color:#00ff88}.no{color:#4a7a9a}.warn{color:#ffd700}.err{color:#ff5555}
+  .card{background:#071020;border:1px solid #0d2a42;border-radius:6px;padding:10px;margin-bottom:8px}
+  .ticker{font-size:14px;color:#00c4ff;font-weight:700;margin-bottom:6px}
+  .score-row{display:flex;gap:12px;align-items:center;margin-bottom:6px;flex-wrap:wrap}
+  .score-box{background:#050d1a;border-radius:4px;padding:4px 10px;text-align:center;min-width:70px}
+  .score-box .label{font-size:9px;color:#336688}
+  .score-box .val{font-size:18px;font-weight:700}
+  .green{color:#00ff88}.red{color:#ff5555}.gold{color:#ffd700}.blue{color:#00c4ff}.gray{color:#4a7a9a}
+  .would-enter{background:#00ff8820;border:1px solid #00ff8860;border-radius:4px;padding:4px 8px;color:#00ff88;font-size:11px}
+  .blocked{background:#ff555520;border:1px solid #ff555560;border-radius:4px;padding:4px 8px;color:#ff5555;font-size:11px;margin-bottom:4px}
+  .reasons{background:#050d1a;border-radius:4px;padding:6px;margin-top:6px;font-size:10px;color:#6a9aba;line-height:1.5;max-height:120px;overflow-y:auto}
+  .signals{display:flex;gap:8px;flex-wrap:wrap;margin-top:6px;font-size:10px;color:#6a9aba}
+  .sig{background:#050d1a;padding:2px 6px;border-radius:3px}
+  .refresh-btn{background:#0d2a42;border:1px solid #1a5080;color:#00c4ff;padding:6px 14px;border-radius:4px;cursor:pointer;font-family:monospace;font-size:11px;letter-spacing:1px;margin-bottom:12px}
+  .refresh-btn:hover{background:#1a3a5a}
+  .data-signals{display:flex;gap:6px;flex-wrap:wrap;margin-top:6px}
+  .ds{background:#071820;border:1px solid #0d2a42;border-radius:4px;padding:3px 8px;font-size:10px}
+  .audit{font-size:10px;color:#4a7a9a;line-height:1.6;max-height:150px;overflow-y:auto}
+</style>
+</head>
+<body>
+<h1>⚡ ARGO SCORE DEBUG</h1>
+<button class="refresh-btn" onclick="load()">↻ REFRESH</button>
+<div id="ts" class="ts">Loading...</div>
+<div id="content">Loading...</div>
+
+<script>
+async function load() {
+  try {
+    const r = await fetch('/api/score-debug');
+    const d = await r.json();
+    document.getElementById('ts').textContent =
+      'Last scan: ' + (d.lastScan ? new Date(d.lastScan).toLocaleTimeString() : '--') +
+      ' | Generated: ' + new Date(d.timestamp).toLocaleTimeString();
+    render(d);
+  } catch(e) {
+    document.getElementById('content').innerHTML = '<div class="err">Error: ' + e.message + '</div>';
+  }
+}
+
+function gv(v, good, warn, bad) {
+  if (v === undefined || v === null) return '<span class="gray">--</span>';
+  if (typeof v === 'boolean') return v ? '<span class="' + (good||'yes') + '">YES</span>' : '<span class="no">no</span>';
+  return '<span>' + v + '</span>';
+}
+
+function scoreColor(s, min) {
+  if (s >= min) return 'green';
+  if (s >= min * 0.85) return 'gold';
+  return 'red';
+}
+
+function render(d) {
+  const g = d.gates || {};
+  const agentSig = d.agentSignal || '?';
+  const agentConf = d.agentConf || '?';
+  const agentBias = d.agentBias || '?';
+
+  const sigColor = agentSig.includes('bearish') ? 'green' :
+                   agentSig.includes('bullish') ? 'warn' : 'blue';
+  const biasColor = agentBias === 'puts_on_bounces' ? 'green' :
+                    agentBias === 'calls_on_dips' ? 'warn' :
+                    agentBias === 'avoid' ? 'err' : 'blue';
+
+  let html = '';
+
+  // Gates section
+  html += '<div class="section">';
+  html += '<div class="section-title">=== GATES & CONTEXT ===</div>';
+  html += '<div class="gate-grid">';
+  html += gate('Agent Signal', '<span class="' + sigColor + '">' + agentSig.toUpperCase() + '</span> (' + agentConf + ')');
+  html += gate('Entry Bias', '<span class="' + biasColor + '">' + agentBias.replace(/_/g,' ').toUpperCase() + '</span>');
+  html += gate('Price Regime', (g.priceRegime||'?') + ' (' + (g.regimeDuration||0) + 'd below 200MA)');
+  html += gate('Agent Regime', g.agentRegime || '?');
+  html += gate('Regime Class', '<span class="' + (g.regimeClass==='B'||g.regimeClass==='C'?'gold':'green') + '">' + (g.regimeClass||'?') + '</span>');
+  html += gate('VIX', '<span class="' + (g.vix>=30?'err':g.vix>=25?'gold':'green') + '">' + (g.vix||0).toFixed(1) + '</span>');
+  html += gate('IVR', (g.ivr||0).toFixed(0) + ' | elevated: ' + (g.ivElevated?'<span class="yes">YES</span>':'<span class="no">no</span>'));
+  html += gate('SPY Price', '$' + (g.spyPrice||0).toFixed(2));
+  html += gate('SPY 50MA', '$' + (g.spy50MA||0).toFixed(2));
+  html += gate('SPY 200MA', '$' + (g.spy200MA||0).toFixed(2));
+  html += gate('Breadth', '<span class="' + (g.breadthPct<=40?'green':g.breadthPct<=60?'gold':'red') + '">' + (g.breadthPct||0).toFixed(0) + '%</span>');
+  html += gate('Credit PUT', g.creditModeActive ? '<span class="yes">ACTIVE</span>' : '<span class="no">off</span>');
+  html += gate('Credit CALL', g.creditCallModeActive ? '<span class="yes">ACTIVE</span>' : '<span class="no">off</span>');
+  html += gate('Credit Allowed VIX', g.creditAllowedVIX ? '<span class="yes">YES</span>' : '<span class="err">NO</span>');
+  html += gate('Choppy Block', g.isChoppyRegime ? '<span class="warn">ACTIVE</span>' : '<span class="no">no</span>');
+  html += gate('Macro Bullish Block', g.macroBullish ? '<span class="err">BLOCKING</span>' : '<span class="no">no</span>');
+  html += gate('200MA Call Block', g.below200MACallBlock ? '<span class="warn">ACTIVE</span>' : '<span class="no">no</span>');
+  html += gate('VIX Falling Pause', g.vixFallingPause ? '<span class="warn">ACTIVE</span>' : '<span class="no">no</span>');
+  html += gate('Post-Reversal Block', g.postReversalBlock ? '<span class="err">ACTIVE</span>' : '<span class="no">no</span>');
+  html += gate('Avoid Hold', g.avoidHoldActive ? '<span class="err">ACTIVE until ' + (g.avoidUntilStr||'?') + '</span>' : '<span class="no">no</span>');
+  html += gate('Target DTE', g.targetDTE + 'd');
+  html += gate('Short Delta Target', (g.shortDeltaTarget||0).toFixed(2));
+  html += gate('Min Credit Ratio', (g.minCreditRatio||0).toFixed(2));
+  html += gate('Credit OTM%', ((g.creditOTMpct||0)*100).toFixed(0) + '%');
+  html += '</div>';
+
+  // Data signals section
+  html += '<div style="margin-top:8px"><div class="section-title">Data Signals</div>';
+  html += '<div class="data-signals">';
+  html += ds('Credit Stress', g.creditStress, 'HYG+TLT both falling');
+  html += ds('NVDA Weakness', g.nvdaWeakness, 'AI capex signal');
+  html += ds('JPM Stress', g.jpmStress, 'Credit/bank signal');
+  html += '</div></div>';
+
+  // Agent reasoning
+  if (d.agentReasoning) {
+    html += '<div style="margin-top:8px;font-size:10px;color:#4a9aba;font-style:italic">"' + d.agentReasoning + '"</div>';
+  }
+  html += '</div>';
+
+  // Per-instrument scores
+  html += '<div class="section">';
+  html += '<div class="section-title">=== SCORES ===</div>';
+  (d.results || []).forEach(r => {
+    if (r.noData) {
+      html += '<div class="card"><span class="ticker">' + r.ticker + '</span> <span class="gray">— no scan data yet</span></div>';
+      return;
+    }
+    const min = r.effectiveMin || 70;
+    const best = r.bestScore || 0;
+    const type = r.bestType || 'put';
+    html += '<div class="card">';
+    html += '<div class="ticker">' + r.ticker + ' <span style="font-size:10px;color:#4a7a9a">$' + (r.price||0).toFixed(2) + ' · ' + r.ageSec + 's ago</span></div>';
+    html += '<div class="score-row">';
+    html += '<div class="score-box"><div class="label">PUT</div><div class="val ' + scoreColor(r.putScore||0,min) + '">' + (r.putScore||0) + '</div></div>';
+    html += '<div class="score-box"><div class="label">CALL</div><div class="val ' + scoreColor(r.callScore||0,min) + '">' + (r.callScore||0) + '</div></div>';
+    html += '<div class="score-box"><div class="label">MIN</div><div class="val blue">' + min + '</div></div>';
+    html += '<div class="score-box"><div class="label">BEST</div><div class="val ' + scoreColor(best,min) + '">' + best + ' ' + type.toUpperCase() + '</div></div>';
+    if (r.wouldEnter) html += '<div class="would-enter">✓ WOULD ENTER</div>';
+    html += '</div>';
+    if (r.constraint) html += '<div class="blocked">CONSTRAINT: ' + r.constraint + '</div>';
+    (r.blocks||[]).forEach(b => { html += '<div class="blocked">⊘ ' + b + '</div>'; });
+    const sigs = r.signals || {};
+    if (Object.keys(sigs).length) {
+      html += '<div class="signals">';
+      if (sigs.rsi !== undefined) html += '<span class="sig">RSI ' + (sigs.rsi||0).toFixed(1) + '</span>';
+      if (sigs.dailyRsi !== undefined) html += '<span class="sig">dRSI ' + (sigs.dailyRsi||0).toFixed(1) + '</span>';
+      if (sigs.macd) html += '<span class="sig">MACD: ' + sigs.macd + '</span>';
+      if (sigs.momentum) html += '<span class="sig">MOM: ' + sigs.momentum + '</span>';
+      if (sigs.vwap) html += '<span class="sig">VWAP $' + (sigs.vwap||0).toFixed(2) + '</span>';
+      html += '</div>';
+    }
+    const reasons = type === 'put' ? (r.putReasons||[]) : (r.callReasons||[]);
+    if (reasons.length) {
+      html += '<div class="reasons">' + reasons.map(rr => '· ' + rr).join('<br>') + '</div>';
+    }
+    html += '</div>';
+  });
+  html += '</div>';
+
+  // Gate audit
+  const audit = d.gateAudit || [];
+  if (audit.length) {
+    html += '<div class="section">';
+    html += '<div class="section-title">=== GATE AUDIT (last 50) ===</div>';
+    html += '<div class="audit">' + audit.map(a => {
+      const ts = a.ts ? new Date(a.ts).toLocaleTimeString() : '--';
+      return ts + ' | ' + (a.ticker||'?') + ' | ' + (a.gate||'?') + ': ' + (a.result||'?') + (a.reason ? ' — ' + a.reason : '');
+    }).join('<br>') + '</div>';
+    html += '</div>';
+  }
+
+  document.getElementById('content').innerHTML = html;
+}
+
+function gate(label, val) {
+  return '<div class="gate"><div class="gate-label">' + label + '</div><div class="gate-val">' + val + '</div></div>';
+}
+
+function ds(label, active, desc) {
+  const col = active ? 'err' : 'gray';
+  const icon = active ? '⚠' : '·';
+  return '<div class="ds"><span class="' + col + '">' + icon + ' ' + label + '</span> <span class="gray">' + desc + '</span></div>';
+}
+
+load();
+setInterval(load, 15000);
+</script>
+</body>
+</html>`);
+});
+
 app.get("/api/score-debug", (req, res) => {
   try {
     // Score-debug gates built from entryEngine getRegimeRulebook  -- single source of truth
@@ -11645,14 +11852,19 @@ app.get("/api/score-debug", (req, res) => {
       ivElevated:          _dbRb.ivElevated,
       creditAllowedVIX:    _dbRb.creditAllowedVIX,
       vix:                 _dbRb.vix,
-      spyPrice:            state._liveSPY,
-      spy50MA:             state._spyMA50,
-      spy200MA:            state._spyMA200,
+      spyPrice:            state._liveSPY || 0,
+      spy50MA:             state._spyMA50 || 0,
+      spy200MA:            state._spyMA200 || 0,
       regimeDuration:      state._regimeDuration || 0,
       shortDeltaTarget:    _dbRb.spreadParams.shortDeltaTarget,
       targetDTE:           _dbRb.spreadParams.targetDTE,
       minCreditRatio:      _dbRb.spreadParams.minCreditRatio,
       creditOTMpct:        _dbRb.spreadParams.creditOTMpct,
+      entryBias:           agentMacro.entryBias || "neutral",
+      creditStress:        state._creditStress || false,
+      nvdaWeakness:        state._nvdaWeakness || false,
+      jpmStress:           state._jpmStress || false,
+      breadthPct:          state._lastBreadthPct || 0,
     };
 
     // Build per-instrument results from scan snapshots
@@ -11667,13 +11879,14 @@ app.get("/api/score-debug", (req, res) => {
 
       // Reconstruct gate blocks for display
       const blocks = [...(snap.blocked || [])];
-      if (isChoppyRegime && !creditModeActive)  blocks.push("choppy regime - debit blocked");
-      if (creditModeActive)                      blocks.push("credit put mode active");
-      if (creditCallModeActive)                  blocks.push("credit call mode active");
-      if (gates.below200MACallBlock)             blocks.push("SPY below 200MA - calls blocked");
-      if (gates.macroBullish)                    blocks.push("macro aggressive - puts blocked");
-      if (gates.vixFallingPause)                 blocks.push("VIX falling - puts paused");
-      if (avoidHoldActive)                       blocks.push(`avoid hold until ${avoidUntilStr}`);
+      // Use gates object — variables from outer scope aren't available here
+      if (gates.isChoppyRegime && !gates.creditModeActive) blocks.push("choppy regime - debit blocked");
+      if (gates.creditModeActive)                           blocks.push("credit put mode active");
+      if (gates.creditCallModeActive)                       blocks.push("credit call mode active");
+      if (gates.below200MACallBlock)                        blocks.push("SPY below 200MA - calls blocked");
+      if (gates.macroBullish)                               blocks.push("macro aggressive - puts blocked");
+      if (gates.vixFallingPause)                            blocks.push("VIX falling - puts paused");
+      if (gates.avoidHoldActive)                            blocks.push(`avoid hold until ${gates.avoidUntilStr || "?"}`);
 
       const instrConstraint = INSTRUMENT_CONSTRAINTS[stock.ticker] || null;
       return {
