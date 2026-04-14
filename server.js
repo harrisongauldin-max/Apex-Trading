@@ -4166,6 +4166,12 @@ async function getMacroNews() {
             // AG-9: schemaVersion - backward compat
             schemaVersion:    agentResult.schemaVersion    || 1,
           };
+                    if (state._regimeClass === "B" && state._agentMacro.signal === "mild bullish") {
+            state._agentMacro.entryBias = "puts_on_bounces";
+          }
+          if (state._regimeClass === "B" && state._agentMacro.signal === "mild bearish") {
+            state._agentMacro.entryBias = "puts_on_bounces";
+          }
           // Apply intraday regime override if signal is strong enough
           applyIntradayRegimeOverride(agentResult);
           // AG-6: Apply exit urgency signal
