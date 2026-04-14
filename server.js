@@ -1,5 +1,5 @@
 // -
-// ARGO V2.84 - Systematic SPY/QQQ Options Trading Agent
+// ARGO V3.0 - Systematic SPY/QQQ Options Trading Agent
 // Alpaca Paper Trading Edition
 // -
 const express    = require("express");
@@ -171,7 +171,7 @@ const CORRELATION_GROUPS = [
 const SEMIS = ["NVDA", "AMD", "SMCI", "ARM", "AVGO", "MU"];
 
 // - Watchlist (36 high-liquidity stocks) -
-// - ARGO-V2.5 Instrument Configuration -
+// - ARGO-V3.0 Instrument Configuration -
 // Phase 1: SPY primary, QQQ secondary - building to $25k
 // At $25k: set INDIVIDUAL_STOCKS_ENABLED = true to unlock full watchlist
 const INDIVIDUAL_STOCKS_ENABLED = false;
@@ -2375,7 +2375,7 @@ async function alpacaGet(endpoint, base = ALPACA_BASE) {
       if (_alpacaConsecFails >= ALPACA_CIRCUIT_THRESHOLD && !_alpacaCircuitOpen) {
         _alpacaCircuitOpen = true;
         logEvent("warn", `[CIRCUIT] Alpaca API degraded (${_alpacaConsecFails} consecutive failures) - new entries paused`);
-        if (RESEND_API_KEY && GMAIL_USER) sendResendEmail("ARGO-V2.5 ALERT - Alpaca API degraded",
+        if (RESEND_API_KEY && GMAIL_USER) sendResendEmail("ARGO-V3.0 ALERT - Alpaca API degraded",
           `<p>${_alpacaConsecFails} consecutive Alpaca failures. New entries paused. Check Railway logs.</p>`).catch(()=>{});
       }
       return null;
@@ -3451,12 +3451,12 @@ const AGENT_MACRO_CACHE_MS = 3 * 60 * 1000; // 3 minutes - faster macro reaction
 async function getAgentDayPlan(scanType = "morning") {
   if (!ANTHROPIC_API_KEY) return null;
 
-  const systemPrompt = `You are the head macro strategist for ARGO-V2.5, a systematic SPY/QQQ options spread trading system. Return ONLY valid JSON - no markdown, no preamble.
+  const systemPrompt = `You are the head macro strategist for ARGO-V3.0, a systematic SPY/QQQ options spread trading system. Return ONLY valid JSON - no markdown, no preamble.
 
 {"regime":"trending_bear"|"trending_bull"|"choppy"|"breakdown"|"recovery"|"neutral","signal":"strongly bearish"|"bearish"|"mild bearish"|"neutral"|"mild bullish"|"bullish"|"strongly bullish","confidence":"high"|"medium"|"low","entryBias":"puts_on_bounces"|"calls_on_dips"|"neutral"|"avoid","tradeType":"spread"|"credit"|"naked"|"none","suppressUntil":null|"HH:MM","riskLevel":"low"|"medium"|"high","vixOutlook":"spiking"|"elevated_stable"|"mean_reverting"|"falling","keyLevels":{"spySupport":null,"spyResistance":null},"catalysts":[],"reasoning":"2 sentences max","weeklyBias":"bullish"|"bearish"|"neutral","overnightMove":"string describing futures direction"}
 
 Rules:
-- suppressUntil: set to "HH:MM" ET if high-impact event today (CPI 08:30, FOMC 14:00, NFP 08:30) - ARGO-V2.5 will not enter before this time
+- suppressUntil: set to "HH:MM" ET if high-impact event today (CPI 08:30, FOMC 14:00, NFP 08:30) - ARGO-V3.0 will not enter before this time
 - riskLevel high = FOMC day, CPI day, major geopolitical event - reduce position size
 - entryBias puts_on_bounces = bearish trend, wait for intraday relief before entering puts
 - entryBias calls_on_dips = bullish trend, wait for intraday weakness before entering calls
@@ -3504,7 +3504,7 @@ What is your strategic assessment for today's trading session?`;
 async function getAgentPostMarketAssessment(scanType = "post-market") {
   if (!ANTHROPIC_API_KEY) return null;
 
-  const systemPrompt = `Post-market analyst for ARGO-V2.5. Return ONLY valid JSON - no markdown.
+  const systemPrompt = `Post-market analyst for ARGO-V3.0. Return ONLY valid JSON - no markdown.
 {"overnightRisk":"low"|"medium"|"high","holdRecommendations":{},"tomorrowBias":"bullish"|"bearish"|"neutral","catalystsTomorrow":[],"reasoning":"1-2 sentences"}
 holdRecommendations: {ticker: "HOLD"|"MONITOR"|"EXIT_AT_OPEN"} for each open position.`;
 
@@ -3578,7 +3578,7 @@ async function getAgentMacroAnalysis(headlines) {
   if (_agentMacroCache.result && Date.now() - _agentMacroCache.fetchedAt < AGENT_MACRO_CACHE_MS) {
     return _agentMacroCache.result;
   }
-  const systemPrompt = `You are the head macro strategist for ARGO-V2.5, a systematic SPY/QQQ options trading system. Return ONLY valid JSON - no markdown, no preamble.
+  const systemPrompt = `You are the head macro strategist for ARGO-V3.0, a systematic SPY/QQQ options trading system. Return ONLY valid JSON - no markdown, no preamble.
 
 {"signal":"strongly bearish"|"bearish"|"mild bearish"|"neutral"|"mild bullish"|"bullish"|"strongly bullish","modifier":-20to20,"confidence":"high"|"medium"|"low","mode":"defensive"|"cautious"|"normal"|"aggressive","reasoning":"1 sentence","regime":"trending_bear"|"trending_bull"|"choppy"|"breakdown"|"recovery"|"neutral","regimeDuration":"intraday"|"1-3 days"|"3-7 days"|"1-2 weeks"|"multi-week","entryBias":"puts_on_bounces"|"calls_on_dips"|"neutral"|"avoid","tradeType":"spread"|"credit"|"naked"|"none","vixOutlook":"spiking"|"elevated_stable"|"mean_reverting"|"falling"|"unknown","keyLevels":{"spySupport":null,"spyResistance":null},"catalysts":[],"bearishTickers":[],"bullishTickers":[],"themes":[],"exitUrgency":"hold"|"monitor"|"trim"|"exit","positionSizeMult":0.25|0.5|0.75|1.0|1.25|1.5,"schemaVersion":2}
 
@@ -3844,7 +3844,7 @@ RSI: ${stock.rsi} | MACD: ${stock.macd} | Momentum: ${stock.momentum}
 Score: ${score}/100 | Top reasons: ${reasons.slice(0,4).join('; ')}
 Macro: ${(state._agentMacro||{}).signal||'neutral'} (${(state._agentMacro||{}).confidence||'unknown'})
 VIX: ${state.vix}
-Should ARGO-V2.5 enter this ${optionType} position?`;
+Should ARGO-V3.0 enter this ${optionType} position?`;
 
   const raw = await callClaudeAgent(systemPrompt, userPrompt, 200, false);
   if (!raw) return { approved: true, reason: "agent unavailable - allowing" };
@@ -10579,7 +10579,7 @@ async function sendMorningBriefing() {
     // - Header -
     const header = `
       <div style="text-align:center;border-bottom:3px double #333;padding-bottom:12px;margin-bottom:12px">
-        <div style="font-family:Georgia,serif;font-size:22px;font-weight:bold;color:#111;letter-spacing:1px">ARGO-V2.5 TRADING DESK</div>
+        <div style="font-family:Georgia,serif;font-size:22px;font-weight:bold;color:#111;letter-spacing:1px">ARGO-V3.0 TRADING DESK</div>
         <div style="font-size:10px;color:#555;margin-top:4px;letter-spacing:1px">${dateStr.toUpperCase()}</div>
       </div>
       <div style="display:flex;gap:0;border:1px solid #ccc;margin-bottom:4px">
@@ -10752,7 +10752,7 @@ async function sendMorningBriefing() {
     // - Footer -
     const footer = `
       <div style="border-top:3px double #333;margin-top:16px;padding-top:8px;text-align:center;font-size:9px;color:#999;letter-spacing:1px">
-        ARGO V2.80 - Entry window 9:30am-3:45pm ET - SPY/QQQ primary - Monthly options
+        ARGO V3.0 - Entry window 9:30am-3:45pm ET - SPY/QQQ primary - Monthly options
       </div>`;
 
     // - Assemble -
@@ -10760,7 +10760,7 @@ async function sendMorningBriefing() {
       <div style="font-family:Georgia,serif;background:#ffffff;color:#111;padding:24px;max-width:620px;border:1px solid #ccc">
         ${header}
         ${divider}
-        ${agentNarrative ? sectionHead('ANALYST BRIEFING - ARGO-V2.5 INTELLIGENCE') + '<div style="font-family:Georgia,serif;font-size:13px;color:#111;line-height:1.7;white-space:pre-wrap;padding:8px 0">' + agentNarrative + '</div>' + divider : ''}
+        ${agentNarrative ? sectionHead('ANALYST BRIEFING - ARGO-V3.0 INTELLIGENCE') + '<div style="font-family:Georgia,serif;font-size:13px;color:#111;line-height:1.7;white-space:pre-wrap;padding:8px 0">' + agentNarrative + '</div>' + divider : ''}
         ${sectionHead('Open Positions - ' + positions.length + ' active')}
         ${posTable}
         ${triggersHTML}
@@ -10771,7 +10771,7 @@ async function sendMorningBriefing() {
       </div>`;
 
     await sendResendEmail(
-      `ARGO-V2.5 Desk - ${dateStr} | VIX ${state.vix} | ${positions.length} positions`,
+      `ARGO-V3.0 Desk - ${dateStr} | VIX ${state.vix} | ${positions.length} positions`,
       html
     );
     logEvent("scan", "Morning briefing email sent");
@@ -10794,7 +10794,7 @@ async function sendResendEmail(subject, html) {
         "Content-Type":  "application/json",
       },
       body: JSON.stringify({
-        from:    "ARGO-V2.5 <onboarding@resend.dev>",
+        from:    "ARGO-V3.0 <onboarding@resend.dev>",
         to:      [GMAIL_USER],
         subject,
         html,
@@ -10837,7 +10837,7 @@ function buildEmailHTML(type) {
   return `
 <!DOCTYPE html><html><body style="font-family:monospace;background:#07101f;color:#cce8ff;padding:20px;max-width:600px">
 <div style="background:#0a1628;border:1px solid #0d3050;border-radius:12px;padding:20px;margin-bottom:16px">
-  <h2 style="color:#00ff88;margin:0 0 4px">- ARGO-V2.5 ${type === "morning" ? "Morning Briefing" : "End of Day Report"}</h2>
+  <h2 style="color:#00ff88;margin:0 0 4px">- ARGO-V3.0 ${type === "morning" ? "Morning Briefing" : "End of Day Report"}</h2>
   <p style="color:#336688;margin:0;font-size:12px">${new Date().toLocaleDateString("en-US",{weekday:"long",month:"long",day:"numeric"})}</p>
 </div>
 
@@ -10891,22 +10891,22 @@ function buildEmailHTML(type) {
 ${type === "morning" ? `
 <div style="background:rgba(0,255,136,0.05);border:1px solid rgba(0,255,136,0.15);border-radius:8px;padding:14px">
   <h3 style="color:#00ff88;font-size:11px;margin:0 0 6px">TODAY'S OUTLOOK</h3>
-  <p style="font-size:12px;color:#cce8ff;margin:0">ARGO-V2.82 will scan every 10 seconds. New entries: 9:30AM-3:00PM ET (mean reversion to 3:30PM). Position management runs until 3:50PM. VIX is currently ${state.vix} - ${state.vix<20?"normal conditions, full sizing":"reduced sizing active"}. ${state.positions.length} position${state.positions.length!==1?"s":""} currently open.</p>
+  <p style="font-size:12px;color:#cce8ff;margin:0">ARGO-V3.0 will scan every 10 seconds. New entries: 9:30AM-3:00PM ET (mean reversion to 3:30PM). Position management runs until 3:50PM. VIX is currently ${state.vix} - ${state.vix<20?"normal conditions, full sizing":"reduced sizing active"}. ${state.positions.length} position${state.positions.length!==1?"s":""} currently open.</p>
 </div>` : `
 <div style="background:rgba(0,196,255,0.05);border:1px solid rgba(0,196,255,0.15);border-radius:8px;padding:14px">
   <h3 style="color:#00c4ff;font-size:11px;margin:0 0 6px">END OF DAY SUMMARY</h3>
-  <p style="font-size:12px;color:#cce8ff;margin:0">Market closed. ${state.todayTrades} trade${state.todayTrades!==1?"s":""} executed today. Daily P&L: ${parseFloat(daily)>=0?"+":""}$${daily}. ARGO-V2.5 resumes scanning tomorrow at 10:00 AM ET.</p>
+  <p style="font-size:12px;color:#cce8ff;margin:0">Market closed. ${state.todayTrades} trade${state.todayTrades!==1?"s":""} executed today. Daily P&L: ${parseFloat(daily)>=0?"+":""}$${daily}. ARGO-V3.0 resumes scanning tomorrow at 10:00 AM ET.</p>
 </div>`}
 
-<p style="font-size:10px;color:#336688;text-align:center;margin-top:16px">ARGO-V2.5 SPY Spread Trader - Paper Trading - Not financial advice</p>
+<p style="font-size:10px;color:#336688;text-align:center;margin-top:16px">ARGO-V3.0 SPY Spread Trader - Paper Trading - Not financial advice</p>
 </body></html>`;
 }
 
 async function sendEmail(type) {
   if (!RESEND_API_KEY || !GMAIL_USER) { logEvent("warn", "Email not configured"); return; }
   const subject = type === "morning"
-    ? `ARGO-V2.5 Morning Briefing - ${new Date().toLocaleDateString()}`
-    : `ARGO-V2.5 EOD Report - P&L ${(state.cash-state.dayStartCash)>=0?"+":""}$${(state.cash-state.dayStartCash).toFixed(2)}`;
+    ? `ARGO-V3.0 Morning Briefing - ${new Date().toLocaleDateString()}`
+    : `ARGO-V3.0 EOD Report - P&L ${(state.cash-state.dayStartCash)>=0?"+":""}$${(state.cash-state.dayStartCash).toFixed(2)}`;
   try {
     await sendResendEmail(subject, buildEmailHTML(type));
     logEvent("email", `${type} email sent to ${GMAIL_USER}`);
@@ -10932,7 +10932,7 @@ function buildMonthlyReport() {
   const bestTrade  = trades.length ? trades.reduce((b,t)=>t.pnl>b.pnl?t:b) : null;
   const worstTrade = trades.length ? trades.reduce((w,t)=>t.pnl<w.pnl?t:w) : null;
 
-  return `ARGO-V2.5 MONTHLY PERFORMANCE REPORT
+  return `ARGO-V3.0 MONTHLY PERFORMANCE REPORT
 ${"-".repeat(48)}
 Period:           ${state.monthStart} - ${new Date().toLocaleDateString()}
 
@@ -11315,10 +11315,10 @@ async function premarketAssessment() {
       const watches = assessments.filter(a => a.recommendation === "WATCH");
       const holds  = assessments.filter(a => a.recommendation === "HOLD");
       const subject = assessments.length === 0
-        ? `ARGO-V2.5 Pre-Market - No Positions | ${macro.signal.toUpperCase()} | ${new Date().toLocaleDateString()}`
+        ? `ARGO-V3.0 Pre-Market - No Positions | ${macro.signal.toUpperCase()} | ${new Date().toLocaleDateString()}`
         : closes.length
-        ? `ARGO-V2.5 Pre-Market - ${closes.length} CLOSE, ${watches.length} WATCH | ${new Date().toLocaleDateString()}`
-        : `ARGO-V2.5 Pre-Market - All Clear | ${new Date().toLocaleDateString()}`;
+        ? `ARGO-V3.0 Pre-Market - ${closes.length} CLOSE, ${watches.length} WATCH | ${new Date().toLocaleDateString()}`
+        : `ARGO-V3.0 Pre-Market - All Clear | ${new Date().toLocaleDateString()}`;
 
       const rowColor = (rec) => rec === "CLOSE" ? "#cc0000" : rec === "WATCH" ? "#cc6600" : "#006600";
       const rows = assessments.map(a => `
@@ -11335,7 +11335,7 @@ async function premarketAssessment() {
       await sendResendEmail(subject, `
         <div style="font-family:Georgia,serif;background:#fff;color:#111;padding:24px;max-width:700px;border:1px solid #ccc">
           <div style="text-align:center;border-bottom:3px double #333;padding-bottom:12px;margin-bottom:16px">
-            <div style="font-size:20px;font-weight:bold;letter-spacing:1px">ARGO-V2.5 PRE-MARKET ASSESSMENT</div>
+            <div style="font-size:20px;font-weight:bold;letter-spacing:1px">ARGO-V3.0 PRE-MARKET ASSESSMENT</div>
             <div style="font-size:10px;color:#555;margin-top:4px;letter-spacing:1px">${new Date().toLocaleDateString('en-US',{weekday:'long',month:'long',day:'numeric'}).toUpperCase()} - 8:45AM ET</div>
           </div>
           <div style="display:flex;gap:0;border:1px solid #ccc;margin-bottom:16px">
@@ -11373,10 +11373,10 @@ async function premarketAssessment() {
           </table>
           <div style="border-top:1px solid #ccc;margin-top:12px;padding-top:8px;font-size:10px;color:#555">
             ${macro.triggers && macro.triggers.length ? '<strong>Macro signals:</strong> ' + macro.triggers.join(' - ') + '<br>' : ''}
-            <em>These are recommendations only. ARGO-V2.5 will manage exits automatically at open.</em>
+            <em>These are recommendations only. ARGO-V3.0 will manage exits automatically at open.</em>
           </div>
           <div style="border-top:3px double #333;margin-top:12px;padding-top:8px;text-align:center;font-size:9px;color:#999;letter-spacing:1px">
-            ARGO V2.80 - Market opens in ~45 minutes - Entry window 9:30am ET
+            ARGO V3.0 - Market opens in ~45 minutes - Entry window 9:30am ET
           </div>
         </div>`
       );
@@ -11542,8 +11542,8 @@ cron.schedule("*/15 12-21 * * 1-5", async () => {
   if (minsSinceLastScan > 15 && minsSinceLastScan < 999 && RESEND_API_KEY && GMAIL_USER) {
     logEvent("warn", `Health check: no scan in ${minsSinceLastScan.toFixed(0)} minutes - sending alert`);
     sendResendEmail(
-      "ARGO-V2.5 ALERT - Scanner may be down",
-      `<p>ARGO-V2.5 has not scanned in ${minsSinceLastScan.toFixed(0)} minutes during market hours.</p>
+      "ARGO-V3.0 ALERT - Scanner may be down",
+      `<p>ARGO-V3.0 has not scanned in ${minsSinceLastScan.toFixed(0)} minutes during market hours.</p>
              <p>Last scan: ${state.lastScan || "unknown"}</p>
              <p>Check Railway logs immediately.</p>`
     );
@@ -11573,7 +11573,7 @@ cron.schedule("0 13,14 * * 1", async () => {
   await saveStateNow();
   if (RESEND_API_KEY && GMAIL_USER) {
     sendResendEmail(
-      `ARGO-V2.5 Monthly Report - ${et.toLocaleDateString("en-US",{month:"long",year:"numeric"})}`,
+      `ARGO-V3.0 Monthly Report - ${et.toLocaleDateString("en-US",{month:"long",year:"numeric"})}`,
       `<pre style="font-family:monospace;background:#07101f;color:#cce8ff;padding:20px">${report}</pre>`
     );
   }
@@ -12238,9 +12238,9 @@ app.post("/api/test-email", async (req, res) => {
       return res.json({ ok: true, message: `Morning briefing sent to ${GMAIL_USER}` });
     }
     await sendResendEmail(
-      `ARGO-V2.5 Email Test - ${new Date().toLocaleTimeString()}`,
+      `ARGO-V3.0 Email Test - ${new Date().toLocaleTimeString()}`,
       `<div style="font-family:monospace;background:#07101f;color:#00ff88;padding:20px;border-radius:8px">
-        <h2>- ARGO-V2.5 Email Working</h2>
+        <h2>- ARGO-V3.0 Email Working</h2>
         <p style="color:#cce8ff">If you received this, Resend is configured correctly.</p>
         <p style="color:#336688">Recipient: ${GMAIL_USER}</p>
         <p style="color:#336688">Sent at: ${new Date().toISOString()}</p>
@@ -12771,7 +12771,7 @@ process.on("unhandledRejection", (reason, promise) => {
 // Boot sequence - load state from Redis then start server
 initState().then(() => {
   app.listen(PORT, () => {
-    console.log(`ARGO V2.80 running on port ${PORT}`);
+    console.log(`ARGO V3.0 running on port ${PORT}`);
     console.log(`Alpaca key:  ${ALPACA_KEY?"SET":"NOT SET"}`);
     console.log(`Gmail:       ${GMAIL_USER||"NOT SET"}`);
     console.log(`Resend:      ${RESEND_API_KEY?"SET -":"NOT SET - email disabled"}`);
@@ -12787,7 +12787,7 @@ initState().then(() => {
 });
 
 // -
-// ARGO V2.80 - BACKTESTING ENGINE
+// ARGO V3.0 - BACKTESTING ENGINE
 // Walk-forward simulation using Alpaca historical daily bars
 // Replays ARGO's scoring logic against historical data without real orders
 // QS-W2/GL-1: Addresses the out-of-sample validation gap identified by panel
