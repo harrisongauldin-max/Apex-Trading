@@ -5738,11 +5738,11 @@ async function executeCreditSpread(stock, price, score, scoreReasons, vix, optio
 
     // Parameters from entryEngine or sensible defaults
     const targetDelta  = (spreadParamsOverride && spreadParamsOverride.shortDeltaTarget) || 0.20;
-    const targetDTE    = (spreadParamsOverride && spreadParamsOverride.targetDTE)        || 21;
-    const minDTE       = (spreadParamsOverride && spreadParamsOverride.minDTE)           || 14;
+    const targetDTE    = (spreadParamsOverride && spreadParamsOverride.targetDTE)        || 35; // panel: 35 DTE lands on monthlies, matches TP/stop calibration
+    const minDTE       = (spreadParamsOverride && spreadParamsOverride.minDTE)           || 21; // panel: raised from 14 to match 35 DTE target (avoid weeklies)
     const minCreditRR  = (spreadParamsOverride && spreadParamsOverride.minCreditRatio)   || 0.25;  // panel CRITICAL #1: 0.20 is breakeven, 0.25 is true EV-positive floor
     // Spread width: price-relative so TLT($86)->$5, SPY($675)->$15
-    const baseWidth    = (spreadParamsOverride && spreadParamsOverride.creditWidth)      || 15;
+    const baseWidth    = (spreadParamsOverride && spreadParamsOverride.creditWidth)      || 10; // panel: $10 wide — better R/R + margin efficiency on $10k account
     const spreadWidth  = Math.max(5, Math.min(baseWidth, Math.round(price * 0.025)));
 
     // -- STEP 1: Target strike via B-S delta inversion ----------------------
@@ -7600,7 +7600,7 @@ async function runScan() {
   // Prevents repeated iteration over state.positions on every check
   const _totalCap  = totalCap();
   const _openRisk  = openRisk();
-  const _heatPct   = Math.max(0, _totalCap - (state.cash || 0)) / _totalCap; // cash-delta: consistent with heatPct()
+  const _heatPct   = openCostBasis() / _totalCap;
   const _heatPctPc = parseFloat((_heatPct * 100).toFixed(1));
 
   // Scan-cycle cache - expensive fetches reused within same scan window
