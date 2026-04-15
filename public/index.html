@@ -1689,10 +1689,316 @@ function renderPositions() {
   const wrap = document.getElementById('positions-wrap');
   const positions = state.positions || [];
   if (!positions.length) {
-    wrap.innerHTML = '<div class="no-data">No open positions. ARGO V3.0 will enter trades during market hours (9:30AM–3:45PM ET). SPY/QQQ spreads primary.</div>';
+    wrap.innerHTML = '<div class="no-data">No open positions. ARGO V3.0 will enter trades during market hours (9:30AM\u20133:45PM ET).</div>';
     return;
   }
-  wrap.innerHTML = positions.map(p => {
+
+  // ── Pair legs into spreads ───────────────────────────────────────────────
+  const used = {}, groups = [];
+  positions.forEach(function(p, i) {
+    if (used[i]) return;
+    // Try to pair with another leg: same ticker, expDate, optionType, different strike
+    if (!p.isSpread && !p.isCreditSpread) {
+      for (let j = i+1; j < positions.length; j++) {
+        if (used[j]) return;
+        const q = positions[j];
+        if (q.ticker === p.ticker && q.expDate === p.expDate &&
+            q.optionType === p.optionType && q.strike !== p.strike) {
+          used[i] = used[j] = true;
+          // Short = higher strike (more OTM for puts = short leg), Long = lower strike
+          const legs = [p, q].sort(function(a,b){ return b.strike - a.strike; });
+          groups.push({ type:'paired', short: legs[0], long: legs[1] });
+          return;
+        }
+      }
+    }
+    used[i] = true;
+    groups.push({ type: p.isSpread || p.isCreditSpread ? 'spread' : 'single', pos: p });
+  });
+
+  // ── Render each group ────────────────────────────────────────────────────
+  wrap.innerHTML = groups.map(function(g) {
+    if (g.type === 'paired') {
+      return renderPairedSpread(g.short, g.long);
+    } else if (g.type === 'spread') {
+      return renderNativeSpread(g.pos);
+    } else {
+      return renderSingleLeg(g.pos);
+    }
+  }).join('');
+}
+
+// ── Helper: fmt ────────────────────────────────────────────────────────────
+function pnlColor(v) { return v >= 0 ? 'var(--green)' : 'var(--red)'; }
+function pnlSign(v)  { return v >= 0 ? '+' : ''; }
+
+function scoreCol(s) {
+  return s >= 85 ? 'var(--green)' : s >= 70 ? 'var(--blue)' : 'var(--orange)';
+}
+
+function rescoreBtn(ticker) {
+  return `<button onclick="rescorePos('${ticker}')" style="font-size:9px;padding:2px 7px;background:rgba(0,196,255,.1);border:1px solid var(--blue);border-radius:4px;color:var(--blue);cursor:pointer">\u21bb RESCORE</button>`;
+}
+
+function closeBtn(ticker, sym) {
+  return `<button class="btn btn-red" style="padding:3px 10px;font-size:10px" onclick="closePos('${ticker}','${sym||''}')">CLOSE</button>`;
+}
+
+// ── Paired spread card (two reconciled individual legs) ─────────────────────
+function renderPairedSpread(s, l) {
+  // s = short leg (higher strike), l = long leg (lower strike)
+  const c         = Math.min(s.contracts||1, l.contracts||1);
+  const netCredit = parseFloat(s.premium) - parseFloat(l.premium);
+  const width     = s.strike - l.strike;
+  const maxProfit = netCredit * 100 * c;
+  const maxLoss   = (width - netCredit) * 100 * c;
+  const breakeven = (s.strike - netCredit).toFixed(2);
+
+  // P&L: sum both legs. Short leg profits as cost falls, long leg profits as value rises.
+  const sP = s.unrealizedPnL !== undefined ? parseFloat(s.unrealizedPnL)
+    : (parseFloat(s.premium) - parseFloat(s.currentPrice||s.premium)) * 100 * c;
+  const lP = l.unrealizedPnL !== undefined ? parseFloat(l.unrealizedPnL)
+    : (parseFloat(l.currentPrice||l.premium) - parseFloat(l.premium)) * 100 * c;
+  const netPnL   = sP + lP;
+  const pct      = maxProfit > 0 ? (netPnL / maxProfit * 100) : 0;
+
+  // Estimated current position value = cost to close (what we'd pay to buy back spread)
+  const sCur = parseFloat(s.currentPrice || s.premium);
+  const lCur = parseFloat(l.currentPrice || l.premium);
+  const costToClose  = (sCur - lCur) * 100 * c;   // cost to close spread
+  const estPosValue  = maxProfit - netPnL;          // remaining value vs max profit
+  const marginReq    = maxLoss;                      // margin = max loss
+
+  const score    = s.score || l.score || 0;
+  const dte      = Math.max(0, Math.round((new Date(s.expDate) - new Date()) / 86400000));
+  const ticker   = s.ticker;
+  const optType  = (s.optionType||'put').toUpperCase();
+  const expDate  = s.expDate;
+  const dteLabel = s.dteLabel || l.dteLabel || 'RECONCILED';
+
+  return `
+  <div style="background:#050e1a;border:1px solid rgba(0,255,136,.25);border-radius:10px;padding:14px;margin-bottom:10px">
+    <!-- Header -->
+    <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;margin-bottom:12px">
+      <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+        <span style="font-size:16px;font-weight:700;color:var(--blue)">${ticker}</span>
+        <span style="font-size:11px;color:var(--muted)">$${s.strike}/$${l.strike} ${expDate}</span>
+        <span style="font-size:9px;padding:2px 7px;border-radius:10px;background:rgba(0,255,136,.15);color:var(--green)">CREDIT SPREAD</span>
+        <span style="font-size:9px;padding:2px 7px;border-radius:10px;background:rgba(255,80,80,.15);color:#ff5050">${optType}</span>
+        <span style="font-size:9px;padding:2px 7px;border-radius:10px;background:rgba(255,165,0,.15);color:var(--orange)">${dteLabel.toUpperCase()}</span>
+        <span style="font-size:9px;padding:2px 7px;border-radius:10px;background:rgba(100,100,100,.15);color:var(--muted)">${c}x CONTRACTS</span>
+      </div>
+      <div style="display:flex;align-items:center;gap:8px">
+        <span style="font-size:11px;font-weight:700;color:${scoreCol(score)}">Entry: ${score}/100</span>
+        ${rescoreBtn(ticker)}
+        ${closeBtn(ticker, s.buySymbol||s.contractSymbol||'')}
+      </div>
+    </div>
+
+    <!-- P&L highlight bar -->
+    <div style="background:rgba(0,0,0,.3);border-radius:8px;padding:10px 14px;margin-bottom:10px;display:flex;gap:24px;flex-wrap:wrap;align-items:center">
+      <div>
+        <div style="font-size:9px;color:var(--muted);margin-bottom:2px">UNREALIZED P&amp;L</div>
+        <div style="font-size:20px;font-weight:700;color:${pnlColor(netPnL)}">${pnlSign(netPnL)}$${Math.abs(netPnL).toFixed(2)}</div>
+      </div>
+      <div>
+        <div style="font-size:9px;color:var(--muted);margin-bottom:2px">P&amp;L %</div>
+        <div style="font-size:20px;font-weight:700;color:${pnlColor(pct)}">${pnlSign(pct)}${pct.toFixed(1)}%</div>
+      </div>
+      <div>
+        <div style="font-size:9px;color:var(--muted);margin-bottom:2px">EST. POSITION VALUE</div>
+        <div style="font-size:16px;font-weight:700;color:var(--text)">$${costToClose.toFixed(2)}</div>
+      </div>
+      <div>
+        <div style="font-size:9px;color:var(--muted);margin-bottom:2px">DTE</div>
+        <div style="font-size:16px;font-weight:700;color:var(--text)">${dte}d</div>
+      </div>
+    </div>
+
+    <!-- Details grid -->
+    <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:8px">
+      <div><div style="font-size:9px;color:var(--muted)">NET CREDIT</div><div style="font-weight:700">${fmt(netCredit)}</div></div>
+      <div><div style="font-size:9px;color:var(--muted)">SPREAD WIDTH</div><div style="font-weight:700">$${width}</div></div>
+      <div><div style="font-size:9px;color:var(--muted)">BREAKEVEN</div><div style="font-weight:700">$${breakeven}</div></div>
+      <div><div style="font-size:9px;color:var(--muted)">EXP DATE</div><div style="font-weight:700">${expDate}</div></div>
+      <div><div style="font-size:9px;color:var(--muted)">MAX PROFIT</div><div style="font-weight:700;color:var(--green)">$${maxProfit.toFixed(0)}</div></div>
+      <div><div style="font-size:9px;color:var(--muted)">MAX LOSS</div><div style="font-weight:700;color:var(--red)">$${maxLoss.toFixed(0)}</div></div>
+      <div><div style="font-size:9px;color:var(--muted)">MARGIN REQ</div><div style="font-weight:700">$${marginReq.toFixed(0)}</div></div>
+      <div><div style="font-size:9px;color:var(--muted)">COST TO CLOSE</div><div style="font-weight:700">$${costToClose.toFixed(2)}</div></div>
+      <div><div style="font-size:9px;color:var(--muted)">SHORT LEG</div><div style="font-weight:700;color:var(--orange)">$${s.strike} ${optType}</div></div>
+      <div><div style="font-size:9px;color:var(--muted)">LONG LEG</div><div style="font-weight:700;color:var(--muted)">$${l.strike} ${optType}</div></div>
+      <div><div style="font-size:9px;color:var(--muted)">SHORT PRICE</div><div style="font-weight:700">$${parseFloat(s.currentPrice||s.premium).toFixed(2)}</div></div>
+      <div><div style="font-size:9px;color:var(--muted)">LONG PRICE</div><div style="font-weight:700">$${parseFloat(l.currentPrice||l.premium).toFixed(2)}</div></div>
+    </div>
+  </div>`;
+}
+
+// ── Native spread card (already has spread fields) ─────────────────────────
+function renderNativeSpread(p) {
+  const curPrice  = parseFloat(p.currentPrice || p.premium);
+  const c         = p.contracts || 1;
+  let chgDollar, chgPct;
+  if (p.isCreditSpread) {
+    chgDollar = p.unrealizedPnL !== undefined ? parseFloat(p.unrealizedPnL) : (parseFloat(p.premium) - curPrice) * 100 * c;
+    chgPct    = p.maxProfit ? (chgDollar / parseFloat(p.maxProfit) * 100) : 0;
+  } else {
+    chgDollar = p.unrealizedPnL !== undefined ? parseFloat(p.unrealizedPnL) : (curPrice - parseFloat(p.premium)) * 100 * c;
+    chgPct    = parseFloat(p.premium) > 0 ? (chgDollar / (parseFloat(p.premium) * 100 * c) * 100) : 0;
+  }
+  const estValue = p.isCreditSpread
+    ? (curPrice * 100 * c)
+    : (curPrice * 100 * c);
+  const score  = p.score || 0;
+  const dte    = Math.max(0, Math.round((new Date(p.expDate) - new Date()) / 86400000));
+  const optType = (p.optionType||'put').toUpperCase();
+  const strikeDisplay = p.isCreditSpread
+    ? `$${p.shortStrike||p.sellStrike}/$${p.longStrike||p.buyStrike}`
+    : `$${p.buyStrike}/$${p.sellStrike}`;
+
+  return `
+  <div style="background:#050e1a;border:1px solid rgba(0,150,255,.3);border-radius:10px;padding:14px;margin-bottom:10px">
+    <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;margin-bottom:12px">
+      <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+        <span style="font-size:16px;font-weight:700;color:var(--blue)">${p.ticker}</span>
+        <span style="font-size:11px;color:var(--muted)">${strikeDisplay} ${p.expDate}</span>
+        <span style="font-size:9px;padding:2px 7px;border-radius:10px;background:${p.isCreditSpread?'rgba(0,255,136,.15)':'rgba(0,150,255,.15)'};color:${p.isCreditSpread?'var(--green)':'var(--blue)'}">${p.isCreditSpread?'CREDIT':'DEBIT'} SPREAD</span>
+        <span style="font-size:9px;padding:2px 7px;border-radius:10px;background:rgba(255,80,80,.15);color:#ff5050">${optType}</span>
+      </div>
+      <div style="display:flex;align-items:center;gap:8px">
+        <span style="font-size:11px;font-weight:700;color:${scoreCol(score)}">Entry: ${score}/100</span>
+        ${rescoreBtn(p.ticker)}
+        ${closeBtn(p.ticker, p.buySymbol||p.contractSymbol||'')}
+      </div>
+    </div>
+    <div style="background:rgba(0,0,0,.3);border-radius:8px;padding:10px 14px;margin-bottom:10px;display:flex;gap:24px;flex-wrap:wrap">
+      <div><div style="font-size:9px;color:var(--muted)">UNREALIZED P&amp;L</div><div style="font-size:20px;font-weight:700;color:${pnlColor(chgDollar)}">${pnlSign(chgDollar)}$${Math.abs(chgDollar).toFixed(2)}</div></div>
+      <div><div style="font-size:9px;color:var(--muted)">P&amp;L %</div><div style="font-size:20px;font-weight:700;color:${pnlColor(chgPct)}">${pnlSign(chgPct)}${chgPct.toFixed(1)}%</div></div>
+      <div><div style="font-size:9px;color:var(--muted)">EST. POSITION VALUE</div><div style="font-size:16px;font-weight:700">$${estValue.toFixed(2)}</div></div>
+      <div><div style="font-size:9px;color:var(--muted)">DTE</div><div style="font-size:16px;font-weight:700">${dte}d</div></div>
+    </div>
+    <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:8px">
+      <div><div style="font-size:9px;color:var(--muted)">${p.isCreditSpread?'NET CREDIT':'NET DEBIT'}</div><div style="font-weight:700">${fmt(p.premium)}</div></div>
+      <div><div style="font-size:9px;color:var(--muted)">CURRENT PRICE</div><div style="font-weight:700">$${curPrice.toFixed(2)}</div></div>
+      <div><div style="font-size:9px;color:var(--muted)">MAX PROFIT</div><div style="font-weight:700;color:var(--green)">$${(p.maxProfit||0).toFixed(0)}</div></div>
+      <div><div style="font-size:9px;color:var(--muted)">MAX LOSS</div><div style="font-weight:700;color:var(--red)">$${(p.maxLoss||0).toFixed(0)}</div></div>
+      <div><div style="font-size:9px;color:var(--muted)">MARGIN</div><div style="font-weight:700">${fmt(p.cost)}</div></div>
+      <div><div style="font-size:9px;color:var(--muted)">BREAKEVEN</div><div style="font-weight:700">$${p.breakeven||'--'}</div></div>
+      <div><div style="font-size:9px;color:var(--muted)">CONTRACTS</div><div style="font-weight:700">${p.contracts}x</div></div>
+      <div><div style="font-size:9px;color:var(--muted)">EXP DATE</div><div style="font-weight:700">${p.expDate}</div></div>
+    </div>
+  </div>`;
+}
+
+// ── Single leg card ────────────────────────────────────────────────────────
+function renderSingleLeg(p) {
+  const curPrice  = parseFloat(p.currentPrice || p.premium);
+  const c         = p.contracts || 1;
+  const chgDollar = p.unrealizedPnL !== undefined ? parseFloat(p.unrealizedPnL)
+    : (curPrice - parseFloat(p.premium)) * 100 * c;
+  const chgPct    = parseFloat(p.premium) > 0
+    ? (chgDollar / (parseFloat(p.premium) * 100 * c) * 100) : 0;
+  const estValue  = curPrice * 100 * c;
+  const score     = p.score || 0;
+  const dte       = Math.max(0, Math.round((new Date(p.expDate) - new Date()) / 86400000));
+  const optType   = (p.optionType||'put').toUpperCase();
+  const dteLabel  = p.dteLabel || p.expiryType || 'monthly';
+  const isReconciled = dteLabel.toUpperCase().includes('RECONCIL');
+
+  return `
+  <div style="background:#050e1a;border:1px solid var(--border);border-radius:10px;padding:14px;margin-bottom:10px">
+    <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;margin-bottom:12px">
+      <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+        <span style="font-size:16px;font-weight:700;color:var(--blue)">${p.ticker}</span>
+        <span style="font-size:11px;color:var(--muted)">$${p.strike}${optType} · ${p.expDate}</span>
+        <span style="font-size:9px;padding:2px 7px;border-radius:10px;background:rgba(255,80,80,.15);color:#ff5050">${optType}</span>
+        <span style="font-size:9px;padding:2px 7px;border-radius:10px;background:${isReconciled?'rgba(255,165,0,.15)':'rgba(100,100,100,.15)'};color:${isReconciled?'var(--orange)':'var(--muted)'}">${dteLabel.toUpperCase()}</span>
+      </div>
+      <div style="display:flex;align-items:center;gap:8px">
+        <span style="font-size:11px;font-weight:700;color:${scoreCol(score)}">Entry: ${score}/100</span>
+        ${rescoreBtn(p.ticker)}
+        ${closeBtn(p.ticker, p.buySymbol||p.contractSymbol||'')}
+      </div>
+    </div>
+    <div style="background:rgba(0,0,0,.3);border-radius:8px;padding:10px 14px;margin-bottom:10px;display:flex;gap:24px;flex-wrap:wrap">
+      <div><div style="font-size:9px;color:var(--muted)">UNREALIZED P&amp;L</div><div style="font-size:20px;font-weight:700;color:${pnlColor(chgDollar)}">${pnlSign(chgDollar)}$${Math.abs(chgDollar).toFixed(2)}</div></div>
+      <div><div style="font-size:9px;color:var(--muted)">P&amp;L %</div><div style="font-size:20px;font-weight:700;color:${pnlColor(chgPct)}">${pnlSign(chgPct)}${chgPct.toFixed(1)}%</div></div>
+      <div><div style="font-size:9px;color:var(--muted)">EST. POSITION VALUE</div><div style="font-size:16px;font-weight:700">$${estValue.toFixed(2)}</div></div>
+      <div><div style="font-size:9px;color:var(--muted)">DTE</div><div style="font-size:16px;font-weight:700">${dte}d</div></div>
+    </div>
+    <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:8px">
+      <div><div style="font-size:9px;color:var(--muted)">ENTRY PRICE</div><div style="font-weight:700">${fmt(p.premium)}</div></div>
+      <div><div style="font-size:9px;color:var(--muted)">CURRENT PRICE</div><div style="font-weight:700">$${curPrice.toFixed(2)}</div></div>
+      <div><div style="font-size:9px;color:var(--muted)">CONTRACTS</div><div style="font-weight:700">${c}x</div></div>
+      <div><div style="font-size:9px;color:var(--muted)">EXP DATE</div><div style="font-weight:700">${p.expDate}</div></div>
+      <div><div style="font-size:9px;color:var(--muted)">TARGET</div><div style="font-weight:700;color:var(--green)">${fmt(p.targetPrice)}</div></div>
+      <div><div style="font-size:9px;color:var(--muted)">STOP</div><div style="font-weight:700;color:var(--red)">${fmt(p.stopPrice)}</div></div>
+      <div><div style="font-size:9px;color:var(--muted)">BREAKEVEN</div><div style="font-weight:700">${p.breakeven?'$'+p.breakeven:'--'}</div></div>
+      <div><div style="font-size:9px;color:var(--muted)">IVR</div><div style="font-weight:700">${p.ivr!=null?p.ivr+'%':'--'}</div></div>
+    </div>
+    ${p._liveRescore ? `<div style="margin-top:8px;font-size:10px;color:var(--muted)">Live rescore: <strong style="color:${p._liveRescore.score>=75?'var(--green)':p._liveRescore.score>=55?'var(--gold)':'var(--red)'}">${p._liveRescore.score} — ${p._liveRescore.label}</strong></div>` : ''}
+  </div>`;
+}
+
+
+function renderSpreadCard(short, long) {
+  const contracts   = short.contracts || 1;
+  const entryCredit = parseFloat(short.premium) - parseFloat(long.premium);
+  const spreadWidth = short.strike - long.strike;
+  const maxProfit   = entryCredit * 100 * contracts;
+  const maxLoss     = (spreadWidth - entryCredit) * 100 * contracts;
+  const breakeven   = (short.strike - entryCredit).toFixed(2);
+  const dte         = Math.max(0, Math.round((new Date(short.expDate) - new Date()) / 86400000));
+  const score       = short.score || long.score || 0;
+  const scoreColor  = score >= 85 ? 'var(--green)' : score >= 70 ? 'var(--blue)' : 'var(--orange)';
+  const dteLabel    = (short.dteLabel || 'RECONCILED').toUpperCase();
+
+  let netPnL = 0;
+  if (short.unrealizedPnL !== undefined && long.unrealizedPnL !== undefined) {
+    netPnL = parseFloat(short.unrealizedPnL) + parseFloat(long.unrealizedPnL);
+  } else {
+    const c = contracts;
+    netPnL = (parseFloat(short.premium) - parseFloat(short.currentPrice || short.premium)) * 100 * c
+           + (parseFloat(long.currentPrice || long.premium)  - parseFloat(long.premium))  * 100 * c;
+  }
+  const pnlPct   = maxProfit > 0 ? (netPnL / maxProfit * 100) : 0;
+  const pnlSign  = netPnL >= 0 ? '+' : '';
+  const pnlColor = netPnL >= 0 ? 'var(--green)' : 'var(--red)';
+
+  return `<div style="background:#050e1a;border:1px solid rgba(0,255,136,.25);border-radius:10px;padding:14px;margin-bottom:10px">
+    <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;margin-bottom:12px">
+      <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+        <span style="font-size:16px;font-weight:700;color:var(--blue)">${short.ticker}</span>
+        <span style="font-size:11px;color:var(--muted)">$${short.strike}/$${long.strike} \xb7 ${short.expDate}</span>
+        <span style="font-size:9px;padding:2px 7px;border-radius:10px;background:rgba(0,255,136,.15);color:var(--green)">CREDIT SPREAD</span>
+        <span style="font-size:9px;padding:2px 7px;border-radius:10px;background:rgba(255,165,0,.15);color:var(--orange)">${dteLabel}</span>
+        <span style="font-size:9px;padding:2px 7px;border-radius:10px;background:rgba(255,80,80,.15);color:#ff5050">PUT</span>
+        <span style="font-size:9px;padding:2px 7px;border-radius:10px;background:rgba(0,0,0,.3);color:var(--muted)">${contracts}x</span>
+      </div>
+      <div style="display:flex;align-items:center;gap:8px">
+        <span style="font-size:11px;font-weight:700;color:${scoreColor}">Entry: ${score}/100</span>
+        <button onclick="rescorePos('${short.ticker}')" style="font-size:9px;padding:2px 7px;background:rgba(0,196,255,.1);border:1px solid var(--blue);border-radius:4px;color:var(--blue);cursor:pointer">&#8635; RESCORE</button>
+        <button class="btn btn-red" style="padding:3px 10px;font-size:10px" onclick="closePos('${short.ticker}','')">CLOSE</button>
+      </div>
+    </div>
+    <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-bottom:10px">
+      <div><div style="font-size:9px;color:var(--muted)">NET CREDIT</div><div style="font-weight:700">$${entryCredit.toFixed(2)}</div></div>
+      <div><div style="font-size:9px;color:var(--muted)">UNREALIZED P&L</div><div style="font-weight:700;color:${pnlColor}">${pnlSign}$${Math.abs(netPnL).toFixed(2)}</div></div>
+      <div><div style="font-size:9px;color:var(--muted)">P&L %</div><div style="font-weight:700;color:${pnlColor}">${pnlSign}${pnlPct.toFixed(1)}%</div></div>
+      <div><div style="font-size:9px;color:var(--muted)">DTE</div><div style="font-weight:700">${dte}d</div></div>
+      <div><div style="font-size:9px;color:var(--muted)">SHORT STRIKE (sold)</div><div style="font-weight:700;color:var(--orange)">$${short.strike} @ $${parseFloat(short.premium).toFixed(2)}</div></div>
+      <div><div style="font-size:9px;color:var(--muted)">LONG STRIKE (bought)</div><div style="font-weight:700;color:var(--muted)">$${long.strike} @ $${parseFloat(long.premium).toFixed(2)}</div></div>
+      <div><div style="font-size:9px;color:var(--muted)">MAX PROFIT</div><div style="font-weight:700;color:var(--green)">$${maxProfit.toFixed(0)}</div></div>
+      <div><div style="font-size:9px;color:var(--muted)">MAX LOSS</div><div style="font-weight:700;color:var(--red)">$${maxLoss.toFixed(0)}</div></div>
+      <div><div style="font-size:9px;color:var(--muted)">SPREAD WIDTH</div><div style="font-weight:700">$${spreadWidth}</div></div>
+      <div><div style="font-size:9px;color:var(--muted)">BREAKEVEN</div><div style="font-weight:700">$${breakeven}</div></div>
+      <div><div style="font-size:9px;color:var(--muted)">SHORT CURR</div><div style="font-weight:700">$${parseFloat(short.currentPrice||short.premium).toFixed(2)}</div></div>
+      <div><div style="font-size:9px;color:var(--muted)">LONG CURR</div><div style="font-weight:700">$${parseFloat(long.currentPrice||long.premium).toFixed(2)}</div></div>
+    </div>
+    <div style="font-size:10px;color:var(--muted);margin-top:4px">Opened: ${new Date(short.openDate || Date.now()).toLocaleString()}</div>
+  </div>`;
+}
+
+function renderSingleCard(p) {
     const score = p.score || 0;
     const scoreColor = score >= 85 ? 'var(--green)' : score >= 70 ? 'var(--blue)' : 'var(--orange)';
     const isSpread = p.isSpread;
@@ -1807,8 +2113,7 @@ function renderPositions() {
       ${p.thesisHistory && p.thesisHistory.length > 0 ? `<div style="margin-top:4px;font-size:9px;color:${thesisColor}">Thesis: ${thesisScore}/100 · ${(p.thesisHistory[p.thesisHistory.length-1]?.notes||'').slice(0,80)}</div>` : ''}
       <div style="font-size:10px;color:var(--muted);margin-top:8px">Opened: ${new Date(p.openDate).toLocaleString()}</div>
     </div>`;
-  }).join('');
-}
+  }
 
 function renderGreeks() {
   const positions = state.positions || [];
