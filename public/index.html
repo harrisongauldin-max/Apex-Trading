@@ -39,7 +39,7 @@ body{background:var(--bg);color:var(--text);font-family:var(--font);font-size:13
 .metric{font-size:22px;font-weight:700;color:var(--green)}
 .metric-sm{font-size:16px;font-weight:700}
 .sub{font-size:10px;color:var(--muted);margin-top:2px}
-.heat-bar{width:100%;height:8px;background:#0d1f35;border-radius:4px;overflow:hidden;margin-top:8px}
+.heat-bar{width:100%;height:12px;background:#0d1f35;border-radius:4px;overflow:hidden;margin-top:8px;position:relative}
 .heat-fill{height:100%;border-radius:4px;transition:width .5s}
 table{width:100%;border-collapse:collapse;font-size:11px}
 th{color:var(--muted);text-align:left;padding:6px 8px;border-bottom:1px solid var(--border);font-size:10px;letter-spacing:.5px}
@@ -280,7 +280,7 @@ input[type=text]:focus{border-color:var(--blue)}
       <div class="card-title">Portfolio Heat</div>
       <div class="metric-sm" id="heat">--%</div>
       <div class="heat-bar"><div class="heat-fill" id="heat-fill" style="width:0%;background:var(--green)"></div></div>
-      <div class="sub">max 60% | <span id="put-heat" style="color:var(--red)">P:--%</span> <span id="call-heat" style="color:var(--blue)">C:--%</span></div>
+      <div class="sub" id="heat-sub-detail">max 60% | <span id="put-heat" style="color:var(--red)">P:--%</span> <span id="call-heat" style="color:var(--blue)">C:--%</span></div>
     </div>
     <div class="card">
       <div class="card-title">Monthly Revenue</div>
@@ -1314,12 +1314,14 @@ function renderMetrics() {
   document.getElementById('pnl').style.color = pnl >= 0 ? 'var(--green)' : 'var(--red)';
   document.getElementById('pnl-sub').textContent = `daily: ${fmt((state.cash||0)-(state.dayStartCash||state.customBudget||10000))}`;
 
-  // Recompute heat client-side using server's totalCap for accuracy
-  // state.totalCap = max(customBudget, cash, accountBaseline, MONTHLY_BUDGET)
+  // Heat = deployed capital / total cap
+  // Deployed = totalCap - available cash (most accurate for credit spreads)
+  const serverTotalCap = Math.max(state.totalCap || 0, state.cash || 0, 10000); // never below $10k
+  const deployedCapital = Math.max(0, serverTotalCap - (state.cash || 0));
+  const heat = serverTotalCap > 0 ? parseFloat((deployedCapital / serverTotalCap * 100).toFixed(1)) : (state.heatPct || 0);
+  // Keep openCostBasis for P/C breakdown proportions
   const positions_heat = state.positions || [];
   const openCostBasis  = positions_heat.reduce((s,p) => s + (parseFloat(p.cost)||0) * (p.partialClosed ? 0.5 : 1), 0);
-  const serverTotalCap = state.totalCap || 10000;
-  const heat = serverTotalCap > 0 ? parseFloat((openCostBasis / serverTotalCap * 100).toFixed(1)) : (state.heatPct || 0);
   document.getElementById('heat').textContent = heat.toFixed(1) + '%';
   // Alpaca account balance — shows actual paper/live account value
   if (state.alpacaCash) {
@@ -1334,9 +1336,23 @@ function renderMetrics() {
   // Scale bar width against MAX_HEAT (60%) so 60% fills the bar completely
   // 54.5% heat = 54.5/60 = 90.8% of bar — was the bug
   // Now: 54.5% heat = 54.5/60 * 100 = 90.8% width — correct visual
-  const MAX_HEAT_PCT = 60;
-  fill.style.width = Math.min((heat / MAX_HEAT_PCT) * 100, 100) + '%';
+  // Bar scaled to 100% so 44.7% heat = 44.7% fill (no more misleading near-full bar)
+  // Cap marker injected at 60% position
+  fill.style.width = Math.min(heat, 100) + '%';
   fill.style.background = heat > 50 ? 'var(--red)' : heat > 35 ? 'var(--orange)' : 'var(--green)';
+  const heatBar = fill.parentElement;
+  if (heatBar) {
+    heatBar.title = heat.toFixed(1) + '% heat | 60% cap';
+    // Add or update cap marker line at 60%
+    let capMarker = document.getElementById('heat-cap-marker');
+    if (!capMarker) {
+      capMarker = document.createElement('div');
+      capMarker.id = 'heat-cap-marker';
+      capMarker.style.cssText = 'position:absolute;top:0;bottom:0;width:2px;background:rgba(255,255,255,0.35);left:60%';
+      capMarker.title = '60% cap';
+      heatBar.appendChild(capMarker);
+    }
+  }
 
   // Directional heat breakdown
   const positions = state.positions || [];
@@ -1351,6 +1367,10 @@ function renderMetrics() {
   const callHeatEl    = document.getElementById('call-heat');
   if (putHeatEl)  putHeatEl.textContent  = 'P:' + putHeatPct.toFixed(0)  + '%';
   if (callHeatEl) callHeatEl.textContent = 'C:' + callHeatPct.toFixed(0) + '%';
+  // Update heat sub-detail to show open cost vs totalCap clearly
+  const heatSubEl = document.getElementById('heat-sub-detail');
+  const heatSubEl2 = document.getElementById('heat-sub-detail');
+  if (heatSubEl2) heatSubEl2.title = 'Open cost: $' + openCostBasis.toFixed(0) + ' / Total cap: $' + serverTotalCap.toFixed(0);
 
   const rev = state.totalRevenue || 0;
   document.getElementById('revenue').textContent = fmt(rev);
