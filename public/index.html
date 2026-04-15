@@ -983,6 +983,7 @@ input[type=text]:focus{border-color:var(--blue)}
     <button class="btn" onclick="fetchLogs()" style="font-size:11px">REFRESH</button>
     <button class="btn" onclick="clearLog()" style="font-size:11px">CLEAR</button>
     <button class="btn" id="copy-log-btn" onclick="copyLogsForClaude()" style="font-size:11px;border-color:rgba(0,196,255,.4);color:#44aaff">&#9126; Copy for Claude</button>
+    <span id="log-row-counter" style="font-size:10px;color:var(--muted);padding:0 4px;white-space:nowrap">0 rows</span>
   </div>
   <!-- ── Log box ── -->
   <div class="log-box" id="server-log" style="height:560px;overflow-y:auto"></div>
@@ -2832,6 +2833,8 @@ function renderServerLog() {
       <span style="color:var(--text);font-size:11px;word-break:break-word">${msg}</span>
     </div>`;
   }).join('');
+  const counter = document.getElementById('log-row-counter');
+  if (counter) counter.textContent = logs.length + ' rows';
 }
 
 function clearLog() {
