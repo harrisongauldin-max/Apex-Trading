@@ -1309,7 +1309,7 @@ function renderMetrics() {
 
   document.getElementById('cash').textContent = fmt(state.cash);
   const budgetAmt = state.customBudget && state.customBudget > 0 ? state.customBudget : (state.cash || 10000);
-  document.getElementById('cash-sub').textContent = `of ${fmt(budgetAmt)} budget`;
+  document.getElementById('cash-sub').textContent = `of ${fmt(state.totalCap || budgetAmt)} budget`;
   document.getElementById('pnl').textContent = (pnl >= 0 ? '+' : '') + fmt(pnl);
   document.getElementById('pnl').style.color = pnl >= 0 ? 'var(--green)' : 'var(--red)';
   document.getElementById('pnl-sub').textContent = `daily: ${fmt((state.cash||0)-(state.dayStartCash||state.customBudget||10000))}`;
