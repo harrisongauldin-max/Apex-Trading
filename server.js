@@ -325,6 +325,12 @@ function defaultState() {
     _macroReversalAt:    null,  // timestamp of last macro-reversal exit batch
     _macroReversalCount: 0,     // how many positions closed in the reversal batch
     _macroReversalSPY:   null,  // SPY price at time of reversal - for comparison
+    // V3.1 regime additions (panel approved)
+    _postCrisisLock:     false, // true for 10 trading days after Regime C → B transition
+    _postCrisisLockExpiry: null,// timestamp when post-crisis lock expires
+    _vixSpikeAt:         null,  // timestamp of last VIX spike > 8pt (flash crash gate)
+    _regimeSubClass:     null,  // B1 (early/mild bear) or B2 (confirmed bear) within Regime B
+    _lastLoggedSubClass: null,  // tracks last logged sub-regime to prevent log flooding
     _dayPlan:            null,  // agent day plan - set at 6am, updated at 7:30am and 8:30am
     _dayPlanDate:        null,  // date of last day plan - reset daily
     _recentLosses:       {},    // ticker -> {closedAt, reason, agentSignal, price} for re-entry veto
@@ -2610,8 +2616,10 @@ function checkVIXVelocity(currentVIX) {
   lastVIXReading = currentVIX;
   const fallPct = prevVIX > 0 ? (delta / prevVIX) : 0;
 
-  // Black swan: VIX spiked 8+ points - close all positions
+  // Black swan: VIX spiked 8+ points — close all positions + set flash crash cooldown
   if (delta >= 8) {
+    state._vixSpikeAt = Date.now(); // V3.1: 48h cooldown on debit put re-entry after spike
+    markDirty();
     logEvent("circuit", `VIX VELOCITY ALERT - jumped ${delta.toFixed(1)} points to ${currentVIX} - closing all positions`);
     return true;
   }
@@ -3642,7 +3650,54 @@ Rules: regime=what SPY does next 3-10 days. entryBias: puts_on_bounces=bearish t
   const regimeA = !spyBelowNow && state._vixSustained < 20;
   const regimeC = state._spyDrawdown < -20 && state._vixSustained > 35 && state._regimeDuration > 10;
   const regimeB = !regimeA && !regimeC; // trending/transitional - the current environment
+  const prevRegimeClass = state._regimeClass;
   state._regimeClass = regimeC ? "C" : regimeB ? "B" : "A";
+
+  // ── V3.1: B1/B2 sub-regime split (panel approved) ───────────────────────
+  // B1 = early/mild bear: duration < 5d OR VIX < 26. Higher min score, tighter reversal threshold.
+  // B2 = confirmed bear: duration >= 5d AND VIX >= 26. Full puts-on-bounces conviction.
+  if (regimeB) {
+    const isB2 = (state._regimeDuration || 0) >= 5 && (state._vixSustained || state.vix) >= 26;
+    state._regimeSubClass = isB2 ? "B2" : "B1";
+  } else {
+    state._regimeSubClass = null;
+  }
+
+  // ── V3.1: Post-crisis recovery lock (panel unanimous) ───────────────────
+  // When exiting Regime C → B, block debit puts for 10 trading days.
+  // Post-crisis V-recoveries are violent upside — puts-on-bounces fires on the wrong side.
+  if (prevRegimeClass === "C" && state._regimeClass === "B") {
+    if (!state._postCrisisLock) {
+      // 10 calendar days ≈ 7 trading days. For true 10 trading days use 14 calendar days.
+      // Using 14 calendar days to ensure full 10-trading-day protection window.
+      const TEN_TRADING_DAYS_MS = 14 * 24 * 3600 * 1000; // 14 calendar ≈ 10 trading days
+      state._postCrisisLock        = true;
+      state._postCrisisLockExpiry  = Date.now() + TEN_TRADING_DAYS_MS;
+      logEvent("warn", "[REGIME] C→B transition detected — post-crisis lock active for 10 trading days. Debit puts blocked.");
+      markDirty();
+    }
+  }
+  // Auto-lift post-crisis lock when expired
+  if (state._postCrisisLock && state._postCrisisLockExpiry && Date.now() > state._postCrisisLockExpiry) {
+    state._postCrisisLock       = false;
+    state._postCrisisLockExpiry = null;
+    logEvent("warn", "[REGIME] Post-crisis lock expired — puts-on-bounces re-enabled.");
+    markDirty();
+  }
+  // Also lift if agent returns trending_bull with high confidence (recovery confirmed)
+  // Post-crisis early lift: agent must confirm recovery via SIGNAL field ("strongly bullish")
+  // OR via REGIME label ("trending_bull") — both are valid confirmation signals
+  // Bug fix: original code read .signal but checked "trending_bull" which is a .regime value
+  const _agentSigNow  = (state._agentMacro || {}).signal  || "";
+  const _agentRegNow  = (state._agentMacro || {}).regime  || "";
+  const _agentConfNow = (state._agentMacro || {}).confidence || "";
+  const _agentConfirmsBull = (_agentSigNow === "strongly bullish" || _agentRegNow === "trending_bull");
+  if (state._postCrisisLock && _agentConfirmsBull && _agentConfNow === "high") {
+    state._postCrisisLock       = false;
+    state._postCrisisLockExpiry = null;
+    logEvent("warn", `[REGIME] Post-crisis lock lifted early — agent confirms bull recovery (signal: ${_agentSigNow}, regime: ${_agentRegNow}, confidence: ${_agentConfNow}).`);
+    markDirty();
+  }
 
   // _regimeDuration: days SPY has been below 200MA - increment once per trading day
   // Used for regime duration boost in scoring (+5 after 3d, +10 after 5d, +15 after 10d)
@@ -8951,10 +9006,51 @@ async function runScan() {
   // Derive allowed flags from rulebook gates (entry window still checked here for timing)
   const entryWindowOpen   = isEntryWindow("put", true) && !finalHourBlock && !suppressBlock;
   const callWindowOpen    = isEntryWindow("call", true) && !finalHourBlock && !suppressBlock;
+  // ── V3.1: Compute new regime gates inline ───────────────────────────────
+  // Post-crisis lock: block debit puts for 10 trading days after C→B transition
+  const postCrisisLockActive = !!(state._postCrisisLock && state._postCrisisLockExpiry && Date.now() < state._postCrisisLockExpiry);
+  if (postCrisisLockActive && !dryRunMode) {
+    const daysLeft = Math.ceil((state._postCrisisLockExpiry - Date.now()) / 86400000);
+    logEvent("filter", `[REGIME] Post-crisis recovery lock active — debit puts blocked (${daysLeft}d remaining)`);
+  }
+
+  // VIX spike cooldown: block debit puts for 48h after VIX spike > 8pt
+  // Credit spreads still allowed (elevated IV benefits premium selling)
+  const SPIKE_COOLDOWN_MS = 48 * 3600 * 1000;
+  const vixSpikeCooldownActive = !!(state._vixSpikeAt && (Date.now() - state._vixSpikeAt) < SPIKE_COOLDOWN_MS);
+  if (vixSpikeCooldownActive && !dryRunMode) {
+    const hoursLeft = Math.ceil((SPIKE_COOLDOWN_MS - (Date.now() - state._vixSpikeAt)) / 3600000);
+    logEvent("filter", `[REGIME] VIX spike cooldown active — debit puts blocked (${hoursLeft}h remaining). Credits still allowed.`);
+  }
+  // Auto-clear _vixSpikeAt after cooldown window expires (48h elapsed)
+  // The primary guard is the 48h window — no additional VIX recovery check needed
+  // (VIX recovery is monitored separately via _vixSustained and vixFallingPause)
+  if (state._vixSpikeAt && !vixSpikeCooldownActive) {
+    logEvent("filter", "[REGIME] VIX spike cooldown expired — debit put entries re-enabled");
+    state._vixSpikeAt = null;
+    markDirty();
+  }
+
+  // B1 gate: log sub-regime on CHANGE only (not every scan — would flood 500-entry log buffer)
+  const _prevSubClass = state._lastLoggedSubClass;
+  if (state._regimeSubClass !== _prevSubClass && !dryRunMode) {
+    state._lastLoggedSubClass = state._regimeSubClass;
+    if (state._regimeSubClass === "B1") {
+      logEvent("warn", `[REGIME B1] Entered early bear sub-regime — min score 75, sizing 0.75x, reversal threshold 2.0%`);
+    } else if (state._regimeSubClass === "B2") {
+      logEvent("warn", `[REGIME B2] Entered confirmed bear sub-regime — full puts-on-bounces conviction, min score 70, sizing 1.0x`);
+    } else if (_prevSubClass && !state._regimeSubClass) {
+      logEvent("warn", `[REGIME] Exited Regime B sub-classification (now Regime ${state._regimeClass})`);
+    }
+  }
+
   const putsAllowed       = (entryWindowOpen && !rb.gates.vixFallingPause && !rb.gates.spyGapUpBlockPuts
                              && !rb.gates.postReversalBlock && !rb.gates.macroBullishBlock
                              && !rb.gates.choppyDebitBlock && !rb.gates.avoidHoldActive
-                             && !rb.gates.crisisDebitBlock) || dryRunMode;
+                             && !rb.gates.crisisDebitBlock
+                             && !postCrisisLockActive       // V3.1: no puts in post-crisis window
+                             && !vixSpikeCooldownActive     // V3.1: no puts for 48h after VIX spike
+                             ) || dryRunMode;
   const callsAllowed      = (callWindowOpen && !rb.gates.below200MACallBlock
                              && (!rb.gates.choppyDebitBlock || isMRCondition)
                              && !rb.gates.avoidHoldActive) || dryRunMode;
@@ -9013,7 +9109,9 @@ async function runScan() {
     const prevClose  = spyBars[spyBars.length-2].c;
     const curSPY     = spyBars[spyBars.length-1].c;
     const spyDayMove = (curSPY - prevClose) / prevClose;
-    if (spyDayMove > 0.025) { // SPY up 2.5%+ = genuine macro reversal
+    // V3.1: B1 uses tighter 2.0% threshold (early-bear bounces more likely real reversals)
+    const _macroRevThreshold = (_rbBase && _rbBase.macroReversalThreshold) ? _rbBase.macroReversalThreshold : 0.025;
+    if (spyDayMove > _macroRevThreshold) { // SPY up threshold% = genuine macro reversal (2.0% B1, 2.5% B2)
       let reversalCount = 0;
       // Panel CRITICAL #4: close ALL puts on macro-reversal, not just losing ones.
       // A 2.5% SPY spike breaks the puts-on-bounces thesis categorically.
