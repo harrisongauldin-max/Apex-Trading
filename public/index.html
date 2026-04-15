@@ -977,9 +977,17 @@ input[type=text]:focus{border-color:var(--blue)}
     <button class="btn" id="log-live-btn" onclick="toggleLogLive()" style="font-size:11px">PAUSE</button>
     <button class="btn" onclick="fetchLogs()" style="font-size:11px">REFRESH</button>
     <button class="btn" onclick="clearLog()" style="font-size:11px">CLEAR</button>
+    <button class="btn" id="copy-log-btn" onclick="copyLogsForClaude()" style="font-size:11px;border-color:rgba(0,196,255,.4);color:var(--blue)">⎘ COPY FOR CLAUDE</button>
+    <button class="btn" onclick="window.open('/score-debug','_blank')" style="font-size:11px;border-color:rgba(170,100,255,.4);color:#aa88ff">⚡ SCORE DEBUG</button>
+  </div>
+  <!-- ── Copy question bar ── -->
+  <div id="copy-question-bar" style="display:none;align-items:center;gap:8px;margin-bottom:10px;flex-wrap:wrap">
+    <input id="copy-question-input" type="text" placeholder="optional: add a question for Claude..." style="flex:1;min-width:200px;background:var(--panel);border:1px solid var(--border);color:var(--text);padding:4px 8px;border-radius:6px;font-family:var(--font);font-size:11px" />
+    <button class="btn" onclick="confirmCopyLogs()" style="font-size:11px;border-color:rgba(0,196,255,.5);color:var(--blue)">COPY</button>
+    <button class="btn" onclick="cancelCopyLogs()" style="font-size:11px">CANCEL</button>
   </div>
   <!-- ── Log box ── -->
-  <div class="log-box" id="server-log" style="height:560px;overflow-y:auto"></div>
+  <div class="log-box" id="server-log" style="height:520px;overflow-y:auto"></div>
 </div>
 
 
@@ -2755,6 +2763,80 @@ function renderServerLog() {
       <span style="color:var(--text);font-size:11px;word-break:break-word">${msg}</span>
     </div>`;
   }).join('');
+}
+
+function copyLogsForClaude() {
+  const bar = document.getElementById('copy-question-bar');
+  bar.style.display = bar.style.display === 'none' ? 'flex' : 'none';
+  if (bar.style.display === 'flex') {
+    document.getElementById('copy-question-input').focus();
+  }
+}
+
+function cancelCopyLogs() {
+  document.getElementById('copy-question-bar').style.display = 'none';
+  document.getElementById('copy-question-input').value = '';
+}
+
+function confirmCopyLogs() {
+  const question = document.getElementById('copy-question-input').value.trim();
+  const filterType = (document.getElementById('log-filter').value || '').trim();
+  const search = (document.getElementById('log-search').value || '').toLowerCase();
+
+  // Get all current log entries from rendered log
+  const rows = document.querySelectorAll('#server-log .log-entry, #server-log div[data-type]');
+  let entries = [];
+
+  // Use _allLogs (populated by fetchLogs from /api/logs)
+  const logs = (_allLogs || []).slice();
+  const types = filterType ? filterType.split(',') : null;
+  let filtered = logs;
+  if (types) filtered = filtered.filter(e => types.includes(e.type));
+  if (search) filtered = filtered.filter(e => (e.message||'').toLowerCase().includes(search));
+  filtered = filtered.slice(0, 80); // last 80 matching entries
+
+  const header = [
+    'ARGO V3.0 — Server Log Export — ' + new Date().toLocaleString(),
+    'Cash: $' + parseFloat(state.cash||0).toFixed(2) +
+    ' | Positions: ' + (state.positions||[]).length +
+    ' | VIX: ' + (state.vix||'--') +
+    ' | Regime: ' + (state._regimeClass||'--') + (state._regimeSubClass ? '/' + state._regimeSubClass : ''),
+    'Filter: ' + (filterType || 'all') + (search ? ' | Search: "' + search + '"' : ''),
+    '─────────────────────────────────────────────────────',
+    ''
+  ];
+
+  const lines = filtered.map(e => {
+    const t = new Date(e.time).toLocaleTimeString();
+    return '[' + t + '] ' + (e.type||'').toUpperCase().padEnd(8) + ' ' + (e.message||'');
+  });
+
+  const footer = ['', '─────────────────────────────────────────────────────',
+    filtered.length + ' log entries' + (question ? '' : '') ];
+
+  if (question) footer.push('', 'Question: ' + question);
+
+  const text = [...header, ...lines, ...footer].join('
+');
+
+  const doCopy = t => {
+    if (navigator.clipboard && navigator.clipboard.writeText) return navigator.clipboard.writeText(t);
+    const ta = Object.assign(document.createElement('textarea'), { value: t });
+    ta.style.cssText = 'position:fixed;opacity:0';
+    document.body.appendChild(ta); ta.select(); document.execCommand('copy'); ta.remove();
+    return Promise.resolve();
+  };
+
+  const btn = document.getElementById('copy-log-btn');
+  doCopy(text).then(() => {
+    btn.textContent = '✓ COPIED';
+    document.getElementById('copy-question-bar').style.display = 'none';
+    document.getElementById('copy-question-input').value = '';
+    setTimeout(() => btn.textContent = '⎘ COPY FOR CLAUDE', 2500);
+  }).catch(() => {
+    btn.textContent = '! FAILED';
+    setTimeout(() => btn.textContent = '⎘ COPY FOR CLAUDE', 2000);
+  });
 }
 
 function clearLog() {
