@@ -1314,7 +1314,12 @@ function renderMetrics() {
   document.getElementById('pnl').style.color = pnl >= 0 ? 'var(--green)' : 'var(--red)';
   document.getElementById('pnl-sub').textContent = `daily: ${fmt((state.cash||0)-(state.dayStartCash||state.customBudget||10000))}`;
 
-  const heat = state.heatPct || 0;
+  // Recompute heat client-side using server's totalCap for accuracy
+  // state.totalCap = max(customBudget, cash, accountBaseline, MONTHLY_BUDGET)
+  const positions_heat = state.positions || [];
+  const openCostBasis  = positions_heat.reduce((s,p) => s + (parseFloat(p.cost)||0) * (p.partialClosed ? 0.5 : 1), 0);
+  const serverTotalCap = state.totalCap || 10000;
+  const heat = serverTotalCap > 0 ? parseFloat((openCostBasis / serverTotalCap * 100).toFixed(1)) : (state.heatPct || 0);
   document.getElementById('heat').textContent = heat.toFixed(1) + '%';
   // Alpaca account balance — shows actual paper/live account value
   if (state.alpacaCash) {
