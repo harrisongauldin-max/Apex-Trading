@@ -118,12 +118,25 @@ function getRegimeRulebook(state) {
   // Regime A: puts fight the uptrend — need RSI overbought signal, high bar
   // Regime B: puts align with trend — lower bar, but still need clear signal
   // Credits: defined-risk structure lowers bar — premium collection not directional
-  const minScorePut    = isBullRegime ? 85 : 70;
+  // ── V3.1: B1/B2 sub-regime scoring differentiation (panel approved) ──────
+  // B1 = early/mild bear: regimeDuration < 5d OR VIX < 26
+  //   Trend not confirmed — higher bar to filter early-bear false positives
+  //   March 25 incident: RSI 11 puts entered day 1 because B1 scored like B2
+  // B2 = confirmed bear: regimeDuration >= 5d AND VIX >= 26
+  //   Full conviction — puts-on-bounces at current B behavior
+  const isB1 = isBearRegime && (state._regimeSubClass === "B1");
+  const isB2 = isBearRegime && (state._regimeSubClass === "B2");
+
+  const minScorePut    = isBullRegime ? 85 : isB1 ? 75 : 70; // B1 raises bar from 70→75
   const minScoreCall   = isBullRegime ? 75 : 85;
-  const minScoreCredit = 65;
+  const minScoreCredit = isB1 ? 68 : 65; // B1 slight raise for credits too
   // Low confidence raises bar — less willing to enter without clear signal
   // High confidence does NOT lower bar — score carries conviction (RM panel)
   const agentMinAdj    = isLowConf ? +10 : 0;
+
+  // B1 macro-reversal threshold is tighter: 2.0% (not 2.5%)
+  // Early-bear bounces are more likely to become genuine reversals
+  const macroReversalThreshold = isB1 ? 0.020 : 0.025;
 
   // ── Gate flags — regime-tagged ────────────────────────────
   const gates = {
@@ -150,6 +163,10 @@ function getRegimeRulebook(state) {
     vixFallingPause:     !!(state._vixFallingPause),
     postReversalBlock:   !!(state._macroReversalAt &&
                            (Date.now() - state._macroReversalAt) < 30 * 60 * 1000),
+    postCrisisLock:      !!(state._postCrisisLock),     // V3.1
+    vixSpikeCooldown:    !!(state._vixSpikeAt),         // V3.1
+    isB1:                isB1,                          // V3.1: early bear sub-regime
+    isB2:                isB2,                          // V3.1: confirmed bear sub-regime
   };
 
   // ── Sizing multipliers ────────────────────────────────────
@@ -159,7 +176,9 @@ function getRegimeRulebook(state) {
   //   multiplier; actual application requires vega check in server.js execution.
   // Change 5 (TR/Kelly): crisis base sizing 0.5x — defined-risk but gap risk real in C
   const sizeMult = {
-    base:          isCrisis ? 0.5 : 1.0,
+    // V3.1: B1 (early bear, unconfirmed) gets 0.75x — trend not confirmed, lower conviction
+    // Crisis: 0.5x. B1: 0.75x. B2/A: 1.0x.
+    base:          isCrisis ? 0.5 : isB1 ? 0.75 : 1.0,
     ivBoostCredit: ivHigh   ? 1.5 : 1.0,  // only applied when under vega cap
     ivBoostDebit:  1.0,                    // never boost debit size in high IV
     oversold:      0.75,                   // RSI <= 40 in Regime B
@@ -248,6 +267,9 @@ function getRegimeRulebook(state) {
     isBullRegime,
     isBearRegime,
     isCrisis,
+    isB1,                        // V3.1: early/mild bear sub-regime
+    isB2,                        // V3.1: confirmed bear sub-regime
+    macroReversalThreshold,      // V3.1: 2.0% in B1, 2.5% in B2/other
     vix,
     ivRank,
     ivElevated,
