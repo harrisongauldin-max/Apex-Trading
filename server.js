@@ -1376,7 +1376,7 @@ async function getDynamicSignals(ticker, bars, intradayBars = null, realOptionsI
 const fmt         = n  => "$" + parseFloat(n).toFixed(2);
 // Use actual account baseline (set from Alpaca on first sync) not hardcoded constant
 // state.accountBaseline tracks the real starting value for performance calculations
-const totalCap    = () => state.customBudget || Math.max(state.cash || 0, state.accountBaseline || 0, MONTHLY_BUDGET);
+const totalCap    = () => Math.max(state.customBudget || 0, state.cash || 0, state.accountBaseline || 0, MONTHLY_BUDGET); // always >= MONTHLY_BUDGET
 // Mark-to-market: use current price not entry cost for real portfolio value
 // currentPrice is updated every reconciliation from Alpaca market values
 const openRisk    = () => state.positions.reduce((s,p) => {
