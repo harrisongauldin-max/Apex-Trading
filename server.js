@@ -85,17 +85,11 @@ const STOP_LOSS_PCT       = 0.35;
 const FAST_STOP_PCT       = 0.20;   // -20% in first 48hrs
 const FAST_STOP_HOURS     = 48;
 const TAKE_PROFIT_PCT     = 0.50;  // fallback only - spread positions use per-position takeProfitPct stamped at entry
-
-// ── VIX-scaled credit spread take profit ──────────────────────────────────────
-// Panel recommendation (April 2026, 6/7 vote):
-// When VIX is elevated at entry, premium was expensive → take profit faster
-// Regime B (VIX > 25): 35% | Neutral (VIX 20-25): 40% | Bull/low-VIX (<20): 50%
-// getDTEExitParams then applies overnight/DTE multipliers on top of this base
 function calcCreditSpreadTP(entryVix) {
   const vix = entryVix || state.vix || 20;
-  if (vix >= 25) return 0.35;   // Regime B / elevated VIX — take profit faster
-  if (vix >= 20) return 0.40;   // Neutral — moderate target
-  return 0.50;                   // Low VIX / bull regime — let it ride
+  if (vix >= 25) return 0.35;
+  if (vix >= 20) return 0.40;
+  return 0.50;
 }
 
 const PARTIAL_CLOSE_PCT   = 0.18;  // partial at 18% - lock in gains early
@@ -966,7 +960,7 @@ async function runReconciliation() {
               expDate: a.expDate, expDays: a.expDays,
               cost: parseFloat((Math.max(0.01, netDebit) * 100 * Math.abs(buyLeg.qty)).toFixed(2)),
               score: 75, reasons: ['Reconstructed spread from Alpaca reconciliation'],
-              openDate: buyLeg.alpPos.created_at || new Date(Date.now() - 86400000).toISOString(), // fallback=yesterday (never today for reconciled)
+              openDate: buyLeg.alpPos.created_at || new Date().toISOString(),
               currentPrice: Math.max(0.01, netDebit), peakPremium: Math.max(0.01, netDebit),
               entryRSI: 50, entryMACD: 'neutral', entryMomentum: 'steady', entryMacro: 'neutral',
               entryThesisScore: 100, thesisHistory: [], agentHistory: [],
@@ -998,7 +992,7 @@ async function runReconciliation() {
             contracts: Math.abs(p.qty), expDate: p.expDate, expDays: p.expDays,
             cost: Math.abs(p.mktVal) || parseFloat((p.avgEntry * 100 * Math.abs(p.qty)).toFixed(2)),
             score: 75, reasons: ['Reconstructed from Alpaca reconciliation'],
-            openDate: p.alpPos.created_at || new Date(Date.now() - 86400000).toISOString(), peakPremium: p.avgEntry, // fallback=yesterday
+            openDate: p.alpPos.created_at || new Date().toISOString(), peakPremium: p.avgEntry,
             entryRSI: 50, entryMACD: 'neutral', entryMomentum: 'steady', entryMacro: 'neutral',
             entryThesisScore: 100, thesisHistory: [], agentHistory: [],
             realData: true, vix: state.vix || 20, entryVIX: state.vix || 20,
@@ -1046,7 +1040,7 @@ async function runReconciliation() {
         const strikeA = a.strike || 0;
         const strikeB = b.strike || 0;
         const width   = Math.abs(strikeA - strikeB);
-        const widthOk = width >= 8 && width <= 22; // allow up to $20 wide
+        const widthOk = width >= 5 && width <= 100;
         // One should be long (no sellSymbol), one short (has sellSymbol or negative cost)
         const aIsShort = a.sellSymbol && !a.buySymbol;
         const bIsShort = b.sellSymbol && !b.buySymbol;
@@ -1389,7 +1383,7 @@ async function getDynamicSignals(ticker, bars, intradayBars = null, realOptionsI
 const fmt         = n  => "$" + parseFloat(n).toFixed(2);
 // Use actual account baseline (set from Alpaca on first sync) not hardcoded constant
 // state.accountBaseline tracks the real starting value for performance calculations
-const totalCap    = () => state.customBudget || Math.max(state.cash || 0, state.accountBaseline || 0, MONTHLY_BUDGET);
+const totalCap    = () => Math.max(state.customBudget || 0, state.cash || 0, state.accountBaseline || 0, MONTHLY_BUDGET);
 // Mark-to-market: use current price not entry cost for real portfolio value
 // currentPrice is updated every reconciliation from Alpaca market values
 const openRisk    = () => state.positions.reduce((s,p) => {
@@ -1399,7 +1393,7 @@ const openRisk    = () => state.positions.reduce((s,p) => {
 }, 0);
 // Entry cost basis (for heat calculations - should use cost not market value)
 const openCostBasis = () => state.positions.reduce((s,p) => s + p.cost * (p.partialClosed ? 0.5 : 1), 0);
-const heatPct     = () => openCostBasis() / totalCap(); // heat uses entry cost not MTM
+const heatPct     = () => Math.max(0, totalCap() - (state.cash || 0)) / totalCap();
 const realizedPnL = () => state.closedTrades.reduce((s,t) => s + t.pnl, 0);
 const stockValue  = () => state.stockPositions.reduce((s,p) => s + p.cost, 0);
 
@@ -4979,11 +4973,9 @@ async function checkAllFilters(stock, price) {
 
   // 5. Consecutive losses — REMOVED: agent handles thesis quality, not a counter
 
-  // 6. Same-ticker limit — count LOGICAL positions, not raw legs
-  // Reconciled spread legs (same ticker+expDate+optionType, diff strikes) = 1 logical position
+  // 6. Same-ticker limit — allow up to 2 positions per ticker (entry + roll)
   const existingPositions = state.positions.filter(p => p.ticker === stock.ticker);
   const logicalPositions  = new Set(existingPositions.map(p => `${p.optionType}|${p.expDate}`)).size;
-  // Index instruments: allow up to 3 logical positions; individual stocks: max 2
   const maxPerTicker = stock.isIndex ? 3 : 2;
   if (logicalPositions >= maxPerTicker) return { pass:false, reason:`Already have ${logicalPositions} logical position(s) in ${stock.ticker} (max ${maxPerTicker})` };
 
@@ -5263,11 +5255,7 @@ function countRecentDayTrades() {
 
 
 function isDayTrade(pos) {
-  // A position is a day trade if it was opened today (same ET calendar date)
-  // Use ET timezone to match market conventions — not server UTC
   if (!pos || !pos.openDate) return false;
-  // RECONCILED positions were opened in a prior session — never a same-day trade
-  // Their openDate may have defaulted to today if Alpaca created_at was null
   if (pos.dteLabel && pos.dteLabel.includes('RECONCIL')) return false;
   const etOptions = { timeZone: "America/New_York", year: "numeric", month: "2-digit", day: "2-digit" };
   const openDay   = new Date(pos.openDate).toLocaleDateString("en-US", etOptions);
@@ -5384,11 +5372,19 @@ async function syncPositionPnLFromAlpaca() {
 
     let updated = 0;
     for (const pos of state.positions) {
-      if (!pos.isSpread || !pos.buySymbol || !pos.sellSymbol) continue;
-
+      if (!pos.isSpread) {
+        const sym = pos.contractSymbol || pos.buySymbol || pos.sellSymbol;
+        if (!sym) continue;
+        const ap = alpacaBySymbol[sym];
+        if (!ap) continue;
+        const curPrice = parseFloat(ap.current_price || 0);
+        if (curPrice > 0) { pos.currentPrice = curPrice; pos.realData = true; }
+        pos.unrealizedPnL = parseFloat(parseFloat(ap.unrealized_pl || 0).toFixed(2));
+        updated++; continue;
+      }
+      if (!pos.buySymbol || !pos.sellSymbol) continue;
       const buyLeg  = alpacaBySymbol[pos.buySymbol];
       const sellLeg = alpacaBySymbol[pos.sellSymbol];
-
       if (!buyLeg || !sellLeg) continue;
 
       // ── Contracts: Alpaca is authoritative ─────────────────────────────
@@ -6297,17 +6293,20 @@ async function confirmPendingOrder() {
           expiryType: "monthly", dteLabel: "CREDIT-SPREAD-MONTHLY",
           partialClosed: false, isMeanReversion: false, trailStop: null,
           breakevenLocked: false, halfPosition: false,
-          // Panel recommendation (6/7 April 2026): VIX-scaled TP — expensive premium = exit faster
-          // Regime B (VIX>=25): 35% | Neutral (VIX 20-25): 40% | Bull (<20): 50%
-          // getDTEExitParams then applies overnight/DTE multipliers on top
-          // Stop: 50% of max loss OR 2x credit (whichever stricter) — unchanged
+          // Panel unanimous (8/8): credit spread stop at 50% of max loss OR 2x credit
+          // Use MIN to take whichever is stricter
+          // Stop expressed as fraction of credit received for consistency with chg calculation
+          // chg = -(currentValue - credit) / credit, stop when chg <= -stopFraction
+          // 50% max loss: stopFraction = 0.50 * maxLoss / netCredit
+          // 2x credit:    stopFraction = 1.0 (spread value = 2x credit)
+          // Take minimum (stricter)
           takeProfitPct: calcCreditSpreadTP(state.vix), fastStopPct: Math.min(1.0, parseFloat((0.50 * maxLoss / netCredit).toFixed(3))),
           _originalEntryScore: pending.score || 100, // baseline for dynamic TP scaling
           _creditHarvestExpiry: new Date(Date.now() + 7 * MS_PER_DAY).toISOString(),
         };
         state.positions.push(position);
         state._pendingOrder = null;
-        logEvent("trade", `[CREDIT SPREAD] ENTERED ${pending.ticker} $${pending.sellStrike}/$${pending.buyStrike} exp ${pending.expDate} | credit $${netCredit} | margin $${marginRequired} | TP: ${(calcCreditSpreadTP(state.vix)*100).toFixed(0)}% (VIX ${(state.vix||0).toFixed(1)})`);
+        logEvent("trade", `[CREDIT SPREAD] ENTERED ${pending.ticker} $${pending.sellStrike}/$${pending.buyStrike} exp ${pending.expDate} | credit $${netCredit} | margin $${marginRequired}`);
         await syncCashFromAlpaca();
         await saveStateNow();
         return;
@@ -6972,41 +6971,64 @@ async function closePosition(ticker, reason, exitPremium = null, contractSym = n
   const heldSeconds = (Date.now() - new Date(pos.openDate).getTime()) / 1000;
   const alpacaCloseAllowed = heldSeconds >= 60;
   if (!alpacaCloseAllowed) logEvent("warn", `${ticker} held only ${heldSeconds.toFixed(0)}s - skipping Alpaca close order to avoid wash trade`);
-  if (!pos.isSpread && pos.contractSymbol && closeQty > 0 && !dryRunMode && alpacaCloseAllowed) {
-    // Safety: if this naked position still has a sell leg open (short position),
-    // buy it back first to avoid leaving a naked short
-    if (pos.sellSymbol && pos.sellSymbol !== pos.contractSymbol) {
-      logEvent("warn", `${ticker} has sell leg ${pos.sellSymbol} - buying back to prevent naked short`);
-      await alpacaPost("/orders", { symbol: pos.sellSymbol, qty: closeQty, side: "buy", type: "market", time_in_force: "day", position_intent: "buy_to_close" }).catch(e => logEvent("error", `${ticker} sell leg close: ${e.message}`));
-    }
-    try {
-      // Use real bid if available, else use ep (mid) as limit
-      // Real bid from position tracking is more reliable than derived estimate
-      const bidPrice = parseFloat((pos.bid > 0 ? pos.bid : ep * 0.98).toFixed(2));
-      const closeBody = {
-        symbol:           pos.contractSymbol,
-        qty:              closeQty,
-        side:             "sell",
-        type:             "limit",
-        time_in_force:    "day",
-        limit_price:      bidPrice,
-        position_intent:  "sell_to_close",
-      };
-      const closeResp = await alpacaPost("/orders", closeBody);
-      if (closeResp && closeResp.id) {
-        logEvent("trade", `Alpaca close order: ${closeResp.id} | ${pos.contractSymbol} | ${closeQty}x | reason:${reason}`);
-        // Use actual fill price if immediately available
-        if (closeResp.filled_avg_price && parseFloat(closeResp.filled_avg_price) > 0) {
-          ep = parseFloat(parseFloat(closeResp.filled_avg_price).toFixed(2));
+  let alpacaCloseOk = dryRunMode; // in dry run, always treat as success
+  if (!pos.isSpread && closeQty > 0 && !dryRunMode && alpacaCloseAllowed) {
+    // Determine if this is a long or short leg
+    // Long leg (bought): has buySymbol or positive qty → close with sell_to_close
+    // Short leg (sold):  has sellSymbol, no buySymbol → close with buy_to_close
+    const isShortLeg = !!(pos.sellSymbol && !pos.buySymbol);
+    const closeSym   = pos.contractSymbol || pos.buySymbol || pos.sellSymbol;
+
+    if (!closeSym) {
+      logEvent("warn", `${ticker} cannot close - no contract symbol on position`);
+    } else {
+      try {
+        let closeBody;
+        if (isShortLeg) {
+          // Short option: buy it back to close
+          closeBody = {
+            symbol:          closeSym,
+            qty:             closeQty,
+            side:            "buy",
+            type:            "market",
+            time_in_force:   "day",
+            position_intent: "buy_to_close",
+          };
+        } else {
+          // Long option: sell it to close
+          const bidPrice = parseFloat((pos.bid > 0 ? pos.bid : ep * 0.98).toFixed(2));
+          closeBody = {
+            symbol:          closeSym,
+            qty:             closeQty,
+            side:            "sell",
+            type:            "limit",
+            time_in_force:   "day",
+            limit_price:     bidPrice,
+            position_intent: "sell_to_close",
+          };
         }
-      } else {
-        logEvent("warn", `Alpaca close order failed for ${pos.contractSymbol}: ${JSON.stringify(closeResp)?.slice(0,150)}`);
+        const closeResp = await alpacaPost("/orders", closeBody);
+        if (closeResp && closeResp.id) {
+          logEvent("trade", `Alpaca close order: ${closeResp.id} | ${closeSym} | ${closeQty}x ${isShortLeg ? "buy_to_close" : "sell_to_close"} | reason:${reason}`);
+          alpacaCloseOk = true;
+          if (closeResp.filled_avg_price && parseFloat(closeResp.filled_avg_price) > 0) {
+            ep = parseFloat(parseFloat(closeResp.filled_avg_price).toFixed(2));
+          }
+        } else {
+          logEvent("warn", `Alpaca close order failed for ${closeSym}: ${JSON.stringify(closeResp)?.slice(0,150)}`);
+        }
+      } catch(e) {
+        logEvent("error", `Alpaca close order error: ${e.message}`);
       }
-    } catch(e) {
-      logEvent("error", `Alpaca close order error: ${e.message}`);
     }
   }
 
+  // Only update state if Alpaca confirmed the close (or dry run)
+  // Prevents ghost positions: ARGO thinks closed, Alpaca still holds → reconcile loop
+  if (!alpacaCloseOk && !dryRunMode) {
+    logEvent("warn", `${ticker} state NOT updated — Alpaca close unconfirmed. Position preserved.`);
+    return;
+  }
   state.cash          = parseFloat((state.cash + ev + (bonus?BONUS_AMOUNT:0)).toFixed(2));
   state.extraBudget  += bonus ? BONUS_AMOUNT : 0;
   state.totalRevenue  = nr;
@@ -7638,11 +7660,10 @@ async function runScan() {
     // Premium is contracting — credit spreads are less attractive, not more.
     // Don't let a formula-inflated IVR activate credit mode when vol is falling.
     // vixFallingPause already handles the directional block; this ensures IVR reflects reality.
-    const vixBelowRecentLow = newVIX < vixP5 && vixP5 > 25; // genuine elevated-regime, VIX falling
+    const vixBelowRecentLow = newVIX < vixP5 && vixP5 > 25 && newVIX < 25; // must be objectively low
     if (vixBelowRecentLow) {
-      // VIX below recent P5 = premium contracting. Cap IVR at 40 (below credit threshold).
       const cappedIVR = Math.min(40, formulaIVR);
-      logEvent("scan", `[IVR] Window has no low-VIX baseline (min:${vixMin.toFixed(1)}) - VIX ${newVIX} below recent P5 ${vixP5.toFixed(1)} (IV contracting) - IVR capped at ${cappedIVR}`);
+      logEvent("scan", `[IVR] Window has no low-VIX baseline (min:${vixMin.toFixed(1)}) - VIX ${newVIX} below recent P5 ${vixP5.toFixed(1)} AND below 25 (IV contracting) - IVR capped at ${cappedIVR}`);
       state._ivRank = cappedIVR;
       state._ivEnv  = cappedIVR >= 50 ? "elevated" : cappedIVR >= 30 ? "normal" : "low";
     } else {
@@ -8666,8 +8687,9 @@ async function runScan() {
 
     // 8. 50MA BREAK - thesis invalidated (real 50-day MA)
     // Minimum 2 hour hold - open volatility can briefly cross 50MA and recover
-    // Firing instantly on a bounce after open loses money on noise, not signal
-    if (hoursOpen >= 2) {
+    // Skip for RECONCILED individual legs — these are spread legs, must close as a pair
+    // Individual leg 50MA exits create partial closes and naked positions
+    if (hoursOpen >= 2 && !(pos.dteLabel && pos.dteLabel.includes("RECONCIL"))) {
       try {
         const maBars = await getStockBars(pos.ticker, 55);
         if (maBars.length >= 50) {
@@ -8735,10 +8757,9 @@ async function runScan() {
     pos.price        = price;
     pos.currentPrice = curP;
 
-    // V2.82: Close-of-day range position check for hold decisions (Technical Analyst recommendation)
-    // After 3:30pm, log where the underlying closed relative to its daily range
-    // Weak close (bottom 25% of range) = sellers in control at close = overnight continuation lower more likely
-    // Strong close (top 25% of range) = buyers stepped in = overnight recovery more likely
+    // V2.82: Close-of-day range position check for hold decisions
+    let bars = null;
+    if (etHourNow >= 15.5) { try { bars = await getStockBars(pos.ticker, 1); } catch(_) {} }
     if (etHourNow >= 15.5 && bars && bars.length >= 1) {
       const todayBar = bars[bars.length - 1];
       const dayHigh = todayBar.h || price;
@@ -9366,13 +9387,9 @@ async function runScan() {
   logEvent("scan", `Prefetch complete in ${((Date.now()-prefetchStart)/1000).toFixed(1)}s for ${WATCHLIST.length} instruments`);
   for (const { stock, price, bars, intradayBars, sectorResult, preMarket, newsArticles, analystData, eqScore } of stockData) {
     // Skip if already at max positions for this ticker
-    // Allow stagger entries (up to maxPerTicker) - don't skip entirely if one position open
     const maxPerTicker = stock.isIndex ? 3 : 2;
     const existingForTicker = state.positions.filter(p => p.ticker === stock.ticker);
-    // Count LOGICAL positions: spread legs sharing same ticker+expDate+optionType = 1 position
-    // Prevents raw leg count blocking entries when reconciled spread = 2 legs but 1 trade
     const logicalExisting = new Set(existingForTicker.map(p => `${p.optionType}|${p.expDate}`)).size;
-    // Combined cap: credit + debit spreads on same ticker count together
     const maxCombined = stock.isIndex ? 2 : 1;
     if (logicalExisting >= maxCombined) continue;
 
