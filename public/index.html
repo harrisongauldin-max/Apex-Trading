@@ -1737,14 +1737,25 @@ function renderPositions() {
     // Try to pair with another leg: same ticker, expDate, optionType, different strike
     if (!p.isSpread && !p.isCreditSpread) {
       for (let j = i+1; j < positions.length; j++) {
-        if (used[j]) return;
+        if (used[j]) continue;
         const q = positions[j];
         if (q.ticker === p.ticker && q.expDate === p.expDate &&
             q.optionType === p.optionType && q.strike !== p.strike) {
           used[i] = used[j] = true;
-          // Short = higher strike (more OTM for puts = short leg), Long = lower strike
-          const legs = [p, q].sort(function(a,b){ return b.strike - a.strike; });
-          groups.push({ type:'paired', short: legs[0], long: legs[1] });
+          // Use buySymbol/sellSymbol to correctly identify long/short
+          // buySymbol = leg we bought (long), sellSymbol = leg we sold (short)
+          var longLeg, shortLeg;
+          if (p.buySymbol && !p.sellSymbol) {
+            longLeg = p; shortLeg = q;       // p is long, q is short
+          } else if (q.buySymbol && !q.sellSymbol) {
+            longLeg = q; shortLeg = p;       // q is long, p is short
+          } else {
+            // Fallback: for credit spreads higher strike = short
+            // for debit spreads higher strike = long — default to credit convention
+            var byStrike = [p, q].sort(function(a,b){ return b.strike - a.strike; });
+            shortLeg = byStrike[0]; longLeg = byStrike[1];
+          }
+          groups.push({ type:'paired', short: shortLeg, long: longLeg });
           return;
         }
       }
@@ -1783,18 +1794,28 @@ function closeBtn(ticker, sym) {
 
 // ── Paired spread card (two reconciled individual legs) ─────────────────────
 function renderPairedSpread(s, l) {
-  // s = short leg (higher strike), l = long leg (lower strike)
+  // Detect spread type from leg strikes
+  // Credit PUT spread: short (sold) higher strike, long (bought) lower strike
+  // Debit  PUT spread: long (bought) higher strike, short (sold) lower strike
+  const isCreditConvention = s.strike > l.strike;
   const c         = Math.min(s.contracts||1, l.contracts||1);
-  const netCredit = parseFloat(s.premium) - parseFloat(l.premium);
-  const width     = s.strike - l.strike;
+  const netCredit = isCreditConvention
+    ? parseFloat(s.premium) - parseFloat(l.premium)   // credit received
+    : parseFloat(l.premium) - parseFloat(s.premium);  // debit paid (positive)
+  const width     = Math.abs(s.strike - l.strike);
   const maxProfit = netCredit * 100 * c;
   const maxLoss   = (width - netCredit) * 100 * c;
-  const breakeven = (s.strike - netCredit).toFixed(2);
+  const breakeven = isCreditConvention
+    ? (s.strike - netCredit).toFixed(2)   // credit: breakeven = short strike - credit
+    : (l.strike - netCredit).toFixed(2);  // debit:  breakeven = long strike - debit
 
-  // P&L: sum both legs. Short leg profits as cost falls, long leg profits as value rises.
-  const sP = s.unrealizedPnL !== undefined ? parseFloat(s.unrealizedPnL)
+  // P&L: Alpaca unrealizedPnL is source of truth (synced each scan)
+  // Sum both legs — Alpaca handles sign correctly for long/short positions
+  const sAlpPnL = s.unrealizedPnL !== undefined ? parseFloat(s.unrealizedPnL) : null;
+  const lAlpPnL = l.unrealizedPnL !== undefined ? parseFloat(l.unrealizedPnL) : null;
+  const sP = sAlpPnL !== null ? sAlpPnL
     : (parseFloat(s.premium) - parseFloat(s.currentPrice||s.premium)) * 100 * c;
-  const lP = l.unrealizedPnL !== undefined ? parseFloat(l.unrealizedPnL)
+  const lP = lAlpPnL !== null ? lAlpPnL
     : (parseFloat(l.currentPrice||l.premium) - parseFloat(l.premium)) * 100 * c;
   const netPnL   = sP + lP;
   const pct      = maxProfit > 0 ? (netPnL / maxProfit * 100) : 0;
@@ -1820,7 +1841,7 @@ function renderPairedSpread(s, l) {
       <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
         <span style="font-size:16px;font-weight:700;color:var(--blue)">${ticker}</span>
         <span style="font-size:11px;color:var(--muted)">$${s.strike}/$${l.strike} ${expDate}</span>
-        <span style="font-size:9px;padding:2px 7px;border-radius:10px;background:rgba(0,255,136,.15);color:var(--green)">CREDIT SPREAD</span>
+        <span style="font-size:9px;padding:2px 7px;border-radius:10px;background:" + (isCreditConvention ? "rgba(0,255,136,.15);color:var(--green)\">CREDIT SPREAD" : "rgba(0,196,255,.15);color:var(--blue)\">DEBIT SPREAD") + "</span>
         <span style="font-size:9px;padding:2px 7px;border-radius:10px;background:rgba(255,80,80,.15);color:#ff5050">${optType}</span>
         <span style="font-size:9px;padding:2px 7px;border-radius:10px;background:rgba(255,165,0,.15);color:var(--orange)">${dteLabel.toUpperCase()}</span>
         <span style="font-size:9px;padding:2px 7px;border-radius:10px;background:rgba(100,100,100,.15);color:var(--muted)">${c}x CONTRACTS</span>
