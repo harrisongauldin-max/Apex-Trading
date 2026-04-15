@@ -85,6 +85,19 @@ const STOP_LOSS_PCT       = 0.35;
 const FAST_STOP_PCT       = 0.20;   // -20% in first 48hrs
 const FAST_STOP_HOURS     = 48;
 const TAKE_PROFIT_PCT     = 0.50;  // fallback only - spread positions use per-position takeProfitPct stamped at entry
+
+// ── VIX-scaled credit spread take profit ──────────────────────────────────────
+// Panel recommendation (April 2026, 6/7 vote):
+// When VIX is elevated at entry, premium was expensive → take profit faster
+// Regime B (VIX > 25): 35% | Neutral (VIX 20-25): 40% | Bull/low-VIX (<20): 50%
+// getDTEExitParams then applies overnight/DTE multipliers on top of this base
+function calcCreditSpreadTP(entryVix) {
+  const vix = entryVix || state.vix || 20;
+  if (vix >= 25) return 0.35;   // Regime B / elevated VIX — take profit faster
+  if (vix >= 20) return 0.40;   // Neutral — moderate target
+  return 0.50;                   // Low VIX / bull regime — let it ride
+}
+
 const PARTIAL_CLOSE_PCT   = 0.18;  // partial at 18% - lock in gains early
 const TRAIL_ACTIVATE_PCT  = 0.15;   // start trailing at +15% - tightened with new targets
 const TRAIL_STOP_PCT      = 0.15;   // trail 15% below peak
@@ -953,7 +966,7 @@ async function runReconciliation() {
               expDate: a.expDate, expDays: a.expDays,
               cost: parseFloat((Math.max(0.01, netDebit) * 100 * Math.abs(buyLeg.qty)).toFixed(2)),
               score: 75, reasons: ['Reconstructed spread from Alpaca reconciliation'],
-              openDate: buyLeg.alpPos.created_at || new Date().toISOString(),
+              openDate: buyLeg.alpPos.created_at || new Date(Date.now() - 86400000).toISOString(), // fallback=yesterday (never today for reconciled)
               currentPrice: Math.max(0.01, netDebit), peakPremium: Math.max(0.01, netDebit),
               entryRSI: 50, entryMACD: 'neutral', entryMomentum: 'steady', entryMacro: 'neutral',
               entryThesisScore: 100, thesisHistory: [], agentHistory: [],
@@ -985,7 +998,7 @@ async function runReconciliation() {
             contracts: Math.abs(p.qty), expDate: p.expDate, expDays: p.expDays,
             cost: Math.abs(p.mktVal) || parseFloat((p.avgEntry * 100 * Math.abs(p.qty)).toFixed(2)),
             score: 75, reasons: ['Reconstructed from Alpaca reconciliation'],
-            openDate: p.alpPos.created_at || new Date().toISOString(), peakPremium: p.avgEntry,
+            openDate: p.alpPos.created_at || new Date(Date.now() - 86400000).toISOString(), peakPremium: p.avgEntry, // fallback=yesterday
             entryRSI: 50, entryMACD: 'neutral', entryMomentum: 'steady', entryMacro: 'neutral',
             entryThesisScore: 100, thesisHistory: [], agentHistory: [],
             realData: true, vix: state.vix || 20, entryVIX: state.vix || 20,
@@ -1376,7 +1389,7 @@ async function getDynamicSignals(ticker, bars, intradayBars = null, realOptionsI
 const fmt         = n  => "$" + parseFloat(n).toFixed(2);
 // Use actual account baseline (set from Alpaca on first sync) not hardcoded constant
 // state.accountBaseline tracks the real starting value for performance calculations
-const totalCap    = () => Math.max(state.customBudget || 0, state.cash || 0, state.accountBaseline || 0, MONTHLY_BUDGET); // always >= MONTHLY_BUDGET
+const totalCap    = () => state.customBudget || Math.max(state.cash || 0, state.accountBaseline || 0, MONTHLY_BUDGET);
 // Mark-to-market: use current price not entry cost for real portfolio value
 // currentPrice is updated every reconciliation from Alpaca market values
 const openRisk    = () => state.positions.reduce((s,p) => {
@@ -1386,7 +1399,7 @@ const openRisk    = () => state.positions.reduce((s,p) => {
 }, 0);
 // Entry cost basis (for heat calculations - should use cost not market value)
 const openCostBasis = () => state.positions.reduce((s,p) => s + p.cost * (p.partialClosed ? 0.5 : 1), 0);
-const heatPct     = () => Math.max(0, totalCap() - (state.cash || 0)) / totalCap(); // deployed capital = totalCap - available cash
+const heatPct     = () => openCostBasis() / totalCap(); // heat uses entry cost not MTM
 const realizedPnL = () => state.closedTrades.reduce((s,t) => s + t.pnl, 0);
 const stockValue  = () => state.stockPositions.reduce((s,p) => s + p.cost, 0);
 
@@ -4966,12 +4979,13 @@ async function checkAllFilters(stock, price) {
 
   // 5. Consecutive losses — REMOVED: agent handles thesis quality, not a counter
 
-  // 6. Same-ticker limit — allow up to 2 positions per ticker (entry + roll)
+  // 6. Same-ticker limit — count LOGICAL positions, not raw legs
+  // Reconciled spread legs (same ticker+expDate+optionType, diff strikes) = 1 logical position
   const existingPositions = state.positions.filter(p => p.ticker === stock.ticker);
-  // Index instruments: allow up to 3 positions (staggered entries on same thesis)
-  // Individual stocks: max 2 (less liquid, more company-specific risk)
+  const logicalPositions  = new Set(existingPositions.map(p => `${p.optionType}|${p.expDate}`)).size;
+  // Index instruments: allow up to 3 logical positions; individual stocks: max 2
   const maxPerTicker = stock.isIndex ? 3 : 2;
-  if (existingPositions.length >= maxPerTicker) return { pass:false, reason:`Already have ${maxPerTicker} positions in ${stock.ticker}` };
+  if (logicalPositions >= maxPerTicker) return { pass:false, reason:`Already have ${logicalPositions} logical position(s) in ${stock.ticker} (max ${maxPerTicker})` };
 
   // 7. Portfolio heat
   if (heatPct() >= effectiveHeatCap()) return { pass:false, reason:`Portfolio heat at ${(heatPct()*100).toFixed(0)}% max` };
@@ -5252,6 +5266,9 @@ function isDayTrade(pos) {
   // A position is a day trade if it was opened today (same ET calendar date)
   // Use ET timezone to match market conventions — not server UTC
   if (!pos || !pos.openDate) return false;
+  // RECONCILED positions were opened in a prior session — never a same-day trade
+  // Their openDate may have defaulted to today if Alpaca created_at was null
+  if (pos.dteLabel && pos.dteLabel.includes('RECONCIL')) return false;
   const etOptions = { timeZone: "America/New_York", year: "numeric", month: "2-digit", day: "2-digit" };
   const openDay   = new Date(pos.openDate).toLocaleDateString("en-US", etOptions);
   const today     = new Date().toLocaleDateString("en-US", etOptions);
@@ -6280,20 +6297,17 @@ async function confirmPendingOrder() {
           expiryType: "monthly", dteLabel: "CREDIT-SPREAD-MONTHLY",
           partialClosed: false, isMeanReversion: false, trailStop: null,
           breakevenLocked: false, halfPosition: false,
-          // Panel unanimous (8/8): credit spread stop at 50% of max loss OR 2x credit
-          // Use MIN to take whichever is stricter
-          // Stop expressed as fraction of credit received for consistency with chg calculation
-          // chg = -(currentValue - credit) / credit, stop when chg <= -stopFraction
-          // 50% max loss: stopFraction = 0.50 * maxLoss / netCredit
-          // 2x credit:    stopFraction = 1.0 (spread value = 2x credit)
-          // Take minimum (stricter)
-          takeProfitPct: 0.50, fastStopPct: Math.min(1.0, parseFloat((0.50 * maxLoss / netCredit).toFixed(3))),
+          // Panel recommendation (6/7 April 2026): VIX-scaled TP — expensive premium = exit faster
+          // Regime B (VIX>=25): 35% | Neutral (VIX 20-25): 40% | Bull (<20): 50%
+          // getDTEExitParams then applies overnight/DTE multipliers on top
+          // Stop: 50% of max loss OR 2x credit (whichever stricter) — unchanged
+          takeProfitPct: calcCreditSpreadTP(state.vix), fastStopPct: Math.min(1.0, parseFloat((0.50 * maxLoss / netCredit).toFixed(3))),
           _originalEntryScore: pending.score || 100, // baseline for dynamic TP scaling
           _creditHarvestExpiry: new Date(Date.now() + 7 * MS_PER_DAY).toISOString(),
         };
         state.positions.push(position);
         state._pendingOrder = null;
-        logEvent("trade", `[CREDIT SPREAD] ENTERED ${pending.ticker} $${pending.sellStrike}/$${pending.buyStrike} exp ${pending.expDate} | credit $${netCredit} | margin $${marginRequired}`);
+        logEvent("trade", `[CREDIT SPREAD] ENTERED ${pending.ticker} $${pending.sellStrike}/$${pending.buyStrike} exp ${pending.expDate} | credit $${netCredit} | margin $${marginRequired} | TP: ${(calcCreditSpreadTP(state.vix)*100).toFixed(0)}% (VIX ${(state.vix||0).toFixed(1)})`);
         await syncCashFromAlpaca();
         await saveStateNow();
         return;
@@ -6350,7 +6364,7 @@ async function confirmPendingOrder() {
         breakevenLocked: false, halfPosition: false,
         target:        parseFloat((netDebit * 1.50).toFixed(2)),
         stop:          parseFloat((netDebit * (isChoppyEntry ? 0.20 : 0.50)).toFixed(2)),
-        takeProfitPct: 0.50, fastStopPct: isChoppyEntry ? 0.20 : 0.50,
+        takeProfitPct: calcCreditSpreadTP(state.vix), fastStopPct: isChoppyEntry ? 0.20 : 0.50,
         _originalEntryScore: score || 100, // baseline for dynamic TP scaling
         breakeven:     optionType === "put"
           ? parseFloat((buyStrike - netDebit).toFixed(2))
@@ -8725,8 +8739,6 @@ async function runScan() {
     // After 3:30pm, log where the underlying closed relative to its daily range
     // Weak close (bottom 25% of range) = sellers in control at close = overnight continuation lower more likely
     // Strong close (top 25% of range) = buyers stepped in = overnight recovery more likely
-    let bars = null;
-    if (etHourNow >= 15.5) { try { bars = await getStockBars(pos.ticker, 1); } catch(_) {} }
     if (etHourNow >= 15.5 && bars && bars.length >= 1) {
       const todayBar = bars[bars.length - 1];
       const dayHigh = todayBar.h || price;
@@ -9357,10 +9369,12 @@ async function runScan() {
     // Allow stagger entries (up to maxPerTicker) - don't skip entirely if one position open
     const maxPerTicker = stock.isIndex ? 3 : 2;
     const existingForTicker = state.positions.filter(p => p.ticker === stock.ticker);
+    // Count LOGICAL positions: spread legs sharing same ticker+expDate+optionType = 1 position
+    // Prevents raw leg count blocking entries when reconciled spread = 2 legs but 1 trade
+    const logicalExisting = new Set(existingForTicker.map(p => `${p.optionType}|${p.expDate}`)).size;
     // Combined cap: credit + debit spreads on same ticker count together
-    // Prevents GLD credit spread + 2 debit spreads = 3 positions on one name
     const maxCombined = stock.isIndex ? 2 : 1;
-    if (existingForTicker.length >= maxCombined) continue;
+    if (logicalExisting >= maxCombined) continue;
 
     // - F14: Check ticker blacklist -
     if ((state.tickerBlacklist || []).includes(stock.ticker)) {
