@@ -1386,7 +1386,7 @@ const openRisk    = () => state.positions.reduce((s,p) => {
 }, 0);
 // Entry cost basis (for heat calculations - should use cost not market value)
 const openCostBasis = () => state.positions.reduce((s,p) => s + p.cost * (p.partialClosed ? 0.5 : 1), 0);
-const heatPct     = () => openCostBasis() / totalCap(); // heat uses entry cost not MTM
+const heatPct     = () => Math.max(0, totalCap() - (state.cash || 0)) / totalCap(); // deployed capital = totalCap - available cash
 const realizedPnL = () => state.closedTrades.reduce((s,t) => s + t.pnl, 0);
 const stockValue  = () => state.stockPositions.reduce((s,p) => s + p.cost, 0);
 
