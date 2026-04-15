@@ -982,6 +982,13 @@ input[type=text]:focus{border-color:var(--blue)}
     <button class="btn" id="log-live-btn" onclick="toggleLogLive()" style="font-size:11px">PAUSE</button>
     <button class="btn" onclick="fetchLogs()" style="font-size:11px">REFRESH</button>
     <button class="btn" onclick="clearLog()" style="font-size:11px">CLEAR</button>
+    <select id="copy-row-limit" style="background:var(--panel);border:1px solid var(--border);color:var(--muted);padding:4px 6px;border-radius:6px;font-family:var(--font);font-size:11px">
+      <option value="100">100 rows</option>
+      <option value="500">500 rows</option>
+      <option value="1000">1000 rows</option>
+      <option value="2000" selected>2000 rows</option>
+      <option value="99999">all rows</option>
+    </select>
     <button class="btn" id="copy-log-btn" onclick="copyLogsForClaude()" style="font-size:11px;border-color:rgba(0,196,255,.4);color:#44aaff">&#9126; Copy for Claude</button>
     <span id="log-row-counter" style="font-size:10px;color:var(--muted);padding:0 4px;white-space:nowrap">0 rows</span>
   </div>
@@ -1328,13 +1335,17 @@ function renderMetrics() {
 
   // Directional heat breakdown
   const positions = state.positions || [];
-  const totalCapVal = (state.cash||0) + positions.reduce((s,p) => s + (p.cost||0), 0);
-  const putCostVal  = positions.filter(p=>p.optionType==='put').reduce((s,p)=>s+(p.cost||0),0);
-  const callCostVal = positions.filter(p=>p.optionType==='call').reduce((s,p)=>s+(p.cost||0),0);
-  const putHeatEl   = document.getElementById('put-heat');
-  const callHeatEl  = document.getElementById('call-heat');
-  if (putHeatEl)  putHeatEl.textContent  = 'P:' + (totalCapVal > 0 ? (putCostVal/totalCapVal*100).toFixed(0) : '0') + '%';
-  if (callHeatEl) callHeatEl.textContent = 'C:' + (totalCapVal > 0 ? (callCostVal/totalCapVal*100).toFixed(0) : '0') + '%';
+  // Match server denominator: totalCap = max(cash, MONTHLY_BUDGET=10000)
+  // So P+C sums to the same total shown in the main heat % figure
+  const totalOpenCost = positions.reduce((s,p) => s + (p.cost||0), 0);
+  const putCostVal    = positions.filter(p=>p.optionType==='put').reduce((s,p)=>s+(p.cost||0),0);
+  const callCostVal   = positions.filter(p=>p.optionType==='call').reduce((s,p)=>s+(p.cost||0),0);
+  const putHeatPct    = totalOpenCost > 0 ? (putCostVal  / totalOpenCost) * heat : 0;
+  const callHeatPct   = totalOpenCost > 0 ? (callCostVal / totalOpenCost) * heat : 0;
+  const putHeatEl     = document.getElementById('put-heat');
+  const callHeatEl    = document.getElementById('call-heat');
+  if (putHeatEl)  putHeatEl.textContent  = 'P:' + putHeatPct.toFixed(0)  + '%';
+  if (callHeatEl) callHeatEl.textContent = 'C:' + callHeatPct.toFixed(0) + '%';
 
   const rev = state.totalRevenue || 0;
   document.getElementById('revenue').textContent = fmt(rev);
@@ -2599,7 +2610,7 @@ async function triggerTestScan() {
     // Wait for scan to complete then refresh logs
     setTimeout(async () => {
       await fetchState();
-      alert('Test scan complete! Check the Server Log tab for WOULD CLOSE / WOULD BUY entries.\n\nNo orders were submitted — this was a dry run forced outside market hours.');
+      alert('Test scan complete! Check the Server Log tab.\n\nWould CLOSE / WOULD BUY entries show what ARGO would have done.\nDry run mode was used for this scan only — live mode is now restored.');
     }, 8000);
   } catch(e) {
     alert('Test scan error: ' + e.message);
@@ -2833,8 +2844,8 @@ function renderServerLog() {
       <span style="color:var(--text);font-size:11px;word-break:break-word">${msg}</span>
     </div>`;
   }).join('');
-  const counter = document.getElementById('log-row-counter');
-  if (counter) counter.textContent = logs.length + ' rows';
+  const ctr = document.getElementById('log-row-counter');
+  if (ctr) ctr.textContent = logs.length + ' rows';
 }
 
 function clearLog() {
@@ -3698,7 +3709,9 @@ function copyLogsForClaude() {
   var filtered = (_allLogs||[]).slice();
   if (types) filtered = filtered.filter(function(e){ return types.indexOf(e.type)>=0; });
   if (search) filtered = filtered.filter(function(e){ return (e.message||'').toLowerCase().indexOf(search)>=0; });
-  filtered = filtered.slice(0, 2000);
+  const limitEl = document.getElementById('copy-row-limit');
+  const limit = limitEl ? parseInt(limitEl.value) : 2000;
+  filtered = filtered.slice(0, limit);
   var NL = '\n';
   var lines = [
     'ARGO V3.0 \u2014 Server Log \u2014 '+new Date().toLocaleString(),
