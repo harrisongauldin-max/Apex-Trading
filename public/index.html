@@ -150,6 +150,7 @@ input[type=text]:focus{border-color:var(--blue)}
   <div class="tab" onclick="switchTab('report')">REPORT</div>
   <div class="tab" onclick="switchTab('backtest')">BACKTEST</div>
   <div class="tab" onclick="switchTab('log')">SERVER LOG</div>
+  <div class="tab" onclick="switchTab('scoredebug')">SCORE DEBUG</div>
 </div>
 
 <!-- ═══════════════ TRADING TAB ═══════════════ -->
@@ -471,12 +472,7 @@ input[type=text]:focus{border-color:var(--blue)}
   </div>
 
   <div class="section-title">Open Positions</div>
-  <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
-    <div style="font-size:10px;color:var(--muted);letter-spacing:1px">OPEN POSITIONS</div>
-    <button id="copy-positions-btn" onclick="copyOpenPositions()" style="font-size:10px;padding:3px 10px;background:rgba(0,196,255,.08);border:1px solid rgba(0,196,255,.3);border-radius:4px;color:var(--blue);cursor:pointer;display:flex;align-items:center;gap:4px">
-      <span id="copy-pos-icon">⎘</span> <span id="copy-pos-label">Copy positions</span>
-    </button>
-  </div>
+  <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px"><div style="font-size:10px;color:#5a7a99;letter-spacing:1px">OPEN POSITIONS</div><button id="copy-pos-btn" onclick="copyOpenPositions()" style="font-size:10px;padding:3px 10px;background:rgba(0,196,255,.08);border:1px solid rgba(0,196,255,.3);border-radius:4px;color:#44aaff;cursor:pointer">&#9126; Copy positions</button></div>
   <div id="positions-wrap">
     <div class="no-data">No open positions. ARGO V3.0 will enter trades during market hours (Puts 9:45AM / Calls 10AM–3:30PM ET).</div>
   </div>
@@ -805,6 +801,15 @@ input[type=text]:focus{border-color:var(--blue)}
 </div>
 
 <!-- ═══════════════ LOG TAB ═══════════════ -->
+<!-- ═══════════════ SCORE DEBUG TAB ═══════════════ -->
+<div id="tab-scoredebug" class="content">
+  <div style="display:flex;gap:8px;margin-bottom:12px;flex-wrap:wrap;align-items:center">
+    <button class="btn btn-green" onclick="loadScoreDebug()">&#8635; REFRESH SCORES</button>
+    <span style="font-size:11px;color:#5a7a99">Per-instrument scoring breakdown from last scan</span>
+  </div>
+  <div id="score-debug-content"><div class="no-data">Click REFRESH SCORES to load scoring data.</div></div>
+</div>
+
 <!-- ═══════════════ BACKTEST TAB ═══════════════ -->
 <div id="tab-backtest" class="content">
   <div style="margin-bottom:14px">
@@ -977,17 +982,10 @@ input[type=text]:focus{border-color:var(--blue)}
     <button class="btn" id="log-live-btn" onclick="toggleLogLive()" style="font-size:11px">PAUSE</button>
     <button class="btn" onclick="fetchLogs()" style="font-size:11px">REFRESH</button>
     <button class="btn" onclick="clearLog()" style="font-size:11px">CLEAR</button>
-    <button class="btn" id="copy-log-btn" onclick="copyLogsForClaude()" style="font-size:11px;border-color:rgba(0,196,255,.4);color:var(--blue)">⎘ COPY FOR CLAUDE</button>
-    <button class="btn" onclick="window.open('/score-debug','_blank')" style="font-size:11px;border-color:rgba(170,100,255,.4);color:#aa88ff">⚡ SCORE DEBUG</button>
-  </div>
-  <!-- ── Copy question bar ── -->
-  <div id="copy-question-bar" style="display:none;align-items:center;gap:8px;margin-bottom:10px;flex-wrap:wrap">
-    <input id="copy-question-input" type="text" placeholder="optional: add a question for Claude..." style="flex:1;min-width:200px;background:var(--panel);border:1px solid var(--border);color:var(--text);padding:4px 8px;border-radius:6px;font-family:var(--font);font-size:11px" />
-    <button class="btn" onclick="confirmCopyLogs()" style="font-size:11px;border-color:rgba(0,196,255,.5);color:var(--blue)">COPY</button>
-    <button class="btn" onclick="cancelCopyLogs()" style="font-size:11px">CANCEL</button>
+    <button class="btn" id="copy-log-btn" onclick="copyLogsForClaude()" style="font-size:11px;border-color:rgba(0,196,255,.4);color:#44aaff">&#9126; Copy for Claude</button>
   </div>
   <!-- ── Log box ── -->
-  <div class="log-box" id="server-log" style="height:520px;overflow-y:auto"></div>
+  <div class="log-box" id="server-log" style="height:560px;overflow-y:auto"></div>
 </div>
 
 
@@ -1694,102 +1692,20 @@ function renderPositions() {
     wrap.innerHTML = '<div class="no-data">No open positions. ARGO V3.0 will enter trades during market hours (9:30AM–3:45PM ET). SPY/QQQ spreads primary.</div>';
     return;
   }
-
-  // ── Pair reconciled legs into spreads ────────────────────────────────────
-  // Reconciled positions arrive as individual legs (isSpread=false, single strike).
-  // Pair same-ticker + same-expiry + same-optionType → credit spread card.
-  const used = new Set();
-  const groups = [];
-  positions.forEach((p, i) => {
-    if (used.has(i)) return;
-    if (!p.isSpread && !p.isCreditSpread && p.strike) {
-      for (let j = i + 1; j < positions.length; j++) {
-        if (used.has(j)) continue;
-        const q = positions[j];
-        if (q.ticker === p.ticker && q.expDate === p.expDate &&
-            q.optionType === p.optionType && q.strike && q.strike !== p.strike) {
-          used.add(i); used.add(j);
-          // Higher strike = short leg (sold), lower strike = long leg (bought)
-          const legs = [p, q].sort((a, b) => b.strike - a.strike);
-          groups.push({ type: 'paired', short: legs[0], long: legs[1] });
-          return;
-        }
-      }
-    }
-    used.add(i);
-    groups.push({ type: 'single', pos: p });
-  });
-
-  // ── Render each group ────────────────────────────────────────────────────
-  wrap.innerHTML = groups.map(g => {
-    if (g.type === 'paired') {
-      const s = g.short, l = g.long;
-      const contracts   = s.contracts || 1;
-      const netCredit   = parseFloat(s.premium) - parseFloat(l.premium);
-      const width       = s.strike - l.strike;
-      const maxProfit   = parseFloat((netCredit * 100 * contracts).toFixed(2));
-      const maxLoss     = parseFloat(((width - netCredit) * 100 * contracts).toFixed(2));
-      const breakeven   = parseFloat((s.strike - netCredit).toFixed(2));
-      const dte         = Math.max(1, Math.round((new Date(s.expDate) - new Date()) / 86400000));
-      const score       = s.score || 75;
-      const scoreColor  = score >= 85 ? 'var(--green)' : score >= 70 ? 'var(--blue)' : 'var(--orange)';
-
-      // P&L: use Alpaca unrealizedPnL if available, otherwise compute net
-      const sUnreal = s.unrealizedPnL !== undefined ? parseFloat(s.unrealizedPnL) : (parseFloat(s.premium) - parseFloat(s.currentPrice || s.premium)) * 100 * contracts;
-      const lUnreal = l.unrealizedPnL !== undefined ? parseFloat(l.unrealizedPnL) : (parseFloat(l.currentPrice || l.premium) - parseFloat(l.premium)) * 100 * contracts;
-      const chgDollar = sUnreal + lUnreal;
-      const chgPct    = maxProfit > 0 ? (chgDollar / maxProfit * 100) : 0;
-      const pnlColor  = chgDollar >= 0 ? 'var(--green)' : 'var(--red)';
-      const pnlSign   = chgDollar >= 0 ? '+' : '';
-      const pctSign   = chgPct   >= 0 ? '+' : '';
-
-      const closeSymbols = [s.sellSymbol || s.contractSymbol, l.buySymbol || l.contractSymbol].filter(Boolean).join(',');
-
-      return `
-      <div style="background:#050e1a;border:1px solid rgba(0,255,136,.25);border-radius:10px;padding:14px;margin-bottom:10px">
-        <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;margin-bottom:10px">
-          <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
-            <span style="font-size:16px;font-weight:700;color:var(--blue)">${s.ticker}</span>
-            <span style="font-size:11px;color:var(--muted)">$${s.strike}/$${l.strike} PUT-SPRD · ${s.expDate}</span>
-            <span style="font-size:9px;padding:2px 6px;border-radius:10px;background:rgba(0,255,136,.15);color:var(--green)">CREDIT $${width}W</span>
-            <span style="font-size:9px;padding:2px 6px;border-radius:10px;background:rgba(255,165,0,.15);color:var(--orange)">RECONCILED</span>
-            <span style="font-size:9px;padding:2px 6px;border-radius:10px;background:rgba(255,80,80,.15);color:#ff5050">PUT</span>
-          </div>
-          <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
-            <span style="font-size:11px;font-weight:700;color:${scoreColor}">Entry: ${score}/100</span>
-            <button class="btn btn-red" style="padding:3px 10px;font-size:10px" onclick="closePos('${s.ticker}','${closeSymbols}')">CLOSE</button>
-          </div>
-        </div>
-        <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-bottom:10px">
-          <div><div style="font-size:9px;color:var(--muted)">NET CREDIT</div><div style="font-weight:700">$${netCredit.toFixed(2)}</div></div>
-          <div><div style="font-size:9px;color:var(--muted)">UNREALIZED P&L</div><div style="font-weight:700;color:${pnlColor}">${pnlSign}$${Math.abs(chgDollar).toFixed(2)}</div></div>
-          <div><div style="font-size:9px;color:var(--muted)">P&L %</div><div style="font-weight:700;color:${pnlColor}">${pctSign}${chgPct.toFixed(1)}%</div></div>
-          <div><div style="font-size:9px;color:var(--muted)">CONTRACTS</div><div style="font-weight:700">${contracts}x</div></div>
-          <div><div style="font-size:9px;color:var(--muted)">SHORT STRIKE</div><div style="font-weight:700;color:var(--orange)">$${s.strike}</div></div>
-          <div><div style="font-size:9px;color:var(--muted)">LONG STRIKE</div><div style="font-weight:700;color:var(--muted)">$${l.strike}</div></div>
-          <div><div style="font-size:9px;color:var(--muted)">MAX PROFIT</div><div style="font-weight:700;color:var(--green)">$${maxProfit.toFixed(0)}</div></div>
-          <div><div style="font-size:9px;color:var(--muted)">MAX LOSS</div><div style="font-weight:700;color:var(--red)">$${maxLoss.toFixed(0)}</div></div>
-          <div><div style="font-size:9px;color:var(--muted)">BREAKEVEN</div><div style="font-weight:700">$${breakeven}</div></div>
-          <div><div style="font-size:9px;color:var(--muted)">WIDTH</div><div style="font-weight:700">$${width}</div></div>
-          <div><div style="font-size:9px;color:var(--muted)">DTE</div><div style="font-weight:700">${dte}d</div></div>
-          <div><div style="font-size:9px;color:var(--muted)">EXP DATE</div><div style="font-weight:700">${s.expDate}</div></div>
-        </div>
-        <div style="display:grid;grid-template-columns:1fr 1fr;gap:6px;font-size:10px;color:var(--muted)">
-          <div>Short leg: $${s.strike}P · entry $${parseFloat(s.premium).toFixed(2)} · now $${parseFloat(s.currentPrice||s.premium).toFixed(2)}</div>
-          <div>Long leg:  $${l.strike}P · entry $${parseFloat(l.premium).toFixed(2)} · now $${parseFloat(l.currentPrice||l.premium).toFixed(2)}</div>
-        </div>
-        <div style="font-size:10px;color:var(--muted);margin-top:8px">Opened: ${new Date(s.openDate).toLocaleString()}</div>
-      </div>`;
-    }
-
-    // ── Single / normal position ─────────────────────────────────────────────
-    const p = g.pos;
-    const score      = p.score || 0;
+  wrap.innerHTML = positions.map(p => {
+    const score = p.score || 0;
     const scoreColor = score >= 85 ? 'var(--green)' : score >= 70 ? 'var(--blue)' : 'var(--orange)';
-    const isSpread   = p.isSpread;
-    const curPrice   = p.currentPrice || p.premium;
+    const isSpread = p.isSpread;
+
+    // Credit spreads: profit when currentPrice (cost to close) < premium (credit received)
+    // P&L = (premium - currentPrice) * 100 * contracts  [inverted from debit spreads]
+    // Debit spreads: profit when currentPrice > premium
+    // P&L = (currentPrice - premium) * 100 * contracts
+    const curPrice = p.currentPrice || p.premium;
     let chgPct, chgDollar;
     if (p.isCreditSpread) {
+      // unrealizedPnL from Alpaca is already correctly signed (positive = profit)
+      // currentPrice = cost to close (lower than premium = profitable)
       chgDollar = p.unrealizedPnL !== undefined ? p.unrealizedPnL : (p.premium - curPrice) * 100 * (p.contracts||1);
       chgPct = p.maxProfit ? (chgDollar / p.maxProfit * 100) : 0;
     } else {
@@ -1798,6 +1714,8 @@ function renderPositions() {
     }
     const thesisScore = p.entryThesisScore || 100;
     const thesisColor = thesisScore >= 70 ? 'var(--green)' : thesisScore >= 40 ? 'var(--gold)' : 'var(--red)';
+
+    // Spread-specific strike display
     const strikeDisplay = isSpread
       ? `$${p.buyStrike}/${p.sellStrike} ${p.optionType==='put'?'P-SPRD':'C-SPRD'}`
       : `$${p.strike}${p.optionType==='put'?'P':'C'}`;
@@ -1827,7 +1745,9 @@ function renderPositions() {
           <button class="btn btn-red" style="padding:3px 10px;font-size:10px" onclick="closePos('${p.ticker}','${p.buySymbol||p.contractSymbol||''}')">CLOSE</button>
         </div>
       </div>
+
       ${isSpread ? `
+      <!-- Spread position grid -->
       <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-bottom:10px">
         <div><div style="font-size:9px;color:var(--muted)">${p.isCreditSpread?'NET CREDIT':'NET DEBIT'}</div><div style="font-weight:700">$${p.premium}</div></div>
         <div><div style="font-size:9px;color:var(--muted)">CURRENT VALUE</div><div style="font-weight:700;color:${chgPct>=0?'var(--green)':'var(--red)'}">$${(p.currentPrice||p.premium).toFixed(2)}</div></div>
@@ -1845,6 +1765,7 @@ function renderPositions() {
         <div><div style="font-size:9px;color:var(--muted)">BREAKEVEN</div><div style="font-weight:700">$${p.breakeven||'--'}</div></div>
         <div><div style="font-size:9px;color:var(--muted)">${p.ticker} STOCK</div><div style="font-weight:700;color:var(--blue)">${p.price?'$'+p.price.toFixed(2):'--'}</div></div>
       </div>` : `
+      <!-- Naked option position grid -->
       <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-bottom:10px">
         <div><div style="font-size:9px;color:var(--muted)">ENTRY PRICE</div><div style="font-weight:700">$${p.premium}</div></div>
         <div><div style="font-size:9px;color:var(--muted)">CURRENT PRICE</div><div style="font-weight:700;color:${chgPct>=0?'var(--green)':'var(--red)'}">$${(p.currentPrice||p.premium).toFixed(2)}</div></div>
@@ -1866,12 +1787,13 @@ function renderPositions() {
         <div class="greek-chip"><span class="greek-label">V VEGA</span><span class="greek-val">${p.greeks?.vega||'--'}</span></div>
         ${p.trailStop ? `<div class="greek-chip"><span class="greek-label">TRAIL STOP</span><span class="greek-val" style="color:var(--orange)">$${p.trailStop.toFixed(2)}</span></div>` : ''}
       </div>`}
+
       ${p.estimatedAH ? `
         <div style="margin-top:8px;padding:6px 8px;background:#0a1a10;border:1px solid #1a3a20;border-radius:6px">
           <div style="font-size:9px;color:#44aa66;margin-bottom:4px">⏱ AFTER-HOURS ESTIMATE (${p.estimatedAH.source})</div>
           <div style="display:flex;gap:16px;flex-wrap:wrap">
             <div><span style="font-size:9px;color:var(--muted)">EST. OPTION </span><span style="font-weight:700;color:${p.estimatedAH.pct>=0?'#44ff88':'#ff6666'}">$${p.estimatedAH.price.toFixed(2)}</span></div>
-            <div><span style="font-size:9px;color:var(--muted)">EST. P&L </span><span style="font-weight:700;color:${p.estimatedAH.pnl>=0?'#44ff88':'#ff6666'}">${p.estimatedAH.pnl>=0?'+':''}$${p.estimatedAH.pnl.toFixed(2)} (${p.estimatedAH.pct>=0?'+':''}${p.estimatedAH.pct}%)</span></div>
+            <div><span style="font-size:9px;color:var(--muted)">EST. P&amp;L </span><span style="font-weight:700;color:${p.estimatedAH.pnl>=0?'#44ff88':'#ff6666'}">${p.estimatedAH.pnl>=0?'+':''}$${p.estimatedAH.pnl.toFixed(2)} (${p.estimatedAH.pct>=0?'+':''}${p.estimatedAH.pct}%)</span></div>
             <div><span style="font-size:9px;color:var(--muted)">${p.ticker} STOCK </span><span style="font-weight:700;color:var(--blue)">$${p.estimatedAH.stockPrice.toFixed(2)}</span></div>
             <div style="align-self:center"><span style="font-size:9px;color:#555">upd: ${new Date(p.estimatedAH.updatedAt).toLocaleTimeString()}</span></div>
           </div>
@@ -1886,164 +1808,6 @@ function renderPositions() {
       <div style="font-size:10px;color:var(--muted);margin-top:8px">Opened: ${new Date(p.openDate).toLocaleString()}</div>
     </div>`;
   }).join('');
-}
-
-function copyOpenPositions() {
-  const positions = state.positions || [];
-  const btn = document.getElementById('copy-pos-icon');
-  const lbl = document.getElementById('copy-pos-label');
-
-  if (!positions.length) {
-    lbl.textContent = 'No positions';
-    setTimeout(() => { btn.textContent = '⎘'; lbl.textContent = 'Copy positions'; }, 2000);
-    return;
-  }
-
-  // ── pair same-ticker / same-expiry / same-optionType into spreads ──────────
-  const used = new Set();
-  const groups = [];
-
-  positions.forEach((p, i) => {
-    if (used.has(i)) return;
-    // Check for a matching leg: same ticker, expiry, optionType but different strike
-    let partner = -1;
-    if (!p.isSpread && !p.isCreditSpread && p.strike) {
-      for (let j = i + 1; j < positions.length; j++) {
-        if (used.has(j)) continue;
-        const q = positions[j];
-        if (q.ticker === p.ticker && q.expDate === p.expDate &&
-            q.optionType === p.optionType && q.strike && q.strike !== p.strike) {
-          partner = j;
-          break;
-        }
-      }
-    }
-    if (partner >= 0) {
-      used.add(i); used.add(partner);
-      groups.push({ type: 'paired', legs: [p, positions[partner]] });
-    } else {
-      used.add(i);
-      groups.push({ type: 'single', pos: p });
-    }
-  });
-
-  // ── build output lines ─────────────────────────────────────────────────────
-  const lines = ['ARGO V3.0 — Open Positions — ' + new Date().toLocaleString(), ''];
-  let totalPnL = 0;
-
-  groups.forEach(g => {
-    if (g.type === 'paired') {
-      // Sort: higher strike = short leg (sold, received premium), lower = long leg (bought)
-      const legs = g.legs.slice().sort((a, b) => b.strike - a.strike);
-      const shortLeg = legs[0]; // higher strike put = short (credit received)
-      const longLeg  = legs[1]; // lower strike put  = long (debit paid)
-      const contracts = shortLeg.contracts || 1;
-      const dte = shortLeg.expDate
-        ? Math.max(0, Math.round((new Date(shortLeg.expDate) - new Date()) / 86400000)) : '?';
-
-      // Determine if credit (short put has qty < 0 / sellSymbol set) or debit
-      const isCredit = !!(shortLeg.sellSymbol) || (parseFloat(shortLeg.premium) > parseFloat(longLeg.premium));
-      const label = isCredit ? 'CREDIT SPREAD' : 'DEBIT SPREAD';
-
-      // Net P&L: short leg P&L + long leg P&L
-      const shortPnL = shortLeg.unrealizedPnL !== undefined
-        ? parseFloat(shortLeg.unrealizedPnL)
-        : (parseFloat(shortLeg.premium) - parseFloat(shortLeg.currentPrice || shortLeg.premium)) * 100 * contracts;
-      const longPnL = longLeg.unrealizedPnL !== undefined
-        ? parseFloat(longLeg.unrealizedPnL)
-        : (parseFloat(longLeg.currentPrice || longLeg.premium) - parseFloat(longLeg.premium)) * 100 * contracts;
-      const netPnL = shortPnL + longPnL;
-
-      const netCredit = parseFloat(shortLeg.premium) - parseFloat(longLeg.premium);
-      const width     = shortLeg.strike - longLeg.strike;
-      const maxProfit = netCredit * 100 * contracts;
-      const maxLoss   = (width - netCredit) * 100 * contracts;
-      const chgPct    = maxProfit > 0 ? (netPnL / maxProfit * 100) : 0;
-      const pnlSign   = netPnL >= 0 ? '+' : '';
-      const pctSign   = chgPct  >= 0 ? '+' : '';
-
-      totalPnL += netPnL;
-
-      lines.push(`${shortLeg.ticker} ${(shortLeg.optionType||'put').toUpperCase()} $${shortLeg.strike}/$${longLeg.strike} exp ${shortLeg.expDate} [${label}]`);
-      lines.push(`  Net credit: $${netCredit.toFixed(2)} | Width: $${width} | ${contracts}x | ${dte}d DTE`);
-      lines.push(`  P&L: ${pnlSign}$${Math.abs(netPnL).toFixed(2)} (${pctSign}${chgPct.toFixed(1)}% of max profit)`);
-      lines.push(`  Max profit: $${maxProfit.toFixed(0)} | Max loss: $${maxLoss.toFixed(0)} | Breakeven: $${(shortLeg.strike - netCredit).toFixed(2)}`);
-      if (shortLeg.score) lines.push(`  Entry score: ${shortLeg.score}/100`);
-      lines.push('');
-
-    } else {
-      const p = g.pos;
-      const contracts = p.contracts || 1;
-      const dte = p.expDate
-        ? Math.max(0, Math.round((new Date(p.expDate) - new Date()) / 86400000)) : '?';
-
-      // Type label — check all possible flags
-      let typeLabel;
-      if (p.isCreditSpread)             typeLabel = 'CREDIT SPREAD';
-      else if (p.isSpread)              typeLabel = 'DEBIT SPREAD';
-      else if (p.dteLabel === 'RECONCILED') typeLabel = 'RECONCILED';
-      else                               typeLabel = (p.optionType || 'put').toUpperCase() + ' OPTION';
-
-      // Strike display
-      const strikeDisplay = (p.isSpread || p.isCreditSpread)
-        ? `$${p.shortStrike||p.sellStrike||'?'}/$${p.longStrike||p.buyStrike||'?'}`
-        : `$${p.strike || '?'}`;
-
-      // P&L — prefer Alpaca unrealizedPnL
-      let chgDollar;
-      if (p.unrealizedPnL !== undefined && p.unrealizedPnL !== null) {
-        chgDollar = parseFloat(p.unrealizedPnL);
-      } else if (p.isCreditSpread) {
-        chgDollar = (parseFloat(p.premium) - parseFloat(p.currentPrice || p.premium)) * 100 * contracts;
-      } else {
-        chgDollar = (parseFloat(p.currentPrice || p.premium) - parseFloat(p.premium)) * 100 * contracts;
-      }
-
-      // P&L %
-      let chgPct = 0;
-      if (p.isCreditSpread && p.maxProfit) {
-        chgPct = (chgDollar / parseFloat(p.maxProfit)) * 100;
-      } else if (parseFloat(p.premium) > 0) {
-        chgPct = (chgDollar / (parseFloat(p.premium) * 100 * contracts)) * 100;
-      }
-
-      totalPnL += chgDollar;
-
-      const pnlSign = chgDollar >= 0 ? '+' : '';
-      const pctSign = chgPct   >= 0 ? '+' : '';
-
-      lines.push(`${p.ticker} ${(p.optionType||'put').toUpperCase()} ${strikeDisplay} exp ${p.expDate} [${typeLabel}]`);
-      lines.push(`  Entry: $${parseFloat(p.premium).toFixed(2)} | Current: $${parseFloat(p.currentPrice||p.premium).toFixed(2)} | ${contracts}x contract${contracts!==1?'s':''} | ${dte}d DTE`);
-      lines.push(`  P&L: ${pnlSign}$${Math.abs(chgDollar).toFixed(2)} (${pctSign}${chgPct.toFixed(1)}%)`);
-      if (p.isCreditSpread && p.maxProfit) {
-        lines.push(`  Max profit: $${parseFloat(p.maxProfit).toFixed(0)} | Max loss: $${parseFloat(p.maxLoss||0).toFixed(0)} | Breakeven: $${p.breakeven||'--'}`);
-      }
-      if (p.score) lines.push(`  Entry score: ${p.score}/100`);
-      if (p.reasons && p.reasons.length) {
-        lines.push(`  Reasons: ${p.reasons.slice(0,3).join(' · ')}`);
-      }
-      lines.push('');
-    }
-  });
-
-  const totSign = totalPnL >= 0 ? '+' : '';
-  lines.push('─────────────────────────────');
-  lines.push(`${groups.length} position${groups.length!==1?'s':''} | Total P&L: ${totSign}$${Math.abs(totalPnL).toFixed(2)}`);
-
-  const text = lines.join('\n');
-
-  const doCopy = t => {
-    if (navigator.clipboard && navigator.clipboard.writeText) return navigator.clipboard.writeText(t);
-    const ta = Object.assign(document.createElement('textarea'), { value: t });
-    ta.style.cssText = 'position:fixed;opacity:0';
-    document.body.appendChild(ta); ta.select(); document.execCommand('copy'); ta.remove();
-    return Promise.resolve();
-  };
-
-  doCopy(text)
-    .then(() => { btn.textContent = '✓'; lbl.textContent = 'Copied!'; })
-    .catch(() => { btn.textContent = '!'; lbl.textContent = 'Failed'; })
-    .finally(() => setTimeout(() => { btn.textContent = '⎘'; lbl.textContent = 'Copy positions'; }, 2500));
 }
 
 function renderGreeks() {
@@ -2700,7 +2464,7 @@ let _allLogs  = [];
 
 async function fetchLogs(silent=false) {
   try {
-    const r = await fetch('/api/logs?limit=200');
+    const r = await fetch('/api/logs?limit=2000');
     if (!r.ok) throw new Error('HTTP ' + r.status);
     const data = await r.json();
     _allLogs = data.logs || [];
@@ -2763,80 +2527,6 @@ function renderServerLog() {
       <span style="color:var(--text);font-size:11px;word-break:break-word">${msg}</span>
     </div>`;
   }).join('');
-}
-
-function copyLogsForClaude() {
-  const bar = document.getElementById('copy-question-bar');
-  bar.style.display = bar.style.display === 'none' ? 'flex' : 'none';
-  if (bar.style.display === 'flex') {
-    document.getElementById('copy-question-input').focus();
-  }
-}
-
-function cancelCopyLogs() {
-  document.getElementById('copy-question-bar').style.display = 'none';
-  document.getElementById('copy-question-input').value = '';
-}
-
-function confirmCopyLogs() {
-  const question = document.getElementById('copy-question-input').value.trim();
-  const filterType = (document.getElementById('log-filter').value || '').trim();
-  const search = (document.getElementById('log-search').value || '').toLowerCase();
-
-  // Get all current log entries from rendered log
-  const rows = document.querySelectorAll('#server-log .log-entry, #server-log div[data-type]');
-  let entries = [];
-
-  // Use _allLogs (populated by fetchLogs from /api/logs)
-  const logs = (_allLogs || []).slice();
-  const types = filterType ? filterType.split(',') : null;
-  let filtered = logs;
-  if (types) filtered = filtered.filter(e => types.includes(e.type));
-  if (search) filtered = filtered.filter(e => (e.message||'').toLowerCase().includes(search));
-  filtered = filtered.slice(0, 80); // last 80 matching entries
-
-  const header = [
-    'ARGO V3.0 — Server Log Export — ' + new Date().toLocaleString(),
-    'Cash: $' + parseFloat(state.cash||0).toFixed(2) +
-    ' | Positions: ' + (state.positions||[]).length +
-    ' | VIX: ' + (state.vix||'--') +
-    ' | Regime: ' + (state._regimeClass||'--') + (state._regimeSubClass ? '/' + state._regimeSubClass : ''),
-    'Filter: ' + (filterType || 'all') + (search ? ' | Search: "' + search + '"' : ''),
-    '─────────────────────────────────────────────────────',
-    ''
-  ];
-
-  const lines = filtered.map(e => {
-    const t = new Date(e.time).toLocaleTimeString();
-    return '[' + t + '] ' + (e.type||'').toUpperCase().padEnd(8) + ' ' + (e.message||'');
-  });
-
-  const footer = ['', '─────────────────────────────────────────────────────',
-    filtered.length + ' log entries' + (question ? '' : '') ];
-
-  if (question) footer.push('', 'Question: ' + question);
-
-  const text = [...header, ...lines, ...footer].join('
-');
-
-  const doCopy = t => {
-    if (navigator.clipboard && navigator.clipboard.writeText) return navigator.clipboard.writeText(t);
-    const ta = Object.assign(document.createElement('textarea'), { value: t });
-    ta.style.cssText = 'position:fixed;opacity:0';
-    document.body.appendChild(ta); ta.select(); document.execCommand('copy'); ta.remove();
-    return Promise.resolve();
-  };
-
-  const btn = document.getElementById('copy-log-btn');
-  doCopy(text).then(() => {
-    btn.textContent = '✓ COPIED';
-    document.getElementById('copy-question-bar').style.display = 'none';
-    document.getElementById('copy-question-input').value = '';
-    setTimeout(() => btn.textContent = '⎘ COPY FOR CLAUDE', 2500);
-  }).catch(() => {
-    btn.textContent = '! FAILED';
-    setTimeout(() => btn.textContent = '⎘ COPY FOR CLAUDE', 2000);
-  });
 }
 
 function clearLog() {
@@ -3605,6 +3295,7 @@ function switchTab(name) {
   if (name==='analytics')   renderCharts();
   if (name==='report')      loadReport();
   if (name==='log')         fetchLogs();
+  if (name==='scoredebug')  loadScoreDebug();
   if (name==='theta')       loadTheta();
   if (name==='attribution') loadAttribution();
   if (name==='tax')         loadTaxLog();
@@ -3613,6 +3304,245 @@ function switchTab(name) {
 // ── Init ──────────────────────────────────────────────────────────────────
 fetchState();
 setInterval(fetchState, 10000); // refresh every 10 seconds
+
+// ── Copy open positions ─────────────────────────────────────────────────────
+function copyOpenPositions() {
+  var positions = state.positions || [];
+  var btn = document.getElementById('copy-pos-btn');
+  if (!positions.length) {
+    btn.textContent = 'No positions';
+    setTimeout(function(){ btn.textContent = '\u2398 Copy positions'; }, 2000);
+    return;
+  }
+  var used = {}, groups = [];
+  positions.forEach(function(p, i) {
+    if (used[i]) return;
+    if (!p.isSpread && !p.isCreditSpread && p.strike) {
+      for (var j = i+1; j < positions.length; j++) {
+        if (used[j]) continue;
+        var q = positions[j];
+        if (q.ticker===p.ticker && q.expDate===p.expDate && q.optionType===p.optionType && q.strike!==p.strike) {
+          used[i] = used[j] = true;
+          var legs = [p,q].sort(function(a,b){ return b.strike-a.strike; });
+          groups.push({ type:'paired', short:legs[0], long:legs[1] });
+          return;
+        }
+      }
+    }
+    used[i] = true;
+    groups.push({ type:'single', pos:p });
+  });
+  var NL = '\n';
+  var lines = ['ARGO V3.0 \u2014 Open Positions \u2014 '+new Date().toLocaleString(), ''];
+  var totalPnL = 0;
+  groups.forEach(function(g) {
+    if (g.type === 'paired') {
+      var s=g.short, l=g.long, c=s.contracts||1;
+      var nc=parseFloat(s.premium)-parseFloat(l.premium);
+      var w=s.strike-l.strike;
+      var mp=nc*100*c, ml=(w-nc)*100*c;
+      var sP=s.unrealizedPnL!==undefined?parseFloat(s.unrealizedPnL):(parseFloat(s.premium)-parseFloat(s.currentPrice||s.premium))*100*c;
+      var lP=l.unrealizedPnL!==undefined?parseFloat(l.unrealizedPnL):(parseFloat(l.currentPrice||l.premium)-parseFloat(l.premium))*100*c;
+      var net=sP+lP; totalPnL+=net;
+      var pct=mp>0?(net/mp*100):0;
+      lines.push(s.ticker+' '+(s.optionType||'put').toUpperCase()+' $'+s.strike+'/$'+l.strike+' exp '+s.expDate+' [CREDIT SPREAD]');
+      lines.push('  Net credit: $'+nc.toFixed(2)+' | Width: $'+w+' | '+c+'x | '+Math.max(0,Math.round((new Date(s.expDate)-new Date())/86400000))+'d DTE');
+      lines.push('  P&L: '+(net>=0?'+':'-')+'$'+Math.abs(net).toFixed(2)+' ('+(pct>=0?'+':'-')+pct.toFixed(1)+'% of max profit)');
+      lines.push('  Max profit: $'+mp.toFixed(0)+' | Max loss: $'+ml.toFixed(0)+' | Breakeven: $'+(s.strike-nc).toFixed(2));
+      if (s.score) lines.push('  Entry score: '+s.score+'/100');
+      lines.push('');
+    } else {
+      var p=g.pos, c=p.contracts||1;
+      var dte=p.expDate?Math.max(0,Math.round((new Date(p.expDate)-new Date())/86400000)):'?';
+      var label=p.isCreditSpread?'CREDIT SPREAD':p.isSpread?'DEBIT SPREAD':(p.optionType||'put').toUpperCase();
+      var strike=(p.isSpread||p.isCreditSpread)?'$'+(p.shortStrike||p.sellStrike||'?')+'/$'+(p.longStrike||p.buyStrike||'?'):'$'+(p.strike||'?');
+      var cd=p.unrealizedPnL!==undefined?parseFloat(p.unrealizedPnL):p.isCreditSpread?(parseFloat(p.premium)-parseFloat(p.currentPrice||p.premium))*100*c:(parseFloat(p.currentPrice||p.premium)-parseFloat(p.premium))*100*c;
+      var cp2=p.isCreditSpread&&p.maxProfit?(cd/parseFloat(p.maxProfit)*100):parseFloat(p.premium)>0?(cd/(parseFloat(p.premium)*100*c)*100):0;
+      totalPnL+=cd;
+      lines.push(p.ticker+' '+(p.optionType||'put').toUpperCase()+' '+strike+' exp '+p.expDate+' ['+label+']');
+      lines.push('  Entry: $'+parseFloat(p.premium).toFixed(2)+' | Current: $'+parseFloat(p.currentPrice||p.premium).toFixed(2)+' | '+c+'x | '+dte+'d DTE');
+      lines.push('  P&L: '+(cd>=0?'+':'-')+'$'+Math.abs(cd).toFixed(2)+' ('+(cp2>=0?'+':'-')+cp2.toFixed(1)+'%)');
+      if (p.score) lines.push('  Entry score: '+p.score+'/100');
+      lines.push('');
+    }
+  });
+  lines.push('\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500');
+  lines.push(groups.length+' position'+(groups.length!==1?'s':'')+' | Total P&L: '+(totalPnL>=0?'+':'-')+'$'+Math.abs(totalPnL).toFixed(2));
+  var text = lines.join(NL);
+  var doCopy = function(t) {
+    if (navigator.clipboard && navigator.clipboard.writeText) return navigator.clipboard.writeText(t);
+    var ta = document.createElement('textarea');
+    ta.value = t; ta.style.cssText = 'position:fixed;opacity:0';
+    document.body.appendChild(ta); ta.select(); document.execCommand('copy'); ta.remove();
+    return Promise.resolve();
+  };
+  doCopy(text)
+    .then(function(){ btn.textContent='\u2714 Copied!'; setTimeout(function(){ btn.textContent='\u2398 Copy positions'; },2500); })
+    .catch(function(){ btn.textContent='! Failed'; setTimeout(function(){ btn.textContent='\u2398 Copy positions'; },2000); });
+}
+
+// ── Copy logs for Claude ─────────────────────────────────────────────────────
+function copyLogsForClaude() {
+  var btn = document.getElementById('copy-log-btn');
+  var filterType = (document.getElementById('log-filter').value||'').trim();
+  var search = (document.getElementById('log-search').value||'').toLowerCase();
+  var types = filterType ? filterType.split(',') : null;
+  var filtered = (_allLogs||[]).slice();
+  if (types) filtered = filtered.filter(function(e){ return types.indexOf(e.type)>=0; });
+  if (search) filtered = filtered.filter(function(e){ return (e.message||'').toLowerCase().indexOf(search)>=0; });
+  filtered = filtered.slice(0, 2000);
+  var NL = '\n';
+  var lines = [
+    'ARGO V3.0 \u2014 Server Log \u2014 '+new Date().toLocaleString(),
+    'Cash: $'+parseFloat(state.cash||0).toFixed(2)+' | Positions: '+(state.positions||[]).length+' | VIX: '+(state.vix||'--')+' | Regime: '+(state._regimeClass||'--')+(state._regimeSubClass?'/'+state._regimeSubClass:''),
+    'Filter: '+(filterType||'all')+' | Entries: '+filtered.length,
+    '\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500',
+    ''
+  ];
+  filtered.forEach(function(e){
+    var t = new Date(e.time).toLocaleTimeString();
+    var type = (e.type||'info').toUpperCase();
+    while (type.length < 8) type += ' ';
+    lines.push('['+t+'] '+type+' '+(e.message||''));
+  });
+  var text = lines.join(NL);
+  var doCopy = function(t) {
+    if (navigator.clipboard && navigator.clipboard.writeText) return navigator.clipboard.writeText(t);
+    var ta = document.createElement('textarea');
+    ta.value = t; ta.style.cssText = 'position:fixed;opacity:0';
+    document.body.appendChild(ta); ta.select(); document.execCommand('copy'); ta.remove();
+    return Promise.resolve();
+  };
+  doCopy(text)
+    .then(function(){ btn.textContent='\u2714 Copied!'; setTimeout(function(){ btn.textContent='\u2398 Copy for Claude'; },2500); })
+    .catch(function(){ btn.textContent='! Failed'; setTimeout(function(){ btn.textContent='\u2398 Copy for Claude'; },2000); });
+}
+
+// ── Score debug ──────────────────────────────────────────────────────────────
+async function loadScoreDebug() {
+  var el = document.getElementById('score-debug-content');
+  if (!el) return;
+  el.innerHTML = '<div class="no-data">Loading scoring data...</div>';
+  try {
+    var r = await fetch('/api/score-debug');
+    if (!r.ok) throw new Error('HTTP '+r.status);
+    var d = await r.json();
+    renderScoreDebug(d, el);
+  } catch(e) {
+    el.innerHTML = '<div class="no-data" style="color:#ff5555">Error: '+e.message+'<br>Make sure ARGO is running and has completed at least one scan.</div>';
+  }
+}
+
+function scoreColor(v, min) {
+  if (v >= min) return '#00ff88';
+  if (v >= min * 0.85) return '#ffd700';
+  return '#ff5555';
+}
+
+function renderScoreDebug(d, el) {
+  var scores  = d.scores  || d._scoreDebug || {};
+  var gates   = d.gates   || {};
+  var minScore = d.minScore || d.effectiveMin || 70;
+  var ts = d.lastScan ? new Date(d.lastScan).toLocaleTimeString() : '--';
+  var out = '';
+
+  // Header bar
+  out += '<div style="background:var(--panel);border:1px solid var(--border);border-radius:8px;padding:10px 14px;margin-bottom:12px;display:flex;gap:20px;flex-wrap:wrap;font-size:11px;color:var(--muted)">';
+  out += '<span>Last scan: <strong style="color:var(--text)">'+ts+'</strong></span>';
+  out += '<span>Regime: <strong style="color:var(--blue)">'+(d.regimeClass||'--')+(d.regimeSubClass?'/'+d.regimeSubClass:'')+'</strong></span>';
+  out += '<span>VIX: <strong style="color:var(--text)">'+(d.vix||'--')+'</strong></span>';
+  out += '<span>Min score: <strong style="color:var(--text)">'+minScore+'</strong></span>';
+  out += '<span>Macro: <strong style="color:var(--text)">'+(d.agentMacro||'--')+'</strong></span>';
+  out += '</div>';
+
+  // Gates
+  var gk = Object.keys(gates);
+  if (gk.length) {
+    out += '<div class="section-title" style="margin-bottom:8px">System gates</div>';
+    out += '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:5px;margin-bottom:16px">';
+    gk.forEach(function(k) {
+      var blocked = gates[k];
+      var col = blocked ? '#ff5555' : '#00ff88';
+      out += '<div style="background:var(--panel);border:1px solid var(--border);border-radius:5px;padding:5px 10px;display:flex;justify-content:space-between">';
+      out += '<span style="font-size:10px;color:var(--muted)">'+k+'</span>';
+      out += '<span style="font-size:10px;font-weight:700;color:'+col+'">'+(blocked?'BLOCKED':'ok')+'</span>';
+      out += '</div>';
+    });
+    out += '</div>';
+  }
+
+  // Per-ticker scores
+  var tickers = Object.keys(scores);
+  out += '<div class="section-title" style="margin-bottom:8px">Instrument scores ('+tickers.length+' instruments)</div>';
+
+  if (!tickers.length) {
+    out += '<div class="no-data">No score data yet. Scores populate after the first market-hours scan.</div>';
+  } else {
+    tickers.sort().forEach(function(ticker) {
+      var r2 = scores[ticker];
+      var ps = r2.putScore || 0;
+      var cs = r2.callScore || 0;
+      var pc = scoreColor(ps, minScore);
+      var cc = scoreColor(cs, minScore);
+      var blocked = (r2.blocked && r2.blocked.length) ? r2.blocked : null;
+      var ageMs = r2.ts ? (Date.now()-r2.ts) : null;
+      var ageStr = ageMs !== null ? (ageMs < 60000 ? Math.round(ageMs/1000)+'s ago' : Math.round(ageMs/60000)+'m ago') : '';
+
+      out += '<div style="background:var(--panel);border:1px solid var(--border);border-radius:8px;padding:12px;margin-bottom:8px">';
+
+      // Ticker header
+      out += '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">';
+      out += '<span style="font-size:16px;font-weight:700;color:#44aaff">'+ticker+'</span>';
+      out += '<div style="text-align:right">';
+      out += '<div style="font-size:11px;color:var(--muted)">$'+(r2.price||'--')+'</div>';
+      if (ageStr) out += '<div style="font-size:10px;color:var(--muted)">'+ageStr+'</div>';
+      out += '</div></div>';
+
+      // Score boxes
+      out += '<div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:10px">';
+      ['put','call'].forEach(function(type) {
+        var score = type==='put' ? ps : cs;
+        var col   = type==='put' ? pc : cc;
+        var wouldEnter = score >= minScore && !blocked;
+        out += '<div style="background:rgba(0,0,0,.25);border-radius:6px;padding:8px;text-align:center">';
+        out += '<div style="font-size:9px;color:var(--muted);letter-spacing:1px;margin-bottom:4px">'+type.toUpperCase()+'</div>';
+        out += '<div style="font-size:26px;font-weight:700;color:'+col+'">'+score+'</div>';
+        out += '<div style="font-size:9px;margin-top:3px;color:'+(wouldEnter?'#00ff88':'var(--muted)')+'">'+(wouldEnter?'&#9654; WOULD ENTER':'below min')+'</div>';
+        out += '</div>';
+      });
+      out += '</div>';
+
+      // Blocked
+      if (blocked) {
+        out += '<div style="background:rgba(255,50,50,.1);border:1px solid rgba(255,50,50,.3);border-radius:5px;padding:6px 10px;font-size:10px;color:#ff7777;margin-bottom:8px">Blocked: '+blocked.join(' | ')+'</div>';
+      }
+
+      // Signals grid
+      if (r2.signals && Object.keys(r2.signals).length) {
+        out += '<div style="display:flex;flex-wrap:wrap;gap:4px;margin-bottom:8px">';
+        Object.keys(r2.signals).forEach(function(k) {
+          out += '<span style="font-size:9px;background:rgba(0,80,160,.2);padding:2px 6px;border-radius:3px;color:#7aa8cc">'+k+': '+r2.signals[k]+'</span>';
+        });
+        out += '</div>';
+      }
+
+      // Put score reasons
+      if (r2.putReasons && r2.putReasons.length) {
+        out += '<div style="font-size:9px;line-height:1.7;max-height:110px;overflow-y:auto;background:rgba(0,0,0,.2);border-radius:4px;padding:6px">';
+        r2.putReasons.forEach(function(reason) {
+          var col = reason.indexOf('(+')>=0 ? '#00cc66' : reason.indexOf('(-')>=0 ? '#ff5555' : '#5a7a99';
+          out += '<div style="color:'+col+'">'+reason+'</div>';
+        });
+        out += '</div>';
+      }
+
+      out += '</div>';
+    });
+  }
+
+  el.innerHTML = out;
+}
+
 </script>
 </body>
 </html>
