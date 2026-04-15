@@ -7600,7 +7600,7 @@ async function runScan() {
   // Prevents repeated iteration over state.positions on every check
   const _totalCap  = totalCap();
   const _openRisk  = openRisk();
-  const _heatPct   = openCostBasis() / _totalCap;
+  const _heatPct   = Math.max(0, _totalCap - (state.cash || 0)) / _totalCap; // cash-delta: consistent with heatPct()
   const _heatPctPc = parseFloat((_heatPct * 100).toFixed(1));
 
   // Scan-cycle cache - expensive fetches reused within same scan window
