@@ -8725,6 +8725,8 @@ async function runScan() {
     // After 3:30pm, log where the underlying closed relative to its daily range
     // Weak close (bottom 25% of range) = sellers in control at close = overnight continuation lower more likely
     // Strong close (top 25% of range) = buyers stepped in = overnight recovery more likely
+    let bars = null;
+    if (etHourNow >= 15.5) { try { bars = await getStockBars(pos.ticker, 1); } catch(_) {} }
     if (etHourNow >= 15.5 && bars && bars.length >= 1) {
       const todayBar = bars[bars.length - 1];
       const dayHigh = todayBar.h || price;
