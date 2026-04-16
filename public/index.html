@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8"/>
 <meta name="viewport" content="width=device-width,initial-scale=1"/>
-<title>ARGO V3.0 — Professional Options Agent</title>
+<title>ARGO V2.75 — Professional Options Agent</title>
 <style>
 :root{
   --bg:#07101f;--panel:#0a1628;--border:#0d3050;--text:#cce8ff;--muted:#336688;
@@ -39,7 +39,7 @@ body{background:var(--bg);color:var(--text);font-family:var(--font);font-size:13
 .metric{font-size:22px;font-weight:700;color:var(--green)}
 .metric-sm{font-size:16px;font-weight:700}
 .sub{font-size:10px;color:var(--muted);margin-top:2px}
-.heat-bar{width:100%;height:12px;background:#0d1f35;border-radius:4px;overflow:hidden;margin-top:8px;position:relative}
+.heat-bar{width:100%;height:8px;background:#0d1f35;border-radius:4px;overflow:hidden;margin-top:8px}
 .heat-fill{height:100%;border-radius:4px;transition:width .5s}
 table{width:100%;border-collapse:collapse;font-size:11px}
 th{color:var(--muted);text-align:left;padding:6px 8px;border-bottom:1px solid var(--border);font-size:10px;letter-spacing:.5px}
@@ -127,7 +127,7 @@ input[type=text]:focus{border-color:var(--blue)}
       </svg>
     </div>
     <div class="logo-text">
-      <h1>ARGO V3.0 <span id="account-phase-pill" style="font-size:9px;padding:2px 7px;border-radius:10px;letter-spacing:1px;vertical-align:middle;display:none"></span></h1>
+      <h1>ARGO V2.75 <span id="account-phase-pill" style="font-size:9px;padding:2px 7px;border-radius:10px;letter-spacing:1px;vertical-align:middle;display:none"></span></h1>
       <p>PROFESSIONAL OPTIONS AGENT v2.0 · ALPACA PAPER</p>
     </div>
   </div>
@@ -150,7 +150,6 @@ input[type=text]:focus{border-color:var(--blue)}
   <div class="tab" onclick="switchTab('report')">REPORT</div>
   <div class="tab" onclick="switchTab('backtest')">BACKTEST</div>
   <div class="tab" onclick="switchTab('log')">SERVER LOG</div>
-  <div class="tab" onclick="switchTab('scoredebug')">SCORE DEBUG</div>
 </div>
 
 <!-- ═══════════════ TRADING TAB ═══════════════ -->
@@ -280,7 +279,7 @@ input[type=text]:focus{border-color:var(--blue)}
       <div class="card-title">Portfolio Heat</div>
       <div class="metric-sm" id="heat">--%</div>
       <div class="heat-bar"><div class="heat-fill" id="heat-fill" style="width:0%;background:var(--green)"></div></div>
-      <div class="sub" id="heat-sub-detail">max 60% | <span id="put-heat" style="color:var(--red)">P:--%</span> <span id="call-heat" style="color:var(--blue)">C:--%</span></div>
+      <div class="sub">max 60% | <span id="put-heat" style="color:var(--red)">P:--%</span> <span id="call-heat" style="color:var(--blue)">C:--%</span></div>
     </div>
     <div class="card">
       <div class="card-title">Monthly Revenue</div>
@@ -472,9 +471,8 @@ input[type=text]:focus{border-color:var(--blue)}
   </div>
 
   <div class="section-title">Open Positions</div>
-  <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px"><div style="font-size:10px;color:#5a7a99;letter-spacing:1px">OPEN POSITIONS</div><button id="copy-pos-btn" onclick="copyOpenPositions()" style="font-size:10px;padding:3px 10px;background:rgba(0,196,255,.08);border:1px solid rgba(0,196,255,.3);border-radius:4px;color:#44aaff;cursor:pointer">&#9126; Copy positions</button></div>
   <div id="positions-wrap">
-    <div class="no-data">No open positions. ARGO V3.0 will enter trades during market hours (Puts 9:45AM / Calls 10AM–3:30PM ET).</div>
+    <div class="no-data">No open positions. ARGO V2.75 will enter trades during market hours (Puts 9:45AM / Calls 10AM–3:30PM ET).</div>
   </div>
 
   <div class="section-title">Portfolio Greeks</div>
@@ -655,7 +653,7 @@ input[type=text]:focus{border-color:var(--blue)}
     <div class="no-data">Loading correlation data...</div>
   </div>
 
-  <div class="section-title">V3.0 Risk Controls</div>
+  <div class="section-title">V2.5 Risk Controls</div>
   <div class="grid4" style="margin-bottom:12px">
     <div class="card">
       <div class="card-title">ACCOUNT PHASE</div>
@@ -752,7 +750,7 @@ input[type=text]:focus{border-color:var(--blue)}
 <div id="tab-journal" class="content">
   <div class="section-title" style="margin-top:0">Trade Journal — Entry Reasoning</div>
   <div id="journal-wrap">
-    <div class="no-data">No journal entries yet. ARGO V3.0 logs detailed reasoning for every trade.</div>
+    <div class="no-data">No journal entries yet. ARGO V2.75 logs detailed reasoning for every trade.</div>
   </div>
 </div>
 
@@ -777,7 +775,7 @@ input[type=text]:focus{border-color:var(--blue)}
   </div>
 
   <div class="alert alert-orange" style="margin-bottom:12px">
-    ARGO V3.0 auto-buys stocks when monthly options profit exceeds $1,000. 20% of profits above threshold are allocated to high-scoring stocks (85+). Stop loss: -15% from entry.
+    ARGO V2.75 auto-buys stocks when monthly options profit exceeds $1,000. 20% of profits above threshold are allocated to high-scoring stocks (85+). Stop loss: -15% from entry.
   </div>
 
   <div class="section-title">Stock Holdings</div>
@@ -801,20 +799,11 @@ input[type=text]:focus{border-color:var(--blue)}
 </div>
 
 <!-- ═══════════════ LOG TAB ═══════════════ -->
-<!-- ═══════════════ SCORE DEBUG TAB ═══════════════ -->
-<div id="tab-scoredebug" class="content">
-  <div style="display:flex;gap:8px;margin-bottom:12px;flex-wrap:wrap;align-items:center">
-    <button class="btn btn-green" onclick="loadScoreDebug()">&#8635; REFRESH SCORES</button>
-    <span style="font-size:11px;color:#5a7a99">Per-instrument scoring breakdown from last scan</span>
-  </div>
-  <div id="score-debug-content"><div class="no-data">Click REFRESH SCORES to load scoring data.</div></div>
-</div>
-
 <!-- ═══════════════ BACKTEST TAB ═══════════════ -->
 <div id="tab-backtest" class="content">
   <div style="margin-bottom:14px">
     <span style="font-size:13px;color:#00ff88;letter-spacing:2px;font-weight:700">⚙ BACKTEST ENGINE</span>
-    <span style="font-size:10px;color:#336688;margin-left:10px">Walk-forward simulation · ARGO V3.0 scoring · Alpaca historical data</span>
+    <span style="font-size:10px;color:#336688;margin-left:10px">Walk-forward simulation · ARGO V2.75 scoring · Alpaca historical data</span>
     <div style="font-size:10px;color:#4a6a8a;margin-top:4px">⚠ Conservative estimates — backtest enters one position at a time (walk-forward). Live ARGO holds multiple simultaneous positions, so live returns will typically exceed backtest figures.</div>
   </div>
 
@@ -982,15 +971,6 @@ input[type=text]:focus{border-color:var(--blue)}
     <button class="btn" id="log-live-btn" onclick="toggleLogLive()" style="font-size:11px">PAUSE</button>
     <button class="btn" onclick="fetchLogs()" style="font-size:11px">REFRESH</button>
     <button class="btn" onclick="clearLog()" style="font-size:11px">CLEAR</button>
-    <select id="copy-row-limit" style="background:var(--panel);border:1px solid var(--border);color:var(--muted);padding:4px 6px;border-radius:6px;font-family:var(--font);font-size:11px">
-      <option value="100">100 rows</option>
-      <option value="500">500 rows</option>
-      <option value="1000">1000 rows</option>
-      <option value="2000" selected>2000 rows</option>
-      <option value="99999">all rows</option>
-    </select>
-    <button class="btn" id="copy-log-btn" onclick="copyLogsForClaude()" style="font-size:11px;border-color:rgba(0,196,255,.4);color:#44aaff">&#9126; Copy for Claude</button>
-    <span id="log-row-counter" style="font-size:10px;color:var(--muted);padding:0 4px;white-space:nowrap">0 rows</span>
   </div>
   <!-- ── Log box ── -->
   <div class="log-box" id="server-log" style="height:560px;overflow-y:auto"></div>
@@ -1309,26 +1289,19 @@ function renderMetrics() {
 
   document.getElementById('cash').textContent = fmt(state.cash);
   const budgetAmt = state.customBudget && state.customBudget > 0 ? state.customBudget : (state.cash || 10000);
-  document.getElementById('cash-sub').textContent = `of ${fmt(state.totalCap || budgetAmt)} budget`;
+  document.getElementById('cash-sub').textContent = `of ${fmt(budgetAmt)} budget`;
   document.getElementById('pnl').textContent = (pnl >= 0 ? '+' : '') + fmt(pnl);
   document.getElementById('pnl').style.color = pnl >= 0 ? 'var(--green)' : 'var(--red)';
   document.getElementById('pnl-sub').textContent = `daily: ${fmt((state.cash||0)-(state.dayStartCash||state.customBudget||10000))}`;
 
-  // Heat = deployed capital / total cap
-  // Deployed = totalCap - available cash (most accurate for credit spreads)
-  const serverTotalCap = Math.max(state.totalCap || 0, state.cash || 0, 10000); // never below $10k
-  const deployedCapital = Math.max(0, serverTotalCap - (state.cash || 0));
-  const heat = serverTotalCap > 0 ? parseFloat((deployedCapital / serverTotalCap * 100).toFixed(1)) : (state.heatPct || 0);
-  // Keep openCostBasis for P/C breakdown proportions
-  const positions_heat = state.positions || [];
-  const openCostBasis  = positions_heat.reduce((s,p) => s + (parseFloat(p.cost)||0) * (p.partialClosed ? 0.5 : 1), 0);
+  const heat = state.heatPct || 0;
   document.getElementById('heat').textContent = heat.toFixed(1) + '%';
   // Alpaca account balance — shows actual paper/live account value
   if (state.alpacaCash) {
     document.getElementById('alpaca-cash').textContent = fmt(state.alpacaCash);
     const customBudget = state.customBudget && state.customBudget > 0 ? state.customBudget : null;
     document.getElementById('alpaca-cash-sub').textContent = customBudget
-      ? `ARGO V3.0 using ${fmt(customBudget)} of this`
+      ? `ARGO V2.75 using ${fmt(customBudget)} of this`
       : 'paper balance · synced on boot';
   }
   document.getElementById('heat').style.color = heat > 50 ? 'var(--red)' : heat > 35 ? 'var(--orange)' : 'var(--green)';
@@ -1336,41 +1309,19 @@ function renderMetrics() {
   // Scale bar width against MAX_HEAT (60%) so 60% fills the bar completely
   // 54.5% heat = 54.5/60 = 90.8% of bar — was the bug
   // Now: 54.5% heat = 54.5/60 * 100 = 90.8% width — correct visual
-  // Bar scaled to 100% so 44.7% heat = 44.7% fill (no more misleading near-full bar)
-  // Cap marker injected at 60% position
-  fill.style.width = Math.min(heat, 100) + '%';
+  const MAX_HEAT_PCT = 60;
+  fill.style.width = Math.min((heat / MAX_HEAT_PCT) * 100, 100) + '%';
   fill.style.background = heat > 50 ? 'var(--red)' : heat > 35 ? 'var(--orange)' : 'var(--green)';
-  const heatBar = fill.parentElement;
-  if (heatBar) {
-    heatBar.title = heat.toFixed(1) + '% heat | 60% cap';
-    // Add or update cap marker line at 60%
-    let capMarker = document.getElementById('heat-cap-marker');
-    if (!capMarker) {
-      capMarker = document.createElement('div');
-      capMarker.id = 'heat-cap-marker';
-      capMarker.style.cssText = 'position:absolute;top:0;bottom:0;width:2px;background:rgba(255,255,255,0.35);left:60%';
-      capMarker.title = '60% cap';
-      heatBar.appendChild(capMarker);
-    }
-  }
 
   // Directional heat breakdown
   const positions = state.positions || [];
-  // Match server denominator: totalCap = max(cash, MONTHLY_BUDGET=10000)
-  // So P+C sums to the same total shown in the main heat % figure
-  const totalOpenCost = positions.reduce((s,p) => s + (p.cost||0), 0);
-  const putCostVal    = positions.filter(p=>p.optionType==='put').reduce((s,p)=>s+(p.cost||0),0);
-  const callCostVal   = positions.filter(p=>p.optionType==='call').reduce((s,p)=>s+(p.cost||0),0);
-  const putHeatPct    = totalOpenCost > 0 ? (putCostVal  / totalOpenCost) * heat : 0;
-  const callHeatPct   = totalOpenCost > 0 ? (callCostVal / totalOpenCost) * heat : 0;
-  const putHeatEl     = document.getElementById('put-heat');
-  const callHeatEl    = document.getElementById('call-heat');
-  if (putHeatEl)  putHeatEl.textContent  = 'P:' + putHeatPct.toFixed(0)  + '%';
-  if (callHeatEl) callHeatEl.textContent = 'C:' + callHeatPct.toFixed(0) + '%';
-  // Update heat sub-detail to show open cost vs totalCap clearly
-  const heatSubEl = document.getElementById('heat-sub-detail');
-  const heatSubEl2 = document.getElementById('heat-sub-detail');
-  if (heatSubEl2) heatSubEl2.title = 'Open cost: $' + openCostBasis.toFixed(0) + ' / Total cap: $' + serverTotalCap.toFixed(0);
+  const totalCapVal = (state.cash||0) + positions.reduce((s,p) => s + (p.cost||0), 0);
+  const putCostVal  = positions.filter(p=>p.optionType==='put').reduce((s,p)=>s+(p.cost||0),0);
+  const callCostVal = positions.filter(p=>p.optionType==='call').reduce((s,p)=>s+(p.cost||0),0);
+  const putHeatEl   = document.getElementById('put-heat');
+  const callHeatEl  = document.getElementById('call-heat');
+  if (putHeatEl)  putHeatEl.textContent  = 'P:' + (totalCapVal > 0 ? (putCostVal/totalCapVal*100).toFixed(0) : '0') + '%';
+  if (callHeatEl) callHeatEl.textContent = 'C:' + (totalCapVal > 0 ? (callCostVal/totalCapVal*100).toFixed(0) : '0') + '%';
 
   const rev = state.totalRevenue || 0;
   document.getElementById('revenue').textContent = fmt(rev);
@@ -1482,7 +1433,7 @@ function renderMetrics() {
   if (alphaEl && bm) {
     alphaEl.textContent = (bm.alpha >= 0 ? "+" : "") + bm.alpha + "%";
     alphaEl.style.color = bm.alpha >= 0 ? "var(--green)" : "var(--red)";
-    document.getElementById("benchmark-sub").textContent = `ARGO V3.0:${bm.apexReturn >= 0 ? "+" : ""}${bm.apexReturn}% SPY:${bm.spyReturn >= 0 ? "+" : ""}${bm.spyReturn}%`;
+    document.getElementById("benchmark-sub").textContent = `ARGO V2.75:${bm.apexReturn >= 0 ? "+" : ""}${bm.apexReturn}% SPY:${bm.spyReturn >= 0 ? "+" : ""}${bm.spyReturn}%`;
   }
 
   // Drawdown protocol
@@ -1726,337 +1677,10 @@ function renderPositions() {
   const wrap = document.getElementById('positions-wrap');
   const positions = state.positions || [];
   if (!positions.length) {
-    wrap.innerHTML = '<div class="no-data">No open positions. ARGO V3.0 will enter trades during market hours (9:30AM\u20133:45PM ET).</div>';
+    wrap.innerHTML = '<div class="no-data">No open positions. ARGO V2.75 will enter trades during market hours (9:30AM–3:45PM ET). SPY/QQQ spreads primary.</div>';
     return;
   }
-
-  // ── Pair legs into spreads ───────────────────────────────────────────────
-  const used = {}, groups = [];
-  positions.forEach(function(p, i) {
-    if (used[i]) return;
-    // Try to pair with another leg: same ticker, expDate, optionType, different strike
-    if (!p.isSpread && !p.isCreditSpread) {
-      for (let j = i+1; j < positions.length; j++) {
-        if (used[j]) continue;
-        const q = positions[j];
-        if (q.ticker === p.ticker && q.expDate === p.expDate &&
-            q.optionType === p.optionType && q.strike !== p.strike) {
-          used[i] = used[j] = true;
-          // Use buySymbol/sellSymbol to correctly identify long/short
-          // buySymbol = leg we bought (long), sellSymbol = leg we sold (short)
-          var longLeg, shortLeg;
-          if (p.buySymbol && !p.sellSymbol) {
-            longLeg = p; shortLeg = q;       // p is long, q is short
-          } else if (q.buySymbol && !q.sellSymbol) {
-            longLeg = q; shortLeg = p;       // q is long, p is short
-          } else {
-            // Fallback: for credit spreads higher strike = short
-            // for debit spreads higher strike = long — default to credit convention
-            var byStrike = [p, q].sort(function(a,b){ return b.strike - a.strike; });
-            shortLeg = byStrike[0]; longLeg = byStrike[1];
-          }
-          groups.push({ type:'paired', short: shortLeg, long: longLeg });
-          return;
-        }
-      }
-    }
-    used[i] = true;
-    groups.push({ type: p.isSpread || p.isCreditSpread ? 'spread' : 'single', pos: p });
-  });
-
-  // ── Render each group ────────────────────────────────────────────────────
-  wrap.innerHTML = groups.map(function(g) {
-    if (g.type === 'paired') {
-      return renderPairedSpread(g.short, g.long);
-    } else if (g.type === 'spread') {
-      return renderNativeSpread(g.pos);
-    } else {
-      return renderSingleLeg(g.pos);
-    }
-  }).join('');
-}
-
-// ── Helper: fmt ────────────────────────────────────────────────────────────
-function pnlColor(v) { return v >= 0 ? 'var(--green)' : 'var(--red)'; }
-function pnlSign(v)  { return v >= 0 ? '+' : ''; }
-
-function scoreCol(s) {
-  return s >= 85 ? 'var(--green)' : s >= 70 ? 'var(--blue)' : 'var(--orange)';
-}
-
-function rescoreBtn(ticker) {
-  return `<button onclick="rescorePos('${ticker}')" style="font-size:9px;padding:2px 7px;background:rgba(0,196,255,.1);border:1px solid var(--blue);border-radius:4px;color:var(--blue);cursor:pointer">\u21bb RESCORE</button>`;
-}
-
-function closeBtn(ticker, sym) {
-  return `<button class="btn btn-red" style="padding:3px 10px;font-size:10px" onclick="closePos('${ticker}','${sym||''}')">CLOSE</button>`;
-}
-
-// ── Paired spread card (two reconciled individual legs) ─────────────────────
-function renderPairedSpread(s, l) {
-  // Detect spread type from leg strikes
-  // Credit PUT spread: short (sold) higher strike, long (bought) lower strike
-  // Debit  PUT spread: long (bought) higher strike, short (sold) lower strike
-  const isCreditConvention = s.strike > l.strike;
-  const c         = Math.min(s.contracts||1, l.contracts||1);
-  const netCredit = isCreditConvention
-    ? parseFloat(s.premium) - parseFloat(l.premium)   // credit received
-    : parseFloat(l.premium) - parseFloat(s.premium);  // debit paid (positive)
-  const width     = Math.abs(s.strike - l.strike);
-  const maxProfit = netCredit * 100 * c;
-  const maxLoss   = (width - netCredit) * 100 * c;
-  const breakeven = isCreditConvention
-    ? (s.strike - netCredit).toFixed(2)   // credit: breakeven = short strike - credit
-    : (l.strike - netCredit).toFixed(2);  // debit:  breakeven = long strike - debit
-
-  // P&L: Alpaca unrealizedPnL is source of truth (synced each scan)
-  // Sum both legs — Alpaca handles sign correctly for long/short positions
-  const sAlpPnL = s.unrealizedPnL !== undefined ? parseFloat(s.unrealizedPnL) : null;
-  const lAlpPnL = l.unrealizedPnL !== undefined ? parseFloat(l.unrealizedPnL) : null;
-  const sP = sAlpPnL !== null ? sAlpPnL
-    : (parseFloat(s.premium) - parseFloat(s.currentPrice||s.premium)) * 100 * c;
-  const lP = lAlpPnL !== null ? lAlpPnL
-    : (parseFloat(l.currentPrice||l.premium) - parseFloat(l.premium)) * 100 * c;
-  const netPnL   = sP + lP;
-  const pct      = maxProfit > 0 ? (netPnL / maxProfit * 100) : 0;
-
-  // Estimated current position value = cost to close (what we'd pay to buy back spread)
-  const sCur = parseFloat(s.currentPrice || s.premium);
-  const lCur = parseFloat(l.currentPrice || l.premium);
-  const costToClose  = (sCur - lCur) * 100 * c;   // cost to close spread
-  const estPosValue  = maxProfit - netPnL;          // remaining value vs max profit
-  const marginReq    = maxLoss;                      // margin = max loss
-
-  const score    = s.score || l.score || 0;
-  const dte      = Math.max(0, Math.round((new Date(s.expDate) - new Date()) / 86400000));
-  const ticker   = s.ticker;
-  const optType  = (s.optionType||'put').toUpperCase();
-  const expDate  = s.expDate;
-  const dteLabel = s.dteLabel || l.dteLabel || 'RECONCILED';
-
-  return `
-  <div style="background:#050e1a;border:1px solid rgba(0,255,136,.25);border-radius:10px;padding:14px;margin-bottom:10px">
-    <!-- Header -->
-    <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;margin-bottom:12px">
-      <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
-        <span style="font-size:16px;font-weight:700;color:var(--blue)">${ticker}</span>
-        <span style="font-size:11px;color:var(--muted)">$${s.strike}/$${l.strike} ${expDate}</span>
-        <span style="font-size:9px;padding:2px 7px;border-radius:10px;background:" + (isCreditConvention ? "rgba(0,255,136,.15);color:var(--green)\">CREDIT SPREAD" : "rgba(0,196,255,.15);color:var(--blue)\">DEBIT SPREAD") + "</span>
-        <span style="font-size:9px;padding:2px 7px;border-radius:10px;background:rgba(255,80,80,.15);color:#ff5050">${optType}</span>
-        <span style="font-size:9px;padding:2px 7px;border-radius:10px;background:rgba(255,165,0,.15);color:var(--orange)">${dteLabel.toUpperCase()}</span>
-        <span style="font-size:9px;padding:2px 7px;border-radius:10px;background:rgba(100,100,100,.15);color:var(--muted)">${c}x CONTRACTS</span>
-      </div>
-      <div style="display:flex;align-items:center;gap:8px">
-        <span style="font-size:11px;font-weight:700;color:${scoreCol(score)}">Entry: ${score}/100</span>
-        ${rescoreBtn(ticker)}
-        ${closeBtn(ticker, s.buySymbol||s.contractSymbol||'')}
-      </div>
-    </div>
-
-    <!-- P&L highlight bar -->
-    <div style="background:rgba(0,0,0,.3);border-radius:8px;padding:10px 14px;margin-bottom:10px;display:flex;gap:24px;flex-wrap:wrap;align-items:center">
-      <div>
-        <div style="font-size:9px;color:var(--muted);margin-bottom:2px">UNREALIZED P&amp;L</div>
-        <div style="font-size:20px;font-weight:700;color:${pnlColor(netPnL)}">${pnlSign(netPnL)}$${Math.abs(netPnL).toFixed(2)}</div>
-      </div>
-      <div>
-        <div style="font-size:9px;color:var(--muted);margin-bottom:2px">P&amp;L %</div>
-        <div style="font-size:20px;font-weight:700;color:${pnlColor(pct)}">${pnlSign(pct)}${pct.toFixed(1)}%</div>
-      </div>
-      <div>
-        <div style="font-size:9px;color:var(--muted);margin-bottom:2px">EST. POSITION VALUE</div>
-        <div style="font-size:16px;font-weight:700;color:var(--text)">$${costToClose.toFixed(2)}</div>
-      </div>
-      <div>
-        <div style="font-size:9px;color:var(--muted);margin-bottom:2px">DTE</div>
-        <div style="font-size:16px;font-weight:700;color:var(--text)">${dte}d</div>
-      </div>
-    </div>
-
-    <!-- Details grid -->
-    <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:8px">
-      <div><div style="font-size:9px;color:var(--muted)">NET CREDIT</div><div style="font-weight:700">${fmt(netCredit)}</div></div>
-      <div><div style="font-size:9px;color:var(--muted)">SPREAD WIDTH</div><div style="font-weight:700">$${width}</div></div>
-      <div><div style="font-size:9px;color:var(--muted)">BREAKEVEN</div><div style="font-weight:700">$${breakeven}</div></div>
-      <div><div style="font-size:9px;color:var(--muted)">EXP DATE</div><div style="font-weight:700">${expDate}</div></div>
-      <div><div style="font-size:9px;color:var(--muted)">MAX PROFIT</div><div style="font-weight:700;color:var(--green)">$${maxProfit.toFixed(0)}</div></div>
-      <div><div style="font-size:9px;color:var(--muted)">MAX LOSS</div><div style="font-weight:700;color:var(--red)">$${maxLoss.toFixed(0)}</div></div>
-      <div><div style="font-size:9px;color:var(--muted)">MARGIN REQ</div><div style="font-weight:700">$${marginReq.toFixed(0)}</div></div>
-      <div><div style="font-size:9px;color:var(--muted)">COST TO CLOSE</div><div style="font-weight:700">$${costToClose.toFixed(2)}</div></div>
-      <div><div style="font-size:9px;color:var(--muted)">SHORT LEG</div><div style="font-weight:700;color:var(--orange)">$${s.strike} ${optType}</div></div>
-      <div><div style="font-size:9px;color:var(--muted)">LONG LEG</div><div style="font-weight:700;color:var(--muted)">$${l.strike} ${optType}</div></div>
-      <div><div style="font-size:9px;color:var(--muted)">SHORT PRICE</div><div style="font-weight:700">$${parseFloat(s.currentPrice||s.premium).toFixed(2)}</div></div>
-      <div><div style="font-size:9px;color:var(--muted)">LONG PRICE</div><div style="font-weight:700">$${parseFloat(l.currentPrice||l.premium).toFixed(2)}</div></div>
-    </div>
-  </div>`;
-}
-
-// ── Native spread card (already has spread fields) ─────────────────────────
-function renderNativeSpread(p) {
-  const curPrice  = parseFloat(p.currentPrice || p.premium);
-  const c         = p.contracts || 1;
-  let chgDollar, chgPct;
-  if (p.isCreditSpread) {
-    chgDollar = p.unrealizedPnL !== undefined ? parseFloat(p.unrealizedPnL) : (parseFloat(p.premium) - curPrice) * 100 * c;
-    chgPct    = p.maxProfit ? (chgDollar / parseFloat(p.maxProfit) * 100) : 0;
-  } else {
-    chgDollar = p.unrealizedPnL !== undefined ? parseFloat(p.unrealizedPnL) : (curPrice - parseFloat(p.premium)) * 100 * c;
-    chgPct    = parseFloat(p.premium) > 0 ? (chgDollar / (parseFloat(p.premium) * 100 * c) * 100) : 0;
-  }
-  const estValue = p.isCreditSpread
-    ? (curPrice * 100 * c)
-    : (curPrice * 100 * c);
-  const score  = p.score || 0;
-  const dte    = Math.max(0, Math.round((new Date(p.expDate) - new Date()) / 86400000));
-  const optType = (p.optionType||'put').toUpperCase();
-  const strikeDisplay = p.isCreditSpread
-    ? `$${p.shortStrike||p.sellStrike}/$${p.longStrike||p.buyStrike}`
-    : `$${p.buyStrike}/$${p.sellStrike}`;
-
-  return `
-  <div style="background:#050e1a;border:1px solid rgba(0,150,255,.3);border-radius:10px;padding:14px;margin-bottom:10px">
-    <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;margin-bottom:12px">
-      <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
-        <span style="font-size:16px;font-weight:700;color:var(--blue)">${p.ticker}</span>
-        <span style="font-size:11px;color:var(--muted)">${strikeDisplay} ${p.expDate}</span>
-        <span style="font-size:9px;padding:2px 7px;border-radius:10px;background:${p.isCreditSpread?'rgba(0,255,136,.15)':'rgba(0,150,255,.15)'};color:${p.isCreditSpread?'var(--green)':'var(--blue)'}">${p.isCreditSpread?'CREDIT':'DEBIT'} SPREAD</span>
-        <span style="font-size:9px;padding:2px 7px;border-radius:10px;background:rgba(255,80,80,.15);color:#ff5050">${optType}</span>
-      </div>
-      <div style="display:flex;align-items:center;gap:8px">
-        <span style="font-size:11px;font-weight:700;color:${scoreCol(score)}">Entry: ${score}/100</span>
-        ${rescoreBtn(p.ticker)}
-        ${closeBtn(p.ticker, p.buySymbol||p.contractSymbol||'')}
-      </div>
-    </div>
-    <div style="background:rgba(0,0,0,.3);border-radius:8px;padding:10px 14px;margin-bottom:10px;display:flex;gap:24px;flex-wrap:wrap">
-      <div><div style="font-size:9px;color:var(--muted)">UNREALIZED P&amp;L</div><div style="font-size:20px;font-weight:700;color:${pnlColor(chgDollar)}">${pnlSign(chgDollar)}$${Math.abs(chgDollar).toFixed(2)}</div></div>
-      <div><div style="font-size:9px;color:var(--muted)">P&amp;L %</div><div style="font-size:20px;font-weight:700;color:${pnlColor(chgPct)}">${pnlSign(chgPct)}${chgPct.toFixed(1)}%</div></div>
-      <div><div style="font-size:9px;color:var(--muted)">EST. POSITION VALUE</div><div style="font-size:16px;font-weight:700">$${estValue.toFixed(2)}</div></div>
-      <div><div style="font-size:9px;color:var(--muted)">DTE</div><div style="font-size:16px;font-weight:700">${dte}d</div></div>
-    </div>
-    <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:8px">
-      <div><div style="font-size:9px;color:var(--muted)">${p.isCreditSpread?'NET CREDIT':'NET DEBIT'}</div><div style="font-weight:700">${fmt(p.premium)}</div></div>
-      <div><div style="font-size:9px;color:var(--muted)">CURRENT PRICE</div><div style="font-weight:700">$${curPrice.toFixed(2)}</div></div>
-      <div><div style="font-size:9px;color:var(--muted)">MAX PROFIT</div><div style="font-weight:700;color:var(--green)">$${(p.maxProfit||0).toFixed(0)}</div></div>
-      <div><div style="font-size:9px;color:var(--muted)">MAX LOSS</div><div style="font-weight:700;color:var(--red)">$${(p.maxLoss||0).toFixed(0)}</div></div>
-      <div><div style="font-size:9px;color:var(--muted)">MARGIN</div><div style="font-weight:700">${fmt(p.cost)}</div></div>
-      <div><div style="font-size:9px;color:var(--muted)">BREAKEVEN</div><div style="font-weight:700">$${p.breakeven||'--'}</div></div>
-      <div><div style="font-size:9px;color:var(--muted)">CONTRACTS</div><div style="font-weight:700">${p.contracts}x</div></div>
-      <div><div style="font-size:9px;color:var(--muted)">EXP DATE</div><div style="font-weight:700">${p.expDate}</div></div>
-    </div>
-  </div>`;
-}
-
-// ── Single leg card ────────────────────────────────────────────────────────
-function renderSingleLeg(p) {
-  const curPrice  = parseFloat(p.currentPrice || p.premium);
-  const c         = p.contracts || 1;
-  const chgDollar = p.unrealizedPnL !== undefined ? parseFloat(p.unrealizedPnL)
-    : (curPrice - parseFloat(p.premium)) * 100 * c;
-  const chgPct    = parseFloat(p.premium) > 0
-    ? (chgDollar / (parseFloat(p.premium) * 100 * c) * 100) : 0;
-  const estValue  = curPrice * 100 * c;
-  const score     = p.score || 0;
-  const dte       = Math.max(0, Math.round((new Date(p.expDate) - new Date()) / 86400000));
-  const optType   = (p.optionType||'put').toUpperCase();
-  const dteLabel  = p.dteLabel || p.expiryType || 'monthly';
-  const isReconciled = dteLabel.toUpperCase().includes('RECONCIL');
-
-  return `
-  <div style="background:#050e1a;border:1px solid var(--border);border-radius:10px;padding:14px;margin-bottom:10px">
-    <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;margin-bottom:12px">
-      <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
-        <span style="font-size:16px;font-weight:700;color:var(--blue)">${p.ticker}</span>
-        <span style="font-size:11px;color:var(--muted)">$${p.strike}${optType} · ${p.expDate}</span>
-        <span style="font-size:9px;padding:2px 7px;border-radius:10px;background:rgba(255,80,80,.15);color:#ff5050">${optType}</span>
-        <span style="font-size:9px;padding:2px 7px;border-radius:10px;background:${isReconciled?'rgba(255,165,0,.15)':'rgba(100,100,100,.15)'};color:${isReconciled?'var(--orange)':'var(--muted)'}">${dteLabel.toUpperCase()}</span>
-      </div>
-      <div style="display:flex;align-items:center;gap:8px">
-        <span style="font-size:11px;font-weight:700;color:${scoreCol(score)}">Entry: ${score}/100</span>
-        ${rescoreBtn(p.ticker)}
-        ${closeBtn(p.ticker, p.buySymbol||p.contractSymbol||'')}
-      </div>
-    </div>
-    <div style="background:rgba(0,0,0,.3);border-radius:8px;padding:10px 14px;margin-bottom:10px;display:flex;gap:24px;flex-wrap:wrap">
-      <div><div style="font-size:9px;color:var(--muted)">UNREALIZED P&amp;L</div><div style="font-size:20px;font-weight:700;color:${pnlColor(chgDollar)}">${pnlSign(chgDollar)}$${Math.abs(chgDollar).toFixed(2)}</div></div>
-      <div><div style="font-size:9px;color:var(--muted)">P&amp;L %</div><div style="font-size:20px;font-weight:700;color:${pnlColor(chgPct)}">${pnlSign(chgPct)}${chgPct.toFixed(1)}%</div></div>
-      <div><div style="font-size:9px;color:var(--muted)">EST. POSITION VALUE</div><div style="font-size:16px;font-weight:700">$${estValue.toFixed(2)}</div></div>
-      <div><div style="font-size:9px;color:var(--muted)">DTE</div><div style="font-size:16px;font-weight:700">${dte}d</div></div>
-    </div>
-    <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:8px">
-      <div><div style="font-size:9px;color:var(--muted)">ENTRY PRICE</div><div style="font-weight:700">${fmt(p.premium)}</div></div>
-      <div><div style="font-size:9px;color:var(--muted)">CURRENT PRICE</div><div style="font-weight:700">$${curPrice.toFixed(2)}</div></div>
-      <div><div style="font-size:9px;color:var(--muted)">CONTRACTS</div><div style="font-weight:700">${c}x</div></div>
-      <div><div style="font-size:9px;color:var(--muted)">EXP DATE</div><div style="font-weight:700">${p.expDate}</div></div>
-      <div><div style="font-size:9px;color:var(--muted)">TARGET</div><div style="font-weight:700;color:var(--green)">${fmt(p.targetPrice)}</div></div>
-      <div><div style="font-size:9px;color:var(--muted)">STOP</div><div style="font-weight:700;color:var(--red)">${fmt(p.stopPrice)}</div></div>
-      <div><div style="font-size:9px;color:var(--muted)">BREAKEVEN</div><div style="font-weight:700">${p.breakeven?'$'+p.breakeven:'--'}</div></div>
-      <div><div style="font-size:9px;color:var(--muted)">IVR</div><div style="font-weight:700">${p.ivr!=null?p.ivr+'%':'--'}</div></div>
-    </div>
-    ${p._liveRescore ? `<div style="margin-top:8px;font-size:10px;color:var(--muted)">Live rescore: <strong style="color:${p._liveRescore.score>=75?'var(--green)':p._liveRescore.score>=55?'var(--gold)':'var(--red)'}">${p._liveRescore.score} — ${p._liveRescore.label}</strong></div>` : ''}
-  </div>`;
-}
-
-
-function renderSpreadCard(short, long) {
-  const contracts   = short.contracts || 1;
-  const entryCredit = parseFloat(short.premium) - parseFloat(long.premium);
-  const spreadWidth = short.strike - long.strike;
-  const maxProfit   = entryCredit * 100 * contracts;
-  const maxLoss     = (spreadWidth - entryCredit) * 100 * contracts;
-  const breakeven   = (short.strike - entryCredit).toFixed(2);
-  const dte         = Math.max(0, Math.round((new Date(short.expDate) - new Date()) / 86400000));
-  const score       = short.score || long.score || 0;
-  const scoreColor  = score >= 85 ? 'var(--green)' : score >= 70 ? 'var(--blue)' : 'var(--orange)';
-  const dteLabel    = (short.dteLabel || 'RECONCILED').toUpperCase();
-
-  let netPnL = 0;
-  if (short.unrealizedPnL !== undefined && long.unrealizedPnL !== undefined) {
-    netPnL = parseFloat(short.unrealizedPnL) + parseFloat(long.unrealizedPnL);
-  } else {
-    const c = contracts;
-    netPnL = (parseFloat(short.premium) - parseFloat(short.currentPrice || short.premium)) * 100 * c
-           + (parseFloat(long.currentPrice || long.premium)  - parseFloat(long.premium))  * 100 * c;
-  }
-  const pnlPct   = maxProfit > 0 ? (netPnL / maxProfit * 100) : 0;
-  const pnlSign  = netPnL >= 0 ? '+' : '';
-  const pnlColor = netPnL >= 0 ? 'var(--green)' : 'var(--red)';
-
-  return `<div style="background:#050e1a;border:1px solid rgba(0,255,136,.25);border-radius:10px;padding:14px;margin-bottom:10px">
-    <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;margin-bottom:12px">
-      <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
-        <span style="font-size:16px;font-weight:700;color:var(--blue)">${short.ticker}</span>
-        <span style="font-size:11px;color:var(--muted)">$${short.strike}/$${long.strike} \xb7 ${short.expDate}</span>
-        <span style="font-size:9px;padding:2px 7px;border-radius:10px;background:rgba(0,255,136,.15);color:var(--green)">CREDIT SPREAD</span>
-        <span style="font-size:9px;padding:2px 7px;border-radius:10px;background:rgba(255,165,0,.15);color:var(--orange)">${dteLabel}</span>
-        <span style="font-size:9px;padding:2px 7px;border-radius:10px;background:rgba(255,80,80,.15);color:#ff5050">PUT</span>
-        <span style="font-size:9px;padding:2px 7px;border-radius:10px;background:rgba(0,0,0,.3);color:var(--muted)">${contracts}x</span>
-      </div>
-      <div style="display:flex;align-items:center;gap:8px">
-        <span style="font-size:11px;font-weight:700;color:${scoreColor}">Entry: ${score}/100</span>
-        <button onclick="rescorePos('${short.ticker}')" style="font-size:9px;padding:2px 7px;background:rgba(0,196,255,.1);border:1px solid var(--blue);border-radius:4px;color:var(--blue);cursor:pointer">&#8635; RESCORE</button>
-        <button class="btn btn-red" style="padding:3px 10px;font-size:10px" onclick="closePos('${short.ticker}','')">CLOSE</button>
-      </div>
-    </div>
-    <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-bottom:10px">
-      <div><div style="font-size:9px;color:var(--muted)">NET CREDIT</div><div style="font-weight:700">$${entryCredit.toFixed(2)}</div></div>
-      <div><div style="font-size:9px;color:var(--muted)">UNREALIZED P&L</div><div style="font-weight:700;color:${pnlColor}">${pnlSign}$${Math.abs(netPnL).toFixed(2)}</div></div>
-      <div><div style="font-size:9px;color:var(--muted)">P&L %</div><div style="font-weight:700;color:${pnlColor}">${pnlSign}${pnlPct.toFixed(1)}%</div></div>
-      <div><div style="font-size:9px;color:var(--muted)">DTE</div><div style="font-weight:700">${dte}d</div></div>
-      <div><div style="font-size:9px;color:var(--muted)">SHORT STRIKE (sold)</div><div style="font-weight:700;color:var(--orange)">$${short.strike} @ $${parseFloat(short.premium).toFixed(2)}</div></div>
-      <div><div style="font-size:9px;color:var(--muted)">LONG STRIKE (bought)</div><div style="font-weight:700;color:var(--muted)">$${long.strike} @ $${parseFloat(long.premium).toFixed(2)}</div></div>
-      <div><div style="font-size:9px;color:var(--muted)">MAX PROFIT</div><div style="font-weight:700;color:var(--green)">$${maxProfit.toFixed(0)}</div></div>
-      <div><div style="font-size:9px;color:var(--muted)">MAX LOSS</div><div style="font-weight:700;color:var(--red)">$${maxLoss.toFixed(0)}</div></div>
-      <div><div style="font-size:9px;color:var(--muted)">SPREAD WIDTH</div><div style="font-weight:700">$${spreadWidth}</div></div>
-      <div><div style="font-size:9px;color:var(--muted)">BREAKEVEN</div><div style="font-weight:700">$${breakeven}</div></div>
-      <div><div style="font-size:9px;color:var(--muted)">SHORT CURR</div><div style="font-weight:700">$${parseFloat(short.currentPrice||short.premium).toFixed(2)}</div></div>
-      <div><div style="font-size:9px;color:var(--muted)">LONG CURR</div><div style="font-weight:700">$${parseFloat(long.currentPrice||long.premium).toFixed(2)}</div></div>
-    </div>
-    <div style="font-size:10px;color:var(--muted);margin-top:4px">Opened: ${new Date(short.openDate || Date.now()).toLocaleString()}</div>
-  </div>`;
-}
-
-function renderSingleCard(p) {
+  wrap.innerHTML = positions.map(p => {
     const score = p.score || 0;
     const scoreColor = score >= 85 ? 'var(--green)' : score >= 70 ? 'var(--blue)' : 'var(--orange)';
     const isSpread = p.isSpread;
@@ -2171,7 +1795,8 @@ function renderSingleCard(p) {
       ${p.thesisHistory && p.thesisHistory.length > 0 ? `<div style="margin-top:4px;font-size:9px;color:${thesisColor}">Thesis: ${thesisScore}/100 · ${(p.thesisHistory[p.thesisHistory.length-1]?.notes||'').slice(0,80)}</div>` : ''}
       <div style="font-size:10px;color:var(--muted);margin-top:8px">Opened: ${new Date(p.openDate).toLocaleString()}</div>
     </div>`;
-  }
+  }).join('');
+}
 
 function renderGreeks() {
   const positions = state.positions || [];
@@ -2355,9 +1980,11 @@ function renderActivityLog() {
   }).join('');
 }
 
-function renderJournal() {
+async function renderJournal() {
   const wrap = document.getElementById('journal-wrap');
-  const journal = state.tradeJournal || [];
+  let journal = state.tradeJournal || [];
+  try { const r = await fetch('/api/journal'); if (r.ok) journal = await r.json(); } catch(e) {}
+  journal = journal || [];
   if (!journal.length) { wrap.innerHTML = '<div class="no-data">No journal entries yet.</div>'; return; }
   wrap.innerHTML = journal.slice(0, 30).map(e => {
     const isOpen  = e.action === 'OPEN';
@@ -2372,7 +1999,7 @@ function renderJournal() {
           <span style="font-size:10px;padding:2px 8px;border-radius:10px;background:${isOpen?'rgba(0,255,136,.1)':'rgba(0,196,255,.1)'};color:${color}">${e.action}</span>
           ${isOpen ? `<span style="font-size:10px;color:var(--muted)">${
             e.isSpread && e.buyStrike && e.sellStrike
-              ? '$'+e.buyStrike+'/'+'$'+e.sellStrike+(e.isCreditSpread?'P-SPRD':'P-SPRD')
+              ? '$'+e.buyStrike+'/'+'$'+e.sellStrike+((e.optionType==='call'?'C':'P')+'-SPRD')
               : e.strike
                 ? '$'+e.strike+(e.optionType==='put'?'P':'C')+' · '+(e.expDate||'?')
                 : e.optionType
@@ -2638,7 +2265,7 @@ async function triggerDryRun() {
     const resp = await fetch('/api/dry-run-scan', {method:'POST'});
     const data = await resp.json();
     await fetchState();
-    alert('Dry run complete! Check the Server Log tab — look for [DRYRUN] entries showing what ARGO V3.0 would trade.');
+    alert('Dry run complete! Check the Server Log tab — look for [DRYRUN] entries showing what ARGO V2.75 would trade.');
   } catch(e) {
     alert('Dry run error: ' + e.message);
   } finally {
@@ -2656,7 +2283,7 @@ async function triggerTestScan() {
     // Wait for scan to complete then refresh logs
     setTimeout(async () => {
       await fetchState();
-      alert('Test scan complete! Check the Server Log tab.\n\nWould CLOSE / WOULD BUY entries show what ARGO would have done.\nDry run mode was used for this scan only — live mode is now restored.');
+      alert('Test scan complete! Check the Server Log tab for WOULD CLOSE / WOULD BUY entries.\n\nNo orders were submitted — this was a dry run forced outside market hours.');
     }, 8000);
   } catch(e) {
     alert('Test scan error: ' + e.message);
@@ -2685,10 +2312,10 @@ async function resetPDT() {
 }
 
 async function resetCircuit() {
-  if (!confirm('Reset circuit breaker? ARGO V3.0 will resume scanning and entering new trades.')) return;
+  if (!confirm('Reset circuit breaker? ARGO V2.75 will resume scanning and entering new trades.')) return;
   const resp = await fetch('/api/reset-circuit', {method:'POST'});
   const data = await resp.json();
-  alert('Circuit breaker reset. ARGO V3.0 is scanning again.');
+  alert('Circuit breaker reset. ARGO V2.75 is scanning again.');
   await fetchState();
 }
 
@@ -2697,7 +2324,7 @@ async function fullReset() {
   if (!confirm('This cannot be undone. Confirm full reset?')) return;
   const resp = await fetch('/api/full-reset', {method:'POST'});
   const data = await resp.json();
-  alert('Full reset complete. ARGO V3.0 restarted with $10,000.');
+  alert('Full reset complete. ARGO V2.75 restarted with $10,000.');
   location.reload();
 }
 
@@ -2800,13 +2427,13 @@ async function downloadDayReport() {
     const url  = URL.createObjectURL(blob);
     const a    = document.createElement('a');
     a.href     = url;
-    a.download = `ARGO V3.0_DayReport_${today}.json`;
+    a.download = `ARGO V2.75_DayReport_${today}.json`;
     a.click();
     URL.revokeObjectURL(url);
 
     // ── Also show quick summary in alert ─────────────────────────────────
     alert(
-      `ARGO V3.0 Day Report — ${today}\n\n` +
+      `ARGO V2.75 Day Report — ${today}\n\n` +
       `Trades: ${trades.length} | Win Rate: ${winRate}%\n` +
       `Total P&L: $${totalPnL.toFixed(2)}\n` +
       `Best: $${bigWin} | Worst: $${bigLoss}\n` +
@@ -2814,7 +2441,7 @@ async function downloadDayReport() {
       `Exit Reasons:\n` +
       Object.entries(byReason).map(([r,v]) => `  ${r}: ${v.count}x ($${v.pnl.toFixed(2)})`).join('\n') +
       `\n\nOpen Positions: ${openPos.length}\n` +
-      `Report saved as ARGO V3.0_DayReport_${today}.json`
+      `Report saved as ARGO V2.75_DayReport_${today}.json`
     );
   } catch(e) {
     alert('Error generating report: ' + e.message);
@@ -2827,7 +2454,7 @@ let _allLogs  = [];
 
 async function fetchLogs(silent=false) {
   try {
-    const r = await fetch('/api/logs?limit=2000');
+    const r = await fetch('/api/logs?limit=200');
     if (!r.ok) throw new Error('HTTP ' + r.status);
     const data = await r.json();
     _allLogs = data.logs || [];
@@ -2890,8 +2517,6 @@ function renderServerLog() {
       <span style="color:var(--text);font-size:11px;word-break:break-word">${msg}</span>
     </div>`;
   }).join('');
-  const ctr = document.getElementById('log-row-counter');
-  if (ctr) ctr.textContent = logs.length + ' rows';
 }
 
 function clearLog() {
@@ -3114,7 +2739,7 @@ function copyMatrixTemplate() {
   const NL = '\n';
   const DIV = '════════════════════════════════════════';
 
-  let out = 'BACKTEST MATRIX — ARGO V3.0' + NL;
+  let out = 'BACKTEST MATRIX — ARGO V2.75' + NL;
   out += DIV + NL;
   out += 'PERIOD:    ' + startDate + ' → ' + endDate + NL;
   out += 'HOLD:      ' + holdDays + 'd | MAX POS: ' + maxPositions + ' | CAPITAL: $' + capital + NL;
@@ -3296,7 +2921,7 @@ async function runBacktest() {
       putOnly:      btCallSize === 0,
     };
     const modeLabel = body.optionType === "both" ? "puts+calls (best direction daily)" : body.optionType + "s";
-    document.getElementById('bt-loading-msg').textContent = `Replaying ARGO V3.0 ${modeLabel} on ${body.ticker} ${body.startDate}→${body.endDate}...`;
+    document.getElementById('bt-loading-msg').textContent = `Replaying ARGO V2.75 ${modeLabel} on ${body.ticker} ${body.startDate}→${body.endDate}...`;
     const res  = await fetch('/api/backtest', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body) });
     const data = await res.json();
     if (data.error) throw new Error(data.error);
@@ -3506,7 +3131,7 @@ function copyBacktestTemplate() {
     `  ${r}: ${c} (${(c/s.totalTrades*100).toFixed(0)}%)`
   ).join('\n');
 
-  const template = `BACKTEST RESULT — ARGO V3.0
+  const template = `BACKTEST RESULT — ARGO V2.75
 ════════════════════════════════════════
 INSTRUMENT: ${s.ticker}
 DIRECTION:  ${s.optionType?.toUpperCase()}
@@ -3660,7 +3285,6 @@ function switchTab(name) {
   if (name==='analytics')   renderCharts();
   if (name==='report')      loadReport();
   if (name==='log')         fetchLogs();
-  if (name==='scoredebug')  loadScoreDebug();
   if (name==='theta')       loadTheta();
   if (name==='attribution') loadAttribution();
   if (name==='tax')         loadTaxLog();
@@ -3669,247 +3293,6 @@ function switchTab(name) {
 // ── Init ──────────────────────────────────────────────────────────────────
 fetchState();
 setInterval(fetchState, 10000); // refresh every 10 seconds
-
-// ── Copy open positions ─────────────────────────────────────────────────────
-function copyOpenPositions() {
-  var positions = state.positions || [];
-  var btn = document.getElementById('copy-pos-btn');
-  if (!positions.length) {
-    btn.textContent = 'No positions';
-    setTimeout(function(){ btn.textContent = '\u2398 Copy positions'; }, 2000);
-    return;
-  }
-  var used = {}, groups = [];
-  positions.forEach(function(p, i) {
-    if (used[i]) return;
-    if (!p.isSpread && !p.isCreditSpread && p.strike) {
-      for (var j = i+1; j < positions.length; j++) {
-        if (used[j]) continue;
-        var q = positions[j];
-        if (q.ticker===p.ticker && q.expDate===p.expDate && q.optionType===p.optionType && q.strike!==p.strike) {
-          used[i] = used[j] = true;
-          var legs = [p,q].sort(function(a,b){ return b.strike-a.strike; });
-          groups.push({ type:'paired', short:legs[0], long:legs[1] });
-          return;
-        }
-      }
-    }
-    used[i] = true;
-    groups.push({ type:'single', pos:p });
-  });
-  var NL = '\n';
-  var lines = ['ARGO V3.0 \u2014 Open Positions \u2014 '+new Date().toLocaleString(), ''];
-  var totalPnL = 0;
-  groups.forEach(function(g) {
-    if (g.type === 'paired') {
-      var s=g.short, l=g.long, c=s.contracts||1;
-      var nc=parseFloat(s.premium)-parseFloat(l.premium);
-      var w=s.strike-l.strike;
-      var mp=nc*100*c, ml=(w-nc)*100*c;
-      var sP=s.unrealizedPnL!==undefined?parseFloat(s.unrealizedPnL):(parseFloat(s.premium)-parseFloat(s.currentPrice||s.premium))*100*c;
-      var lP=l.unrealizedPnL!==undefined?parseFloat(l.unrealizedPnL):(parseFloat(l.currentPrice||l.premium)-parseFloat(l.premium))*100*c;
-      var net=sP+lP; totalPnL+=net;
-      var pct=mp>0?(net/mp*100):0;
-      lines.push(s.ticker+' '+(s.optionType||'put').toUpperCase()+' $'+s.strike+'/$'+l.strike+' exp '+s.expDate+' [CREDIT SPREAD]');
-      lines.push('  Net credit: $'+nc.toFixed(2)+' | Width: $'+w+' | '+c+'x | '+Math.max(0,Math.round((new Date(s.expDate)-new Date())/86400000))+'d DTE');
-      lines.push('  P&L: '+(net>=0?'+':'-')+'$'+Math.abs(net).toFixed(2)+' ('+(pct>=0?'+':'-')+pct.toFixed(1)+'% of max profit)');
-      lines.push('  Max profit: $'+mp.toFixed(0)+' | Max loss: $'+ml.toFixed(0)+' | Breakeven: $'+(s.strike-nc).toFixed(2));
-      if (s.score) lines.push('  Entry score: '+s.score+'/100');
-      lines.push('');
-    } else {
-      var p=g.pos, c=p.contracts||1;
-      var dte=p.expDate?Math.max(0,Math.round((new Date(p.expDate)-new Date())/86400000)):'?';
-      var label=p.isCreditSpread?'CREDIT SPREAD':p.isSpread?'DEBIT SPREAD':(p.optionType||'put').toUpperCase();
-      var strike=(p.isSpread||p.isCreditSpread)?'$'+(p.shortStrike||p.sellStrike||'?')+'/$'+(p.longStrike||p.buyStrike||'?'):'$'+(p.strike||'?');
-      var cd=p.unrealizedPnL!==undefined?parseFloat(p.unrealizedPnL):p.isCreditSpread?(parseFloat(p.premium)-parseFloat(p.currentPrice||p.premium))*100*c:(parseFloat(p.currentPrice||p.premium)-parseFloat(p.premium))*100*c;
-      var cp2=p.isCreditSpread&&p.maxProfit?(cd/parseFloat(p.maxProfit)*100):parseFloat(p.premium)>0?(cd/(parseFloat(p.premium)*100*c)*100):0;
-      totalPnL+=cd;
-      lines.push(p.ticker+' '+(p.optionType||'put').toUpperCase()+' '+strike+' exp '+p.expDate+' ['+label+']');
-      lines.push('  Entry: $'+parseFloat(p.premium).toFixed(2)+' | Current: $'+parseFloat(p.currentPrice||p.premium).toFixed(2)+' | '+c+'x | '+dte+'d DTE');
-      lines.push('  P&L: '+(cd>=0?'+':'-')+'$'+Math.abs(cd).toFixed(2)+' ('+(cp2>=0?'+':'-')+cp2.toFixed(1)+'%)');
-      if (p.score) lines.push('  Entry score: '+p.score+'/100');
-      lines.push('');
-    }
-  });
-  lines.push('\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500');
-  lines.push(groups.length+' position'+(groups.length!==1?'s':'')+' | Total P&L: '+(totalPnL>=0?'+':'-')+'$'+Math.abs(totalPnL).toFixed(2));
-  var text = lines.join(NL);
-  var doCopy = function(t) {
-    if (navigator.clipboard && navigator.clipboard.writeText) return navigator.clipboard.writeText(t);
-    var ta = document.createElement('textarea');
-    ta.value = t; ta.style.cssText = 'position:fixed;opacity:0';
-    document.body.appendChild(ta); ta.select(); document.execCommand('copy'); ta.remove();
-    return Promise.resolve();
-  };
-  doCopy(text)
-    .then(function(){ btn.textContent='\u2714 Copied!'; setTimeout(function(){ btn.textContent='\u2398 Copy positions'; },2500); })
-    .catch(function(){ btn.textContent='! Failed'; setTimeout(function(){ btn.textContent='\u2398 Copy positions'; },2000); });
-}
-
-// ── Copy logs for Claude ─────────────────────────────────────────────────────
-function copyLogsForClaude() {
-  var btn = document.getElementById('copy-log-btn');
-  var filterType = (document.getElementById('log-filter').value||'').trim();
-  var search = (document.getElementById('log-search').value||'').toLowerCase();
-  var types = filterType ? filterType.split(',') : null;
-  var filtered = (_allLogs||[]).slice();
-  if (types) filtered = filtered.filter(function(e){ return types.indexOf(e.type)>=0; });
-  if (search) filtered = filtered.filter(function(e){ return (e.message||'').toLowerCase().indexOf(search)>=0; });
-  const limitEl = document.getElementById('copy-row-limit');
-  const limit = limitEl ? parseInt(limitEl.value) : 2000;
-  filtered = filtered.slice(0, limit);
-  var NL = '\n';
-  var lines = [
-    'ARGO V3.0 \u2014 Server Log \u2014 '+new Date().toLocaleString(),
-    'Cash: $'+parseFloat(state.cash||0).toFixed(2)+' | Positions: '+(state.positions||[]).length+' | VIX: '+(state.vix||'--')+' | Regime: '+(state._regimeClass||'--')+(state._regimeSubClass?'/'+state._regimeSubClass:''),
-    'Filter: '+(filterType||'all')+' | Entries: '+filtered.length,
-    '\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500',
-    ''
-  ];
-  filtered.forEach(function(e){
-    var t = new Date(e.time).toLocaleTimeString();
-    var type = (e.type||'info').toUpperCase();
-    while (type.length < 8) type += ' ';
-    lines.push('['+t+'] '+type+' '+(e.message||''));
-  });
-  var text = lines.join(NL);
-  var doCopy = function(t) {
-    if (navigator.clipboard && navigator.clipboard.writeText) return navigator.clipboard.writeText(t);
-    var ta = document.createElement('textarea');
-    ta.value = t; ta.style.cssText = 'position:fixed;opacity:0';
-    document.body.appendChild(ta); ta.select(); document.execCommand('copy'); ta.remove();
-    return Promise.resolve();
-  };
-  doCopy(text)
-    .then(function(){ btn.textContent='\u2714 Copied!'; setTimeout(function(){ btn.textContent='\u2398 Copy for Claude'; },2500); })
-    .catch(function(){ btn.textContent='! Failed'; setTimeout(function(){ btn.textContent='\u2398 Copy for Claude'; },2000); });
-}
-
-// ── Score debug ──────────────────────────────────────────────────────────────
-async function loadScoreDebug() {
-  var el = document.getElementById('score-debug-content');
-  if (!el) return;
-  el.innerHTML = '<div class="no-data">Loading scoring data...</div>';
-  try {
-    var r = await fetch('/api/score-debug');
-    if (!r.ok) throw new Error('HTTP '+r.status);
-    var d = await r.json();
-    renderScoreDebug(d, el);
-  } catch(e) {
-    el.innerHTML = '<div class="no-data" style="color:#ff5555">Error: '+e.message+'<br>Make sure ARGO is running and has completed at least one scan.</div>';
-  }
-}
-
-function scoreColor(v, min) {
-  if (v >= min) return '#00ff88';
-  if (v >= min * 0.85) return '#ffd700';
-  return '#ff5555';
-}
-
-function renderScoreDebug(d, el) {
-  var scores  = d.scores  || d._scoreDebug || {};
-  var gates   = d.gates   || {};
-  var minScore = d.minScore || d.effectiveMin || 70;
-  var ts = d.lastScan ? new Date(d.lastScan).toLocaleTimeString() : '--';
-  var out = '';
-
-  // Header bar
-  out += '<div style="background:var(--panel);border:1px solid var(--border);border-radius:8px;padding:10px 14px;margin-bottom:12px;display:flex;gap:20px;flex-wrap:wrap;font-size:11px;color:var(--muted)">';
-  out += '<span>Last scan: <strong style="color:var(--text)">'+ts+'</strong></span>';
-  out += '<span>Regime: <strong style="color:var(--blue)">'+(d.regimeClass||'--')+(d.regimeSubClass?'/'+d.regimeSubClass:'')+'</strong></span>';
-  out += '<span>VIX: <strong style="color:var(--text)">'+(d.vix||'--')+'</strong></span>';
-  out += '<span>Min score: <strong style="color:var(--text)">'+minScore+'</strong></span>';
-  out += '<span>Macro: <strong style="color:var(--text)">'+(d.agentMacro||'--')+'</strong></span>';
-  out += '</div>';
-
-  // Gates
-  var gk = Object.keys(gates);
-  if (gk.length) {
-    out += '<div class="section-title" style="margin-bottom:8px">System gates</div>';
-    out += '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:5px;margin-bottom:16px">';
-    gk.forEach(function(k) {
-      var blocked = gates[k];
-      var col = blocked ? '#ff5555' : '#00ff88';
-      out += '<div style="background:var(--panel);border:1px solid var(--border);border-radius:5px;padding:5px 10px;display:flex;justify-content:space-between">';
-      out += '<span style="font-size:10px;color:var(--muted)">'+k+'</span>';
-      out += '<span style="font-size:10px;font-weight:700;color:'+col+'">'+(blocked?'BLOCKED':'ok')+'</span>';
-      out += '</div>';
-    });
-    out += '</div>';
-  }
-
-  // Per-ticker scores
-  var tickers = Object.keys(scores);
-  out += '<div class="section-title" style="margin-bottom:8px">Instrument scores ('+tickers.length+' instruments)</div>';
-
-  if (!tickers.length) {
-    out += '<div class="no-data">No score data yet. Scores populate after the first market-hours scan.</div>';
-  } else {
-    tickers.sort().forEach(function(ticker) {
-      var r2 = scores[ticker];
-      var ps = r2.putScore || 0;
-      var cs = r2.callScore || 0;
-      var pc = scoreColor(ps, minScore);
-      var cc = scoreColor(cs, minScore);
-      var blocked = (r2.blocked && r2.blocked.length) ? r2.blocked : null;
-      var ageMs = r2.ts ? (Date.now()-r2.ts) : null;
-      var ageStr = ageMs !== null ? (ageMs < 60000 ? Math.round(ageMs/1000)+'s ago' : Math.round(ageMs/60000)+'m ago') : '';
-
-      out += '<div style="background:var(--panel);border:1px solid var(--border);border-radius:8px;padding:12px;margin-bottom:8px">';
-
-      // Ticker header
-      out += '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">';
-      out += '<span style="font-size:16px;font-weight:700;color:#44aaff">'+ticker+'</span>';
-      out += '<div style="text-align:right">';
-      out += '<div style="font-size:11px;color:var(--muted)">$'+(r2.price||'--')+'</div>';
-      if (ageStr) out += '<div style="font-size:10px;color:var(--muted)">'+ageStr+'</div>';
-      out += '</div></div>';
-
-      // Score boxes
-      out += '<div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:10px">';
-      ['put','call'].forEach(function(type) {
-        var score = type==='put' ? ps : cs;
-        var col   = type==='put' ? pc : cc;
-        var wouldEnter = score >= minScore && !blocked;
-        out += '<div style="background:rgba(0,0,0,.25);border-radius:6px;padding:8px;text-align:center">';
-        out += '<div style="font-size:9px;color:var(--muted);letter-spacing:1px;margin-bottom:4px">'+type.toUpperCase()+'</div>';
-        out += '<div style="font-size:26px;font-weight:700;color:'+col+'">'+score+'</div>';
-        out += '<div style="font-size:9px;margin-top:3px;color:'+(wouldEnter?'#00ff88':'var(--muted)')+'">'+(wouldEnter?'&#9654; WOULD ENTER':'below min')+'</div>';
-        out += '</div>';
-      });
-      out += '</div>';
-
-      // Blocked
-      if (blocked) {
-        out += '<div style="background:rgba(255,50,50,.1);border:1px solid rgba(255,50,50,.3);border-radius:5px;padding:6px 10px;font-size:10px;color:#ff7777;margin-bottom:8px">Blocked: '+blocked.join(' | ')+'</div>';
-      }
-
-      // Signals grid
-      if (r2.signals && Object.keys(r2.signals).length) {
-        out += '<div style="display:flex;flex-wrap:wrap;gap:4px;margin-bottom:8px">';
-        Object.keys(r2.signals).forEach(function(k) {
-          out += '<span style="font-size:9px;background:rgba(0,80,160,.2);padding:2px 6px;border-radius:3px;color:#7aa8cc">'+k+': '+r2.signals[k]+'</span>';
-        });
-        out += '</div>';
-      }
-
-      // Put score reasons
-      if (r2.putReasons && r2.putReasons.length) {
-        out += '<div style="font-size:9px;line-height:1.7;max-height:110px;overflow-y:auto;background:rgba(0,0,0,.2);border-radius:4px;padding:6px">';
-        r2.putReasons.forEach(function(reason) {
-          var col = reason.indexOf('(+')>=0 ? '#00cc66' : reason.indexOf('(-')>=0 ? '#ff5555' : '#5a7a99';
-          out += '<div style="color:'+col+'">'+reason+'</div>';
-        });
-        out += '</div>';
-      }
-
-      out += '</div>';
-    });
-  }
-
-  el.innerHTML = out;
-}
-
 </script>
 </body>
 </html>
