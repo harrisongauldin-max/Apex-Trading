@@ -1807,20 +1807,31 @@ function scoreIndexSetup(stock, optionType, spyRSI, spyMACD, spyMomentum, breadt
       reasons.push(`Agent mild bullish in ${bearRegimeForPuts ? "bear regime" : "puts_on_bounces bias"} - bounce entry, treating as neutral (+0)`);
     }
     else if (signal === "mild bullish") {
-      // Regime cap: trending_bear + puts_on_bounces - structural regime wins over tactical bounce headline
-      const inBearPutsOnBounces = ["trending_bear","breakdown"].includes(regime) && entryBias === "puts_on_bounces";
-      const penalty = inBearPutsOnBounces ? -4 : -8;
-      score += penalty; reasons.push(`Agent mild bullish (${penalty})${inBearPutsOnBounces ? " - regime cap" : ""}`);
+      if (tradeType === "credit") {
+        reasons.push(`Agent mild bullish in bear regime - bounce entry, treating as neutral (+0)`);
+      } else {
+        const inBearPutsOnBounces = ["trending_bear","breakdown"].includes(regime) && entryBias === "puts_on_bounces";
+        const penalty = inBearPutsOnBounces ? -4 : -8;
+        score += penalty; reasons.push(`Agent mild bullish (${penalty})${inBearPutsOnBounces ? " - regime cap" : ""}`);
+      }
     }
     else if (signal === "bullish") {
-      const inBearPutsOnBounces2 = ["trending_bear","breakdown"].includes(regime) && entryBias === "puts_on_bounces";
-      const penalty = inBearPutsOnBounces2 ? -8 : -15;
-      score += penalty; reasons.push(`Agent bullish (${penalty})${inBearPutsOnBounces2 ? " - regime cap" : ""}`);
+      if (tradeType === "credit") {
+        score -= 8; reasons.push("Agent bullish (-8) - regime cap");
+      } else {
+        const inBearPutsOnBounces2 = ["trending_bear","breakdown"].includes(regime) && entryBias === "puts_on_bounces";
+        const penalty = inBearPutsOnBounces2 ? -8 : -15;
+        score += penalty; reasons.push(`Agent bullish (${penalty})${inBearPutsOnBounces2 ? " - regime cap" : ""}`);
+      }
     }
     else { // strongly bullish
-      const inBearPutsOnBounces3 = ["trending_bear","breakdown"].includes(regime) && entryBias === "puts_on_bounces";
-      const penalty = inBearPutsOnBounces3 ? -8 : -20;
-      score += penalty; reasons.push(`Agent ${signal} (${penalty})${inBearPutsOnBounces3 ? " - regime cap" : ""}`);
+      if (tradeType === "credit") {
+        score -= 12; reasons.push("Agent strongly bullish (-12) - regime cap");
+      } else {
+        const inBearPutsOnBounces3 = ["trending_bear","breakdown"].includes(regime) && entryBias === "puts_on_bounces";
+        const penalty = inBearPutsOnBounces3 ? -8 : -20;
+        score += penalty; reasons.push(`Agent ${signal} (${penalty})${inBearPutsOnBounces3 ? " - regime cap" : ""}`);
+      }
     }
 
     // - Regime confirmation -
@@ -1947,7 +1958,14 @@ function scoreIndexSetup(stock, optionType, spyRSI, spyMACD, spyMomentum, breadt
     if (breadth <= 30)       { score += 15; reasons.push(`Breadth ${breadth}% - severe weakness (+15)`); }
     else if (breadth <= 45)  { score += 8;  reasons.push(`Breadth ${breadth}% - weak (+8)`); }
     else if (breadth <= 65 && inBearOrChoppy) { score += 4; reasons.push(`Breadth ${breadth}% - below neutral in bear regime (+4)`); }
-    else if (breadth >= 70)  { score -= 15; reasons.push(`Breadth ${breadth}% - strong, wrong for puts (-15)`); }
+    else if (breadth >= 70)  {
+      const isGapDayBreadth = !!(agentMacro && agentMacro.spyGapUp);
+      if (isGapDayBreadth) {
+        score -= 5; reasons.push(`Breadth ${breadth}% - elevated but gap-day mechanics, discounted (-5)`);
+      } else {
+        score -= 15; reasons.push(`Breadth ${breadth}% - strong, wrong for puts (-15)`);
+      }
+    }
 
     // - VIX context -
     if (vixOutlook === "spiking")          { score += 10; reasons.push("VIX spiking - put premium expanding (+10)"); }
@@ -6205,7 +6223,7 @@ async function executeSpreadTrade(stock, price, score, scoreReasons, vix, option
   // Derived from state directly -- spyBelow200MA is a runScan-scoped var, not available here
   // Panel: _dayPlan defaults to normal (was null→high, causing permanent 50% sizing)
   // High risk day only applies when _dayPlan is explicitly set with riskLevel="high"
-  const riskMult = (state._dayPlan?.riskLevel === "high" ? 0.5 : 1.0);  // below200MAMult removed: bear regime should be full-sized in its primary operating mode
+  const riskMult = (state._dayPlan?.riskLevel === "high" ? 0.5 : 1.0);
   // 3B: Score-proportional sizing - higher conviction = larger position (pre-30 fills cap still applies)
   // Applied downstream as a multiplier on contract count
   const scoreSizeMult = (score) => score >= 90 ? 2.0 : score >= 85 ? 1.5 : score >= 80 ? 1.25 : 1.0;
@@ -8911,6 +8929,23 @@ async function runScan() {
     getIntradayBars("SPY"),
   ]);
   if (spyPrice) state._liveSPY = spyPrice;
+  // Compute SPY 200MA once per day at scan time — needed for below200MACallBlock gate
+  const _ma200Date = state._spyMA200Date || "";
+  const _todayStr  = new Date().toLocaleDateString("en-US", { timeZone: "America/New_York" });
+  if (!state._spyMA200 || _ma200Date !== _todayStr) {
+    try {
+      const _spyBars200 = await getStockBars("SPY", 200);
+      if (_spyBars200.length >= 50) {
+        const _closes200 = _spyBars200.slice(-200).map(b => b.c);
+        state._spyMA200    = parseFloat((_closes200.reduce((s,c) => s+c, 0) / _closes200.length).toFixed(2));
+        state._spyMA200Date = _todayStr;
+        logEvent("scan", `[MA] SPY 200MA: $${state._spyMA200} (${_closes200.length} bars)`);
+      } else {
+        // Dinesh: log warning so gate-disabled state is visible, not silent
+        logEvent("warn", `[MA] SPY 200MA: only ${_spyBars200.length} bars returned (need 50+) — below200MACallBlock disabled until data available`);
+      }
+    } catch(e) { logEvent("warn", `[MA] SPY 200MA fetch failed: ${e.message} — below200MACallBlock disabled`); }
+  }
   const spyReturn    = spyBars.length >= 5 ? (spyBars[spyBars.length-1].c - spyBars[0].o) / spyBars[0].o : 0;
   const spyRecovering = (() => {
     if (spyIntraday.length >= 15) {
@@ -9787,7 +9822,7 @@ async function runScan() {
       // Pass credit mode to scoreIndexSetup so RSI block and scoring adjust correctly
       // Scoring uses authRegimeName (price-based, computed once at scan top)
       // Agent signal/confidence/entryBias used for magnitude -- regime overridden by price classifier
-      const scoringMacroBase  = { ...(agentMacro || {}), regime: authRegimeName };
+      const scoringMacroBase  = { ...(agentMacro || {}), regime: authRegimeName, spyGapUp: !!spyGapUp };
       const scoringMacro = creditModeActive
         ? { ...scoringMacroBase, tradeType: "credit" }
         : scoringMacroBase;
@@ -10268,7 +10303,7 @@ async function runScan() {
       const agentStaleMins = agentLastRun
         ? ((Date.now() - new Date(agentLastRun).getTime()) / 60000)
         : 999;
-      logEvent("filter", `Agent macro stale (${agentStaleMins.toFixed(0)}min) - raising min score. Last signal: ${agentSig || "none"}`);
+      logEvent("filter", `Agent macro stale (${agentStaleMins.toFixed(0)}min) - using keyword fallback. Last signal: ${agentSig || "none"}`);
       if (agentStaleMins > 90 && isMarketHours()) {
         logEvent("warn", `[AGENT] Macro analysis has not run in ${agentStaleMins.toFixed(0)} minutes - check API key and headlines`);
       }
