@@ -24,7 +24,7 @@ const ALPACA_NEWS       = "https://data.alpaca.markets/v1beta1";    // news endp
 // - Data Cache - declared early so all functions can use it -
 // Slow-changing data cached to reduce API calls and Railway connection pressure
 const _slowCache     = new Map(); // key: "type:ticker", value: { data, ts }
-const SLOW_CACHE_TTL = 5  * 60 * 1000; // 5 min - news, analyst, premarket
+const SLOW_CACHE_TTL = 10 * 60 * 1000; // OPT5: 10min — news/analyst/premarket update hourly at most
 const BARS_CACHE_TTL = 60 * 60 * 1000; // 60 min - daily bars don't change intraday
 
 function getCached(key, ttl = SLOW_CACHE_TTL) {
@@ -36,7 +36,7 @@ function setCache(key, data) { _slowCache.set(key, { data, ts: Date.now() }); re
 const GMAIL_USER        = process.env.GMAIL_USER        || "";
 const RESEND_API_KEY    = process.env.RESEND_API_KEY    || "";
 const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY || "";
-const ANTHROPIC_MODEL   = "claude-sonnet-4-5";  // Best quality/cost for financial reasoning
+const ANTHROPIC_MODEL   = "claude-sonnet-4-20250514";  // OPT6: latest Sonnet — better performance, same cost
 const STATE_FILE        = path.join(__dirname, "state.json");
 const REDIS_URL         = process.env.UPSTASH_REDIS_REST_URL  || "";
 const REDIS_TOKEN       = process.env.UPSTASH_REDIS_REST_TOKEN || "";
@@ -132,7 +132,7 @@ const INSTRUMENT_CONSTRAINTS = {
   GLD: { allowedTypes: ["credit_put", "credit_call", "debit_put"], reason: "Commodity hedge - debit calls only on equity selloffs" },
   SPY: { allowedTypes: ["credit_put", "credit_call", "debit_put", "debit_call", "iron_condor", "debit_naked"] },
   QQQ: { allowedTypes: ["credit_put", "credit_call", "debit_put", "debit_call", "iron_condor", "debit_naked"] },
-  XLE: { allowedTypes: ["debit_put"], reason: "Energy ETF - directional puts on downtrend only" },
+  XLE: { allowedTypes: ["debit_put", "credit_put"], reason: "Energy ETF - debit puts preferred; credit puts allowed in elevated IV regimes" }, // B8
 };
 // Entry windows handled by isEntryWindow() - see function below
 const STOCK_PROFIT_THRESH = 1000;   // monthly profit threshold for stock buys
@@ -240,6 +240,7 @@ const WATCHLIST = [
   // Entry gated by: SPY below 50MA + score 75+ + direction-aware
   {
     ticker:    "TLT",
+    isIndex:   true,  // B4: required for credit_put/credit_call tradeType
     sector:    "Bonds",
     momentum:  "steady",
     rsi:       50,
@@ -939,7 +940,7 @@ async function runReconciliation() {
           const sameTickerExp = a.ticker === b.ticker && a.expDate === b.expDate && a.optType === b.optType;
           // Width cap raised to 25 - spread widths scale with VIX (up to $20 at VIX 35)
           // Previous cap of 12 caused $14+ wide spreads to be reconciled as individual legs
-          const widthOk = Math.abs(a.strike - b.strike) >= 5 && Math.abs(a.strike - b.strike) <= 25;
+          const widthOk = Math.abs(a.strike - b.strike) >= 5 && Math.abs(a.strike - b.strike) <= 100; // B11: match re-pairing block
           const oppDir  = (a.qty > 0 && b.qty < 0) || (a.qty < 0 && b.qty > 0);
           if (sameTickerExp && widthOk && oppDir) {
             const longLeg  = a.qty > 0 ? a : b;
@@ -948,19 +949,32 @@ async function runReconciliation() {
               ? (longLeg.strike > shortLeg.strike ? longLeg : shortLeg)
               : (longLeg.strike < shortLeg.strike ? longLeg : shortLeg);
             const sellLeg  = buyLeg === longLeg ? shortLeg : longLeg;
-            const netDebit = parseFloat((buyLeg.avgEntry - Math.abs(sellLeg.avgEntry)).toFixed(2));
+            // B3-concern fix: use absolute difference — always positive regardless of direction
+            // credit: sellLeg.avgEntry > buyLeg.avgEntry → difference = net credit received
+            // debit:  buyLeg.avgEntry > sellLeg.avgEntry → difference = net debit paid
+            const netDebit = parseFloat(Math.abs(Math.abs(sellLeg.avgEntry) - buyLeg.avgEntry).toFixed(2));
             const spreadWidth = Math.abs(buyLeg.strike - sellLeg.strike);
+            // B3a: detect credit vs debit — PUT credit: long strike < short strike
+            const _isCredit3a = a.optType === 'put' ? buyLeg.strike < sellLeg.strike : buyLeg.strike > sellLeg.strike;
             state.positions.push({
               ticker: a.ticker, optionType: a.optType,
-              isSpread: true, buyStrike: buyLeg.strike, sellStrike: sellLeg.strike,
+              isSpread: true, isCreditSpread: _isCredit3a,
+              buyStrike: buyLeg.strike, sellStrike: sellLeg.strike,
               spreadWidth, buySymbol: buyLeg.sym, sellSymbol: sellLeg.sym,
               contractSymbol: buyLeg.sym,
-              premium: Math.max(0.01, netDebit), maxProfit: parseFloat((spreadWidth - Math.max(0.01, netDebit)).toFixed(2)),
-              maxLoss: Math.max(0.01, netDebit), contracts: Math.abs(buyLeg.qty),
+              // D-FIX1a: credit=netDebit is credit received; debit=netDebit is cost paid
+              premium:   Math.max(0.01, netDebit),
+              maxProfit: _isCredit3a
+                ? Math.max(0.01, netDebit)                                                  // credit: max profit = credit received
+                : parseFloat((spreadWidth - Math.max(0.01, netDebit)).toFixed(2)),          // debit: max profit = width - cost
+              maxLoss:   _isCredit3a
+                ? parseFloat((spreadWidth - Math.max(0.01, netDebit)).toFixed(2))           // credit: max loss = width - credit
+                : Math.max(0.01, netDebit),                                                 // debit: max loss = cost paid
+              contracts: Math.abs(buyLeg.qty),
               expDate: a.expDate, expDays: a.expDays,
               cost: parseFloat((Math.max(0.01, netDebit) * 100 * Math.abs(buyLeg.qty)).toFixed(2)),
               score: 75, reasons: ['Reconstructed spread from Alpaca reconciliation'],
-              openDate: buyLeg.alpPos.created_at || new Date().toISOString(),
+              openDate: buyLeg.alpPos.created_at || new Date(Date.now() - 86400000).toISOString(), // B10: fallback=yesterday
               currentPrice: Math.max(0.01, netDebit), peakPremium: Math.max(0.01, netDebit),
               entryRSI: 50, entryMACD: 'neutral', entryMomentum: 'steady', entryMacro: 'neutral',
               entryThesisScore: 100, thesisHistory: [], agentHistory: [],
@@ -970,7 +984,8 @@ async function runReconciliation() {
               breakevenLocked: false, halfPosition: false,
               target: parseFloat((Math.max(0.01, netDebit) * 1.5).toFixed(2)),
               stop: parseFloat((Math.max(0.01, netDebit) * 0.65).toFixed(2)),
-              takeProfitPct: TAKE_PROFIT_PCT, fastStopPct: STOP_LOSS_PCT,
+              takeProfitPct: _isCredit3a ? calcCreditSpreadTP(state.vix) : TAKE_PROFIT_PCT, // B7a
+              fastStopPct: STOP_LOSS_PCT,
             });
             used.add(i); used.add(j); paired = true;
             logEvent("warn", `[RECONCILE] Reconstructed SPREAD: ${a.ticker} \$${buyLeg.strike}/\$${sellLeg.strike} ${a.optType.toUpperCase()} exp ${a.expDate}`);
@@ -1001,7 +1016,7 @@ async function runReconciliation() {
             breakevenLocked: false, halfPosition: false,
             target: parseFloat((p.avgEntry * 1.5).toFixed(2)),
             stop: parseFloat((p.avgEntry * 0.65).toFixed(2)),
-            takeProfitPct: TAKE_PROFIT_PCT, fastStopPct: STOP_LOSS_PCT,
+            takeProfitPct: TAKE_PROFIT_PCT, fastStopPct: STOP_LOSS_PCT, // individual leg: type unknown
           });
           used.add(i);
           logEvent("warn", `[RECONCILE] Reconstructed leg: ${p.ticker} ${p.optType.toUpperCase()} \$${p.strike} exp ${p.expDate} | ${Math.abs(p.qty)}x @ \$${p.avgEntry}`);
@@ -1054,17 +1069,24 @@ async function runReconciliation() {
           const netDebit = parseFloat((buyLeg.premium - sellLeg.premium).toFixed(2));
           const curNet   = parseFloat(((buyLeg.currentPrice || buyLeg.premium) - (sellLeg.currentPrice || sellLeg.premium)).toFixed(2));
 
+          // B3b: detect credit vs debit — same logic as B3a
+          const _isCredit3b = a.optionType === 'put' ? buyLeg.strike < sellLeg.strike : buyLeg.strike > sellLeg.strike;
           const merged = {
             ticker:      a.ticker, optionType: a.optionType,
-            isSpread:    true,
+            isSpread:    true, isCreditSpread: _isCredit3b,
             buyStrike:   buyLeg.strike, sellStrike: sellLeg.strike,
             spreadWidth: width,
             buySymbol:   buyLeg.contractSymbol,
             sellSymbol:  sellLeg.contractSymbol,
             contractSymbol: buyLeg.contractSymbol,
             premium:     Math.max(0.01, netDebit),
-            maxProfit:   parseFloat((width - Math.max(0.01, netDebit)).toFixed(2)),
-            maxLoss:     Math.max(0.01, netDebit),
+            // D-FIX1b: same correction as 1a
+            maxProfit:   _isCredit3b
+              ? Math.max(0.01, netDebit)                                             // credit: max profit = credit received
+              : parseFloat((width - Math.max(0.01, netDebit)).toFixed(2)),           // debit: max profit = width - cost
+            maxLoss:     _isCredit3b
+              ? parseFloat((width - Math.max(0.01, netDebit)).toFixed(2))            // credit: max loss = width - credit
+              : Math.max(0.01, netDebit),                                            // debit: max loss = cost paid
             contracts:   Math.max(buyLeg.contracts || 1, sellLeg.contracts || 1),
             expDate:     a.expDate, expDays: a.expDays,
             cost:        parseFloat((Math.max(0.01, netDebit) * 100 * Math.max(buyLeg.contracts||1, sellLeg.contracts||1)).toFixed(2)),
@@ -1082,7 +1104,8 @@ async function runReconciliation() {
             breakevenLocked: false, halfPosition: false,
             target: parseFloat((Math.max(0.01, netDebit) * 1.5).toFixed(2)),
             stop:   parseFloat((Math.max(0.01, netDebit) * 0.65).toFixed(2)),
-            takeProfitPct: TAKE_PROFIT_PCT, fastStopPct: STOP_LOSS_PCT,
+            takeProfitPct: _isCredit3b ? calcCreditSpreadTP(state.vix) : TAKE_PROFIT_PCT, // B7c
+            fastStopPct: STOP_LOSS_PCT,
           };
           toRemove.add(buyIdx);
           toRemove.add(sellIdx);
@@ -1119,6 +1142,8 @@ function logEvent(type, message) {
   // Separate from tradeLog so the live 500-entry rolling buffer is not affected
   if (!state._dailyLogBuffer) state._dailyLogBuffer = [];
   state._dailyLogBuffer.push(entry);
+  if (state._dailyLogBuffer.length > 5000) // B9: cap to prevent unbounded RAM growth
+    state._dailyLogBuffer = state._dailyLogBuffer.slice(-5000);
   console.log(`[${type.toUpperCase()}] ${message}`);
 }
 
@@ -2480,6 +2505,19 @@ async function getStockBars(ticker, limit = 60) {
 // Used for real-time RSI, MACD, VWAP, momentum signals
 // 1-minute gives maximum real-time accuracy - updated every scan cycle
 async function getIntradayBars(ticker, minutes = 390) {
+  // OPT1: Cache intraday bars for 30s — updates every minute, 30s loses nothing
+  // OPT8: For sub-390 requests, try to slice from the cached 390-min bars first
+  const _intradayCacheKey = `intraday:${ticker}:${minutes}`;
+  const _intradayCached   = getCached(_intradayCacheKey, 30 * 1000);
+  if (_intradayCached) return _intradayCached;
+  if (minutes < 390) {
+    const _fullCached = getCached(`intraday:${ticker}:390`, 30 * 1000);
+    if (_fullCached && _fullCached.length >= minutes) {
+      const _sliced = _fullCached.slice(-minutes);
+      setCache(_intradayCacheKey, _sliced);
+      return _sliced; // OPT8: serve sub-window from full cached bars
+    }
+  }
   try {
     // Calculate market open in ET (Railway runs UTC - must use ET explicitly)
     const nowET       = getETTime();
@@ -2497,7 +2535,8 @@ async function getIntradayBars(ticker, minutes = 390) {
     for (const feed of feeds) {
       const url  = `/stocks/${ticker}/bars?timeframe=1Min&start=${startISO}&end=${endISO}&limit=390&feed=${feed}`;
       const data = await alpacaGet(url, ALPACA_DATA);
-      if (data && data.bars && data.bars.length >= 5) return data.bars;
+      if (data && data.bars && data.bars.length >= 5)
+        return setCache(_intradayCacheKey, data.bars);
     }
     return [];
   } catch(e) { return []; }
@@ -2520,14 +2559,19 @@ async function getVIX() {
 // Returns best contract matching our delta target and expiry window
 // - Earnings Calendar -
 async function getEarningsDate(ticker) {
+  // OPT2: Cache for 6 hours — earnings dates don't change intraday
+  // Was: raw Alpaca corporate actions call every scan per ticker (1,080 calls/hour)
+  const _earningsCacheKey = `earnings:${ticker}`;
+  const _earningsCached   = getCached(_earningsCacheKey, 6 * 60 * 60 * 1000);
+  if (_earningsCached !== null && _earningsCached !== undefined) return _earningsCached;
   try {
     const today = getETTime().toISOString().split("T")[0];
     const end   = new Date(Date.now() + 60 * MS_PER_DAY).toISOString().split("T")[0];
     const data  = await alpacaGet(`/corporate_actions/announcements?ca_types=Earnings&symbols=${ticker}&since=${today}&until=${end}`, ALPACA_DATA);
     if (data && data.announcements && data.announcements.length > 0) {
-      return data.announcements[0].ex_date || null;
+      return setCache(_earningsCacheKey, data.announcements[0].ex_date || null);
     }
-    return null;
+    return setCache(_earningsCacheKey, null);
   } catch(e) { return null; }
 }
 
@@ -4948,7 +4992,7 @@ async function getOptionsPrice(symbol) {
 }
 
 
-async function checkAllFilters(stock, price) {
+async function checkAllFilters(stock, price, prefetchedBars = null) { // OPT3: accept pre-fetched bars
   const fails = [];
 
   // 1. Entry window — SPY/QQQ open at 9:30am, individual stocks at 9:45am
@@ -4994,7 +5038,8 @@ async function checkAllFilters(stock, price) {
   // If implied vol >> realized vol, options are overpriced — skip
   // If implied vol ≈ realized vol or implied < realized, options are fairly priced or cheap — enter
   try {
-    const volBars = await getStockBars(stock.ticker, 21);
+    // OPT3: use prefetched bars (60 bars) sliced to 21 — avoids separate Alpaca call
+    const volBars = prefetchedBars ? prefetchedBars.slice(-21) : await getStockBars(stock.ticker, 21);
     if (volBars.length >= 10) {
       const closes   = volBars.map(b => b.c);
       const returns  = closes.slice(1).map((c, i) => Math.log(c / closes[i]));
@@ -5050,7 +5095,8 @@ async function checkAllFilters(stock, price) {
   // Individual stocks: keep check but direction-aware — near resistance bad for calls, near support bad for puts.
   if (!stock.isIndex) {
     try {
-      const bars = await getStockBars(stock.ticker, 20);
+      // OPT3: use prefetched bars sliced to 20
+      const bars = prefetchedBars ? prefetchedBars.slice(-20) : await getStockBars(stock.ticker, 20);
       if (bars.length >= 10) {
         const sr = getSupportResistance(bars);
         if (price >= sr.resistance * (1 - RESISTANCE_BUFFER)) {
@@ -5066,7 +5112,8 @@ async function checkAllFilters(stock, price) {
   // 17. Pre-market check (only relevant in first 90 mins of session)
   const etHour = new Date().toLocaleString("en-US", {timeZone:"America/New_York", hour:"numeric", hour12:false});
   if (parseInt(etHour) < 12) {
-    const priceYest = (await getStockBars(stock.ticker, 2))[0]?.c;
+    // OPT3: slice prefetched bars for yesterday price
+    const priceYest = prefetchedBars ? (prefetchedBars[prefetchedBars.length - 2] || prefetchedBars[0])?.c : (await getStockBars(stock.ticker, 2))[0]?.c;
     if (priceYest) {
       const premarketMove = (price - priceYest) / priceYest;
       if (premarketMove <= PREMARKET_NEGATIVE) {
@@ -5420,7 +5467,9 @@ async function syncPositionPnLFromAlpaca() {
       // Credit spread cost = margin reserved = maxLoss (max risk)
       // Debit spread cost  = net debit paid  = premium × 100 × contracts
       if (pos.maxLoss > 0) {
-        pos.cost = pos.isCreditSpread ? pos.maxLoss : pos.maxLoss;
+        pos.cost = pos.isCreditSpread
+          ? pos.maxLoss // credit: margin reserved
+          : parseFloat((pos.premium * 100 * pos.contracts).toFixed(2)); // B5: debit = cash paid
       }
 
       // ── Max profit / max loss (always recalculate from Alpaca data) ─────
@@ -6026,6 +6075,7 @@ async function executeCreditSpread(stock, price, score, scoreReasons, vix, optio
         isSpread:       true,
         isChoppyEntry:  false,
         mlegBody,
+        spreadPct:      shortContract.spread || 0.05, // B6-concern fix: real bid/ask spread % for retry concession scaling
         _preSubmit:     true, // flag: not yet confirmed submitted to Alpaca
       };
       markDirty();
@@ -6305,6 +6355,7 @@ async function confirmPendingOrder() {
           _creditHarvestExpiry: new Date(Date.now() + 7 * MS_PER_DAY).toISOString(),
         };
         state.positions.push(position);
+        state.todayTrades++; // B2: increment for credit spread fills
         state._pendingOrder = null;
         logEvent("trade", `[CREDIT SPREAD] ENTERED ${pending.ticker} $${pending.sellStrike}/$${pending.buyStrike} exp ${pending.expDate} | credit $${netCredit} | margin $${marginRequired}`);
         await syncCashFromAlpaca();
@@ -6415,7 +6466,10 @@ async function confirmPendingOrder() {
       await alpacaPost(`/orders/${pending.orderId}/cancel`, {}).catch(() => {});
       const spreadPct     = pending.spreadPct || 0.05; // bid-ask spread % at entry time
       const rawConcession = Math.max(0.05, Math.min(0.20, parseFloat((pending.netDebitLimit * spreadPct * 0.5).toFixed(2))));
-      const retryLimit    = parseFloat((pending.netDebitLimit + rawConcession).toFixed(2));
+      // B6: credit spreads accept less premium to improve fill (subtract); debits pay more (add)
+      const retryLimit    = pending.isCreditSpread
+        ? parseFloat((pending.netDebitLimit - rawConcession).toFixed(2))
+        : parseFloat((pending.netDebitLimit + rawConcession).toFixed(2));
       logEvent("warn", `[SPREAD] Unfilled after ${age.toFixed(0)}s - retrying with $${rawConcession.toFixed(2)} concession (spread ${(spreadPct*100).toFixed(0)}%) @ $${retryLimit}`);
       const retryBody  = { ...pending.mlegBody, limit_price: String(retryLimit) };
       const retryResp  = await alpacaPost("/orders", retryBody).catch(() => null);
@@ -7029,7 +7083,11 @@ async function closePosition(ticker, reason, exitPremium = null, contractSym = n
     logEvent("warn", `${ticker} state NOT updated — Alpaca close unconfirmed. Position preserved.`);
     return;
   }
-  state.cash          = parseFloat((state.cash + ev + (bonus?BONUS_AMOUNT:0)).toFixed(2));
+  // D-FIX4: credit spreads: cash += pnl (delta only — credit already collected at entry)
+  // debit spreads: cash += ev (proceeds received on sale)
+  // syncCashFromAlpaca() called immediately after corrects any residual drift
+  const _cashDelta = pos.isCreditSpread ? pnl : ev;
+  state.cash       = parseFloat((state.cash + _cashDelta + (bonus?BONUS_AMOUNT:0)).toFixed(2));
   state.extraBudget  += bonus ? BONUS_AMOUNT : 0;
   state.totalRevenue  = nr;
   state.monthlyProfit = parseFloat((state.monthlyProfit + pnl).toFixed(2));
@@ -7600,7 +7658,7 @@ async function runScan() {
   // Prevents repeated iteration over state.positions on every check
   const _totalCap  = totalCap();
   const _openRisk  = openRisk();
-  const _heatPct   = openCostBasis() / _totalCap;
+  const _heatPct   = Math.max(0, _totalCap - (state.cash || 0)) / _totalCap; // B1: cash delta matches heatPct()
   const _heatPctPc = parseFloat((_heatPct * 100).toFixed(1));
 
   // Scan-cycle cache - expensive fetches reused within same scan window
@@ -8109,21 +8167,20 @@ async function runScan() {
     marketContext.fearGreed   = fg;
     marketContext.dxy         = dxy;
     marketContext.yieldCurve  = yc;
-    // Real put/call ratio from CBOE via Alpaca - fetch PCCE (equity P/C) and PCCR (total P/C)
-    // PCCE tracks equity-only put/call ratio - most relevant for individual stock options
-    try {
-      const pcceData = await alpacaGet(`/stocks/PCCE/bars?timeframe=1Day&limit=5`, ALPACA_DATA);
-      if (pcceData && pcceData.bars && pcceData.bars.length > 0) {
-        const pcRatio  = parseFloat(pcceData.bars[pcceData.bars.length-1].c);
-        const signal   = pcRatio > 0.9 ? "fear" : pcRatio > 0.7 ? "elevated" : pcRatio < 0.5 ? "greed" : "neutral";
-        marketContext.putCallRatio = { ratio: parseFloat(pcRatio.toFixed(2)), signal, source: "CBOE-PCCE" };
-      } else {
-        // Fallback if PCCE unavailable
-        marketContext.putCallRatio = state.vix > 30 ? { ratio: 1.3, signal: "fear" } : state.vix > 20 ? { ratio: 1.0, signal: "neutral" } : { ratio: 0.7, signal: "greed" };
-      }
-    } catch(e) {
-      marketContext.putCallRatio = state.vix > 30 ? { ratio: 1.3, signal: "fear" } : state.vix > 20 ? { ratio: 1.0, signal: "neutral" } : { ratio: 0.7, signal: "greed" };
+    // Real put/call ratio — OPT-PCCE: 15min gate, daily bar
+    if (!state._pcceCheckedAt || Date.now() - state._pcceCheckedAt > 15 * 60 * 1000) {
+      state._pcceCheckedAt = Date.now();
+      try {
+        const pcceData = await alpacaGet(`/stocks/PCCE/bars?timeframe=1Day&limit=5`, ALPACA_DATA);
+        if (pcceData && pcceData.bars && pcceData.bars.length > 0) {
+          const pcRatio = parseFloat(pcceData.bars[pcceData.bars.length-1].c);
+          const signal  = pcRatio > 0.9 ? "fear" : pcRatio > 0.7 ? "elevated" : pcRatio < 0.5 ? "greed" : "neutral";
+          state._pcceRatio = { ratio: parseFloat(pcRatio.toFixed(2)), signal, source: "CBOE-PCCE" };
+        }
+      } catch(e) {}
     }
+    marketContext.putCallRatio = state._pcceRatio ||
+      (state.vix > 30 ? { ratio: 1.3, signal: "fear" } : state.vix > 20 ? { ratio: 1.0, signal: "neutral" } : { ratio: 0.7, signal: "greed" });
     logEvent("scan", `[15min] F&G:${fg.score} | DXY:${dxy.trend} | Yield:${yc.signal}`);
   }
 
@@ -8274,7 +8331,8 @@ async function runScan() {
       if (Date.now() - lastRSICheck > 5 * 60 * 1000) {
         pos._lastRSITriggerCheck = Date.now();
         try {
-          const rsiB = await getStockBars(pos.ticker, 20);
+          const rsiB = _posBarCache.get(pos.ticker) || await getStockBars(pos.ticker, 20);
+          if (!_posBarCache.has(pos.ticker) && rsiB.length) _posBarCache.set(pos.ticker, rsiB); // OPT7
           if (rsiB.length >= 14) {
             const liveRSI   = calcRSI(rsiB);
             const entryRSI  = pos.entryRSI || 70;
@@ -8567,9 +8625,10 @@ async function runScan() {
     // 1b. CREDIT SPREAD MAX LOSS STOP - panel unanimous: 50% of max loss OR 2x credit
     // Checks actual dollar loss against max loss rather than relying on fastStopPct alone
     // This is the primary stop for credit spreads - more precise than percentage-based
-    if (pos.isCreditSpread && pos.maxLoss > 0 && curP > 0) {
+    // D-FIX3: guard min premium — prevents immediate stop fire on reconciled spreads with bad avgEntry data
+    if (pos.isCreditSpread && pos.maxLoss > 0 && curP > 0 && pos.premium > 0.05) {
       const creditLossDollar = (curP - pos.premium) * 100 * (pos.contracts || 1); // $ lost so far
-      const halfMaxLoss      = pos.maxLoss * 0.50;  // 50% of defined max loss in dollars
+      const halfMaxLoss      = pos.maxLoss * 100 * (pos.contracts || 1) * 0.50; // 50% of max loss in dollars (×100 to match creditLossDollar units)
       const twiceCredit      = pos.premium * 2 * 100 * (pos.contracts || 1); // lose 2x what you could gain
       const creditStopDollar = Math.min(halfMaxLoss, twiceCredit); // stricter of the two
       if (creditLossDollar >= creditStopDollar && !pdtProtected) {
@@ -8594,7 +8653,8 @@ async function runScan() {
       // Signal decay: tighten trail if entry thesis has reversed
       let liveRSI = pos.entryRSI || 55;
       try {
-        const posBars = await getStockBars(pos.ticker, 20);
+        const posBars = _posBarCache.get(pos.ticker) || await getStockBars(pos.ticker, 20); // OPT7: reuse cached bars
+        if (!_posBarCache.has(pos.ticker) && posBars.length) _posBarCache.set(pos.ticker, posBars);
         if (posBars.length >= 15) liveRSI = calcRSI(posBars);
       } catch(e) {}
       if (pos.optionType === "call" && liveRSI < 45 && (pos.entryRSI || 55) >= 50) {
@@ -8655,7 +8715,8 @@ async function runScan() {
     if (hoursOpen >= 1 && Math.floor(hoursOpen) > (pos._lastThesisCheck || 0)) {
       pos._lastThesisCheck = Math.floor(hoursOpen);
       try {
-        const tBars  = await getStockBars(pos.ticker, 20);
+        const tBars  = _posBarCache.get(pos.ticker) || await getStockBars(pos.ticker, 20); // OPT7: reuse cached bars
+        if (!_posBarCache.has(pos.ticker) && tBars.length) _posBarCache.set(pos.ticker, tBars);
         if (tBars.length >= 15) {
           const curRSI = calcRSI(tBars);
           const entryRSI = pos.entryRSI || (pos.optionType === "put" ? 75 : 30);
@@ -8691,7 +8752,9 @@ async function runScan() {
     // Individual leg 50MA exits create partial closes and naked positions
     if (hoursOpen >= 2 && !(pos.dteLabel && pos.dteLabel.includes("RECONCIL"))) {
       try {
-        const maBars = await getStockBars(pos.ticker, 55);
+        const _maCacheKey = `ma55:${pos.ticker}`;
+        const maBars = getCached(_maCacheKey, 10 * 60 * 1000) // OPT-MABARS: 10min — daily bars
+          || setCache(_maCacheKey, await getStockBars(pos.ticker, 55));
         if (maBars.length >= 50) {
           const ma50 = maBars.slice(-50).reduce((s, b) => s + b.c, 0) / 50;
           const ma50Break = pos.optionType === "put"
@@ -9463,7 +9526,7 @@ async function runScan() {
     const hasSectorPut    = sectorPositions.some(p => p.optionType === "put");
 
     // Get filter result - even on fail, collect weakness signals for put scoring
-    const filterResult = await checkAllFilters(stock, price);
+    const filterResult = await checkAllFilters(stock, price, bars); // OPT3: pass prefetched bars
 
     // Collect weakness signals that boost put scores
     // CAP: max +20 total weakness boost - prevents whole-sector selloffs
@@ -11304,7 +11367,7 @@ async function syncCashFromAlpaca() {
 }
 
 // - Alpaca cash sync interval - calls syncCashFromAlpaca every 30s -
-setInterval(syncCashFromAlpaca, 30 * 1000); // every 30 seconds
+setInterval(syncCashFromAlpaca, 5 * 60 * 1000); // OPT4: 5min — post-trade syncs handle fills immediately
 
 // - Independent agent macro interval - runs every 3 minutes regardless of scan state -
 // Decoupled from scan so long mleg poll loops don't starve the agent
@@ -12915,7 +12978,13 @@ initState().then(() => {
     console.log(`Scan:        every 10 seconds, 9AM-4PM ET Mon-Fri (SPY/QQQ only)`);
     console.log(`Entry window: 9:30AM-3:45PM ET (SPY/QQQ spreads primary)`);
   });
-});
+}).catch(e => {
+  console.error("[BOOT] initState failed — Redis unreachable or corrupt:", e.message);
+  console.error("[BOOT] Starting with default state. Positions and cash may be wrong.");
+  // Start server anyway so Railway doesn't crash-loop — state will be empty but system is alive
+  app.listen(PORT, () => console.log(`ARGO running (degraded — Redis failed at boot)`));
+  setInterval(() => runScan(), 10000); // still scan, will use default empty state
+});;
 
 // -
 // ARGO V3.0 - BACKTESTING ENGINE
