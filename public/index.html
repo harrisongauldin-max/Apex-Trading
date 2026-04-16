@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8"/>
 <meta name="viewport" content="width=device-width,initial-scale=1"/>
-<title>ARGO V3.1 — Professional Options Agent</title>
+<title>ARGO V3.2 — Professional Options Agent</title>
 <style>
 :root{
   --bg:#07101f;--panel:#0a1628;--border:#0d3050;--text:#cce8ff;--muted:#336688;
@@ -127,7 +127,7 @@ input[type=text]:focus{border-color:var(--blue)}
       </svg>
     </div>
     <div class="logo-text">
-      <h1>ARGO V3.1 <span id="account-phase-pill" style="font-size:9px;padding:2px 7px;border-radius:10px;letter-spacing:1px;vertical-align:middle;display:none"></span></h1>
+      <h1>ARGO V3.2 <span id="account-phase-pill" style="font-size:9px;padding:2px 7px;border-radius:10px;letter-spacing:1px;vertical-align:middle;display:none"></span></h1>
       <p>PROFESSIONAL OPTIONS AGENT v2.0 · ALPACA PAPER</p>
     </div>
   </div>
@@ -474,7 +474,7 @@ input[type=text]:focus{border-color:var(--blue)}
   <div class="section-title">Open Positions</div>
   <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px"><div style="font-size:10px;color:#5a7a99;letter-spacing:1px">OPEN POSITIONS</div><button id="copy-pos-btn" onclick="copyOpenPositions()" style="font-size:10px;padding:3px 10px;background:rgba(0,196,255,.08);border:1px solid rgba(0,196,255,.3);border-radius:4px;color:#44aaff;cursor:pointer">&#9126; Copy positions</button></div>
   <div id="positions-wrap">
-    <div class="no-data">No open positions. ARGO V3.1 will enter trades during market hours (Puts 9:45AM / Calls 10AM–3:30PM ET).</div>
+    <div class="no-data">No open positions. ARGO V3.2 will enter trades during market hours (Puts 9:45AM / Calls 10AM–3:30PM ET).</div>
   </div>
 
   <div class="section-title">Portfolio Greeks</div>
@@ -655,7 +655,7 @@ input[type=text]:focus{border-color:var(--blue)}
     <div class="no-data">Loading correlation data...</div>
   </div>
 
-  <div class="section-title">V3.1 Risk Controls</div>
+  <div class="section-title">V3.2 Risk Controls</div>
   <div class="grid4" style="margin-bottom:12px">
     <div class="card">
       <div class="card-title">ACCOUNT PHASE</div>
@@ -752,7 +752,7 @@ input[type=text]:focus{border-color:var(--blue)}
 <div id="tab-journal" class="content">
   <div class="section-title" style="margin-top:0">Trade Journal — Entry Reasoning</div>
   <div id="journal-wrap">
-    <div class="no-data">No journal entries yet. ARGO V3.1 logs detailed reasoning for every trade.</div>
+    <div class="no-data">No journal entries yet. ARGO V3.2 logs detailed reasoning for every trade.</div>
   </div>
 </div>
 
@@ -777,7 +777,7 @@ input[type=text]:focus{border-color:var(--blue)}
   </div>
 
   <div class="alert alert-orange" style="margin-bottom:12px">
-    ARGO V3.1 auto-buys stocks when monthly options profit exceeds $1,000. 20% of profits above threshold are allocated to high-scoring stocks (85+). Stop loss: -15% from entry.
+    ARGO V3.2 auto-buys stocks when monthly options profit exceeds $1,000. 20% of profits above threshold are allocated to high-scoring stocks (85+). Stop loss: -15% from entry.
   </div>
 
   <div class="section-title">Stock Holdings</div>
@@ -815,7 +815,7 @@ input[type=text]:focus{border-color:var(--blue)}
 <div id="tab-backtest" class="content">
   <div style="margin-bottom:14px">
     <span style="font-size:13px;color:#00ff88;letter-spacing:2px;font-weight:700">⚙ BACKTEST ENGINE</span>
-    <span style="font-size:10px;color:#336688;margin-left:10px">Walk-forward simulation · ARGO V3.1 scoring · Alpaca historical data</span>
+    <span style="font-size:10px;color:#336688;margin-left:10px">Walk-forward simulation · ARGO V3.2 scoring · Alpaca historical data</span>
     <div style="font-size:10px;color:#4a6a8a;margin-top:4px">⚠ Conservative estimates — backtest enters one position at a time (walk-forward). Live ARGO holds multiple simultaneous positions, so live returns will typically exceed backtest figures.</div>
   </div>
 
@@ -1324,7 +1324,7 @@ function renderMetrics() {
     document.getElementById('alpaca-cash').textContent = fmt(state.alpacaCash);
     const customBudget = state.customBudget && state.customBudget > 0 ? state.customBudget : null;
     document.getElementById('alpaca-cash-sub').textContent = customBudget
-      ? `ARGO V3.1 using ${fmt(customBudget)} of this`
+      ? `ARGO V3.2 using ${fmt(customBudget)} of this`
       : 'paper balance · synced on boot';
   }
   document.getElementById('heat').style.color = heat > 50 ? 'var(--red)' : heat > 35 ? 'var(--orange)' : 'var(--green)';
@@ -1456,7 +1456,7 @@ function renderMetrics() {
   if (alphaEl && bm) {
     alphaEl.textContent = (bm.alpha >= 0 ? "+" : "") + bm.alpha + "%";
     alphaEl.style.color = bm.alpha >= 0 ? "var(--green)" : "var(--red)";
-    document.getElementById("benchmark-sub").textContent = `ARGO V3.1:${bm.apexReturn >= 0 ? "+" : ""}${bm.apexReturn}% SPY:${bm.spyReturn >= 0 ? "+" : ""}${bm.spyReturn}%`;
+    document.getElementById("benchmark-sub").textContent = `ARGO V3.2:${bm.apexReturn >= 0 ? "+" : ""}${bm.apexReturn}% SPY:${bm.spyReturn >= 0 ? "+" : ""}${bm.spyReturn}%`;
   }
 
   // Drawdown protocol
@@ -1700,7 +1700,7 @@ function renderPositions() {
   const wrap = document.getElementById('positions-wrap');
   const positions = state.positions || [];
   if (!positions.length) {
-    wrap.innerHTML = '<div class="no-data">No open positions. ARGO V3.1 will enter trades during market hours (9:30AM\u20133:45PM ET).</div>';
+    wrap.innerHTML = '<div class="no-data">No open positions. ARGO V3.2 will enter trades during market hours (9:30AM\u20133:45PM ET).</div>';
     return;
   }
 
@@ -2593,7 +2593,7 @@ async function triggerDryRun() {
     const resp = await fetch('/api/dry-run-scan', {method:'POST'});
     const data = await resp.json();
     await fetchState();
-    alert('Dry run complete! Check the Server Log tab — look for [DRYRUN] entries showing what ARGO V3.1 would trade.');
+    alert('Dry run complete! Check the Server Log tab — look for [DRYRUN] entries showing what ARGO V3.2 would trade.');
   } catch(e) {
     alert('Dry run error: ' + e.message);
   } finally {
@@ -2640,10 +2640,10 @@ async function resetPDT() {
 }
 
 async function resetCircuit() {
-  if (!confirm('Reset circuit breaker? ARGO V3.1 will resume scanning and entering new trades.')) return;
+  if (!confirm('Reset circuit breaker? ARGO V3.2 will resume scanning and entering new trades.')) return;
   const resp = await fetch('/api/reset-circuit', {method:'POST'});
   const data = await resp.json();
-  alert('Circuit breaker reset. ARGO V3.1 is scanning again.');
+  alert('Circuit breaker reset. ARGO V3.2 is scanning again.');
   await fetchState();
 }
 
@@ -2652,7 +2652,7 @@ async function fullReset() {
   if (!confirm('This cannot be undone. Confirm full reset?')) return;
   const resp = await fetch('/api/full-reset', {method:'POST'});
   const data = await resp.json();
-  alert('Full reset complete. ARGO V3.1 restarted with $10,000.');
+  alert('Full reset complete. ARGO V3.2 restarted with $10,000.');
   location.reload();
 }
 
@@ -2761,7 +2761,7 @@ async function downloadDayReport() {
 
     // ── Also show quick summary in alert ─────────────────────────────────
     alert(
-      `ARGO V3.1 Day Report — ${today}\n\n` +
+      `ARGO V3.2 Day Report — ${today}\n\n` +
       `Trades: ${trades.length} | Win Rate: ${winRate}%\n` +
       `Total P&L: $${totalPnL.toFixed(2)}\n` +
       `Best: $${bigWin} | Worst: $${bigLoss}\n` +
@@ -3067,7 +3067,7 @@ function copyMatrixTemplate() {
   const NL = '\n';
   const DIV = '════════════════════════════════════════';
 
-  let out = 'BACKTEST MATRIX — ARGO V3.1' + NL;
+  let out = 'BACKTEST MATRIX — ARGO V3.2' + NL;
   out += DIV + NL;
   out += 'PERIOD:    ' + startDate + ' → ' + endDate + NL;
   out += 'HOLD:      ' + holdDays + 'd | MAX POS: ' + maxPositions + ' | CAPITAL: $' + capital + NL;
@@ -3249,7 +3249,7 @@ async function runBacktest() {
       putOnly:      btCallSize === 0,
     };
     const modeLabel = body.optionType === "both" ? "puts+calls (best direction daily)" : body.optionType + "s";
-    document.getElementById('bt-loading-msg').textContent = `Replaying ARGO V3.1 ${modeLabel} on ${body.ticker} ${body.startDate}→${body.endDate}...`;
+    document.getElementById('bt-loading-msg').textContent = `Replaying ARGO V3.2 ${modeLabel} on ${body.ticker} ${body.startDate}→${body.endDate}...`;
     const res  = await fetch('/api/backtest', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body) });
     const data = await res.json();
     if (data.error) throw new Error(data.error);
@@ -3459,7 +3459,7 @@ function copyBacktestTemplate() {
     `  ${r}: ${c} (${(c/s.totalTrades*100).toFixed(0)}%)`
   ).join('\n');
 
-  const template = `BACKTEST RESULT — ARGO V3.1
+  const template = `BACKTEST RESULT — ARGO V3.2
 ════════════════════════════════════════
 INSTRUMENT: ${s.ticker}
 DIRECTION:  ${s.optionType?.toUpperCase()}
@@ -3651,7 +3651,7 @@ function copyOpenPositions() {
     groups.push({ type:'single', pos:p });
   });
   var NL = '\n';
-  var lines = ['ARGO V3.1 \u2014 Open Positions \u2014 '+new Date().toLocaleString(), ''];
+  var lines = ['ARGO V3.2 \u2014 Open Positions \u2014 '+new Date().toLocaleString(), ''];
   var totalPnL = 0;
   groups.forEach(function(g) {
     if (g.type === 'paired') {
@@ -3713,7 +3713,7 @@ function copyLogsForClaude() {
   if (countVal !== 'all') filtered = filtered.slice(0, parseInt(countVal));
   var NL = '\n';
   var lines = [
-    'ARGO V3.1 \u2014 Server Log \u2014 '+new Date().toLocaleString(),
+    'ARGO V3.2 \u2014 Server Log \u2014 '+new Date().toLocaleString(),
     'Cash: $'+parseFloat(state.cash||0).toFixed(2)+' | Positions: '+(state.positions||[]).length+' | VIX: '+(state.vix||'--')+' | Regime: '+(state._regimeClass||'--')+(state._regimeSubClass?'/'+state._regimeSubClass:''),
     'Filter: '+(filterType||'all')+' | Entries: '+filtered.length,
     '\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500',
