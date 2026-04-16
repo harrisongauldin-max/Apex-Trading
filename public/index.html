@@ -994,6 +994,8 @@ input[type=text]:focus{border-color:var(--blue)}
       <option value="all">All rows</option>
     </select>
     <button class="btn" id="copy-log-btn" onclick="copyLogsForClaude()" style="font-size:11px;border-color:rgba(0,196,255,.4);color:#44aaff">&#9126; Copy for Claude</button>
+    <input type="date" id="redis-log-date" style="font-size:11px;background:#0a1628;color:#44aaff;border:1px solid rgba(0,196,255,.4);border-radius:4px;padding:3px 6px" title="leave blank for today (ET)" />
+    <button class="btn" id="copy-redis-log-btn" onclick="copyFullDayFromRedis()" style="font-size:11px;border-color:rgba(0,196,255,.4);color:#44aaff" title="Pulls the full day's log from Redis (EOD archive), applies current filter+search, and copies to clipboard">&#9126; Copy full day from Redis</button>
   </div>
   <!-- ── Log box ── -->
   <div class="log-box" id="server-log" style="height:560px;overflow-y:auto"></div>
@@ -3738,6 +3740,81 @@ function copyLogsForClaude() {
     .catch(function(){ btn.textContent='! Failed'; setTimeout(function(){ btn.textContent='\u2398 Copy for Claude'; },2000); });
 }
 
+// ── Copy full day from Redis ─────────────────────────────────────────────────
+// Pulls the EOD-archived daily log for a given date (defaults to today ET),
+// applies the same filter + search controls as copyLogsForClaude, and copies.
+// Today's in-memory rolling buffer shows ~200-500 entries; Redis holds 5000+.
+function copyFullDayFromRedis() {
+  var btn = document.getElementById('copy-redis-log-btn');
+  var dateEl = document.getElementById('redis-log-date');
+  var date = dateEl && dateEl.value ? dateEl.value : (function() {
+    // default: today in ET (YYYY-MM-DD)
+    var fmt = new Intl.DateTimeFormat('en-CA', { timeZone: 'America/New_York', year: 'numeric', month: '2-digit', day: '2-digit' });
+    return fmt.format(new Date()); // en-CA gives YYYY-MM-DD
+  })();
+
+  var origText = btn.textContent;
+  btn.textContent = 'Fetching ' + date + '...';
+  btn.disabled = true;
+
+  fetch('/api/logs/history?date=' + encodeURIComponent(date) + '&limit=10000')
+    .then(function(r) {
+      if (!r.ok) {
+        return r.json().then(function(j) { throw new Error(j.error || ('HTTP ' + r.status)); });
+      }
+      return r.json();
+    })
+    .then(function(data) {
+      var entries = data.entries || [];
+      if (!entries.length) throw new Error('No entries returned for ' + date);
+
+      // Apply current filter + search (same semantics as copyLogsForClaude)
+      var filterType = (document.getElementById('log-filter').value||'').trim();
+      var search     = (document.getElementById('log-search').value||'').toLowerCase();
+      var types      = filterType ? filterType.split(',') : null;
+      if (types)  entries = entries.filter(function(e){ return types.indexOf(e.type)>=0; });
+      if (search) entries = entries.filter(function(e){ return (e.message||'').toLowerCase().indexOf(search)>=0; });
+
+      // Sort oldest-first for readability (Redis archive is push-order, usually chronological)
+      // Tolerate either order by sorting explicitly on e.time
+      entries.sort(function(a,b){ return new Date(a.time) - new Date(b.time); });
+
+      var summary = data.summary || {};
+      var NL = '\n';
+      var lines = [
+        'ARGO V3.2 \u2014 Full Day Log from Redis \u2014 ' + date,
+        'Exported: ' + new Date().toLocaleString(),
+        'Filter: ' + (filterType||'all') + (search ? ' | Search: "'+search+'"' : '') + ' | Entries: ' + entries.length + ' (of ' + (summary.totalEntries||'?') + ' total)',
+        'EOD summary: trades=' + (summary.trades||0) + ' warns=' + (summary.warns||0) + ' errors=' + (summary.errors||0) + ' closedToday=' + (summary.closedToday||0) + ' cashEOD=$' + (summary.cashEOD||'?') + ' positionsEOD=' + (summary.positionsEOD||0),
+        '\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500',
+        ''
+      ];
+      entries.forEach(function(e){
+        var t = new Date(e.time).toLocaleTimeString();
+        var type = (e.type||'info').toUpperCase();
+        while (type.length < 8) type += ' ';
+        lines.push('['+t+'] '+type+' '+(e.message||''));
+      });
+      var text = lines.join(NL);
+
+      var doCopy = function(t) {
+        if (navigator.clipboard && navigator.clipboard.writeText) return navigator.clipboard.writeText(t);
+        var ta = document.createElement('textarea');
+        ta.value = t; ta.style.cssText = 'position:fixed;opacity:0';
+        document.body.appendChild(ta); ta.select(); document.execCommand('copy'); ta.remove();
+        return Promise.resolve();
+      };
+      return doCopy(text).then(function(){
+        btn.textContent = '\u2714 Copied ' + entries.length + ' entries';
+        setTimeout(function(){ btn.textContent = origText; btn.disabled = false; }, 3500);
+      });
+    })
+    .catch(function(err) {
+      btn.textContent = '! ' + (err.message || 'Failed');
+      setTimeout(function(){ btn.textContent = origText; btn.disabled = false; }, 4000);
+    });
+}
+
 // ── Score debug ──────────────────────────────────────────────────────────────
 function copyScoreDebug() {
   var btn = document.getElementById('copy-score-debug-btn');
@@ -3760,15 +3837,17 @@ function copyScoreDebug() {
 
   // Gates
   var gates = d.gates || {};
-  var BOOLEAN_GATES = ['isChoppyRegime','creditModeActive','creditCallModeActive',
-    'below200MACallBlock','macroBullish','vixFallingPause','postReversalBlock',
-    'avoidHoldActive','ivElevated','creditAllowedVIX'];
+  var BLOCK_GATES  = ['isChoppyRegime','below200MACallBlock','macroBullish',
+    'vixFallingPause','postReversalBlock','avoidHoldActive'];
+  var ACTIVE_GATES = ['creditModeActive','creditCallModeActive','ivElevated','creditAllowedVIX'];
   if (Object.keys(gates).length) {
     lines.push('SYSTEM GATES');
     Object.keys(gates).forEach(function(k) {
       var val = gates[k];
-      var isBool = BOOLEAN_GATES.indexOf(k) >= 0;
-      var label = isBool ? (val ? 'BLOCKED' : 'ok') : (val !== null && val !== undefined ? String(val) : '--');
+      var label;
+      if (BLOCK_GATES.indexOf(k) >= 0)       label = val ? 'BLOCKED' : 'ok';
+      else if (ACTIVE_GATES.indexOf(k) >= 0) label = val ? 'ACTIVE'  : 'inactive';
+      else label = (val !== null && val !== undefined ? String(val) : '--');
       lines.push(k + '\t' + label);
     });
   }
