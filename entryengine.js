@@ -102,8 +102,13 @@ function getRegimeRulebook(state) {
   //   Professional: selling puts below a confirmed downtrend is a high-probability
   //   premium collection trade when IVR is elevated — the trend provides directional
   //   confirmation and fear premium provides the edge (Sosnoff/tastytrade 2014)
-  const creditPutActive  = (agentChoppy || agentSaysCredit ||
-                            (isBearRegime && creditAllowedVIX)) && vixFloor;
+  // Dinesh: bullPutActive — sell put spreads below market in Regime A
+  // Same EV math as bear calls but trend-aligned. Gate: Regime A + IVR elevated + not macro aggressive
+  // Risk Manager: higher minScore required — bull trend can reverse and put spreads lose on crashes
+  const bullPutActive   = isBullRegime && creditAllowedVIX && !isMacroBullish && !agentStale;
+  const creditPutActive = (agentChoppy || agentSaysCredit ||
+                           (isBearRegime && creditAllowedVIX) ||
+                           bullPutActive) && vixFloor;
 
   // Credit CALL: bear regime + elevated IV — sell calls above a falling market
   //   Professional: bear call spreads in confirmed downtrends capture doubly elevated
@@ -130,7 +135,8 @@ function getRegimeRulebook(state) {
 
   const minScorePut    = isBullRegime ? 85 : isB1 ? 75 : 70; // B1 raises bar from 70→75
   const minScoreCall   = isBullRegime ? 75 : 85;
-  const minScoreCredit = isB1 ? 68 : 65; // B1 slight raise for credits too
+  // Dinesh: bull regime needs higher bar — selling puts into a potential trend reversal is riskier
+  const minScoreCredit = isB1 ? 68 : isBullRegime ? 75 : 65;
   // Low confidence raises bar — less willing to enter without clear signal
   // High confidence does NOT lower bar — score carries conviction (RM panel)
   const agentMinAdj    = isLowConf ? +10 : 0;
@@ -215,11 +221,15 @@ function getRegimeRulebook(state) {
   //   efficiently. Vega exposure per dollar of premium collected is minimized
   //   in the 21-28 DTE window. Never open credit spreads with < 14 DTE
   //   (gamma risk dominates — small moves cause large P&L swings).
-  const targetDTE = isCrisis     ? 14   // C: richest premium, shortest exposure
-                  : isBearRegime ? 35   // B: panel-approved 35 DTE — matches TP/stop calibration
-                  : 28;                 // A: longer hold, mean reversion needs time
-  const minDTE    = isCrisis     ? 7    // C: accept shorter in crisis premium richness
-                  : 21;                 // panel: min 21 to avoid weeklies (matches 35 DTE target)
+  // Adaptive DTE: inversely correlated with IV — longer in calm (need theta), shorter in crisis (premium immediate)
+  // Richard: low IV = extend window to collect time value. Crisis = capture rich premium fast.
+  const targetDTE = vix >= 35 ? 21    // Crisis: premium rich, fast capture, less vega exposure
+                  : vix >= 28 ? 35    // Elevated: theta sweet spot, panel-approved
+                  : vix >= 22 ? 45    // Normal: extend for time value in calmer markets
+                  : 60;              // Low IV: maximize theta collection window
+  const minDTE    = vix >= 35 ? 7    // Crisis: accept near-term, premium covers gamma risk
+                  : vix >= 28 ? 21   // Elevated: no weeklies
+                  : 28;             // Low/Normal: minimum 4 weeks, need time value
 
   // Short delta target for credit spread short leg (QS/PM2):
   //   Professional range: 0.15-0.25. At 5% OTM, VIX 29, 21 DTE: delta = 0.21.
@@ -243,7 +253,12 @@ function getRegimeRulebook(state) {
     maxDebitRatio:     0.40,
 
     // Credit spread parameters — professionally calibrated
-    creditWidth:       isCrisis ? 7 : 10, // panel-approved $10 wide
+    // Adaptive width: narrower in calm IV (concentrate credit/risk), wider in crisis (premium covers it)
+    // Richard: width is the primary R/R lever — scales with VIX, not price alone
+    creditWidth:       vix >= 35 ? 15   // Crisis C: premium rich, width doesn't matter
+                     : vix >= 28 ? 10   // Elevated B2: standard panel-approved
+                     : vix >= 22 ? 7    // Normal B1/A: tighten to improve R/R
+                     : 5,               // Low IV: narrow — credit is scarce
     creditOTMpct,
     minCreditRatio,
     targetCreditRatio,
