@@ -3788,12 +3788,26 @@ function renderScoreDebug(d, el) {
   if (gk.length) {
     out += '<div class="section-title" style="margin-bottom:8px">System gates</div>';
     out += '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:5px;margin-bottom:16px">';
+    // Gilfoyle fix: boolean gates show BLOCKED/ok, numeric/string values show their value
+    // Before: vix=28.74 → truthy → showed 'BLOCKED' in red (wrong)
+    // After:  vix=28.74 → shows '28.74' in muted colour
+    var BOOLEAN_GATES = ['isChoppyRegime','creditModeActive','creditCallModeActive',
+      'below200MACallBlock','macroBullish','vixFallingPause','postReversalBlock',
+      'avoidHoldActive','ivElevated','creditAllowedVIX'];
     gk.forEach(function(k) {
-      var blocked = gates[k];
-      var col = blocked ? '#ff5555' : '#00ff88';
+      var val = gates[k];
+      var isBool = BOOLEAN_GATES.indexOf(k) >= 0;
+      var col, label;
+      if (isBool) {
+        col   = val ? '#ff5555' : '#00ff88';
+        label = val ? 'BLOCKED' : 'ok';
+      } else {
+        col   = val !== null && val !== undefined && val !== 0 && val !== '' ? '#00c4ff' : '#336688';
+        label = val !== null && val !== undefined ? String(val) : '--';
+      }
       out += '<div style="background:var(--panel);border:1px solid var(--border);border-radius:5px;padding:5px 10px;display:flex;justify-content:space-between">';
       out += '<span style="font-size:10px;color:var(--muted)">'+k+'</span>';
-      out += '<span style="font-size:10px;font-weight:700;color:'+col+'">'+(blocked?'BLOCKED':'ok')+'</span>';
+      out += '<span style="font-size:10px;font-weight:700;color:'+col+'">'+label+'</span>';
       out += '</div>';
     });
     out += '</div>';
