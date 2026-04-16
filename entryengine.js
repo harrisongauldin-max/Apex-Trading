@@ -30,7 +30,8 @@ const SCORE_CAP         = 95;
 // Panel unanimous: structure must match instrument's volatility profile
 const INSTRUMENT_CONSTRAINTS = {
   TLT: { allowedTypes: ["credit_put","credit_call"],
-         reason: "Bond ETF — slow movement, only collect premium. Debit spreads need large directional moves TLT rarely delivers." },
+         minIVPct: 40, // skip TLT credits when IV rank < 40 (~IV < 18%) — R/R math fails at low bond IV
+         reason: "Bond ETF — only trade credits when IV rank >= 40 (IV > ~18%)" },
   GLD: { allowedTypes: ["credit_put","credit_call","debit_put"],
          reason: "Commodity hedge — credit puts and calls appropriate. Debit calls only on confirmed equity selloff + DXY weakness." },
   SPY: { allowedTypes: ["credit_put","credit_call","debit_put","debit_call","iron_condor"] },
