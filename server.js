@@ -1418,7 +1418,7 @@ const openRisk    = () => state.positions.reduce((s,p) => {
 }, 0);
 // Entry cost basis (for heat calculations - should use cost not market value)
 const openCostBasis = () => state.positions.reduce((s,p) => s + p.cost * (p.partialClosed ? 0.5 : 1), 0);
-const heatPct     = () => Math.max(0, totalCap() - (state.cash || 0)) / totalCap();
+const heatPct     = () => Math.max(0, openCostBasis()) / totalCap(); // margin deployed / total cap — 0% with no positions
 const realizedPnL = () => state.closedTrades.reduce((s,t) => s + t.pnl, 0);
 const stockValue  = () => state.stockPositions.reduce((s,p) => s + p.cost, 0);
 
@@ -7657,7 +7657,7 @@ async function runScan() {
   // Prevents repeated iteration over state.positions on every check
   const _totalCap  = totalCap();
   const _openRisk  = openRisk();
-  const _heatPct   = Math.max(0, _totalCap - (state.cash || 0)) / _totalCap; // B1: cash delta matches heatPct()
+  const _heatPct   = Math.max(0, openCostBasis()) / _totalCap; // margin deployed / total cap — matches heatPct()
   const _heatPctPc = parseFloat((_heatPct * 100).toFixed(1));
 
   // Scan-cycle cache - expensive fetches reused within same scan window
