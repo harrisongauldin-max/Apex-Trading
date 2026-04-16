@@ -1,5 +1,5 @@
 // -
-// ARGO V3.0 - Systematic SPY/QQQ Options Trading Agent
+// ARGO V3.1 - Systematic SPY/QQQ Options Trading Agent
 // Alpaca Paper Trading Edition
 // -
 const express    = require("express");
@@ -10945,7 +10945,7 @@ async function sendMorningBriefing() {
     // - Footer -
     const footer = `
       <div style="border-top:3px double #333;margin-top:16px;padding-top:8px;text-align:center;font-size:9px;color:#999;letter-spacing:1px">
-        ARGO V3.0 - Entry window 9:30am-3:45pm ET - SPY/QQQ primary - Monthly options
+        ARGO V3.1 - Entry window 9:30am-3:45pm ET - SPY/QQQ primary - Monthly options
       </div>`;
 
     // - Assemble -
@@ -11569,7 +11569,7 @@ async function premarketAssessment() {
             <em>These are recommendations only. ARGO-V3.0 will manage exits automatically at open.</em>
           </div>
           <div style="border-top:3px double #333;margin-top:12px;padding-top:8px;text-align:center;font-size:9px;color:#999;letter-spacing:1px">
-            ARGO V3.0 - Market opens in ~45 minutes - Entry window 9:30am ET
+            ARGO V3.1 - Market opens in ~45 minutes - Entry window 9:30am ET
           </div>
         </div>`
       );
@@ -12964,7 +12964,7 @@ process.on("unhandledRejection", (reason, promise) => {
 // Boot sequence - load state from Redis then start server
 initState().then(() => {
   app.listen(PORT, () => {
-    console.log(`ARGO V3.0 running on port ${PORT}`);
+    console.log(`ARGO V3.1 running on port ${PORT}`);
     console.log(`Alpaca key:  ${ALPACA_KEY?"SET":"NOT SET"}`);
     console.log(`Gmail:       ${GMAIL_USER||"NOT SET"}`);
     console.log(`Resend:      ${RESEND_API_KEY?"SET -":"NOT SET - email disabled"}`);
@@ -12986,7 +12986,7 @@ initState().then(() => {
 });;
 
 // -
-// ARGO V3.0 - BACKTESTING ENGINE
+// ARGO V3.1 - BACKTESTING ENGINE
 // Walk-forward simulation using Alpaca historical daily bars
 // Replays ARGO's scoring logic against historical data without real orders
 // QS-W2/GL-1: Addresses the out-of-sample validation gap identified by panel
