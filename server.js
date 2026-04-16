@@ -5962,6 +5962,26 @@ async function executeCreditSpread(stock, price, score, scoreReasons, vix, optio
     }
     logEvent("filter", `${stock.ticker} long leg: $${longContract.strike} | width $${actualWidth} | $${longContract.premium.toFixed(2)}`);
 
+    // Dinesh/Gilfoyle: bid-ask stability gate — Alpaca returns bid+ask on all option snapshots
+    // Wide bid-ask = market maker uncertainty = mispriced credit (gap days, illiquid strikes)
+    // Gate on both legs: unstable long leg means exit cost is uncertain
+    const MAX_SPREAD_PCT = 0.20; // 20% of mid — tighter than panel's 15% for safety
+    const shortMid = shortContract.bid > 0 ? (shortContract.ask + shortContract.bid) / 2 : shortContract.premium;
+    const longMid  = longContract.bid  > 0 ? (longContract.ask  + longContract.bid)  / 2 : longContract.premium;
+    // Dinesh: no-quote guard — bid=0 AND ask=0 means no market, not a stable spread
+    const shortNoQuote   = shortContract.bid <= 0 && shortContract.ask <= 0;
+    const longNoQuote    = longContract.bid  <= 0 && longContract.ask  <= 0;
+    const shortSpreadPct = shortNoQuote ? 1.0 : shortMid > 0 ? (shortContract.ask - shortContract.bid) / shortMid : 0;
+    const longSpreadPct  = longNoQuote  ? 1.0 : longMid  > 0 ? (longContract.ask  - longContract.bid)  / longMid  : 0;
+    if (shortSpreadPct > MAX_SPREAD_PCT) {
+      logEvent("filter", `${stock.ticker} credit spread skipped — short leg bid-ask ${(shortSpreadPct*100).toFixed(0)}% of mid (unstable market, retry next scan)`);
+      return null;
+    }
+    if (longSpreadPct > MAX_SPREAD_PCT) {
+      logEvent("filter", `${stock.ticker} credit spread skipped — long leg bid-ask ${(longSpreadPct*100).toFixed(0)}% of mid (unstable market, retry next scan)`);
+      return null;
+    }
+
     const netCredit  = parseFloat((shortContract.premium - longContract.premium).toFixed(2));
     if (netCredit <= 0) { logEvent("filter", `${stock.ticker} credit spread: no credit available (${netCredit})`); return null; }
 
