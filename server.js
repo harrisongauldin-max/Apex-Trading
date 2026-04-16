@@ -5988,11 +5988,12 @@ async function executeCreditSpread(stock, price, score, scoreReasons, vix, optio
       return null;
     }
 
-    const netCredit  = parseFloat((shortContract.premium - longContract.premium).toFixed(2));
+    // let so retry block can reassign — all downstream code naturally uses correct values
+    let netCredit  = parseFloat((shortContract.premium - longContract.premium).toFixed(2));
     if (netCredit <= 0) { logEvent("filter", `${stock.ticker} credit spread: no credit available (${netCredit})`); return null; }
 
-    const maxProfit  = netCredit;                              // keep all credit if expires worthless
-    const maxLoss    = parseFloat((actualWidth - netCredit).toFixed(2)); // width - credit = max risk
+    let maxProfit  = netCredit;                              // keep all credit if expires worthless
+    let maxLoss    = parseFloat((actualWidth - netCredit).toFixed(2)); // width - credit = max risk
 
     // V2.84: Risk/reward validation for credit spreads
     // Maximum acceptable risk/reward ratio: 4:1 (risk $400 to make $100)
@@ -6001,10 +6002,60 @@ async function executeCreditSpread(stock, price, score, scoreReasons, vix, optio
     const rrRatioCred = maxLoss > 0 ? maxProfit / maxLoss : 0;
     const MIN_CREDIT_RR = (spreadParamsOverride && spreadParamsOverride.minCreditRatio) || 0.25; // panel CRITICAL #1: 0.25 is true EV-positive minimum at delta 0.20 (0.20 was breakeven)
     if (rrRatioCred < MIN_CREDIT_RR) {
-      logEvent("filter", `${stock.ticker} credit spread R/R ${(rrRatioCred*100).toFixed(0)}% (credit $${netCredit} / risk $${maxLoss}) - below ${(MIN_CREDIT_RR*100).toFixed(0)}% minimum - skip`);
-      return null;
+      // Richard/Gilfoyle/Dinesh: width retry — compute narrowest width achieving 25% R/R
+      // Algebraic inversion: credit/(width-credit) >= 0.25  →  maxWidth = 5 × netCredit
+      // sameExpiry + snapshots already in memory — zero extra Alpaca calls
+      const _retryWidth = Math.max(3, Math.round(5 * netCredit)); // $3 floor (Dinesh)
+      if (_retryWidth >= actualWidth) {
+        logEvent("filter", `${stock.ticker} credit spread R/R ${(rrRatioCred*100).toFixed(0)}% (credit $${netCredit} / risk $${maxLoss}) — below ${(MIN_CREDIT_RR*100).toFixed(0)}% minimum — skip`);
+        return null;
+      }
+      const _retryLongStrike = optionType === "put"
+        ? shortContract.strike - _retryWidth
+        : shortContract.strike + _retryWidth;
+      const _retryCandidate = sameExpiry
+        .filter(c => snapshots[c.symbol])
+        .map(c => ({ c, dist: Math.abs(parseFloat(c.strike_price) - _retryLongStrike) }))
+        .sort((a, b) => a.dist - b.dist)[0];
+      if (!_retryCandidate) {
+        logEvent("filter", `${stock.ticker} credit spread R/R ${(rrRatioCred*100).toFixed(0)}% — no cached strike near $${_retryLongStrike} for $${_retryWidth} retry — skip`);
+        return null;
+      }
+      const _rSnap = snapshots[_retryCandidate.c.symbol];
+      const _rQ    = _rSnap?.latestQuote || {};
+      const _rBid  = parseFloat(_rQ.bp || 0);
+      const _rAsk  = parseFloat(_rQ.ap || 0);
+      const _rMid  = _rBid > 0 && _rAsk > 0 ? (_rBid + _rAsk) / 2 : 0;
+      const _rSpreadPct = _rMid > 0 ? (_rAsk - _rBid) / _rMid : 1;
+      // Richard: retry long leg must also pass bid-ask stability gate
+      if (!(_rMid > 0 && _rSpreadPct <= MAX_SPREAD_PCT)) {
+        logEvent("filter", `${stock.ticker} credit spread R/R ${(rrRatioCred*100).toFixed(0)}% — retry long leg bid-ask ${(_rSpreadPct*100).toFixed(0)}% unstable — skip`);
+        return null;
+      }
+      const _retryCredit  = parseFloat((shortContract.premium - _rMid).toFixed(2));
+      const _retryMaxLoss = parseFloat((_retryWidth - _retryCredit).toFixed(2));
+      const _retryRR      = _retryMaxLoss > 0 ? _retryCredit / _retryMaxLoss : 0;
+      if (_retryRR < MIN_CREDIT_RR || _retryCredit <= 0) {
+        logEvent("filter", `${stock.ticker} credit spread R/R ${(rrRatioCred*100).toFixed(0)}% — retry $${_retryWidth} wide also fails (${(_retryRR*100).toFixed(0)}%) — skip`);
+        return null;
+      }
+      // Retry succeeded — update longContract and reassign lets so all downstream uses correct values
+      logEvent("filter", `${stock.ticker} [R/R RETRY] $${actualWidth}→$${_retryWidth} wide | ${(rrRatioCred*100).toFixed(0)}%→${(_retryRR*100).toFixed(0)}% R/R | credit $${_retryCredit}`);
+      longContract = {
+        symbol:  _retryCandidate.c.symbol,
+        strike:  parseFloat(_retryCandidate.c.strike_price),
+        expDate: longContract.expDate,
+        expDays: longContract.expDays,
+        premium: parseFloat(_rMid.toFixed(2)),
+        bid: _rBid, ask: _rAsk,
+        spread: _rSpreadPct,
+      };
+      // Reassign lets — marginRequired and position object pick up correct narrower-spread values
+      netCredit = _retryCredit;
+      maxProfit = _retryCredit;
+      maxLoss   = _retryMaxLoss;
     }
-    logEvent("filter", `${stock.ticker} credit spread R/R: collect $${(netCredit*100).toFixed(0)} / risk $${(maxLoss*100).toFixed(0)} per contract (${(rrRatioCred*100).toFixed(0)}% ratio)`);
+    logEvent("filter", `${stock.ticker} credit spread R/R: collect $${(netCredit*100).toFixed(0)} / risk $${(maxLoss*100).toFixed(0)} per contract (${(maxLoss > 0 ? netCredit/maxLoss*100 : 0).toFixed(0)}% ratio)`);
     // C10: Sizing from entryEngine sizeMod parameter (replaces inline scoreBaseMult + ivSizeMultCredit)
     // entryEngine.scoreCandidate already computed: base * ivBoostCredit * crisisAdj * oversoldMod
     // Using internal computation here was overriding that work silently
