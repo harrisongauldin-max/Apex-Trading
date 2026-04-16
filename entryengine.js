@@ -286,7 +286,7 @@ function getRegimeRulebook(state) {
     gates,
     sizeMult,
     spreadParams,
-    correlatedGroups: CORRELATED_GROUPS,
+    // correlatedGroups removed from return — heatMultiplier removed from scan loop
     instrumentConstraints: INSTRUMENT_CONSTRAINTS,
     minScorePut,
     minScoreCall,
@@ -336,7 +336,9 @@ function scoreCandidate(stock, rawPutScore, rawCallScore, putReasons, callReason
     if (rb.isBearRegime && rb.gates.creditCallActive) {
       tradeType  = "credit_call";
       optionType = "call"; // flip so executeCreditSpread builds call spread ABOVE market
-      putReasons.push("[CREDIT REDIRECT] Bear regime: bearish signal → bear call spread (sell calls above market, not puts below)");
+      const _redirectMsg = "[CREDIT REDIRECT] Bear regime: bearish signal → bear call spread (sell calls above market, not puts below)";
+      putReasons.push(_redirectMsg);   // putReasons: visible in score debug
+      callReasons.push(_redirectMsg);  // callReasons: visible in position scoreReasons after redirect
     } else {
       tradeType = "credit_put"; // valid in choppy + bull regimes (Regime A bullPutActive)
     }
@@ -375,7 +377,11 @@ function scoreCandidate(stock, rawPutScore, rawCallScore, putReasons, callReason
   //   Actual application requires checking portfolio vega against maxPortfolioVega
   //   in server.js executeCreditSpread. The sizeMod here is pre-vega-check.
   const dailyRsi      = signals.dailyRsi || signals.rsi || 50;
-  const oversoldInBear = rb.gates.oversoldSizeReduce && dailyRsi <= 40 && optionType === "put";
+  // RSI<=40 in bear regime = oversold = short squeeze risk regardless of direction
+  // credit_call (sell calls above market): an oversold bounce can breach the short strike
+  // Apply 0.75x sizing reduction for both debit puts AND credit calls when RSI<=40
+  const oversoldInBear = rb.gates.oversoldSizeReduce && dailyRsi <= 40 &&
+                         (optionType === "put" || tradeType === "credit_call");
   const isCrisis      = rb.isCrisis;
   const isCredit      = tradeType.startsWith("credit");
   const ivBoost       = isCredit ? rb.sizeMult.ivBoostCredit : rb.sizeMult.ivBoostDebit;
@@ -523,7 +529,11 @@ function evaluateEntry(candidate, rulebook, state, context = {}) {
   // MACD contradiction gate removed (panel: redundant with score system in Regime A)
 
   // Drawdown protocol (explicit context param — no hidden state dependency)
-  const ddMinScore = context.drawdownMinScore ?? BASE_MIN_SCORE;
+  // Default to minScore (trade-type minimum already computed) not BASE_MIN_SCORE
+  // Using BASE_MIN_SCORE was silently overriding minScoreCredit=65 → 70 for all credits
+  // When in drawdown: context.drawdownMinScore is elevated above normal → correctly raises bar
+  // When not in drawdown: default to minScore → no accidental override
+  const ddMinScore = context.drawdownMinScore ?? minScore;
   minScore = Math.max(minScore, ddMinScore);
 
   if (score < minScore)
