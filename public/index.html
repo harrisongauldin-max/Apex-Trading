@@ -982,6 +982,16 @@ input[type=text]:focus{border-color:var(--blue)}
     <button class="btn" id="log-live-btn" onclick="toggleLogLive()" style="font-size:11px">PAUSE</button>
     <button class="btn" onclick="fetchLogs()" style="font-size:11px">REFRESH</button>
     <button class="btn" onclick="clearLog()" style="font-size:11px">CLEAR</button>
+    <select id="copy-log-count" style="font-size:11px;background:#0a1628;color:#44aaff;border:1px solid rgba(0,196,255,.4);border-radius:4px;padding:3px 6px;cursor:pointer">
+      <option value="25">25 rows</option>
+      <option value="50">50 rows</option>
+      <option value="100">100 rows</option>
+      <option value="200">200 rows</option>
+      <option value="500">500 rows</option>
+      <option value="1000">1000 rows</option>
+      <option value="2000" selected>2000 rows</option>
+      <option value="all">All rows</option>
+    </select>
     <button class="btn" id="copy-log-btn" onclick="copyLogsForClaude()" style="font-size:11px;border-color:rgba(0,196,255,.4);color:#44aaff">&#9126; Copy for Claude</button>
   </div>
   <!-- ── Log box ── -->
@@ -3697,7 +3707,9 @@ function copyLogsForClaude() {
   var filtered = (_allLogs||[]).slice();
   if (types) filtered = filtered.filter(function(e){ return types.indexOf(e.type)>=0; });
   if (search) filtered = filtered.filter(function(e){ return (e.message||'').toLowerCase().indexOf(search)>=0; });
-  filtered = filtered.slice(0, 2000);
+  var countEl = document.getElementById('copy-log-count');
+  var countVal = countEl ? countEl.value : '50';
+  if (countVal !== 'all') filtered = filtered.slice(0, parseInt(countVal));
   var NL = '\n';
   var lines = [
     'ARGO V3.1 \u2014 Server Log \u2014 '+new Date().toLocaleString(),
