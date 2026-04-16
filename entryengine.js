@@ -7,8 +7,8 @@
 // v2.0 changes (panel 19/19 unanimous — professional calibration):
 //   1. OTM% raised to 8-10% in Regime B, 10-12% in Regime C
 //      (PM2/CBOE: short delta target 0.15-0.20, not 0.28-0.30)
-//   2. Min credit ratio raised to 0.30 floor, 0.35 target
-//      (QS: Simon & Campasano 2014 — EV requires >25% at 8%+ OTM)
+//   2. Min credit ratio 0.25 floor (EV breakeven at delta 0.20), 0.30 target
+//      (QS: breakeven R/R = loss_prob/win_prob = 0.20/0.80 = 25% exactly)
 //   3. DTE targets added to spreadParams per regime
 //      (OT + Natenberg 1994 Ch.8: 21-28 DTE in B, 14-21 in C)
 //   4. Portfolio vega cap added — maxPortfolioVega per VIX point
@@ -23,7 +23,7 @@
 
 // ── Constants ────────────────────────────────────────────────
 const BASE_MIN_SCORE    = 70;
-const SCORE_CAP         = 95;
+const SCORE_CAP         = 100; // matches server.js scoreIndexSetup cap (was 95 — inconsistent with 100-point intent)
 
 // ── INSTRUMENT CONSTRAINTS ───────────────────────────────────
 // Hard enforcement at execution — survives any gate shift
@@ -77,7 +77,7 @@ function getRegimeRulebook(state) {
   const agentChoppy       = agentType === "none";
   const agentSaysCredit   = agentType === "credit";
   const agentPutsOnBounce = agentBias === "puts_on_bounces";
-  const agentAvoid        = agentBias === "avoid";
+  // agentAvoid removed — agent 'avoid' bias is handled in scoreIndexSetup (score→0), not gate layer
   const isLowConf         = agentConf === "low" || agentStale;
   const isMacroBullish    = agentMacro.mode === "aggressive";
 
@@ -261,7 +261,7 @@ function getRegimeRulebook(state) {
                      : 5,               // Low IV: narrow — credit is scarce
     creditOTMpct,
     minCreditRatio,
-    targetCreditRatio,
+    targetCreditRatio,  // aspirational target — server.js enforces minCreditRatio only
 
     // DTE management (Change 3)
     targetDTE,
@@ -270,9 +270,12 @@ function getRegimeRulebook(state) {
     // Short leg delta targeting (Change 1 — PM2/QS)
     shortDeltaTarget,
     shortDeltaMax,
-    shortDeltaMin,
+    shortDeltaMin,  // floor — not yet enforced in server.js (contract selection uses delta range loosely)
 
     // Vega exposure management (Change 4 — GS/VS + Natenberg)
+    // TODO: maxPortfolioVega and ivBoostVegaThresh are defined here but not yet
+    // enforced in server.js executeCreditSpread — ivBoost currently applied without
+    // vega check. Wire in when portfolio grows to multi-position size.
     maxPortfolioVega,
     ivBoostVegaThresh,
   };
@@ -335,7 +338,7 @@ function scoreCandidate(stock, rawPutScore, rawCallScore, putReasons, callReason
   // TODO #5 FIX: Iron condor now reachable — activates when regime is choppy + IVR >= 60
   // Choppy regime = no clear directional bias = ideal for premium collection on both sides
   // IVR >= 60 = elevated IV makes both legs rich enough to collect meaningful premium
-  const isChoppy     = (rb.regimeName || "").includes("choppy") || rb.isChoppy;
+  const isChoppy     = (rb.regimeName || "").includes("choppy"); // rb.isChoppy removed — not in returned object
   const ironCondorOk = isIndex && isChoppy && rb.ivRank >= 60 && allowsCredit && !stock.isMeanReversion;
   if (stock.isMeanReversion)
     tradeType = "debit_naked";
