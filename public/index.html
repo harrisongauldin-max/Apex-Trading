@@ -3759,7 +3759,16 @@ function scoreColor(v, min) {
 }
 
 function renderScoreDebug(d, el) {
-  var scores  = d.scores  || d._scoreDebug || {};
+  // API returns d.results (array) — convert to keyed object for rendering
+  var scores;
+  if (d.results && Array.isArray(d.results)) {
+    scores = {};
+    d.results.forEach(function(r) {
+      if (!r.noData) scores[r.ticker] = r;
+    });
+  } else {
+    scores = d.scores || d._scoreDebug || {};
+  }
   var gates   = d.gates   || {};
   var minScore = d.minScore || d.effectiveMin || 70;
   var ts = d.lastScan ? new Date(d.lastScan).toLocaleTimeString() : '--';
