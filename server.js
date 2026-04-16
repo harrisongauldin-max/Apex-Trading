@@ -6774,7 +6774,6 @@ async function executeTrade(stock, price, score, scoreReasons, vix, optionType =
     iv:            parseFloat(((contract.iv||0.3)*100).toFixed(1)),
     vix,
     washSaleFlag:  stock._washSaleWarning || false,
-    scoreReasons,  // F13: full signal breakdown
     reasoning:     `Score ${score}/100. ${scoreReasons.slice(0,3).join(". ")}.${stock._washSaleWarning ? " - WASH SALE WARNING." : ""}`,
   });
   if (state.tradeJournal.length > 100) state.tradeJournal = state.tradeJournal.slice(0,100);
@@ -12811,7 +12810,7 @@ app.post("/api/reset-account", requireSecret, async (req, res) => {
   logEvent("reset", `[V2.5] Clean account reset - previous cash: $${prevCash?.toFixed(2)||'?'} | ARGO state cleared | awaiting Alpaca sync`);
   res.json({ ok: true, message: "Account reset complete. ARGO state cleared. Cash will sync from Alpaca on next scan." });
 });
-app.get("/api/journal",      (req,res) => res.json(state.tradeJournal.slice(0,50)));
+app.get("/api/journal",      (req,res) => res.json((state.tradeJournal||[]).slice(0,100))); // full unstripped entries
 app.get("/api/report",       (req,res) => res.json({report:buildMonthlyReport()}));
 
 // - New Feature Endpoints -
