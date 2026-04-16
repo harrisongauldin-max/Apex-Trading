@@ -215,10 +215,10 @@ function getRegimeRulebook(state) {
   //   in the 21-28 DTE window. Never open credit spreads with < 14 DTE
   //   (gamma risk dominates — small moves cause large P&L swings).
   const targetDTE = isCrisis     ? 14   // C: richest premium, shortest exposure
-                  : isBearRegime ? 21   // B: optimal theta/vega ratio window
+                  : isBearRegime ? 35   // B: panel-approved 35 DTE — matches TP/stop calibration
                   : 28;                 // A: longer hold, mean reversion needs time
   const minDTE    = isCrisis     ? 7    // C: accept shorter in crisis premium richness
-                  : 14;                 // B+A: below 14 DTE gamma risk unacceptable
+                  : 21;                 // panel: min 21 to avoid weeklies (matches 35 DTE target)
 
   // Short delta target for credit spread short leg (QS/PM2):
   //   Professional range: 0.15-0.25. At 5% OTM, VIX 29, 21 DTE: delta = 0.21.
@@ -242,7 +242,7 @@ function getRegimeRulebook(state) {
     maxDebitRatio:     0.40,
 
     // Credit spread parameters — professionally calibrated
-    creditWidth:       isCrisis ? 7 : 15,
+    creditWidth:       isCrisis ? 7 : 10, // panel-approved $10 wide
     creditOTMpct,
     minCreditRatio,
     targetCreditRatio,
