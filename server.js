@@ -9604,7 +9604,7 @@ async function runScan() {
       }
       // Bear call credit: strongly prefer below VWAP (market already weak intraday)
       // putSetup/callSetup not yet initialized here -- creditCallModeActive already implies call direction
-      if (creditCallModeActive && price > vwap * 1.01) {
+      if (creditCallModeActive && price > vwap * 1.03) { // panel: raised 1%→3% — 1% fired on normal intraday moves
         logEvent("filter", `[VWAP] ${stock.ticker} bear call skipped - price ABOVE VWAP by ${vwapPct}% (wait for intraday weakness)`);
         continue;
       }
@@ -9619,6 +9619,10 @@ async function runScan() {
     }
 
     // Pre-market gap - logged for context, direction-aware penalty applied after optionType resolved
+    // Gap day context log (Richard/panel): explicit line when gap >4% so dashboard is readable at a glance
+    if (preMarket && Math.abs(preMarket.gapPct || 0) > 4) {
+      logEvent("scan", `[GAP DAY] ${stock.ticker} ${(preMarket.gapPct > 0 ? 'gap-up' : 'gap-down')} ${Math.abs(preMarket.gapPct).toFixed(1)}% — bear calls need intraday confirmation`);
+    }
     if (preMarket && Math.abs(preMarket.gapPct) > 3) {
       logEvent("filter", `${stock.ticker} pre-market gap ${preMarket.gapPct > 0 ? "+" : ""}${preMarket.gapPct}%`);
     }
@@ -10560,8 +10564,17 @@ async function runScan() {
     } else if (useCreditSpread || useCreditCallSpread) {
       state._lastEntryType = "credit";
       const _sizeMod = sizeMod || 1.0;
+      // Panel/Gilfoyle: minIVPct gate — skip credit spreads when IV too low to reach 25% R/R
+      // Uses ivPercentile (0-100 rank) rather than raw IV% — reliable across all instruments
+      const _instrConstraint = INSTRUMENT_CONSTRAINTS[stock.ticker];
+      const _ivPct = stock.ivPercentile || 50;
+      if (_instrConstraint && _instrConstraint.minIVPct && _ivPct < _instrConstraint.minIVPct) {
+        logEvent("filter", `${stock.ticker} credit spread skipped — IV rank ${_ivPct} below min ${_instrConstraint.minIVPct} (R/R math fails at low IV)`);
+        entered = false;
+      } else {
       const creditPos = await executeCreditSpread(stock, price, score, reasons, state.vix, optionType, _sizeMod, rb.spreadParams);
       entered = !!creditPos;
+      } // end minIVPct gate
       // No debit fallback here — credit and debit are mutually exclusive strategies.
       // If credit R/R fails, the market is saying premium isn't rich enough to sell.
       // The correct response is to wait, not switch to buying puts into a crashed market.
