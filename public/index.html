@@ -805,6 +805,7 @@ input[type=text]:focus{border-color:var(--blue)}
 <div id="tab-scoredebug" class="content">
   <div style="display:flex;gap:8px;margin-bottom:12px;flex-wrap:wrap;align-items:center">
     <button class="btn btn-green" onclick="loadScoreDebug()">&#8635; REFRESH SCORES</button>
+    <button class="btn" id="copy-score-debug-btn" onclick="copyScoreDebug()" style="font-size:11px;border-color:#336688">&#128203; COPY FOR CLAUDE</button>
     <span style="font-size:11px;color:#5a7a99">Per-instrument scoring breakdown from last scan</span>
   </div>
   <div id="score-debug-content"><div class="no-data">Click REFRESH SCORES to load scoring data.</div></div>
@@ -3738,6 +3739,71 @@ function copyLogsForClaude() {
 }
 
 // ── Score debug ──────────────────────────────────────────────────────────────
+function copyScoreDebug() {
+  var btn = document.getElementById('copy-score-debug-btn');
+  var el = document.getElementById('score-debug-content');
+  if (!el || !el.innerText.trim() || el.innerText.includes('Click REFRESH')) {
+    if (btn) { btn.textContent = '⚠ Load scores first'; setTimeout(function() { btn.textContent = '📋 COPY FOR CLAUDE'; }, 2000); }
+    return;
+  }
+
+  // Build structured text output from the last fetched score data
+  var d = window._lastScoreDebugData;
+  if (!d) { if (btn) btn.textContent = '⚠ No data'; setTimeout(function() { btn.textContent = '📋 COPY FOR CLAUDE'; }, 2000); return; }
+
+  var NL = '\n';
+  var lines = [];
+  var ts = d.lastScan ? new Date(d.lastScan).toLocaleTimeString() : '--';
+  lines.push('Last scan: ' + ts);
+  lines.push('Regime: ' + (d.regimeClass||'--') + (d.regimeSubClass ? '/' + d.regimeSubClass : ''));
+  lines.push('VIX: ' + (d.vix||'--') + ' | Min score: ' + (d.minScore||d.effectiveMin||70) + ' | Macro: ' + (d.agentMacro||'--'));
+
+  // Gates
+  var gates = d.gates || {};
+  var BOOLEAN_GATES = ['isChoppyRegime','creditModeActive','creditCallModeActive',
+    'below200MACallBlock','macroBullish','vixFallingPause','postReversalBlock',
+    'avoidHoldActive','ivElevated','creditAllowedVIX'];
+  if (Object.keys(gates).length) {
+    lines.push('SYSTEM GATES');
+    Object.keys(gates).forEach(function(k) {
+      var val = gates[k];
+      var isBool = BOOLEAN_GATES.indexOf(k) >= 0;
+      var label = isBool ? (val ? 'BLOCKED' : 'ok') : (val !== null && val !== undefined ? String(val) : '--');
+      lines.push(k + '\t' + label);
+    });
+  }
+
+  // Instrument scores
+  var results = d.results || [];
+  if (results.length) {
+    lines.push('');
+    lines.push('INSTRUMENT SCORES (' + results.length + ' INSTRUMENTS)');
+    results.forEach(function(r) {
+      if (r.noData) return;
+      lines.push('');
+      lines.push(r.ticker + ' | $' + (r.price||'--') + ' | PUT:' + r.putScore + ' CALL:' + r.callScore
+        + ' | ' + (r.putScore >= (d.minScore||70) ? '▶ WOULD ENTER' : 'below min'));
+      lines.push('rsi: ' + (r.signals&&r.signals.rsi||'--') + ' | dailyRsi: ' + (r.signals&&r.signals.dailyRsi||'--')
+        + ' | macd: ' + (r.signals&&r.signals.macd||'--') + ' | momentum: ' + (r.signals&&r.signals.momentum||'--'));
+      if (r.putReasons && r.putReasons.length) {
+        r.putReasons.forEach(function(reason) { lines.push(reason); });
+      }
+    });
+  }
+
+  var out = lines.join(NL);
+  navigator.clipboard.writeText(out).then(function() {
+    if (btn) { btn.textContent = '✅ COPIED'; setTimeout(function() { btn.textContent = '📋 COPY FOR CLAUDE'; }, 2500); }
+  }).catch(function() {
+    // Fallback for older browsers
+    var ta = document.createElement('textarea');
+    ta.value = out; ta.style.position = 'fixed'; ta.style.opacity = '0';
+    document.body.appendChild(ta); ta.select();
+    document.execCommand('copy'); document.body.removeChild(ta);
+    if (btn) { btn.textContent = '✅ COPIED'; setTimeout(function() { btn.textContent = '📋 COPY FOR CLAUDE'; }, 2500); }
+  });
+}
+
 async function loadScoreDebug() {
   var el = document.getElementById('score-debug-content');
   if (!el) return;
@@ -3746,6 +3812,7 @@ async function loadScoreDebug() {
     var r = await fetch('/api/score-debug');
     if (!r.ok) throw new Error('HTTP '+r.status);
     var d = await r.json();
+    window._lastScoreDebugData = d; // stored for copyScoreDebug()
     renderScoreDebug(d, el);
   } catch(e) {
     el.innerHTML = '<div class="no-data" style="color:#ff5555">Error: '+e.message+'<br>Make sure ARGO is running and has completed at least one scan.</div>';
