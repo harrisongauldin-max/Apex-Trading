@@ -1,22 +1,23 @@
 // ============================================================
-// ARGO Entry Engine — v2.0
+// ARGO Entry Engine — v3.2
 // ============================================================
 // Single source of truth for all entry decisions.
 // Three exports: getRegimeRulebook, scoreCandidate, evaluateEntry
 //
-// v2.0 changes (panel 19/19 unanimous — professional calibration):
-//   1. OTM% raised to 8-10% in Regime B, 10-12% in Regime C
-//      (PM2/CBOE: short delta target 0.15-0.20, not 0.28-0.30)
-//   2. Min credit ratio 0.25 floor (EV breakeven at delta 0.20), 0.30 target
-//      (QS: breakeven R/R = loss_prob/win_prob = 0.20/0.80 = 25% exactly)
-//   3. DTE targets added to spreadParams per regime
-//      (OT + Natenberg 1994 Ch.8: 21-28 DTE in B, 14-21 in C)
-//   4. Portfolio vega cap added — maxPortfolioVega per VIX point
-//      (GS/VS: Natenberg Ch.8 — vega dominates early in trade life)
-//   5. SPY+QQQ correlated heat — count as 1.5x not 2x
-//      (TR: Kelly criterion, tastytrade 2014 small account research)
-//   6. IVR as primary credit gate (ivRank >= 50), raw VIX as floor
-//      (QS: Simon & Campasano — IVR more stable than raw VIX level)
+// v3.2 changes (full combined panel — gate simplification + credit direction):
+//   1. Credit direction fix: bear regime → credit_call not credit_put
+//      High put score in bear = bearish DIRECTION → sell CALLS (bear call spread)
+//      credit_put (bull put) contradicts trending_bear thesis at delta 0.20
+//   2. Gate simplification: 43 gates → 22
+//      B1/B2 subregimes removed (regimeDuration unreliable, never promoted)
+//      Flat score table: credit=65(bear)/75(bull), put=70/85, call=85/75
+//      agentMinAdj removed: stale agent uses keyword fallback, no bar raise
+//      MACD contradiction gate removed from evaluateEntry (redundant with score)
+//      Stagger gate dormant when no positions, activates automatically
+//   3. Sizing fix: _dayPlan default was null→high-risk (permanent 50% penalty)
+//      Now only high-risk when explicitly set. below200MAMult removed.
+//   4. Dynamic width retry: maxWidth = 5 × netCredit (algebraic R/R inversion)
+//   5. Post-crisis lock 14d → 3d. Margin cap 15% → 20% pre-fills.
 // ============================================================
 
 "use strict";
@@ -78,7 +79,7 @@ function getRegimeRulebook(state) {
   const agentSaysCredit   = agentType === "credit";
   const agentPutsOnBounce = agentBias === "puts_on_bounces";
   // agentAvoid removed — agent 'avoid' bias is handled in scoreIndexSetup (score→0), not gate layer
-  const isLowConf         = agentConf === "low" || agentStale;
+  // isLowConf removed — agentMinAdj=0, stale agent uses keyword fallback instead
   const isMacroBullish    = agentMacro.mode === "aggressive";
 
   // ── IV / VIX conditions ───────────────────────────────────
@@ -124,26 +125,13 @@ function getRegimeRulebook(state) {
   // Regime A: puts fight the uptrend — need RSI overbought signal, high bar
   // Regime B: puts align with trend — lower bar, but still need clear signal
   // Credits: defined-risk structure lowers bar — premium collection not directional
-  // ── V3.1: B1/B2 sub-regime scoring differentiation (panel approved) ──────
-  // B1 = early/mild bear: regimeDuration < 5d OR VIX < 26
-  //   Trend not confirmed — higher bar to filter early-bear false positives
-  //   March 25 incident: RSI 11 puts entered day 1 because B1 scored like B2
-  // B2 = confirmed bear: regimeDuration >= 5d AND VIX >= 26
-  //   Full conviction — puts-on-bounces at current B behavior
-  const isB1 = isBearRegime && (state._regimeSubClass === "B1");
-  const isB2 = isBearRegime && (state._regimeSubClass === "B2");
+  // Flat score table: regime + trade type only (B1/B2 removed, agentMinAdj removed)
+  const minScorePut    = isBullRegime ? 85 : 70;  // bear: 70, bull: 85 (fighting trend)
+  const minScoreCall   = isBullRegime ? 75 : 85;  // bear: 85 (fighting trend), bull: 75
+  const minScoreCredit = isBullRegime ? 75 : 65;  // credits: 65 bear, 75 bull
+  const agentMinAdj    = 0;                        // removed — stale agent uses keyword fallback
 
-  const minScorePut    = isBullRegime ? 85 : isB1 ? 75 : 70; // B1 raises bar from 70→75
-  const minScoreCall   = isBullRegime ? 75 : 85;
-  // Dinesh: bull regime needs higher bar — selling puts into a potential trend reversal is riskier
-  const minScoreCredit = isB1 ? 68 : isBullRegime ? 75 : 65;
-  // Low confidence raises bar — less willing to enter without clear signal
-  // High confidence does NOT lower bar — score carries conviction (RM panel)
-  const agentMinAdj    = isLowConf ? +10 : 0;
-
-  // B1 macro-reversal threshold is tighter: 2.0% (not 2.5%)
-  // Early-bear bounces are more likely to become genuine reversals
-  const macroReversalThreshold = isB1 ? 0.020 : 0.025;
+  const macroReversalThreshold = 0.025;            // unified (B1/B2 distinction removed)
 
   // ── Gate flags — regime-tagged ────────────────────────────
   const gates = {
@@ -170,10 +158,8 @@ function getRegimeRulebook(state) {
     vixFallingPause:     !!(state._vixFallingPause),
     postReversalBlock:   !!(state._macroReversalAt &&
                            (Date.now() - state._macroReversalAt) < 30 * 60 * 1000),
-    postCrisisLock:      !!(state._postCrisisLock),     // V3.1
-    vixSpikeCooldown:    !!(state._vixSpikeAt),         // V3.1
-    isB1:                isB1,                          // V3.1: early bear sub-regime
-    isB2:                isB2,                          // V3.1: confirmed bear sub-regime
+    postCrisisLock:      !!(state._postCrisisLock),
+    vixSpikeCooldown:    !!(state._vixSpikeAt),
   };
 
   // ── Sizing multipliers ────────────────────────────────────
@@ -183,9 +169,8 @@ function getRegimeRulebook(state) {
   //   multiplier; actual application requires vega check in server.js execution.
   // Change 5 (TR/Kelly): crisis base sizing 0.5x — defined-risk but gap risk real in C
   const sizeMult = {
-    // V3.1: B1 (early bear, unconfirmed) gets 0.75x — trend not confirmed, lower conviction
-    // Crisis: 0.5x. B1: 0.75x. B2/A: 1.0x.
-    base:          isCrisis ? 0.5 : isB1 ? 0.75 : 1.0,
+    // Crisis: 0.5x. All other regimes: 1.0x. (B1/B2 sizing distinction removed)
+    base:          isCrisis ? 0.5 : 1.0,
     ivBoostCredit: ivHigh   ? 1.5 : 1.0,  // only applied when under vega cap
     ivBoostDebit:  1.0,                    // never boost debit size in high IV
     oversold:      0.75,                   // RSI <= 40 in Regime B
@@ -286,9 +271,7 @@ function getRegimeRulebook(state) {
     isBullRegime,
     isBearRegime,
     isCrisis,
-    isB1,                        // V3.1: early/mild bear sub-regime
-    isB2,                        // V3.1: confirmed bear sub-regime
-    macroReversalThreshold,      // V3.1: 2.0% in B1, 2.5% in B2/other
+    macroReversalThreshold,      // 2.5% unified (B1/B2 removed)
     vix,
     ivRank,
     ivElevated,
@@ -327,7 +310,7 @@ function scoreCandidate(stock, rawPutScore, rawCallScore, putReasons, callReason
   let callScore = Math.min(SCORE_CAP, Math.max(0, rawCallScore));
 
   // ── Direction first — score determines optionType ─────────
-  const optionType = putScore >= callScore ? "put" : "call";
+  let optionType = putScore >= callScore ? "put" : "call"; // let: bear redirect may flip to 'call'
 
   // ── Trade type — instrument constraints override credit mode ─
   // Instrument constraints checked first: XLE allows debit_put only,
@@ -345,8 +328,19 @@ function scoreCandidate(stock, rawPutScore, rawCallScore, putReasons, callReason
   else if (ironCondorOk && instrConstraint?.allowedTypes?.includes("iron_condor"))
     tradeType = "iron_condor";
   // Use rb.creditAllowedVIX which respects the lowered 45 threshold with VIX belt (Fix #13)
-  else if (optionType === "put" && rb.gates.creditPutActive && isIndex && rb.creditAllowedVIX && allowsCredit)
-    tradeType = "credit_put";
+  else if (optionType === "put" && rb.gates.creditPutActive && isIndex && rb.creditAllowedVIX && allowsCredit) {
+    // Bear regime: high put score = bearish DIRECTION signal → credit structure is the complement
+    // credit_put (bull put spread) sells puts BELOW market — loses if bear trend continues
+    // credit_call (bear call spread) sells calls ABOVE market — wins if bear trend continues
+    // Panel unanimous: redirect to credit_call in Regime B so structure aligns with thesis
+    if (rb.isBearRegime && rb.gates.creditCallActive) {
+      tradeType  = "credit_call";
+      optionType = "call"; // flip so executeCreditSpread builds call spread ABOVE market
+      putReasons.push("[CREDIT REDIRECT] Bear regime: bearish signal → bear call spread (sell calls above market, not puts below)");
+    } else {
+      tradeType = "credit_put"; // valid in choppy + bull regimes (Regime A bullPutActive)
+    }
+  }
   else if (optionType === "call" && rb.gates.creditCallActive && isIndex && allowsCredit)
     tradeType = "credit_call";
   else
@@ -388,11 +382,8 @@ function scoreCandidate(stock, rawPutScore, rawCallScore, putReasons, callReason
   const crisisAdj     = isCrisis && isCredit ? rb.sizeMult.creditCrisis : rb.sizeMult.base;
   const sizeMod       = crisisAdj * ivBoost * (oversoldInBear ? rb.sizeMult.oversold : 1.0);
 
-  // Change 5 (TR): correlated heat multiplier
-  //   SPY and QQQ count as 1.5x combined heat — their 0.95 correlation means
-  //   holding both simultaneously is effectively one directional bet
-  const corrGroup    = rb.correlatedGroups.find(g => g.tickers.includes(ticker));
-  const heatMultiplier = corrGroup ? corrGroup.heatMultiplier : 1.0;
+  // Correlation heat multiplier removed from scan loop (panel simplification)
+  // CORRELATED_GROUPS retained for reference but heatMultiplier no longer applied
 
   return {
     stock,
@@ -406,7 +397,7 @@ function scoreCandidate(stock, rawPutScore, rawCallScore, putReasons, callReason
     putReasons,
     callReasons,
     sizeMod,
-    heatMultiplier,  // 1.5 for SPY/QQQ, 1.0 for others
+    // heatMultiplier removed from return — correlation multiplier removed from scan loop
     constraintPass,
     constraintReason: constraint && !constraintPass
       ? `[CONSTRAINT] ${tradeType} not in allowed [${constraint.allowedTypes.join(",")}]${constraint.reason ? " — " + constraint.reason : ""}`
@@ -484,8 +475,11 @@ function evaluateEntry(candidate, rulebook, state, context = {}) {
   //   Use maxProfitPct (% of max profit earned) instead. 15% of max profit = genuine confirmation.
   // existingProfitPct: for debit = positive when profitable. For credit = negative (inverted).
   // existingCreditProfitPct: provided by context as (premium - currentValue) / maxProfit.
+  // Stagger gate: dormant when no positions exist (can't pile-on with nothing open)
+  // Re-activates automatically when positions exist and recentSameDir is provided
   const recentSameDir = context.recentSameDir ?? null;
-  if (recentSameDir !== null && recentSameDir < 30) {
+  const hasOpenPositions = (state.positions || []).length > 0;
+  if (hasOpenPositions && recentSameDir !== null && recentSameDir < 30) {
     const isCredit = tradeType && tradeType.startsWith("credit");
     if (isCredit) {
       // Credit: use % of max profit earned (positive when profitable)
@@ -512,8 +506,7 @@ function evaluateEntry(candidate, rulebook, state, context = {}) {
                : optionType === "put"             ? rb.minScorePut
                : rb.minScoreCall;
 
-  // Agent confidence raises bar when weak — does not lower when strong
-  minScore = Math.max(0, minScore + rb.agentMinAdj);
+  // agentMinAdj = 0 (removed) — no bar adjustment
 
   // Afternoon minimum [Regime A only]
   // Late-day entries in bull market have elevated overnight gap risk
@@ -527,15 +520,7 @@ function evaluateEntry(candidate, rulebook, state, context = {}) {
     minScore = Math.max(minScore, afternoonMin);
   }
 
-  // MACD contradiction [Regime A only]
-  // In bear/crisis regimes, macdContradictsGate=false — entire check skipped
-  // MS panel: genuine contradiction requires both MACD opposing AND RSI < 65
-  // If RSI >= 65, the stock is extended — a put is a fade, not a contradiction
-  if (g.macdContradictsGate) {
-    const genuineContradiction = (optionType === "put" && macdBullish && dailyRsi < 65)
-                               || (optionType === "call" && macdBearish);
-    if (genuineContradiction) minScore = Math.max(minScore, 85);
-  }
+  // MACD contradiction gate removed (panel: redundant with score system in Regime A)
 
   // Drawdown protocol (explicit context param — no hidden state dependency)
   const ddMinScore = context.drawdownMinScore ?? BASE_MIN_SCORE;
