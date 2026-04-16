@@ -1170,15 +1170,26 @@ async function saveDailyLogToRedis() {
       }
     });
     // Save with 90-day TTL (7,776,000 seconds) -- auto-expire old logs
-    const res = await fetch(`${REDIS_URL}/set/${logKey}`, {
+    // Use pipeline endpoint (matches redisSave) — the /set/KEY endpoint with a
+    // JSON {value,ex} body was silently broken: Upstash stored the wrapper
+    // object as the value, so GET returned {value:"<logs>",ex:...} with no
+    // .entries field. Pipeline SET with explicit EX arg is the correct form.
+    const res = await fetch(`${REDIS_URL}/pipeline`, {
       method:  "POST",
       headers: { Authorization: `Bearer ${REDIS_TOKEN}`, "Content-Type": "application/json" },
-      body:    JSON.stringify({ value: logData, ex: 7776000 }),
+      body:    JSON.stringify([["set", logKey, logData, "ex", 7776000]]),
     });
     if (res.ok) {
-      logEvent("scan", `[EOD LOG] Daily log saved to Redis: ${logKey} | ${(state._dailyLogBuffer||[]).length} entries`);
-      state._dailyLogBuffer = []; // reset buffer for next day
-      markDirty();
+      // Pipeline returns HTTP 200 even on command errors — inspect the result array
+      const resultArr = await res.json().catch(() => null);
+      const firstRes  = Array.isArray(resultArr) ? resultArr[0] : null;
+      if (firstRes && firstRes.error) {
+        console.error("[EOD LOG] Redis pipeline SET error:", firstRes.error);
+      } else {
+        logEvent("scan", `[EOD LOG] Daily log saved to Redis: ${logKey} | ${(state._dailyLogBuffer||[]).length} entries`);
+        state._dailyLogBuffer = []; // reset buffer for next day
+        markDirty();
+      }
     } else {
       console.error("[EOD LOG] Redis save failed:", res.status);
     }
@@ -12379,7 +12390,24 @@ app.get("/api/logs/history", async (req, res) => {
       });
       const data = await resp.json();
       if (!data.result) return res.status(404).json({ error: `No log found for ${date}` });
-      const parsed = JSON.parse(data.result);
+      // Historical compat: the previous save path used a malformed Upstash body
+      // ({value, ex} sent as JSON) — Upstash stored the wrapper as the value.
+      // So data.result may be the correct log JSON OR a wrapper like
+      // '{"value":"<log-json>","ex":7776000}'. Unwrap if needed.
+      let parsed;
+      try {
+        parsed = JSON.parse(data.result);
+      } catch(e) {
+        return res.status(500).json({ error: `Stored value for ${date} is not valid JSON: ${e.message}` });
+      }
+      if (parsed && typeof parsed.value === "string" && !parsed.entries) {
+        // Pre-fix wrapper shape — unwrap and re-parse
+        try {
+          parsed = JSON.parse(parsed.value);
+        } catch(e) {
+          return res.status(500).json({ error: `Wrapped log value for ${date} is not valid JSON: ${e.message}` });
+        }
+      }
       const filter = req.query.filter;
       const limit  = Math.min(parseInt(req.query.limit || 500), 10000);
       const types  = filter ? filter.split(",").map(t => t.trim().toLowerCase()) : null;
