@@ -5777,13 +5777,16 @@ async function executeCreditSpread(stock, price, score, scoreReasons, vix, optio
     const sigma = (stock._realIV && stock._realIV > 0.05) ? stock._realIV : vix / 100;
     const T     = Math.max(0.01, targetDTE / 365);
     const r     = 0.05;
-    // invPhi(1 - targetDelta) via A&S rational approximation
-    const _p = 1 - targetDelta;
+    // Delta inversion via A&S rational approximation — option-type aware
+    // PUT:  target strike BELOW price → invPhi(1 - delta)
+    // CALL: target strike ABOVE price → invPhi(delta)
+    // Using wrong formula for calls was targeting ITM strikes (below price)
+    const _p = optionType === "put" ? (1 - targetDelta) : targetDelta;
     const _q = Math.min(_p, 1 - _p);
     const _t = Math.sqrt(-2 * Math.log(_q));
     const _num = 2.515517 + 0.802853*_t + 0.010328*_t*_t;
     const _den = 1 + 1.432788*_t + 0.189269*_t*_t + 0.001308*_t*_t*_t;
-    const _z   = (_p < 0.5 ? -1 : 1) * (_t - _num/_den);  // invPhi(1-delta)
+    const _z   = (_p < 0.5 ? -1 : 1) * (_t - _num/_den);
     const shortStrikeRaw = price * Math.exp(-(_z * sigma * Math.sqrt(T) - (r + sigma*sigma/2) * T));
     const inc = price < 200 ? 0.5 : 1;  // $0.50 increments for TLT/GLD, $1 for SPY/QQQ
     const shortStrike = Math.round(shortStrikeRaw / inc) * inc;
