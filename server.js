@@ -1,5 +1,5 @@
 // -
-// ARGO V3.1 - Systematic SPY/QQQ Options Trading Agent
+// ARGO V3.2 - Systematic SPY/QQQ Options Trading Agent
 // Alpaca Paper Trading Edition
 // -
 const express    = require("express");
@@ -333,7 +333,7 @@ function defaultState() {
     _macroReversalAt:    null,  // timestamp of last macro-reversal exit batch
     _macroReversalCount: 0,     // how many positions closed in the reversal batch
     _macroReversalSPY:   null,  // SPY price at time of reversal - for comparison
-    // V3.1 regime additions (panel approved)
+    // V3.2 regime additions (panel approved)
     _postCrisisLock:     false, // true for 10 trading days after Regime C → B transition
     _postCrisisLockExpiry: null,// timestamp when post-crisis lock expires
     _vixSpikeAt:         null,  // timestamp of last VIX spike > 8pt (flash crash gate)
@@ -2675,7 +2675,7 @@ function checkVIXVelocity(currentVIX) {
 
   // Black swan: VIX spiked 8+ points — close all positions + set flash crash cooldown
   if (delta >= 8) {
-    state._vixSpikeAt = Date.now(); // V3.1: 48h cooldown on debit put re-entry after spike
+    state._vixSpikeAt = Date.now(); // V3.2: 48h cooldown on debit put re-entry after spike
     markDirty();
     logEvent("circuit", `VIX VELOCITY ALERT - jumped ${delta.toFixed(1)} points to ${currentVIX} - closing all positions`);
     return true;
@@ -3710,7 +3710,7 @@ Rules: regime=what SPY does next 3-10 days. entryBias: puts_on_bounces=bearish t
   const prevRegimeClass = state._regimeClass;
   state._regimeClass = regimeC ? "C" : regimeB ? "B" : "A";
 
-  // ── V3.1: B1/B2 sub-regime split (panel approved) ───────────────────────
+  // ── V3.2: B1/B2 sub-regime split (panel approved) ───────────────────────
   // B1 = early/mild bear: duration < 5d OR VIX < 26. Higher min score, tighter reversal threshold.
   // B2 = confirmed bear: duration >= 5d AND VIX >= 26. Full puts-on-bounces conviction.
   if (regimeB) {
@@ -3720,14 +3720,14 @@ Rules: regime=what SPY does next 3-10 days. entryBias: puts_on_bounces=bearish t
     state._regimeSubClass = null;
   }
 
-  // ── V3.1: Post-crisis recovery lock (panel unanimous) ───────────────────
+  // ── V3.2: Post-crisis recovery lock (panel unanimous) ───────────────────
   // When exiting Regime C → B, block debit puts for 10 trading days.
   // Post-crisis V-recoveries are violent upside — puts-on-bounces fires on the wrong side.
   if (prevRegimeClass === "C" && state._regimeClass === "B") {
     if (!state._postCrisisLock) {
       // 10 calendar days ≈ 7 trading days. For true 10 trading days use 14 calendar days.
       // Using 14 calendar days to ensure full 10-trading-day protection window.
-      const TEN_TRADING_DAYS_MS = 14 * 24 * 3600 * 1000; // 14 calendar ≈ 10 trading days
+      const TEN_TRADING_DAYS_MS = 3 * 24 * 3600 * 1000; // panel: 10 trading days → 3 days post-crisis lock
       state._postCrisisLock        = true;
       state._postCrisisLockExpiry  = Date.now() + TEN_TRADING_DAYS_MS;
       logEvent("warn", "[REGIME] C→B transition detected — post-crisis lock active for 10 trading days. Debit puts blocked.");
@@ -5032,42 +5032,14 @@ async function checkAllFilters(stock, price, prefetchedBars = null) { // OPT3: a
   // 7. Portfolio heat
   if (heatPct() >= effectiveHeatCap()) return { pass:false, reason:`Portfolio heat at ${(heatPct()*100).toFixed(0)}% max` };
 
-  // 8. Sector exposure
-  const sectorExp = state.positions.filter(p=>p.sector===stock.sector).reduce((s,p)=>s+p.cost,0);
-  if (sectorExp / totalCap() >= MAX_SECTOR_PCT) return { pass:false, reason:`${stock.sector} sector at ${MAX_SECTOR_PCT*100}% limit` };
+  // 8. Sector cap removed (panel: 5 index ETFs, heat cap handles concentration)
 
   // 9. Sector concentration — rely on MAX_SECTOR_PCT and correlation blocks
   // Hard per-sector count removed — heat % and correlation blocks handle this
   // (opposite sector bet detection handled by same-ticker opposite direction check in scan loop)
 
-  // 10. Dynamic vol filter — realized vs implied gap (replaces static IVR_MAX)
-  // If implied vol >> realized vol, options are overpriced — skip
-  // If implied vol ≈ realized vol or implied < realized, options are fairly priced or cheap — enter
-  try {
-    // OPT3: use prefetched bars (60 bars) sliced to 21 — avoids separate Alpaca call
-    const volBars = prefetchedBars ? prefetchedBars.slice(-21) : await getStockBars(stock.ticker, 21);
-    if (volBars.length >= 10) {
-      const closes   = volBars.map(b => b.c);
-      const returns  = closes.slice(1).map((c, i) => Math.log(c / closes[i]));
-      const realized = Math.sqrt(returns.reduce((s, r) => s + r * r, 0) / returns.length) * Math.sqrt(252) * 100;
-      const implied  = stock.ivr * 0.4 + 15; // approximate IV from IVR (IVR=50 → ~35% IV)
-      const volGap   = implied - realized;
-      // Skip if implied vol is more than 20 points above realized (options too expensive)
-      // TODO #8 FIX: Credit spreads benefit from high IV (collect richer premium)
-      // Only block debit trades where expensive IV hurts the buyer
-      // Credit spreads: high IV = good, we're selling the overpriced premium
-      const isCreditEntry = creditModeActive || (stock._tradeType || "").startsWith("credit");
-      if (volGap > 20 && !isCreditEntry) return { pass: false, reason: `Vol gap ${volGap.toFixed(1)}pts — implied ${implied.toFixed(0)}% vs realized ${realized.toFixed(0)}% — options expensive` };
-      if (volGap > 20 && isCreditEntry) logEvent("filter", `${stock.ticker} vol gap ${volGap.toFixed(1)}pts — credit spread, collecting rich premium (favorable)`);
-      // Bonus signal: if realized > implied, options are cheap (underpriced) — log as positive
-      if (realized > implied + 5) logEvent("filter", `${stock.ticker} vol gap FAVORABLE — realized ${realized.toFixed(0)}% > implied ${implied.toFixed(0)}%`);
-    } else {
-      // Fallback to static IVR check if not enough bars
-      if (stock.ivr > IVR_MAX) return { pass: false, reason: `IVR ${stock.ivr} > ${IVR_MAX} (fallback)` };
-    }
-  } catch(e) {
-    if (stock.ivr > IVR_MAX) return { pass: false, reason: `IVR ${stock.ivr} > ${IVR_MAX}` };
-  }
+  // 10. Dynamic vol filter removed (panel: credit bypass made it half-functional;
+  //     elevated IV = collect rich premium on credits. R/R gate handles structure quality.)
 
   // 11. Earnings
   if (stock.earningsDate) {
@@ -6069,7 +6041,7 @@ async function executeCreditSpread(stock, price, score, scoreReasons, vix, optio
 
     // Credit received reduces capital requirement - margin = max loss
     const profitableCount = (state.closedTrades || []).filter(t => t.pnl > 0).length;
-    const creditCapPct    = profitableCount >= 20 ? 0.25 : 0.15;
+    const creditCapPct    = profitableCount >= 20 ? 0.25 : 0.20; // panel: raised from 0.15 (too tight pre-fills)
     const marginRequired  = parseFloat((maxLoss * 100 * contracts).toFixed(2));
     if (marginRequired > state.cash * creditCapPct) {
       logEvent("filter", `${stock.ticker} credit spread margin $${marginRequired} exceeds ${(creditCapPct*100).toFixed(0)}% limit`);
@@ -6228,9 +6200,9 @@ async function executeSpreadTrade(stock, price, score, scoreReasons, vix, option
   // A missing day plan should never unlock full sizing - fail safe, not fail open
   // 200MA bear regime: additional 50% size reduction (stacks with other multipliers)
   // Derived from state directly -- spyBelow200MA is a runScan-scoped var, not available here
-  const spyBelow200MALocal = !!(state._spyMA200 && state._liveSPY && state._liveSPY < state._spyMA200);
-  const below200MAMult = spyBelow200MALocal ? 0.5 : 1.0;
-  const riskMult = ((!state._dayPlan || state._dayPlan.riskLevel === "high") ? 0.5 : 1.0) * below200MAMult;
+  // Panel: _dayPlan defaults to normal (was null→high, causing permanent 50% sizing)
+  // High risk day only applies when _dayPlan is explicitly set with riskLevel="high"
+  const riskMult = (state._dayPlan?.riskLevel === "high" ? 0.5 : 1.0);  // below200MAMult removed: bear regime should be full-sized in its primary operating mode
   // 3B: Score-proportional sizing - higher conviction = larger position (pre-30 fills cap still applies)
   // Applied downstream as a multiplier on contract count
   const scoreSizeMult = (score) => score >= 90 ? 2.0 : score >= 85 ? 1.5 : score >= 80 ? 1.25 : 1.0;
@@ -9180,7 +9152,7 @@ async function runScan() {
   // Derive allowed flags from rulebook gates (entry window still checked here for timing)
   const entryWindowOpen   = isEntryWindow("put", true) && !finalHourBlock && !suppressBlock;
   const callWindowOpen    = isEntryWindow("call", true) && !finalHourBlock && !suppressBlock;
-  // ── V3.1: Compute new regime gates inline ───────────────────────────────
+  // ── V3.2: Compute new regime gates inline ───────────────────────────────
   // Post-crisis lock: block debit puts for 10 trading days after C→B transition
   const postCrisisLockActive = !!(state._postCrisisLock && state._postCrisisLockExpiry && Date.now() < state._postCrisisLockExpiry);
   if (postCrisisLockActive && !dryRunMode) {
@@ -9222,8 +9194,8 @@ async function runScan() {
                              && !rb.gates.postReversalBlock && !rb.gates.macroBullishBlock
                              && !rb.gates.choppyDebitBlock && !rb.gates.avoidHoldActive
                              && !rb.gates.crisisDebitBlock
-                             && !postCrisisLockActive       // V3.1: no puts in post-crisis window
-                             && !vixSpikeCooldownActive     // V3.1: no puts for 48h after VIX spike
+                             && !postCrisisLockActive       // V3.2: no puts in post-crisis window
+                             && !vixSpikeCooldownActive     // V3.2: no puts for 48h after VIX spike
                              ) || dryRunMode;
   const callsAllowed      = (callWindowOpen && !rb.gates.below200MACallBlock
                              && (!rb.gates.choppyDebitBlock || isMRCondition)
@@ -9283,7 +9255,7 @@ async function runScan() {
     const prevClose  = spyBars[spyBars.length-2].c;
     const curSPY     = spyBars[spyBars.length-1].c;
     const spyDayMove = (curSPY - prevClose) / prevClose;
-    // V3.1: B1 uses tighter 2.0% threshold (early-bear bounces more likely real reversals)
+    // V3.2: B1 uses tighter 2.0% threshold (early-bear bounces more likely real reversals)
     const _macroRevThreshold = (_rbBase && _rbBase.macroReversalThreshold) ? _rbBase.macroReversalThreshold : 0.025;
     if (spyDayMove > _macroRevThreshold) { // SPY up threshold% = genuine macro reversal (2.0% B1, 2.5% B2)
       let reversalCount = 0;
@@ -9863,7 +9835,10 @@ async function runScan() {
           : 0;
         const gldCallGate = isGLDEntryAllowed("call", dxy5d, spy5dReturn, state.vix, liveStock.rsi, liveStock.price || 0, gldMA20Live);
         // Pass tradeIntent type so GLD gate can bypass RSI check for credit puts
-        const _gldIntentType = (creditModeActive && putSetup.score >= MIN_SCORE) ? "credit_put" : "debit_put";
+        // In bear regime, credit mode routes to credit_call (sell calls above market)
+        // In choppy/bull, credit mode routes to credit_put (sell puts below market)
+        const _gldCreditType  = isBearTrend ? "credit_call" : "credit_put";
+        const _gldIntentType  = (creditModeActive && putSetup.score >= MIN_SCORE) ? _gldCreditType : "debit_put";
         const gldPutGate  = isGLDEntryAllowed("put",  dxy5d, spy5dReturn, state.vix, liveStock.rsi, liveStock.price || 0, gldMA20Live, _gldIntentType);
         if (!gldCallGate.allowed) { callSetup.score = 0; logEvent("filter", gldCallGate.reason); }
         if (!gldPutGate.allowed)  { putSetup.score  = 0; logEvent("filter", gldPutGate.reason);  }
@@ -10325,7 +10300,7 @@ async function runScan() {
     const macdContradicts = rb.gates.macdContradictsGate && !creditModeActive &&
       ((optionType === "put" && macdBullish && dailyRsiNow < 65) ||
        (optionType === "call" && macdBearish && !isMRCall));
-    // macdMinScore removed -- evaluateEntry handles MACD contradiction gate
+    // macdContradicts: server.js applies its own MACD check here (evaluateEntry gate removed)
     if (!rb.gates.macdContradictsGate && optionType === "put" && macdBullish && dailyRsiNow >= 68)
       logEvent("filter", `${liveStock.ticker} MACD bypass - RSI ${dailyRsiNow.toFixed(0)} overbought + bullish MACD in Regime B = bounce fade`);
     if (macdContradicts) logEvent("filter", `${liveStock.ticker} MACD ${macdSignal} contradicts ${optionType} - evaluateEntry raises minimum`);
@@ -10503,14 +10478,9 @@ async function runScan() {
 
   // Enter trades - sorted by score, best first
   // heatPct() is live and updates after every executeTrade call
-  for (const { stock, price, score, reasons, optionType, isMeanReversion, tradeIntent, constraintPass, constraintReason, heatMultiplier, sizeMod } of scored) {
-    // Fix 8 (TR/Kelly panel): correlated instruments (SPY+QQQ) count as 1.5x heat
-    // Prevents holding both as two independent bets at 0.95 correlation
-    const _heatMult = heatMultiplier || 1.0;
-    if (heatPct() * _heatMult >= effectiveHeatCap()) {
-      if (_heatMult > 1.0) logEvent("filter", `${stock.ticker} correlated heat check: ${(heatPct()*_heatMult*100).toFixed(0)}% effective (${(heatPct()*100).toFixed(0)}% raw x ${_heatMult}x mult) - at cap`);
-      break;
-    }
+  for (const { stock, price, score, reasons, optionType, isMeanReversion, tradeIntent, constraintPass, constraintReason, sizeMod } of scored) {
+    // Heat cap — panel: correlation multiplier removed (heat cap handles concentration)
+    if (heatPct() >= effectiveHeatCap()) break;
     if (state.cash <= CAPITAL_FLOOR) break;
 
     const { pass, reason } = await checkAllFilters(stock, price, tradeIntent?.type || null);
@@ -10524,47 +10494,10 @@ async function runScan() {
       logEvent("filter", `${stock.ticker} - bypassing filter for PUT: ${reason}`);
     }
 
-    // - F8: Block high-beta entry if correlation limit reached -
-    const stockBeta = stock.beta || stock._liveBeta || 1.0;
-    if (stockBeta > 1.5 && highBetaPositions >= 2 && !dryRunMode) {
-      logEvent("filter", `${stock.ticker} beta:${stockBeta.toFixed(1)} - high-beta limit reached (${highBetaPositions}/2)`);
-      continue;
-    }
+    // High-beta limit removed (panel: irrelevant for 5 index ETFs — SPY/QQQ/GLD/TLT/XLE)
 
-    // Liquidity pre-check - block before executeTrade if contract is clearly unfillable
-    // executeTrade also checks, but this avoids unnecessary order submission attempts
-    if (stock._cachedContract) {
-      const execOI     = stock._cachedContract.oi || 0;
-      const execSpread = stock._cachedContract.spread || 1;
-      // Hard block: OI known and below floor
-      if (execOI > 0 && execOI < MIN_OI) {
-        logEvent("filter", `${stock.ticker} pre-blocked - OI:${execOI} below minimum ${MIN_OI}`);
-        continue;
-      }
-      // Hard block: spread too wide
-      if (execSpread > MAX_SPREAD_PCT) {
-        logEvent("filter", `${stock.ticker} pre-blocked - spread ${(execSpread*100).toFixed(0)}% exceeds ${(MAX_SPREAD_PCT*100).toFixed(0)}% max`);
-        continue;
-      }
-      // MR-specific tighter gate: MR trades need better liquidity
-      if (isMeanReversion && execOI > 0 && execOI < 50 && execSpread > 0.20) {
-        logEvent("filter", `${stock.ticker} MEAN REVERSION blocked - OI:${execOI} spread:${(execSpread*100).toFixed(0)}% too illiquid for MR`);
-        continue;
-      }
-    }
-    // - AGENT PRE-ENTRY CHECK - only for genuinely borderline scores -
-    // Panel fix: firing below 85 means paying for a call on nearly every trade.
-    // Only medium-confidence rejections were silently ignored (wasted API cost).
-    // New logic: fire only on 70-79 (true borderline). Scores 80+ have enough
-    // signal consensus to proceed without validation.
-    // Block on both high AND medium confidence rejections (low = too uncertain to block).
-    if (!dryRunMode && score >= MIN_SCORE && score < 80 && !creditModeActive) {
-      const preCheck = await getAgentPreEntryCheck(stock, score, reasons, optionType, false);
-      if (!preCheck.approved && ["high","medium"].includes(preCheck.confidence)) {
-        logEvent("filter", `${stock.ticker} blocked by pre-entry agent check (${preCheck.confidence} conf) - ${preCheck.reason}`);
-        continue;
-      }
-    }
+    // Liquidity pre-check removed (panel: bid-ask gate in executeCreditSpread handles this)
+    // Pre-entry agent check removed (panel: redundant API cost — score provides signal quality)
 
     // ENTRY ENGINE: evaluateEntry  -- single gate check using locked tradeIntent
     const intent     = tradeIntent || {};
@@ -10620,7 +10553,6 @@ async function runScan() {
     // Derive execution path from locked intentType
     // Richard/Gilfoyle: log intentType immediately after pass — makes the dark gap visible
     logEvent("filter", `${stock.ticker} entry approved — intent:${intentType} score:${score} regime:${rb.regimeName}`);
-    const agentTradeType      = (state._agentMacro || {}).tradeType || "spread";
     const useCreditSpread     = intentType === "credit_put"  && stock.isIndex && !isMeanReversion;
     const useCreditCallSpread = intentType === "credit_call" && stock.isIndex && !isMeanReversion;
     const useIronCondor       = intentType === "iron_condor" && stock.isIndex && !isMeanReversion && !dryRunMode
@@ -11043,7 +10975,7 @@ async function sendMorningBriefing() {
     // - Footer -
     const footer = `
       <div style="border-top:3px double #333;margin-top:16px;padding-top:8px;text-align:center;font-size:9px;color:#999;letter-spacing:1px">
-        ARGO V3.1 - Entry window 9:30am-3:45pm ET - SPY/QQQ primary - Monthly options
+        ARGO V3.2 - Entry window 9:30am-3:45pm ET - SPY/QQQ primary - Monthly options
       </div>`;
 
     // - Assemble -
@@ -11667,7 +11599,7 @@ async function premarketAssessment() {
             <em>These are recommendations only. ARGO-V3.0 will manage exits automatically at open.</em>
           </div>
           <div style="border-top:3px double #333;margin-top:12px;padding-top:8px;text-align:center;font-size:9px;color:#999;letter-spacing:1px">
-            ARGO V3.1 - Market opens in ~45 minutes - Entry window 9:30am ET
+            ARGO V3.2 - Market opens in ~45 minutes - Entry window 9:30am ET
           </div>
         </div>`
       );
@@ -13062,7 +12994,7 @@ process.on("unhandledRejection", (reason, promise) => {
 // Boot sequence - load state from Redis then start server
 initState().then(() => {
   app.listen(PORT, () => {
-    console.log(`ARGO V3.1 running on port ${PORT}`);
+    console.log(`ARGO V3.2 running on port ${PORT}`);
     console.log(`Alpaca key:  ${ALPACA_KEY?"SET":"NOT SET"}`);
     console.log(`Gmail:       ${GMAIL_USER||"NOT SET"}`);
     console.log(`Resend:      ${RESEND_API_KEY?"SET -":"NOT SET - email disabled"}`);
@@ -13084,7 +13016,7 @@ initState().then(() => {
 });;
 
 // -
-// ARGO V3.1 - BACKTESTING ENGINE
+// ARGO V3.2 - BACKTESTING ENGINE
 // Walk-forward simulation using Alpaca historical daily bars
 // Replays ARGO's scoring logic against historical data without real orders
 // QS-W2/GL-1: Addresses the out-of-sample validation gap identified by panel
