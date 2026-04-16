@@ -12381,7 +12381,7 @@ app.get("/api/logs/history", async (req, res) => {
       if (!data.result) return res.status(404).json({ error: `No log found for ${date}` });
       const parsed = JSON.parse(data.result);
       const filter = req.query.filter;
-      const limit  = Math.min(parseInt(req.query.limit || 500), 2000);
+      const limit  = Math.min(parseInt(req.query.limit || 500), 10000);
       const types  = filter ? filter.split(",").map(t => t.trim().toLowerCase()) : null;
       let entries  = parsed.entries || [];
       if (types) entries = entries.filter(e => types.includes(e.type));
