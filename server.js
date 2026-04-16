@@ -1672,6 +1672,12 @@ function scoreIndexSetup(stock, optionType, spyRSI, spyMACD, spyMomentum, breadt
   // Structural signals (regime, entryBias, VIX level) legitimately co-fire in Regime B by definition.
   // Event signals (agent bearish + MACD crossover + breadth crash) may reflect one macro event.
   // Threshold raised 4→5: Regime B routinely has 4 valid independent signals.
+  // Gilfoyle/Richard: eventKeywords counts INDEPENDENT EVENT signals only
+  // Structural signals (Regime:, VIX level, entry bias) are deliberately absent —
+  // they legitimately co-fire in Regime B and don't indicate false correlation
+  // Breadth IS an event signal (single reading) — kept in list correctly
+  // Dinesh: "Breadth falling" was wrong — it only matches supplementary signal
+  //         "Breadth" matches primary breadth score reasons (e.g. "Breadth 38% - weak")
   const eventKeywords = optionType === "put"
     ? ["Agent strongly bearish","Agent bearish","Agent mild bearish","MACD bearish","Breadth"]
     : ["Agent strongly bullish","Agent bullish","Agent mild bullish","MACD bullish","Breadth"];
@@ -1953,7 +1959,7 @@ function scoreIndexSetup(stock, optionType, spyRSI, spyMACD, spyMomentum, breadt
     // Bounce quality scoring - best put entries are on relief bounces not crashes
     if (entryBias === "puts_on_bounces") {
       const agentAlreadyBearish = ["strongly bearish","bearish","mild bearish"].includes(signal);
-      if (spyMomentum === "steady" && spyRSI >= 45 && spyRSI <= 60) {
+      if (spyMomentum === "steady" && spyRSI >= 45 && spyRSI <= 65) { // panel: 65 — RSI 64 bounce is a valid fade
         const biasBonus = agentAlreadyBearish ? 8 : 15;
         score += biasBonus; reasons.push(`Entry bias: fading bounce RSI ${spyRSI} (+${biasBonus})`);
       } else if (spyMomentum === "steady") {
@@ -10561,6 +10567,8 @@ async function runScan() {
     }
 
     // Derive execution path from locked intentType
+    // Richard/Gilfoyle: log intentType immediately after pass — makes the dark gap visible
+    logEvent("filter", `${stock.ticker} entry approved — intent:${intentType} score:${score} regime:${rb.regimeName}`);
     const agentTradeType      = (state._agentMacro || {}).tradeType || "spread";
     const useCreditSpread     = intentType === "credit_put"  && stock.isIndex && !isMeanReversion;
     const useCreditCallSpread = intentType === "credit_call" && stock.isIndex && !isMeanReversion;
@@ -10576,6 +10584,12 @@ async function runScan() {
 
     let entered = false;
     state._lastEntryType = null; // reset before each entry attempt
+    // Gilfoyle: log which execution branch fires — critical for diagnosing silent non-entries
+    const _branch = useIronCondor ? "iron_condor"
+      : (useCreditSpread || useCreditCallSpread) ? `credit_${optionType}`
+      : (useSpread || isMeanReversion) ? `debit_${optionType}`
+      : "none";
+    logEvent("filter", `${stock.ticker} execution branch: ${_branch} (creditSpread:${useCreditSpread} creditCall:${useCreditCallSpread} debit:${useSpread} MR:${isMeanReversion})`);
     if (useIronCondor) {
       state._lastEntryType = "iron_condor";
       logEvent("scan", `[IRON CONDOR] ${stock.ticker} choppy + IVR ${ivRankNow} - attempting iron condor`);
@@ -13904,6 +13918,62 @@ app.post("/api/backtest/stress", async (req, res) => {
     res.json({ ticker, optionType, stressTests: results });
   } catch(e) {
     logEvent("error", `[BACKTEST/STRESS] Error: ${e.message}`);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ─── /api/force-entry — pipeline test endpoint (paper trading only) ──────────
+// Dinesh: hard guard — 403 in live trading, confirm required, 0.5x size
+// Richard: calls executeCreditSpread directly with real prices — full pipeline test
+// Gilfoyle: logs [FORCE ENTRY] prominently, appears in EOD email
+app.post('/api/force-entry', async (req, res) => {
+  // Dinesh guard: never allow in live trading
+  if (ALPACA_BASE.includes('live')) {
+    return res.status(403).json({ error: 'force-entry disabled in live trading' });
+  }
+  const { ticker, optionType, confirm } = req.body || {};
+  if (!confirm) return res.status(400).json({ error: 'must include confirm:true in body' });
+  if (!ticker || !optionType) return res.status(400).json({ error: 'ticker and optionType required' });
+  if (!['put','call'].includes(optionType)) return res.status(400).json({ error: 'optionType must be put or call' });
+
+  const stock = WATCHLIST.find(s => s.ticker === ticker);
+  if (!stock) return res.status(400).json({ error: `${ticker} not in WATCHLIST` });
+  if (!stock.isIndex) return res.status(400).json({ error: `${ticker} is not an index instrument` });
+
+  // D1: rate limit — prevent double-click double-order (30s cooldown)
+  const _lastForce = state._lastForceEntry || 0;
+  if (Date.now() - _lastForce < 30000) {
+    return res.status(429).json({ error: `Rate limited — wait ${Math.ceil((30000-(Date.now()-_lastForce))/1000)}s before next force-entry` });
+  }
+  state._lastForceEntry = Date.now();
+
+  try {
+    logEvent("scan", `[FORCE ENTRY] ${ticker} ${optionType} — bypassing score/R/R gates — PIPELINE TEST`);
+    const price = await getStockQuote(ticker);
+    if (!price) return res.status(500).json({ error: 'could not fetch live price from Alpaca' });
+
+    const rb = getRegimeRulebook(state);
+    // Dinesh: 0.5x size floor — test with minimum exposure
+    const pos = await executeCreditSpread(
+      stock, price, 99, ['[FORCE ENTRY] pipeline test — score/R/R gates bypassed'],
+      state.vix || 25, optionType, 0.5, rb.spreadParams
+    );
+    if (pos) {
+      // D2+D3: pos={pending:true} when order submitted — read actual values from state._pendingOrder
+      const orderId = state._pendingOrder?.orderId || '?';
+      const credit  = state._pendingOrder?.netCredit || state._pendingOrder?.premium || '?';
+      logEvent("scan", `[FORCE ENTRY] ✅ ${ticker} order submitted — orderId:${orderId} credit:$${credit} — awaiting fill confirmation`);
+      // Dinesh: mark force entries in EOD email via state flag
+      if (!state._forceEntries) state._forceEntries = [];
+      state._forceEntries.push({ ticker, optionType, ts: Date.now(), orderId });
+      markDirty();
+      res.json({ success: true, message: 'Order submitted — awaiting fill. Check positions panel and server log.', orderId, credit });
+    } else {
+      logEvent("scan", `[FORCE ENTRY] ❌ ${ticker} executeCreditSpread returned null — check filter logs for reason`);
+      res.json({ success: false, reason: 'executeCreditSpread returned null — bid-ask gate or no valid chain. Check server log.' });
+    }
+  } catch(e) {
+    logEvent("error", `[FORCE ENTRY] Error: ${e.message}`);
     res.status(500).json({ error: e.message });
   }
 });
