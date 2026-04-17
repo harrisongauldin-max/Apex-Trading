@@ -836,6 +836,9 @@ async function runReconciliation() {
     if (!alpacaPositions || !Array.isArray(alpacaPositions)) return;
 
     const alpacaSymbols = new Set(alpacaPositions.map(p => p.symbol));
+    // Build symbol lookup — used by credit/debit correction and broken-spread passes
+    const alpacaBySymbol = {};
+    for (const ap of alpacaPositions) alpacaBySymbol[ap.symbol] = ap;
     let ghosts = 0, orphans = 0;
 
     // - Update currentPrice on existing positions from Alpaca data -
@@ -855,6 +858,81 @@ async function runReconciliation() {
           pos.probabilityOfProfit = parseFloat(((1 - Math.abs(parseFloat(alpPos.greeks.delta))) * 100).toFixed(1));
         }
       }
+    }
+
+    // - Credit/debit label correction for existing spread positions -
+    // Fixes positions entered with wrong isCreditSpread flag before the fix
+    for (const pos of state.positions) {
+      if (!pos.isSpread || !pos.buySymbol || !pos.sellSymbol) continue;
+      const buyLeg  = alpacaBySymbol[pos.buySymbol];
+      const sellLeg = alpacaBySymbol[pos.sellSymbol];
+      if (!buyLeg || !sellLeg) continue;
+      const buyEntry  = parseFloat(buyLeg.avg_entry_price  || 0);
+      const sellEntry = parseFloat(sellLeg.avg_entry_price || 0);
+      if (buyEntry <= 0 || sellEntry <= 0) continue;
+      const shouldBeCredit = sellEntry > buyEntry;
+      if (pos.isCreditSpread !== shouldBeCredit) {
+        logEvent("warn", `[RECONCILE] Correcting ${pos.ticker} isCreditSpread: ${pos.isCreditSpread} → ${shouldBeCredit} (sell avg $${sellEntry} vs buy avg $${buyEntry})`);
+        pos.isCreditSpread = shouldBeCredit;
+        // Recalculate premium as net credit/debit from actual fill prices
+        const netPremium = parseFloat(Math.abs(sellEntry - buyEntry).toFixed(2));
+        if (netPremium > 0) pos.premium = netPremium;
+        // Recalculate max profit/loss
+        const width = Math.abs((pos.buyStrike || 0) - (pos.sellStrike || 0));
+        if (width > 0) {
+          pos.maxProfit = shouldBeCredit
+            ? parseFloat((pos.premium * 100 * (pos.contracts || 1)).toFixed(2))
+            : parseFloat(((width - pos.premium) * 100 * (pos.contracts || 1)).toFixed(2));
+          pos.maxLoss = shouldBeCredit
+            ? parseFloat(((width - pos.premium) * 100 * (pos.contracts || 1)).toFixed(2))
+            : parseFloat((pos.premium * 100 * (pos.contracts || 1)).toFixed(2));
+        }
+      }
+      // Correct contracts from Alpaca — use MIN of both legs
+      // A spread can only have as many matched pairs as the smaller leg allows
+      // e.g. 4x long $745 / 1x short $739 = 1x spread (not 4x)
+      const alpacaContracts = Math.min(
+        Math.abs(parseInt(buyLeg.qty || 1)),
+        Math.abs(parseInt(sellLeg.qty || 1))
+      );
+      if (alpacaContracts > 0 && alpacaContracts !== pos.contracts) {
+        logEvent("warn", `[RECONCILE] Correcting ${pos.ticker} contracts: ${pos.contracts} → ${alpacaContracts} (min of both legs)`);
+        pos.contracts = alpacaContracts;
+        // Recalculate maxProfit/maxLoss with corrected contracts
+        const width = Math.abs((pos.buyStrike || 0) - (pos.sellStrike || 0));
+        if (width > 0 && pos.premium > 0) {
+          pos.maxProfit = pos.isCreditSpread
+            ? parseFloat((pos.premium * 100 * alpacaContracts).toFixed(2))
+            : parseFloat(((width - pos.premium) * 100 * alpacaContracts).toFixed(2));
+          pos.maxLoss = pos.isCreditSpread
+            ? parseFloat(((width - pos.premium) * 100 * alpacaContracts).toFixed(2))
+            : parseFloat((pos.premium * 100 * alpacaContracts).toFixed(2));
+        }
+      }
+    }
+
+    // - Broken spread correction: if spread has only one leg in Alpaca, convert to naked -
+    for (const pos of state.positions) {
+      if (!pos.isSpread) continue;
+      const hasOnlyOneSym = (pos.buySymbol && !pos.sellSymbol) || (!pos.buySymbol && pos.sellSymbol);
+      if (!hasOnlyOneSym) continue;
+      const sym = pos.buySymbol || pos.sellSymbol;
+      const alpacaLeg = alpacaBySymbol[sym];
+      if (!alpacaLeg) continue; // ghost detection will handle it
+      // Only one leg exists in Alpaca — convert to naked position
+      logEvent("warn", `[RECONCILE] ${pos.ticker} spread missing one leg (${sym}) — converting to naked`);
+      pos.isSpread     = false;
+      pos.isCreditSpread = false;
+      const legQty = parseInt(alpacaLeg.qty || 1);
+      pos.contracts    = Math.abs(legQty);
+      pos.contractSymbol = sym;
+      pos.buySymbol    = legQty > 0 ? sym : null;
+      pos.sellSymbol   = legQty < 0 ? sym : null;
+      pos.premium      = parseFloat(alpacaLeg.avg_entry_price || pos.premium || 0);
+      pos.maxLoss      = null;
+      pos.maxProfit    = null;
+      pos.buyStrike    = legQty > 0 ? pos.buyStrike : null;
+      pos.sellStrike   = legQty < 0 ? (pos.sellStrike || pos.buyStrike) : null;
     }
 
     // - Ghost detection - ARGO has position, Alpaca doesn't -
@@ -1068,8 +1146,9 @@ async function runReconciliation() {
           const netDebit = parseFloat((buyLeg.premium - sellLeg.premium).toFixed(2));
           const curNet   = parseFloat(((buyLeg.currentPrice || buyLeg.premium) - (sellLeg.currentPrice || sellLeg.premium)).toFixed(2));
 
-          // B3b: detect credit vs debit — same logic as B3a
-          const _isCredit3b = a.optionType === 'put' ? buyLeg.strike < sellLeg.strike : buyLeg.strike > sellLeg.strike;
+          // B3b: detect credit vs debit — price-based (matches B3a fix)
+          // sellLeg.premium > buyLeg.premium → net credit received → isCreditSpread = true
+          const _isCredit3b = sellLeg.premium > buyLeg.premium;
           const merged = {
             ticker:      a.ticker, optionType: a.optionType,
             isSpread:    true, isCreditSpread: _isCredit3b,
