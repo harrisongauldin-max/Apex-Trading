@@ -1170,26 +1170,15 @@ async function saveDailyLogToRedis() {
       }
     });
     // Save with 90-day TTL (7,776,000 seconds) -- auto-expire old logs
-    // Use pipeline endpoint (matches redisSave) — the /set/KEY endpoint with a
-    // JSON {value,ex} body was silently broken: Upstash stored the wrapper
-    // object as the value, so GET returned {value:"<logs>",ex:...} with no
-    // .entries field. Pipeline SET with explicit EX arg is the correct form.
-    const res = await fetch(`${REDIS_URL}/pipeline`, {
+    const res = await fetch(`${REDIS_URL}/set/${logKey}`, {
       method:  "POST",
       headers: { Authorization: `Bearer ${REDIS_TOKEN}`, "Content-Type": "application/json" },
-      body:    JSON.stringify([["set", logKey, logData, "ex", 7776000]]),
+      body:    JSON.stringify({ value: logData, ex: 7776000 }),
     });
     if (res.ok) {
-      // Pipeline returns HTTP 200 even on command errors — inspect the result array
-      const resultArr = await res.json().catch(() => null);
-      const firstRes  = Array.isArray(resultArr) ? resultArr[0] : null;
-      if (firstRes && firstRes.error) {
-        console.error("[EOD LOG] Redis pipeline SET error:", firstRes.error);
-      } else {
-        logEvent("scan", `[EOD LOG] Daily log saved to Redis: ${logKey} | ${(state._dailyLogBuffer||[]).length} entries`);
-        state._dailyLogBuffer = []; // reset buffer for next day
-        markDirty();
-      }
+      logEvent("scan", `[EOD LOG] Daily log saved to Redis: ${logKey} | ${(state._dailyLogBuffer||[]).length} entries`);
+      state._dailyLogBuffer = []; // reset buffer for next day
+      markDirty();
     } else {
       console.error("[EOD LOG] Redis save failed:", res.status);
     }
@@ -5879,7 +5868,9 @@ async function executeCreditSpread(stock, price, score, scoreReasons, vix, optio
     const snapshots = snapResults.reduce((acc, r) => ({ ...acc, ...(r?.snapshots || {}) }), {});
 
     // Find best short leg contract: has price, delta in range, closest to target strike
+    // Select short leg by closest delta to targetDelta — more accurate than BS target strike
     let shortContract = null;
+    let _bestDeltaDist = Infinity;
     for (const c of chainContracts.slice(0, 50)) {
       const snap   = snapshots[c.symbol];
       if (!snap) continue;
@@ -5890,9 +5881,12 @@ async function executeCreditSpread(stock, price, score, scoreReasons, vix, optio
       const mid    = bid > 0 && ask > 0 ? (bid + ask) / 2 : 0;
       if (mid <= 0) continue;
       const delta  = Math.abs(parseFloat(greeks.delta || 0));
-      if (delta < 0.10 || delta > 0.35) continue;  // loose range - let R/R gate be the enforcer
+      if (delta < 0.10 || delta > 0.40) continue;
+      const deltaDist = Math.abs(delta - targetDelta);
+      if (deltaDist >= _bestDeltaDist) continue;
       const strike = parseFloat(c.strike_price);
       const expDTE = Math.round((new Date(c.expiration_date) - today) / 86400000);
+      _bestDeltaDist = deltaDist;
       shortContract = {
         symbol:  c.symbol,
         strike,
@@ -5905,8 +5899,10 @@ async function executeCreditSpread(stock, price, score, scoreReasons, vix, optio
         oi:      parseInt(snap.openInterest || 0),
         iv:      parseFloat(snap.impliedVolatility || sigma),
       };
-      logEvent("filter", `${stock.ticker} short leg: $${strike} | ${expDTE}DTE | delta${delta.toFixed(3)} | $${mid.toFixed(2)}`);
-      break;
+    }
+    if (shortContract) {
+      const _d = Math.abs(parseFloat(shortContract.greeks.delta));
+      logEvent("filter", `${stock.ticker} short leg: $${shortContract.strike} | ${shortContract.expDays}DTE | delta${_d.toFixed(3)} | $${shortContract.premium} (closest to target delta ${targetDelta})`);
     }
 
     if (!shortContract) {
@@ -6978,6 +6974,11 @@ async function closePosition(ticker, reason, exitPremium = null, contractSym = n
       : state.positions.findIndex(p => p.ticker === ticker);
     if (idx === -1) return;
     const pos  = state.positions[idx];
+    if (pos._closingSubmitted) {
+      logEvent("warn", `${ticker} close already submitted this scan — skipping duplicate`);
+      return;
+    }
+    pos._closingSubmitted = true;
 
     // - Spread close - close both legs atomically via mleg -
     // CRITICAL: Must close both legs together - separate orders leave naked positions
@@ -7038,6 +7039,8 @@ async function closePosition(ticker, reason, exitPremium = null, contractSym = n
       } catch(e) {
         logEvent("error", `[SPREAD CLOSE] Error closing legs: ${e.message}`);
       }
+      alpacaCloseOk = true; // spread close attempted — update state regardless of fill confirmation
+      // Reconcile loop will detect ghost if Alpaca didn't actually fill
     }
   const mult = pos.partialClosed ? 0.5 : 1.0;
 
@@ -7171,7 +7174,8 @@ async function closePosition(ticker, reason, exitPremium = null, contractSym = n
   state.extraBudget  += bonus ? BONUS_AMOUNT : 0;
   state.totalRevenue  = nr;
   state.monthlyProfit = parseFloat((state.monthlyProfit + pnl).toFixed(2));
-  state.positions.splice(idx, 1);
+  const _spliceIdx = state.positions.indexOf(pos);
+  if (_spliceIdx !== -1) state.positions.splice(_spliceIdx, 1);
   // PDT tracking - record if this is a day trade (opened and closed same day)
   // Emergency exits (macro-reversal, VIX spike) bypass PDT counting — protective closures
   // are not strategic day trades and should not consume PDT bandwidth
@@ -9201,6 +9205,8 @@ async function runScan() {
   // Derive allowed flags from rulebook gates (entry window still checked here for timing)
   const entryWindowOpen   = isEntryWindow("put", true) && !finalHourBlock && !suppressBlock;
   const callWindowOpen    = isEntryWindow("call", true) && !finalHourBlock && !suppressBlock;
+  // Credit spreads: 9:45am start — options market needs 15min for reliable quotes
+  const creditWindowOpen  = isEntryWindow("call", false) && !finalHourBlock && !suppressBlock;
   // ── V3.2: Compute new regime gates inline ───────────────────────────────
   // Post-crisis lock: block debit puts for 10 trading days after C→B transition
   const postCrisisLockActive = !!(state._postCrisisLock && state._postCrisisLockExpiry && Date.now() < state._postCrisisLockExpiry);
@@ -9249,8 +9255,8 @@ async function runScan() {
   const callsAllowed      = (callWindowOpen && !rb.gates.below200MACallBlock
                              && (!rb.gates.choppyDebitBlock || isMRCondition)
                              && !rb.gates.avoidHoldActive) || dryRunMode;
-  const creditAllowed     = creditModeActive  && entryWindowOpen && !rb.gates.avoidHoldActive && !rb.gates.vixFallingPause;
-  const callCreditAllowed = creditCallModeActive && callWindowOpen && !rb.gates.avoidHoldActive;
+  const creditAllowed     = creditModeActive  && creditWindowOpen && !rb.gates.avoidHoldActive && !rb.gates.vixFallingPause;
+  const callCreditAllowed = creditCallModeActive && creditWindowOpen && !rb.gates.avoidHoldActive;
   if (isMRCondition && choppyDebitBlock) logEvent("filter", `MR call allowed in choppy - SPY RSI ${spyRSIForMR.toFixed(1)} extreme oversold + VIX ${state.vix}`);
   if (creditAllowed && !putsAllowed) logEvent("filter", "Debit puts blocked - credit put spread mode active");
   if (callCreditAllowed)             logEvent("filter", "Bear call credit mode active");
@@ -12390,26 +12396,9 @@ app.get("/api/logs/history", async (req, res) => {
       });
       const data = await resp.json();
       if (!data.result) return res.status(404).json({ error: `No log found for ${date}` });
-      // Historical compat: the previous save path used a malformed Upstash body
-      // ({value, ex} sent as JSON) — Upstash stored the wrapper as the value.
-      // So data.result may be the correct log JSON OR a wrapper like
-      // '{"value":"<log-json>","ex":7776000}'. Unwrap if needed.
-      let parsed;
-      try {
-        parsed = JSON.parse(data.result);
-      } catch(e) {
-        return res.status(500).json({ error: `Stored value for ${date} is not valid JSON: ${e.message}` });
-      }
-      if (parsed && typeof parsed.value === "string" && !parsed.entries) {
-        // Pre-fix wrapper shape — unwrap and re-parse
-        try {
-          parsed = JSON.parse(parsed.value);
-        } catch(e) {
-          return res.status(500).json({ error: `Wrapped log value for ${date} is not valid JSON: ${e.message}` });
-        }
-      }
+      const parsed = JSON.parse(data.result);
       const filter = req.query.filter;
-      const limit  = Math.min(parseInt(req.query.limit || 500), 10000);
+      const limit  = Math.min(parseInt(req.query.limit || 500), 2000);
       const types  = filter ? filter.split(",").map(t => t.trim().toLowerCase()) : null;
       let entries  = parsed.entries || [];
       if (types) entries = entries.filter(e => types.includes(e.type));
