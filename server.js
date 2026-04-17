@@ -945,17 +945,16 @@ async function runReconciliation() {
           if (sameTickerExp && widthOk && oppDir) {
             const longLeg  = a.qty > 0 ? a : b;
             const shortLeg = a.qty > 0 ? b : a;
-            const buyLeg   = a.optType === 'put'
-              ? (longLeg.strike > shortLeg.strike ? longLeg : shortLeg)
-              : (longLeg.strike < shortLeg.strike ? longLeg : shortLeg);
-            const sellLeg  = buyLeg === longLeg ? shortLeg : longLeg;
-            // B3-concern fix: use absolute difference — always positive regardless of direction
-            // credit: sellLeg.avgEntry > buyLeg.avgEntry → difference = net credit received
-            // debit:  buyLeg.avgEntry > sellLeg.avgEntry → difference = net debit paid
+            // buyLeg = what we own (qty > 0), sellLeg = what we sold (qty < 0)
+            // Do NOT assign by strike order — that inverts credit call spreads
+            // (credit call: short LOWER strike, long HIGHER strike → lower strike has qty < 0)
+            const buyLeg   = longLeg;   // always the qty > 0 leg
+            const sellLeg  = shortLeg;  // always the qty < 0 leg
+            // Credit detection: if we received more for selling than we paid for protection
+            // sellLeg.avgEntry > buyLeg.avgEntry → net credit → isCreditSpread = true
             const netDebit = parseFloat(Math.abs(Math.abs(sellLeg.avgEntry) - buyLeg.avgEntry).toFixed(2));
             const spreadWidth = Math.abs(buyLeg.strike - sellLeg.strike);
-            // B3a: detect credit vs debit — PUT credit: long strike < short strike
-            const _isCredit3a = a.optType === 'put' ? buyLeg.strike < sellLeg.strike : buyLeg.strike > sellLeg.strike;
+            const _isCredit3a = sellLeg.avgEntry > buyLeg.avgEntry;  // price-based: no strike-order assumption
             state.positions.push({
               ticker: a.ticker, optionType: a.optType,
               isSpread: true, isCreditSpread: _isCredit3a,
@@ -7164,6 +7163,7 @@ async function closePosition(ticker, reason, exitPremium = null, contractSym = n
   // Prevents ghost positions: ARGO thinks closed, Alpaca still holds → reconcile loop
   if (!alpacaCloseOk && !dryRunMode) {
     logEvent("warn", `${ticker} state NOT updated — Alpaca close unconfirmed. Position preserved.`);
+    delete pos._closingSubmitted; // allow retry on next scan
     return;
   }
   // D-FIX4: credit spreads: cash += pnl (delta only — credit already collected at entry)
@@ -9206,7 +9206,8 @@ async function runScan() {
   const entryWindowOpen   = isEntryWindow("put", true) && !finalHourBlock && !suppressBlock;
   const callWindowOpen    = isEntryWindow("call", true) && !finalHourBlock && !suppressBlock;
   // Credit spreads: 9:45am start — options market needs 15min for reliable quotes
-  const creditWindowOpen  = isEntryWindow("call", false) && !finalHourBlock && !suppressBlock;
+  // dryRunMode bypass: test-scan after hours needs to simulate credit execution
+  const creditWindowOpen  = (isEntryWindow("call", false) && !finalHourBlock && !suppressBlock) || dryRunMode;
   // ── V3.2: Compute new regime gates inline ───────────────────────────────
   // Post-crisis lock: block debit puts for 10 trading days after C→B transition
   const postCrisisLockActive = !!(state._postCrisisLock && state._postCrisisLockExpiry && Date.now() < state._postCrisisLockExpiry);
