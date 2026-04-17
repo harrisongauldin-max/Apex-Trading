@@ -255,7 +255,7 @@ function getRegimeRulebook(state) {
     // Short leg delta targeting (Change 1 — PM2/QS)
     shortDeltaTarget,
     shortDeltaMax,
-    shortDeltaMin,  // floor — not yet enforced in server.js (contract selection uses delta range loosely)
+    shortDeltaMin,  // floor — executeCreditSpread now selects by delta proximity to target
 
     // Vega exposure management (Change 4 — GS/VS + Natenberg)
     // TODO: maxPortfolioVega and ivBoostVegaThresh are defined here but not yet
