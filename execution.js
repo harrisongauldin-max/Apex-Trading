@@ -2,10 +2,13 @@
 // Order execution: credit spreads, debit spreads, single-leg options.
 // Handles order submission, fill confirmation, position state updates.
 'use strict';
+const MAX_LOSS_PER_TRADE = 500;
+const VIX_REDUCE50 = 35;
+const VIX_REDUCE25 = 28;
 
 const { alpacaGet, alpacaPost, alpacaDelete, getStockBars } = require('./broker');
 const { state, logEvent, markDirty, saveStateNow }          = require('./state');
-const { calcGreeks, calcPositionSize: _calcPS, getETTime,
+const { calcGreeks, getETTime,
         openRisk, heatPct, getDeployableCash, effectiveHeatCap,
         calcCreditSpreadTP }                                 = require('./signals');
 const { CAPITAL_FLOOR, MIN_OPTION_PREMIUM, MIN_OI,
@@ -1255,6 +1258,7 @@ async function executeTrade(stock, price, score, scoreReasons, vix, optionType =
 module.exports = {
   executeCreditSpread, executeDebitSpread, executeIronCondor,
   executeSpreadTrade, executeTrade,
-  findContract, bsStrikeForDelta, calcPositionSize, getOptionsPrice,
+  findContract, bsStrikeForDelta, getOptionsPrice,
   initExecution,
-};
+  calcPositionSize,
+};;;
