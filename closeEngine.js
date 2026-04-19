@@ -6,7 +6,7 @@ const { alpacaGet, alpacaPost, alpacaDelete } = require('./broker');
 const { state, logEvent, markDirty, saveStateNow } = require('./state');
 const { calcCreditSpreadTP, realizedPnL }     = require('./signals');
 const { STOP_LOSS_PCT, TAKE_PROFIT_PCT, PDT_PROFIT_EXIT,
-        PDT_STOP_LOSS, FAST_STOP_PCT, MONTHLY_BUDGET }  = require('./constants');
+        PDT_STOP_LOSS, FAST_STOP_PCT, MONTHLY_BUDGET, ALPACA_KEY } = require('./constants');
 
 // ─── Injected dependencies ───────────────────────────────────────
 let _dryRunMode    = false;
