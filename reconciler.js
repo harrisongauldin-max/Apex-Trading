@@ -4,7 +4,8 @@
 'use strict';
 
 const { alpacaGet } = require('./broker');
-const { WATCHLIST }  = require('./constants');
+const { WATCHLIST, ALPACA_KEY, INDIVIDUAL_STOCKS_ENABLED,
+        TAKE_PROFIT_PCT, STOP_LOSS_PCT, MS_PER_DAY } = require('./constants');
 
 // ─── Injected dependencies (set by server.js at boot) ────────────
 let _state         = null;
