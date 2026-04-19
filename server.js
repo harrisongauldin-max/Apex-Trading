@@ -34,10 +34,12 @@ const {
   TAKE_PROFIT_PCT, FAST_STOP_HOURS, MS_PER_DAY, SCAN_INTERVAL,
   TRIGGER_COOLDOWN_MS, SAME_DAY_INTERVAL, OVERNIGHT_INTERVAL,
   MACRO_REVERSAL_PCT, SCAN_WATCHDOG_MS: _SCAN_WATCHDOG_MS,
+  INDIVIDUAL_STOCKS_ENABLED,
 } = require('./constants');
 
 const app  = express();
 const PORT = process.env.PORT || 3000;
+let isShuttingDown = false;
 app.use(express.json());
 app.use(express.static(path.join(__dirname, 'public')));
 
