@@ -48,7 +48,7 @@ const {
   REDIS_URL, REDIS_TOKEN, REDIS_KEY, REDIS_SAVE_INTERVAL,
   ANTHROPIC_API_KEY, RESEND_API_KEY, GMAIL_USER, MARKETAUX_KEY,
   WATCHLIST, PDT_LIMIT, MAX_HEAT, STOP_LOSS_PCT,
-  TAKE_PROFIT_PCT, FAST_STOP_HOURS, MS_PER_DAY, SCAN_INTERVAL,
+  TAKE_PROFIT_PCT, FAST_STOP_HOURS, MS_PER_DAY,
   TRIGGER_COOLDOWN_MS, SAME_DAY_INTERVAL, OVERNIGHT_INTERVAL,
   MACRO_REVERSAL_PCT, SCAN_WATCHDOG_MS: _SCAN_WATCHDOG_MS,
   INDIVIDUAL_STOCKS_ENABLED,
@@ -66,6 +66,7 @@ setBrokerLogger((type, msg) => logEvent(type, msg), null);
 // ─── Stubs for functions referenced in routes but not yet modularized ─
 const INSTRUMENT_CONSTRAINTS = {};
 const fmt = (n) => '$' + (n||0).toFixed(2);
+async function updateAfterHoursContext() { /* stub */ }
 async function getAgentPostMarketAssessment(label) {
   logEvent('macro', `[${label}] Post-market assessment (stub — agent not yet modularized)`);
 }
@@ -857,7 +858,7 @@ app.get("/api/state", async (req, res) => {
       correct120: state._agentAccuracy.correct120,
       pending:    state._agentAccuracy.pending.length,
     } : null,
-    alpacaCircuit: { open: _alpacaCircuitOpen, consecFails: _alpacaConsecFails },
+    alpacaCircuit: { open: getCircuitState().open, consecFails: getCircuitState().consecFails },
     avgScanIntervalMs: state._avgScanIntervalMs || 0,
     portfolioBetaDelta: state._portfolioBetaDelta || 0,
     accountPhase: getAccountPhase(),
