@@ -209,4 +209,5 @@ module.exports = {
   alpacaGet, alpacaPost, alpacaDelete,
   getStockQuote, getStockBars, getIntradayBars,
   getCircuitState, setBrokerLogger,
-};
+  alpacaHeaders, withTimeout,
+};;;
