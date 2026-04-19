@@ -3,18 +3,16 @@
 // checkExits() is a pure function — it returns decisions, never calls closePosition.
 // scanner.js applies the decisions after this function returns.
 'use strict';
+const { triggerRescore } = require('./agent');
 
 const { state, logEvent, markDirty }           = require('./state');
-const { alpacaGet, getStockBars, getStockQuote, getCached: _getCached }
+const { alpacaGet, getStockBars, getStockQuote }
                                                 = require('./broker');
 const { calcRSI, openRisk, realizedPnL,
-        getTimeAdjustedStop, getDTEExitParams,
-        applyExitUrgency, getTimeOfDayAnalysis,
-        getETTime, isMarketHours }             = require('./signals');
-const { getCached, setCache }                  = require('./market');
-const { analyzeNews }                          = require('./market');
+        getETTime, isMarketHours, getAccountPhase } = require('./signals');
+const { getCached, setCache, analyzeNews }      = require('./market');
 const { calcThesisIntegrity }                  = require('./risk');
-const { isDayTrade, triggerRescore }           = require('./risk');
+const { isDayTrade, countRecentDayTrades }     = require('./risk');
 const {
   STOP_LOSS_PCT, FAST_STOP_PCT, FAST_STOP_HOURS, TAKE_PROFIT_PCT,
   PARTIAL_CLOSE_PCT, TRAIL_ACTIVATE_PCT, TRAIL_STOP_PCT,
