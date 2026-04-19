@@ -82,9 +82,20 @@ const {
   INDIVIDUAL_STOCKS_ENABLED, MONTHLY_BUDGET, MACRO_REVERSAL_PCT,
   TARGET_DELTA_MIN, TARGET_DELTA_MAX,
   ALPACA_KEY, ALPACA_SECRET, ALPACA_DATA, ALPACA_OPT_SNAP, ALPACA_OPTIONS,
+  INDIVIDUAL_STOCK_WATCHLIST,
 } = require('./constants');
 
 let scanRunning  = false;
+// Stub: getBenchmarkComparison not yet modularized
+async function getBenchmarkComparison() { return null; }
+// Stub: getEarningsQualityScore
+async function getEarningsQualityScore() { return { signal: 'neutral' }; }
+// Stub: getLiveSignals (alias for getDynamicSignals)
+async function getLiveSignals(ticker, bars, intraday) { return getDynamicSignals(ticker, bars, intraday); }
+// Stub: getCached/setCache
+const _scanCache = new Map();
+function getCached(key) { const v = _scanCache.get(key); return v && v.exp > Date.now() ? v.val : null; }
+function setCache(key, val, ttlMs=300000) { _scanCache.set(key, { val, exp: Date.now() + ttlMs }); }
 let _scanGen     = 0; // increments each scan - finally block only resets its own generation
 let lastMedScan  = 0;  // 5 minute tier
 let lastSlowScan = 0;  // 15 minute tier
@@ -1942,8 +1953,9 @@ async function runScan() {
       logEvent("filter", `[DRAWDOWN] Entries paused - drawdown critical (${ddProtocol.message})`);
       continue;
     }
-    if (_alpacaCircuitOpen) {
-      logEvent("filter", `[CIRCUIT] Entries paused - Alpaca API degraded (${_alpacaConsecFails} consecutive failures)`);
+    const _circuit = getCircuitState();
+    if (_circuit.open) {
+      logEvent("filter", `[CIRCUIT] Entries paused - Alpaca API degraded (${_circuit.consecFails} consecutive failures)`);
       continue;
     }
     // BF-W4: Block entries when spiral is active for the same type
