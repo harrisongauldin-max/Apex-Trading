@@ -578,4 +578,5 @@ module.exports = {
   getDeployableCash, effectiveHeatCap, getAccountPhase, calcCreditSpreadTP,
   getETTime, isDST, isMarketHours, isEntryWindow, getBusinessDaysAgo,
   getWeeklyTrend, getSupportResistance, setSignalsLogger,
-};
+  calcMAE, calcFactorScore,
+};;
