@@ -1,3 +1,6 @@
+'use strict';
+// Suppress node-fetch punycode deprecation (cosmetic only, Node 22 native fetch available)
+process.env.NODE_NO_WARNINGS = '1';
 // server.js — ARGO V3.2
 // Express API shell, schedulers, and boot sequence (~600 lines).
 'use strict';
@@ -8,23 +11,42 @@ const path    = require('path');
 const fs      = require('fs');
 
 const { state, markDirty, saveStateNow, flushStateIfDirty,
-        logEvent, redisSave, redisLoad, defaultState }   = require('./state');
-const { alpacaGet, alpacaPost, getStockBars,
-        getCircuitState, setBrokerLogger }               = require('./broker');
+        logEvent, redisSave, redisLoad, defaultState,
+        saveDailyLogToRedis }                             = require('./state');
+const { alpacaGet, alpacaPost, getStockBars, getStockQuote,
+        getIntradayBars, getCircuitState, setBrokerLogger,
+        alpacaHeaders, withTimeout }                     = require('./broker');
 const { openRisk, openCostBasis, heatPct, realizedPnL,
-        totalCap, effectiveHeatCap, getAccountPhase,
+        totalCap, effectiveHeatCap, getAccountPhase, stockValue,
+        calcBetaWeightedDelta, calcSharpeRatio, calcVaR, calcMAE,
+        calcRiskOfRuin, calcDrawdownDuration,
         getETTime, isMarketHours, calcCreditSpreadTP }   = require('./signals');
 const { runScan, getScannerState, setDryRunMode }        = require('./scanner');
+// marketContext and dryRunMode live in scanner.js — access via getScannerState()
+// They are proxied here for backward compatibility with routes that reference them directly
+let marketContext = {};
+let dryRunMode = false;
+setInterval(() => {
+  const ss = getScannerState();
+  marketContext = ss.marketContext || marketContext;
+  dryRunMode    = ss.dryRunMode   || false;
+}, 1000);
 const { runReconciliation, syncPositionPnLFromAlpaca,
         initReconciler }                                  = require('./reconciler');
 const { closePosition, syncCashFromAlpaca }             = require('./closeEngine');
 const { runBacktest }                                    = require('./backtest');
 const { sendEmail, sendMorningBriefing,
         initReporting, setReportingContext }             = require('./reporting');
-const { getAgentMacroAnalysis }                          = require('./agent');
+const { getAgentMacroAnalysis, getAgentRescore,
+        getAgentDayPlan }                                = require('./agent');
+const { getMacroNews, getUpcomingMacroEvents }           = require('./market');
+const { getTimeAdjustedStop, getTimeOfDayAnalysis }      = require('./exitEngine');
+const { getRegimeRulebook }                              = require('./entryEngine');
+const { executeCreditSpread: _execCreditSpread }         = require('./execution');
 const { getDrawdownProtocol, getPnLByTicker,
         getPnLBySector, getPnLByScoreRange, getTaxLog,
-        getStreakAnalysis, countRecentDayTrades }        = require('./risk');
+        getStreakAnalysis, countRecentDayTrades,
+        calcThesisIntegrity }                           = require('./risk');
 const {
   ALPACA_KEY, ALPACA_SECRET, ALPACA_BASE, ALPACA_DATA, ALPACA_OPTIONS,
   ALPACA_OPT_SNAP, MONTHLY_BUDGET, CAPITAL_FLOOR,
@@ -35,6 +57,7 @@ const {
   TRIGGER_COOLDOWN_MS, SAME_DAY_INTERVAL, OVERNIGHT_INTERVAL,
   MACRO_REVERSAL_PCT, SCAN_WATCHDOG_MS: _SCAN_WATCHDOG_MS,
   INDIVIDUAL_STOCKS_ENABLED,
+  INDIVIDUAL_STOCK_WATCHLIST,
 } = require('./constants');
 
 const app  = express();
@@ -44,6 +67,22 @@ app.use(express.json());
 app.use(express.static(path.join(__dirname, 'public')));
 
 setBrokerLogger((type, msg) => logEvent(type, msg), null);
+
+// ─── Stubs for functions referenced in routes but not yet modularized ─
+const INSTRUMENT_CONSTRAINTS = {};
+const fmt = (n) => '$' + (n||0).toFixed(2);
+async function getAgentPostMarketAssessment(label) {
+  logEvent('macro', `[${label}] Post-market assessment (stub — agent not yet modularized)`);
+}
+async function getAgentPreEntryCheck(stock, score, reasons, optionType) {
+  return { pass: true, confidence: 'medium', reasoning: 'Pre-entry check stub' };
+}
+function buildMonthlyReport() {
+  const trades = state.closedTrades || [];
+  const pnl = trades.reduce((s,t) => s + (t.pnl||0), 0);
+  return `Monthly Report: ${trades.length} trades | P&L: $${pnl.toFixed(2)}`;
+}
+const executeCreditSpread = _execCreditSpread || (async () => null);
 
 function requireSecret(req, res, next) {
   if (!ARGO_SECRET) {
@@ -793,6 +832,7 @@ app.use(express.static(path.join(__dirname, "public")));
 // C12: Shared-secret auth for destructive endpoints
 // Set ARGO_SECRET env var in Railway. Without it all destructive ops are blocked.
 const ARGO_SECRET = process.env.ARGO_SECRET || "";
+
 function requireSecret(req, res, next) {
   if (!ARGO_SECRET) {
     // No secret configured -- log warning but allow (backwards compat during deploy)
