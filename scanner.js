@@ -2616,9 +2616,10 @@ async function runScan() {
 
 module.exports = {
   runScan,
-  // Export mutable scanner state for server.js dashboard and API endpoints
   getScannerState: () => ({
-    scanRunning, dryRunMode, marketContext,
+    scanRunning,
+    dryRunMode,
+    marketContext,
     circuit: getCircuitState(),
   }),
   setDryRunMode: (v) => { dryRunMode = v; },
