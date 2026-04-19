@@ -22,15 +22,10 @@ const { openRisk, openCostBasis, heatPct, realizedPnL,
         calcRiskOfRuin, calcDrawdownDuration,
         getETTime, isMarketHours, calcCreditSpreadTP }   = require('./signals');
 const { runScan, getScannerState, setDryRunMode }        = require('./scanner');
-// marketContext and dryRunMode live in scanner.js — access via getScannerState()
-// They are proxied here for backward compatibility with routes that reference them directly
-let marketContext = {};
+// marketContext and dryRunMode live in scanner.js — read live via getScannerState()
+function getMarketContext() { return getScannerState().marketContext || {}; }
 let dryRunMode = false;
-setInterval(() => {
-  const ss = getScannerState();
-  marketContext = ss.marketContext || marketContext;
-  dryRunMode    = ss.dryRunMode   || false;
-}, 1000);
+setInterval(() => { dryRunMode = getScannerState().dryRunMode || false; }, 1000);
 const { runReconciliation, syncPositionPnLFromAlpaca,
         initReconciler }                                  = require('./reconciler');
 const { closePosition, syncCashFromAlpaca }             = require('./closeEngine');
@@ -604,7 +599,7 @@ setTimeout(async () => {
     logEvent("macro", "[AGENT] Running initial macro analysis on startup...");
     try {
       const macro = await getMacroNews();
-      if (macro) { marketContext.macro = macro; markDirty(); }
+      if (macro) { markDirty(); } // macro stored in state._agentMacro by agent module
     } catch(e) { logEvent("warn", `[AGENT] Startup macro failed: ${e.message}`); }
     _lastAgentInterval = Date.now();
   }
@@ -621,7 +616,7 @@ setInterval(async () => {
   try {
     const macro = await getMacroNews();
     if (macro) {
-      marketContext.macro = macro;
+      // macro stored in state._agentMacro — no local marketContext write needed
       markDirty();
     }
   } catch(e) { logEvent("warn", `[AGENT] Interval macro failed: ${e.message}`); }
@@ -906,19 +901,19 @@ app.get("/api/state", async (req, res) => {
     scanFailures:       state._scanFailures || 0,
     ivrDebitBlocked:    (state._ivRank || 50) < 15,
     ivrCaution:         (state._ivRank || 50) >= 15 && (state._ivRank || 50) < 25,
-    macroCalendar:      marketContext.macroCalendar,
+    macroCalendar:      getMarketContext().macroCalendar,
     upcomingEvents:     getUpcomingMacroEvents(7),
-    regime:             marketContext.regime,
-    concentration:      marketContext.concentration,
-    stressTest:         marketContext.stressTest,
-    drawdownProtocol:   marketContext.drawdownProtocol,
-    benchmark:          marketContext.benchmark,
+    regime:             getMarketContext().regime,
+    concentration:      getMarketContext().concentration,
+    stressTest:         getMarketContext().stressTest,
+    drawdownProtocol:   getMarketContext().drawdownProtocol,
+    benchmark:          getMarketContext().benchmark,
     timeOfDay:          getTimeOfDayAnalysis(),
-    monteCarlo:         marketContext.monteCarlo,
-    kelly:              marketContext.kelly,
-    relativeValue:      marketContext.relativeValue,
-    globalMarket:       marketContext.globalMarket,
-    streaks:            marketContext.streaks,
+    monteCarlo:         getMarketContext().monteCarlo,
+    kelly:              getMarketContext().kelly,
+    relativeValue:      getMarketContext().relativeValue,
+    globalMarket:       getMarketContext().globalMarket,
+    streaks:            getMarketContext().streaks,
     calmar:             calcCalmarRatio(),
     informationRatio:   calcInformationRatio(),
     drawdownDuration:   calcDrawdownDuration(),
@@ -1760,7 +1755,7 @@ app.get("/api/health", (req, res) => {
     positions:     state.positions.length,
     cash:          state.cash,
     vix:           state.vix,
-    marketContext,
+    marketContext: getMarketContext(),
     sharpe:        calcSharpeRatio(),
     var95:         calcVaR(),
     mae:           calcMAE(),
