@@ -4,6 +4,7 @@
 // scanner.js applies the decisions after this function returns.
 'use strict';
 const { triggerRescore } = require('./agent');
+const _posBarCache = new Map();
 
 const { state, logEvent, markDirty }           = require('./state');
 const { alpacaGet, getStockBars, getStockQuote }
@@ -20,6 +21,7 @@ const {
   PDT_PROFIT_EXIT, PDT_STOP_LOSS, MA50_BUFFER, MS_PER_DAY,
   MONTHLY_BUDGET, IV_COLLAPSE_PCT, SAME_DAY_INTERVAL, OVERNIGHT_INTERVAL,
   TRIGGER_COOLDOWN_MS,
+  ANTHROPIC_API_KEY, WATCHLIST, EARNINGS_SKIP_DAYS, PDT_LIMIT,
 } = require('./constants');
 
 
@@ -209,6 +211,7 @@ async function checkExits(positions, posSnapshots, posQuotes, posNewsCache, ctx)
     // Above $25k (Alpaca cash): normal operation resumes automatically
     const alpacaBalance  = state.alpacaCash || state.cash || 0;
     const belowPDTLimit  = alpacaBalance < 25000;
+    const pdtProtected   = openedToday && belowPDTLimit;
     const PDT_PROFIT_EXIT = 0.65;  // +65% - take the money, worth the day trade
     const PDT_LOSS_EXIT   = 0.30;  // -30% - deep enough loss to warrant cutting
 
