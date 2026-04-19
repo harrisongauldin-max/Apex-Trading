@@ -678,6 +678,150 @@ async function checkExits(positions, posSnapshots, posQuotes, posNewsCache, ctx)
   return decisions;
 }
 
+
+// ─── Functions extracted from monolith ────────────────────────────────────
+
+function getTimeAdjustedStop(pos) {
+  const daysOpen   = (Date.now() - new Date(pos.openDate).getTime()) / MS_PER_DAY;
+  const chgPct     = pos.currentPrice && pos.premium
+    ? (pos.currentPrice - pos.premium) / pos.premium : 0;
+  const isFlat     = Math.abs(chgPct) < 0.05; // within 5% of entry
+
+  // Base stop loss
+  let stopPct = STOP_LOSS_PCT; // -35%
+
+  // Tighten progressively for aging positions
+  if (daysOpen >= 8)      stopPct = 0.15; // -15% - very old, exit faster
+  else if (daysOpen >= 6) stopPct = 0.20; // -20%
+  else if (daysOpen >= 4) stopPct = 0.25; // -25%
+  else if (daysOpen >= 2) stopPct = 0.30; // -30%
+
+  // Extra tightening for flat old positions - theta is killing them
+  if (isFlat && daysOpen >= 4) stopPct = Math.min(stopPct, 0.20);
+  if (isFlat && daysOpen >= 6) stopPct = Math.min(stopPct, 0.12);
+
+  return stopPct;
+}
+
+function getDTEExitParams(dte, daysOpen = 0) {
+  // Phase-aware exit tightening — preservation mode locks profits faster
+  const acctPhase = getAccountPhase();
+  // PDT-aware target adjustment
+  const pdtRemaining = Math.max(0, PDT_LIMIT - countRecentDayTrades());
+  const pdtTight     = pdtRemaining <= 1;
+  const pdtLocked    = pdtRemaining === 0;
+
+  // ── Overnight tier adjustment ─────────────────────────────────────────
+  // Monthly options: softer overnight penalty — theta decays slowly, thesis needs time
+  // Weekly options: tighter — theta is racing, exit fast
+  // Partials: sell half at partialPct, close remainder at takeProfitPct
+  let overnightMult = 1.0;
+  let overnightLabel = "";
+  if (dte <= 21) {
+    // Weekly: overnight hurts more — tighten target
+    if (daysOpen >= 2) { overnightMult = 0.65; overnightLabel = "(2D+)"; }
+    else if (daysOpen >= 1) { overnightMult = 0.80; overnightLabel = "(OVERNIGHT)"; }
+  } else {
+    // Monthly 30-45 DTE: much gentler overnight adjustment — holding is the plan
+    if (daysOpen >= 7)  { overnightMult = 0.75; overnightLabel = "(7D+)"; }
+    else if (daysOpen >= 3) { overnightMult = 0.85; overnightLabel = "(3D+)"; }
+    else if (daysOpen >= 1) { overnightMult = 0.92; overnightLabel = "(OVERNIGHT)"; }
+  }
+
+  if (dte <= 21) {
+    // Weekly / short-DTE — tighter targets, faster exits
+    // These should be rare in PDT accounts — mean reversion calls mainly
+    const base = pdtLocked ? 0.12 : pdtTight ? 0.15 : 0.20;
+    const tp   = parseFloat((base * overnightMult).toFixed(3));
+    const part = parseFloat((tp * 0.60).toFixed(3));
+    const ride = parseFloat((tp * 1.30).toFixed(3));
+    return {
+      takeProfitPct:  tp,
+      partialPct:     part,
+      ridePct:        ride,
+      stopLossPct:    0.30, // tighter stop on weeklies — theta risk is real
+      fastStopPct:    0.15,
+      trailActivate:  pdtLocked ? 0.08 : pdtTight ? 0.10 : 0.12,
+      trailStop:      pdtLocked ? 0.05 : 0.07,
+      label:          (pdtLocked ? "SHORT-DTE(PDT-LOCKED)" : pdtTight ? "SHORT-DTE(PDT-TIGHT)" : "SHORT-DTE") + overnightLabel,
+    };
+  } else if (dte <= 45) {
+    // Monthly 30-45 DTE — primary strategy for PDT-constrained accounts
+    // Target 30-50% — give the thesis room to play out over 5-10 days
+    const base = pdtLocked ? 0.25 : pdtTight ? 0.30 : 0.40;
+    const tp   = parseFloat((base * overnightMult).toFixed(3));
+    const part = parseFloat((tp * 0.55).toFixed(3));
+    const ride = parseFloat((tp * 1.40).toFixed(3)); // ride winners longer on monthlies
+    return {
+      takeProfitPct:  tp,
+      partialPct:     part,
+      ridePct:        ride,
+      stopLossPct:    0.35,
+      fastStopPct:    0.20,
+      trailActivate:  pdtLocked ? 0.15 : pdtTight ? 0.18 : 0.22,
+      trailStop:      pdtLocked ? 0.08 : pdtTight ? 0.10 : 0.12,
+      label:          (pdtLocked ? "MONTHLY(PDT-LOCKED)" : pdtTight ? "MONTHLY(PDT-TIGHT)" : "MONTHLY") + overnightLabel,
+    };
+  } else {
+        const base = pdtLocked ? 0.35 : pdtTight ? 0.45 : 0.55;
+    const tp   = parseFloat((base * overnightMult).toFixed(3));
+    const part = parseFloat((tp * 0.55).toFixed(3));
+    const ride = parseFloat((tp * 1.50).toFixed(3));
+    return {
+      takeProfitPct:  tp,
+      partialPct:     part,
+      ridePct:        ride,
+      stopLossPct:    0.35,
+      fastStopPct:    0.20,
+      trailActivate:  pdtLocked ? 0.20 : pdtTight ? 0.25 : 0.30,
+      trailStop:      pdtLocked ? 0.10 : pdtTight ? 0.12 : 0.15,
+      label:          (pdtLocked ? "LEAPS(PDT-LOCKED)" : pdtTight ? "LEAPS(PDT-TIGHT)" : "LEAPS") + overnightLabel,
+    };
+  }
+}
+
+function applyExitUrgency(agentResult) {
+  if (!agentResult || !agentResult.exitUrgency) return;
+  const urgency = agentResult.exitUrgency;
+  if (urgency === "hold" || urgency === "monitor") return; // no action
+  const positions = state.positions || [];
+  if (positions.length === 0) return;
+  if (urgency === "trim" || urgency === "exit") {
+    logEvent("macro", `[AGENT] exitUrgency=${urgency} - ${urgency === "exit" ? "scheduling exit on all losing positions" : "flagging for trim review"}`);
+    // Flag positions for rescore - actual close happens via rescore path with user confirmation
+    positions.forEach(p => {
+      p._exitUrgencyFlag = urgency;
+      p._exitUrgencySetAt = Date.now();
+    });
+  }
+}
+
+function getTimeOfDayAnalysis() {
+  const trades = state.closedTrades || [];
+  if (trades.length < 5) return { best: "insufficient data", hourly: [] };
+
+  const hourly = {};
+  for (const trade of trades) {
+    if (!trade.openDate) continue;
+    const hour = new Date(trade.openDate).getHours();
+    if (!hourly[hour]) hourly[hour] = { wins: 0, losses: 0, pnl: 0, trades: 0 };
+    hourly[hour].trades++;
+    hourly[hour].pnl += trade.pnl || 0;
+    if ((trade.pnl || 0) > 0) hourly[hour].wins++;
+    else hourly[hour].losses++;
+  }
+
+  const sorted = Object.entries(hourly)
+    .map(([h, d]) => ({ hour: parseInt(h), ...d, winRate: d.trades ? Math.round(d.wins / d.trades * 100) : 0 }))
+    .sort((a, b) => b.pnl - a.pnl);
+
+  return {
+    best:   sorted[0] ? `${sorted[0].hour}:00 ET (${sorted[0].winRate}% WR, $${sorted[0].pnl.toFixed(0)} P&L)` : "insufficient data",
+    worst:  sorted[sorted.length-1] ? `${sorted[sorted.length-1].hour}:00 ET` : "--",
+    hourly: sorted,
+  };
+}
+
 module.exports = {
   checkExits,
   fetchPositionData,
