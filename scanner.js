@@ -81,6 +81,7 @@ const {
   MS_PER_DAY, TRIGGER_COOLDOWN_MS, SAME_DAY_INTERVAL, OVERNIGHT_INTERVAL,
   INDIVIDUAL_STOCKS_ENABLED, MONTHLY_BUDGET, MACRO_REVERSAL_PCT,
   TARGET_DELTA_MIN, TARGET_DELTA_MAX,
+  ALPACA_KEY, ALPACA_SECRET, ALPACA_DATA, ALPACA_OPT_SNAP, ALPACA_OPTIONS,
 } = require('./constants');
 
 let scanRunning  = false;
@@ -120,7 +121,7 @@ async function runScan() {
   _lastScanStart = Date.now(); // watchdog timestamp
   const thisScanGen = ++_scanGen; // stamp this scan's generation
   try {
-  if (!ALPACA_KEY) { logEvent("warn", "No ALPACA_API_KEY set - check Railway variables"); scanRunning = false; return; }
+  if (!ALPACA_KEY) { logEvent("warn", "No ALPACA_KEY set - check Railway variables"); scanRunning = false; return; }
   if (!isMarketHours() && !dryRunMode) { logEvent("scan", "Outside market hours - skipping trade logic"); scanRunning = false; return; }
   if (dryRunMode) logEvent("scan", "- DRY RUN MODE - no orders submitted, no state changes");
   // Clear dry run close flags from previous scan
