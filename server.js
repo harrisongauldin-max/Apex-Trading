@@ -77,7 +77,7 @@ async function initState() {
         console.warn("[STATE] Loading anyway - verify dashboard looks correct");
       }
 
-      state = { ...defaultState(), ...saved };
+      Object.assign(state, defaultState(), saved);
       console.log("[STATE] Loaded | cash: $" + state.cash + " | positions: " + state.positions.length + " | trades: " + (state.closedTrades||[]).length);
     }
   } else {
@@ -463,7 +463,7 @@ async function gracefulShutdown(signal) {
   console.log(`[SHUTDOWN] ${signal} received - saving state before exit`);
 
   // Stop accepting new scans
-  scanRunning = true; // prevents new scan from starting
+  // scanner.js will detect shutdown via process signal
 
   // Save state with retries - most critical operation on shutdown
   let saved = false;
@@ -520,9 +520,9 @@ setInterval(() => {
 let _lastScanStart = 0;
 const SCAN_WATCHDOG_MS = 90 * 1000;
 setInterval(() => {
-  if (scanRunning && _lastScanStart > 0 && (Date.now() - _lastScanStart) > SCAN_WATCHDOG_MS) {
+  const _scanState = getScannerState();
+  if (_scanState.scanRunning && _lastScanStart > 0 && (Date.now() - _lastScanStart) > SCAN_WATCHDOG_MS) {
     logEvent("warn", `[WATCHDOG] Scan running ${((Date.now()-_lastScanStart)/1000).toFixed(0)}s -- force-resetting scanRunning`);
-    scanRunning = false;
     _lastScanStart = 0;
   }
 }, 15 * 1000);
@@ -1337,7 +1337,7 @@ app.post("/api/scan",        async (req,res) => { res.json({ok:true}); runScan()
 // Use this after-hours to verify scoring, filter logic, and exit checks
 // Automatically re-disables dry run after the scan completes
 app.post("/api/test-scan", async (req, res) => {
-  if (scanRunning) return res.json({ error: "Scan already running" });
+  if (getScannerState().scanRunning) return res.json({ error: "Scan already running" });
   const wasDryRun = dryRunMode;
   dryRunMode = true;
   res.json({ ok: true, message: "Test scan started - dry run forced for this cycle. Check /api/logs for results." });
@@ -1447,11 +1447,11 @@ app.post("/api/test-email", async (req, res) => {
 app.post("/api/dry-run-scan", async (req, res) => {
   // Wait up to 35 seconds for any running scan to complete
   let waited = 0;
-  while (scanRunning && waited < 35000) {
+  while (getScannerState().scanRunning && waited < 35000) {
     await new Promise(r => setTimeout(r, 500));
     waited += 500;
   }
-  if (scanRunning) return res.json({ error: "Scan still running after 35s - try again" });
+  if (getScannerState().scanRunning) return res.json({ error: "Scan still running after 35s - try again" });
   dryRunMode = true;
   logEvent("scan", "- DRY RUN SCAN STARTED -");
   try {
@@ -1515,7 +1515,7 @@ app.post("/api/full-reset", requireSecret, async (req, res) => {
     } catch(e) { /* best effort */ }
   }
   // Reset state completely
-  state = defaultState();
+  Object.assign(state, defaultState());
   await saveStateNow();
   logEvent("reset", "FULL RESET - state wiped, starting fresh with $10,000");
   res.json({ ok: true, message: "Full reset complete" });
@@ -2041,4 +2041,3 @@ app.post('/api/force-entry', async (req, res) => {
     res.status(500).json({ error: e.message });
   }
 });
-
