@@ -25,7 +25,16 @@ const { getAgentMacroAnalysis }                          = require('./agent');
 const { getDrawdownProtocol, getPnLByTicker,
         getPnLBySector, getPnLByScoreRange, getTaxLog,
         getStreakAnalysis, countRecentDayTrades }        = require('./risk');
-const { MONTHLY_BUDGET, ALPACA_DATA }                   = require('./constants');
+const {
+  ALPACA_KEY, ALPACA_SECRET, ALPACA_BASE, ALPACA_DATA, ALPACA_OPTIONS,
+  ALPACA_OPT_SNAP, MONTHLY_BUDGET, CAPITAL_FLOOR,
+  REDIS_URL, REDIS_TOKEN, REDIS_KEY, REDIS_SAVE_INTERVAL,
+  ANTHROPIC_API_KEY, RESEND_API_KEY, GMAIL_USER, MARKETAUX_KEY,
+  WATCHLIST, PDT_LIMIT, MAX_HEAT, STOP_LOSS_PCT,
+  TAKE_PROFIT_PCT, FAST_STOP_HOURS, MS_PER_DAY, SCAN_INTERVAL,
+  TRIGGER_COOLDOWN_MS, SAME_DAY_INTERVAL, OVERNIGHT_INTERVAL,
+  MACRO_REVERSAL_PCT, SCAN_WATCHDOG_MS: _SCAN_WATCHDOG_MS,
+} = require('./constants');
 
 const app  = express();
 const PORT = process.env.PORT || 3000;
