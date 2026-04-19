@@ -20,7 +20,7 @@ const { openRisk, openCostBasis, heatPct, realizedPnL,
         totalCap, effectiveHeatCap, getAccountPhase, stockValue,
         calcBetaWeightedDelta, calcSharpeRatio, calcVaR, calcMAE,
         calcRiskOfRuin, calcDrawdownDuration,
-        getETTime, isMarketHours, calcCreditSpreadTP }   = require('./signals');
+        getETTime, isMarketHours, isEntryWindow, calcCreditSpreadTP }   = require('./signals');
 const { runScan, getScannerState, setDryRunMode }        = require('./scanner');
 // marketContext and dryRunMode live in scanner.js — read live via getScannerState()
 function getMarketContext() { return getScannerState().marketContext || {}; }
@@ -31,7 +31,7 @@ const { runReconciliation, syncPositionPnLFromAlpaca,
 const { closePosition, syncCashFromAlpaca }             = require('./closeEngine');
 const { runBacktest }                                    = require('./backtest');
 const { sendEmail, sendMorningBriefing,
-        initReporting, setReportingContext }             = require('./reporting');
+        initReporting, setReportingContext, sendResendEmail, premarketAssessment }             = require('./reporting');
 const { getAgentMacroAnalysis, getAgentRescore,
         getAgentDayPlan }                                = require('./agent');
 const { getMacroNews, getUpcomingMacroEvents }           = require('./market');
@@ -52,7 +52,7 @@ const {
   TRIGGER_COOLDOWN_MS, SAME_DAY_INTERVAL, OVERNIGHT_INTERVAL,
   MACRO_REVERSAL_PCT, SCAN_WATCHDOG_MS: _SCAN_WATCHDOG_MS,
   INDIVIDUAL_STOCKS_ENABLED,
-  INDIVIDUAL_STOCK_WATCHLIST,
+  INDIVIDUAL_STOCK_WATCHLIST, STATE_FILE,
 } = require('./constants');
 
 const app  = express();
