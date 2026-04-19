@@ -844,6 +844,7 @@ function requireSecret(req, res, next) {
 }
 
 app.get("/api/state", async (req, res) => {
+  try {
   res.json({
     ...state,
     heatPct:       parseFloat((heatPct()*100).toFixed(1)),
@@ -930,6 +931,10 @@ app.get("/api/state", async (req, res) => {
     lastScanScores:     state._lastScanScores || {},
     watchlist:          WATCHLIST.map(w => ({ ticker: w.ticker, sector: w.sector, beta: w.beta, isPrimary: w.isPrimary, catalyst: w.catalyst })),
   });
+  } catch(e) {
+    logEvent("error", `/api/state threw: ${e.message}`);
+    res.status(500).json({ error: e.message, stack: e.stack?.split("\n")[1] });
+  }
 });
 
 // - TEST ENDPOINT: Thesis integrity simulator -
@@ -1385,7 +1390,10 @@ app.get("/api/logs/history", async (req, res) => {
   }
 });
 
-app.post("/api/scan",        async (req,res) => { res.json({ok:true}); runScan(); });
+app.post("/api/scan", async (req,res) => {
+  res.json({ok:true});
+  runScan().catch(e => logEvent("error", `Manual scan error: ${e.message}`));
+});
 
 // - Test scan - forces a dry run scan regardless of market hours or day -
 // Use this after-hours to verify scoring, filter logic, and exit checks
