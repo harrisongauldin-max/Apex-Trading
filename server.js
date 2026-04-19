@@ -315,6 +315,13 @@ async function initState() {
   }
 
   // - POSITION RECONCILIATION - runs on startup and every 5 minutes -
+  initReconciler({
+    state,
+    logFn:              logEvent,
+    redisSaveFn:        redisSave,
+    calcCreditSpreadTP: calcCreditSpreadTP,
+    indStockList:       [],
+  });
   await runReconciliation();
 
 
