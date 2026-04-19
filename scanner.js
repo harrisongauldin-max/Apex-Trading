@@ -71,7 +71,7 @@ const {
   getTimeAdjustedStop, getDTEExitParams, applyExitUrgency, getTimeOfDayAnalysis,
 } = require('./exitEngine');
 
-const { sendMorningBriefing, sendEmail, setReportingContext } = require('./reporting');
+const { sendMorningBriefing, sendEmail, setReportingContext, sendResendEmail } = require('./reporting');
 
 const {
   WATCHLIST, CAPITAL_FLOOR, MIN_SCORE, MIN_SCORE_CREDIT, MAX_HEAT,
