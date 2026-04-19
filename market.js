@@ -1,9 +1,23 @@
 // market.js — ARGO V3.2
 // Market data: macro news, breadth, VIX, sentiment, economic indicators.
 'use strict';
+const MARKETAUX_CACHE_MS = 60 * 60 * 1000  // 60 minutes;
 const fetch = require('node-fetch');
 const { alpacaGet, getStockBars, getStockQuote } = require('./broker');
 const { state, logEvent }                        = require('./state');
+
+// Macro calendar — key events that affect options pricing
+// Update dates as needed; daysTo is computed live from today
+const MACRO_EVENTS_2025 = [
+  { date: "2026-04-29", event: "FOMC Meeting", impact: "high" },
+  { date: "2026-05-07", event: "FOMC Minutes", impact: "medium" },
+  { date: "2026-05-12", event: "CPI Report", impact: "high" },
+  { date: "2026-05-15", event: "PPI Report", impact: "medium" },
+  { date: "2026-05-30", event: "PCE Inflation", impact: "high" },
+  { date: "2026-06-02", event: "Jobs Report (NFP)", impact: "high" },
+  { date: "2026-06-17", event: "FOMC Meeting", impact: "high" },
+  { date: "2026-06-10", event: "CPI Report", impact: "high" },
+];
 const { calcRSI, getETTime }                    = require('./signals');
 const { SLOW_CACHE_TTL, BARS_CACHE_TTL, MARKETAUX_KEY,
         MS_PER_DAY }                             = require('./constants');
@@ -782,6 +796,9 @@ async function getShortInterestSignal(ticker, bars) {
     return { squeezeRisk: "low", modifier: 0 };
   } catch(e) { return { squeezeRisk: "low", modifier: 0 }; }
 }
+
+// MACRO_EVENTS_2025 moved to top
+
 
 function getUpcomingMacroEvents(daysAhead = 7) {
   // Compare date strings to avoid timezone/time-of-day issues
