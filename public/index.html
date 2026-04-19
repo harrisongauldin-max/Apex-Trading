@@ -994,8 +994,6 @@ input[type=text]:focus{border-color:var(--blue)}
       <option value="all">All rows</option>
     </select>
     <button class="btn" id="copy-log-btn" onclick="copyLogsForClaude()" style="font-size:11px;border-color:rgba(0,196,255,.4);color:#44aaff">&#9126; Copy for Claude</button>
-    <input type="date" id="redis-log-date" style="font-size:11px;background:#0a1628;color:#44aaff;border:1px solid rgba(0,196,255,.4);border-radius:4px;padding:3px 6px" title="leave blank for today (ET)" />
-    <button class="btn" id="copy-redis-log-btn" onclick="copyFullDayFromRedis()" style="font-size:11px;border-color:rgba(0,196,255,.4);color:#44aaff" title="Pulls the full day's log from Redis (EOD archive), applies current filter+search, and copies to clipboard">&#9126; Copy full day from Redis</button>
   </div>
   <!-- ── Log box ── -->
   <div class="log-box" id="server-log" style="height:560px;overflow-y:auto"></div>
@@ -1765,7 +1763,15 @@ function renderPairedSpread(s, l) {
   const width     = s.strike - l.strike;
   const maxProfit = netCredit * 100 * c;
   const maxLoss   = (width - netCredit) * 100 * c;
-  const breakeven = (s.strike - netCredit).toFixed(2);
+  // Breakeven depends on spread direction and type:
+  // Call credit (short higher, long lower): BE = shortStrike + netCredit = s.strike + netCredit
+  // Put  credit (short lower,  long higher): BE = shortStrike - netCredit = s.strike - netCredit
+  // For paired display, s = higher-strike leg, l = lower-strike leg
+  // optionType determines direction:
+  const _beCredit = (s.optionType||'put') === 'call'
+    ? (l.strike + netCredit).toFixed(2)   // call credit: BE = lower strike + credit
+    : (s.strike - netCredit).toFixed(2);  // put  credit: BE = higher strike - credit
+  const breakeven = _beCredit;
 
   // P&L: sum both legs. Short leg profits as cost falls, long leg profits as value rises.
   const sP = s.unrealizedPnL !== undefined ? parseFloat(s.unrealizedPnL)
@@ -1848,58 +1854,84 @@ function renderPairedSpread(s, l) {
 
 // ── Native spread card (already has spread fields) ─────────────────────────
 function renderNativeSpread(p) {
-  const curPrice  = parseFloat(p.currentPrice || p.premium);
+  const curPrice  = parseFloat(p.currentPrice || p.premium) || 0;
   const c         = p.contracts || 1;
+  const prem      = parseFloat(p.premium) || 0;
+  const maxPr     = parseFloat(p.maxProfit) || 0;
+  const maxLs     = parseFloat(p.maxLoss)   || 0;
+  const width     = Math.abs((p.buyStrike||0) - (p.sellStrike||0));
   let chgDollar, chgPct;
   if (p.isCreditSpread) {
-    chgDollar = p.unrealizedPnL !== undefined ? parseFloat(p.unrealizedPnL) : (parseFloat(p.premium) - curPrice) * 100 * c;
-    chgPct    = p.maxProfit ? (chgDollar / parseFloat(p.maxProfit) * 100) : 0;
+    chgDollar = p.unrealizedPnL !== undefined ? parseFloat(p.unrealizedPnL) : (prem - curPrice) * 100 * c;
+    chgPct    = maxPr > 0 ? (chgDollar / maxPr * 100) : 0;
   } else {
-    chgDollar = p.unrealizedPnL !== undefined ? parseFloat(p.unrealizedPnL) : (curPrice - parseFloat(p.premium)) * 100 * c;
-    chgPct    = parseFloat(p.premium) > 0 ? (chgDollar / (parseFloat(p.premium) * 100 * c) * 100) : 0;
+    chgDollar = p.unrealizedPnL !== undefined ? parseFloat(p.unrealizedPnL) : (curPrice - prem) * 100 * c;
+    chgPct    = prem > 0 ? (chgDollar / (prem * 100 * c) * 100) : 0;
   }
-  const estValue = p.isCreditSpread
-    ? (curPrice * 100 * c)
-    : (curPrice * 100 * c);
+  // Color always follows dollar P&L sign (positive = green regardless of % magnitude)
+  const dollarColor = pnlColor(chgDollar);
+  const pctColor    = pnlColor(chgDollar);
+  const estValue    = curPrice * 100 * c;
   const score  = p.score || 0;
   const dte    = Math.max(0, Math.round((new Date(p.expDate) - new Date()) / 86400000));
   const optType = (p.optionType||'put').toUpperCase();
+  // Breakeven: credit call = sellStrike + credit; credit put = sellStrike - credit
+  //            debit call  = buyStrike  + premium; debit put  = buyStrike  - premium
+  let breakeven = p.breakeven || '--';
+  if (prem > 0) {
+    const sell = parseFloat(p.sellStrike || p.shortStrike) || 0;
+    const buy  = parseFloat(p.buyStrike  || p.longStrike)  || 0;
+    if (p.isCreditSpread && sell > 0) {
+      breakeven = p.optionType === 'call'
+        ? (sell + prem).toFixed(2)
+        : (sell - prem).toFixed(2);
+    } else if (!p.isCreditSpread && buy > 0) {
+      breakeven = p.optionType === 'call'
+        ? (buy + prem).toFixed(2)
+        : (buy - prem).toFixed(2);
+    }
+  }
+  const shortStr = parseFloat(p.sellStrike||p.shortStrike) || '?';
+  const longStr  = parseFloat(p.buyStrike ||p.longStrike)  || '?';
   const strikeDisplay = p.isCreditSpread
-    ? `$${p.shortStrike||p.sellStrike}/$${p.longStrike||p.buyStrike}`
-    : `$${p.buyStrike}/$${p.sellStrike}`;
+    ? \`$\${shortStr}/$\${longStr}\`
+    : \`$\${longStr}/$\${shortStr}\`;
+  const widthDisplay  = width > 0 ? \`$\${width}\` : '--';
+  const maxPrDisplay  = maxPr > 0 ? \`$\${maxPr.toFixed(0)}\` : '--';
+  const maxLsDisplay  = maxLs > 0 ? \`$\${maxLs.toFixed(0)}\` : '--';
 
-  return `
+  return \`
   <div style="background:#050e1a;border:1px solid rgba(0,150,255,.3);border-radius:10px;padding:14px;margin-bottom:10px">
     <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;margin-bottom:12px">
       <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
-        <span style="font-size:16px;font-weight:700;color:var(--blue)">${p.ticker}</span>
-        <span style="font-size:11px;color:var(--muted)">${strikeDisplay} ${p.expDate}</span>
-        <span style="font-size:9px;padding:2px 7px;border-radius:10px;background:${p.isCreditSpread?'rgba(0,255,136,.15)':'rgba(0,150,255,.15)'};color:${p.isCreditSpread?'var(--green)':'var(--blue)'}">${p.isCreditSpread?'CREDIT':'DEBIT'} SPREAD</span>
-        <span style="font-size:9px;padding:2px 7px;border-radius:10px;background:rgba(255,80,80,.15);color:#ff5050">${optType}</span>
+        <span style="font-size:16px;font-weight:700;color:var(--blue)">\${p.ticker}</span>
+        <span style="font-size:11px;color:var(--muted)">\${strikeDisplay} \${p.expDate}</span>
+        <span style="font-size:9px;padding:2px 7px;border-radius:10px;background:\${p.isCreditSpread?'rgba(0,255,136,.15)':'rgba(0,150,255,.15)'};color:\${p.isCreditSpread?'var(--green)':'var(--blue)'}">\${p.isCreditSpread?'CREDIT':'DEBIT'} SPREAD</span>
+        <span style="font-size:9px;padding:2px 7px;border-radius:10px;background:rgba(255,80,80,.15);color:#ff5050">\${optType}</span>
       </div>
       <div style="display:flex;align-items:center;gap:8px">
-        <span style="font-size:11px;font-weight:700;color:${scoreCol(score)}">Entry: ${score}/100</span>
-        ${rescoreBtn(p.ticker)}
-        ${closeBtn(p.ticker, p.buySymbol||p.contractSymbol||'')}
+        <span style="font-size:11px;font-weight:700;color:\${scoreCol(score)}">Entry: \${score}/100</span>
+        \${rescoreBtn(p.ticker)}
+        \${closeBtn(p.ticker, p.buySymbol||p.contractSymbol||'')}
       </div>
     </div>
     <div style="background:rgba(0,0,0,.3);border-radius:8px;padding:10px 14px;margin-bottom:10px;display:flex;gap:24px;flex-wrap:wrap">
-      <div><div style="font-size:9px;color:var(--muted)">UNREALIZED P&amp;L</div><div style="font-size:20px;font-weight:700;color:${pnlColor(chgDollar)}">${pnlSign(chgDollar)}$${Math.abs(chgDollar).toFixed(2)}</div></div>
-      <div><div style="font-size:9px;color:var(--muted)">P&amp;L %</div><div style="font-size:20px;font-weight:700;color:${pnlColor(chgPct)}">${pnlSign(chgPct)}${chgPct.toFixed(1)}%</div></div>
-      <div><div style="font-size:9px;color:var(--muted)">EST. POSITION VALUE</div><div style="font-size:16px;font-weight:700">$${estValue.toFixed(2)}</div></div>
-      <div><div style="font-size:9px;color:var(--muted)">DTE</div><div style="font-size:16px;font-weight:700">${dte}d</div></div>
+      <div><div style="font-size:9px;color:var(--muted)">UNREALIZED P&amp;L</div><div style="font-size:20px;font-weight:700;color:\${dollarColor}">\${pnlSign(chgDollar)}$\${Math.abs(chgDollar).toFixed(2)}</div></div>
+      <div><div style="font-size:9px;color:var(--muted)">P&amp;L %</div><div style="font-size:20px;font-weight:700;color:\${pctColor}">\${pnlSign(chgDollar)}\${Math.abs(chgPct).toFixed(1)}%</div></div>
+      <div><div style="font-size:9px;color:var(--muted)">EST. POSITION VALUE</div><div style="font-size:16px;font-weight:700">$\${estValue.toFixed(2)}</div></div>
+      <div><div style="font-size:9px;color:var(--muted)">DTE</div><div style="font-size:16px;font-weight:700">\${dte}d</div></div>
     </div>
     <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:8px">
-      <div><div style="font-size:9px;color:var(--muted)">${p.isCreditSpread?'NET CREDIT':'NET DEBIT'}</div><div style="font-weight:700">${fmt(p.premium)}</div></div>
-      <div><div style="font-size:9px;color:var(--muted)">CURRENT PRICE</div><div style="font-weight:700">$${curPrice.toFixed(2)}</div></div>
-      <div><div style="font-size:9px;color:var(--muted)">MAX PROFIT</div><div style="font-weight:700;color:var(--green)">$${(p.maxProfit||0).toFixed(0)}</div></div>
-      <div><div style="font-size:9px;color:var(--muted)">MAX LOSS</div><div style="font-weight:700;color:var(--red)">$${(p.maxLoss||0).toFixed(0)}</div></div>
-      <div><div style="font-size:9px;color:var(--muted)">MARGIN</div><div style="font-weight:700">${fmt(p.cost)}</div></div>
-      <div><div style="font-size:9px;color:var(--muted)">BREAKEVEN</div><div style="font-weight:700">$${p.breakeven||'--'}</div></div>
-      <div><div style="font-size:9px;color:var(--muted)">CONTRACTS</div><div style="font-weight:700">${p.contracts}x</div></div>
-      <div><div style="font-size:9px;color:var(--muted)">EXP DATE</div><div style="font-weight:700">${p.expDate}</div></div>
+      <div><div style="font-size:9px;color:var(--muted)">\${p.isCreditSpread?'NET CREDIT':'NET DEBIT'}</div><div style="font-weight:700">\${fmt(prem)}</div></div>
+      <div><div style="font-size:9px;color:var(--muted)">SPREAD WIDTH</div><div style="font-weight:700">\${widthDisplay}</div></div>
+      <div><div style="font-size:9px;color:var(--muted)">MAX PROFIT</div><div style="font-weight:700;color:var(--green)">\${maxPrDisplay}</div></div>
+      <div><div style="font-size:9px;color:var(--muted)">MAX LOSS</div><div style="font-weight:700;color:var(--red)">\${maxLsDisplay}</div></div>
+      <div><div style="font-size:9px;color:var(--muted)">MARGIN</div><div style="font-weight:700">\${fmt(p.cost)}</div></div>
+      <div><div style="font-size:9px;color:var(--muted)">BREAKEVEN</div><div style="font-weight:700">$\${breakeven}</div></div>
+      <div><div style="font-size:9px;color:var(--muted)">CONTRACTS</div><div style="font-weight:700">\${c}x</div></div>
+      <div><div style="font-size:9px;color:var(--muted)">EXP DATE</div><div style="font-weight:700">\${p.expDate}</div></div>
     </div>
-  </div>`;
+  </div>\`;
 }
 
 // ── Single leg card ────────────────────────────────────────────────────────
@@ -1934,7 +1966,7 @@ function renderSingleLeg(p) {
     </div>
     <div style="background:rgba(0,0,0,.3);border-radius:8px;padding:10px 14px;margin-bottom:10px;display:flex;gap:24px;flex-wrap:wrap">
       <div><div style="font-size:9px;color:var(--muted)">UNREALIZED P&amp;L</div><div style="font-size:20px;font-weight:700;color:${pnlColor(chgDollar)}">${pnlSign(chgDollar)}$${Math.abs(chgDollar).toFixed(2)}</div></div>
-      <div><div style="font-size:9px;color:var(--muted)">P&amp;L %</div><div style="font-size:20px;font-weight:700;color:${pnlColor(chgPct)}">${pnlSign(chgPct)}${chgPct.toFixed(1)}%</div></div>
+      <div><div style="font-size:9px;color:var(--muted)">P&amp;L %</div><div style="font-size:20px;font-weight:700;color:${pnlColor(chgDollar)}">${pnlSign(chgDollar)}${Math.abs(chgPct).toFixed(1)}%</div></div>
       <div><div style="font-size:9px;color:var(--muted)">EST. POSITION VALUE</div><div style="font-size:16px;font-weight:700">$${estValue.toFixed(2)}</div></div>
       <div><div style="font-size:9px;color:var(--muted)">DTE</div><div style="font-size:16px;font-weight:700">${dte}d</div></div>
     </div>
@@ -3668,7 +3700,7 @@ function copyOpenPositions() {
       lines.push(s.ticker+' '+(s.optionType||'put').toUpperCase()+' $'+s.strike+'/$'+l.strike+' exp '+s.expDate+' [CREDIT SPREAD]');
       lines.push('  Net credit: $'+nc.toFixed(2)+' | Width: $'+w+' | '+c+'x | '+Math.max(0,Math.round((new Date(s.expDate)-new Date())/86400000))+'d DTE');
       lines.push('  P&L: '+(net>=0?'+':'-')+'$'+Math.abs(net).toFixed(2)+' ('+(pct>=0?'+':'-')+pct.toFixed(1)+'% of max profit)');
-      lines.push('  Max profit: $'+mp.toFixed(0)+' | Max loss: $'+ml.toFixed(0)+' | Breakeven: $'+(s.strike-nc).toFixed(2));
+      lines.push('  Max profit: $'+mp.toFixed(0)+' | Max loss: $'+ml.toFixed(0)+' | Breakeven: $'+((s.optionType||'put')==='call'?(l.strike+nc):(s.strike-nc)).toFixed(2));
       if (s.score) lines.push('  Entry score: '+s.score+'/100');
       lines.push('');
     } else {
@@ -3681,7 +3713,7 @@ function copyOpenPositions() {
       totalPnL+=cd;
       lines.push(p.ticker+' '+(p.optionType||'put').toUpperCase()+' '+strike+' exp '+p.expDate+' ['+label+']');
       lines.push('  Entry: $'+parseFloat(p.premium).toFixed(2)+' | Current: $'+parseFloat(p.currentPrice||p.premium).toFixed(2)+' | '+c+'x | '+dte+'d DTE');
-      lines.push('  P&L: '+(cd>=0?'+':'-')+'$'+Math.abs(cd).toFixed(2)+' ('+(cp2>=0?'+':'-')+cp2.toFixed(1)+'%)');
+      lines.push('  P&L: '+(cd>=0?'+':'-')+'$'+Math.abs(cd).toFixed(2)+' ('+(cd>=0?'+':'-')+Math.abs(cp2).toFixed(1)+'%)');
       if (p.score) lines.push('  Entry score: '+p.score+'/100');
       lines.push('');
     }
@@ -3738,81 +3770,6 @@ function copyLogsForClaude() {
   doCopy(text)
     .then(function(){ btn.textContent='\u2714 Copied!'; setTimeout(function(){ btn.textContent='\u2398 Copy for Claude'; },2500); })
     .catch(function(){ btn.textContent='! Failed'; setTimeout(function(){ btn.textContent='\u2398 Copy for Claude'; },2000); });
-}
-
-// ── Copy full day from Redis ─────────────────────────────────────────────────
-// Pulls the EOD-archived daily log for a given date (defaults to today ET),
-// applies the same filter + search controls as copyLogsForClaude, and copies.
-// Today's in-memory rolling buffer shows ~200-500 entries; Redis holds 5000+.
-function copyFullDayFromRedis() {
-  var btn = document.getElementById('copy-redis-log-btn');
-  var dateEl = document.getElementById('redis-log-date');
-  var date = dateEl && dateEl.value ? dateEl.value : (function() {
-    // default: today in ET (YYYY-MM-DD)
-    var fmt = new Intl.DateTimeFormat('en-CA', { timeZone: 'America/New_York', year: 'numeric', month: '2-digit', day: '2-digit' });
-    return fmt.format(new Date()); // en-CA gives YYYY-MM-DD
-  })();
-
-  var origText = btn.textContent;
-  btn.textContent = 'Fetching ' + date + '...';
-  btn.disabled = true;
-
-  fetch('/api/logs/history?date=' + encodeURIComponent(date) + '&limit=10000')
-    .then(function(r) {
-      if (!r.ok) {
-        return r.json().then(function(j) { throw new Error(j.error || ('HTTP ' + r.status)); });
-      }
-      return r.json();
-    })
-    .then(function(data) {
-      var entries = data.entries || [];
-      if (!entries.length) throw new Error('No entries returned for ' + date);
-
-      // Apply current filter + search (same semantics as copyLogsForClaude)
-      var filterType = (document.getElementById('log-filter').value||'').trim();
-      var search     = (document.getElementById('log-search').value||'').toLowerCase();
-      var types      = filterType ? filterType.split(',') : null;
-      if (types)  entries = entries.filter(function(e){ return types.indexOf(e.type)>=0; });
-      if (search) entries = entries.filter(function(e){ return (e.message||'').toLowerCase().indexOf(search)>=0; });
-
-      // Sort oldest-first for readability (Redis archive is push-order, usually chronological)
-      // Tolerate either order by sorting explicitly on e.time
-      entries.sort(function(a,b){ return new Date(a.time) - new Date(b.time); });
-
-      var summary = data.summary || {};
-      var NL = '\n';
-      var lines = [
-        'ARGO V3.2 \u2014 Full Day Log from Redis \u2014 ' + date,
-        'Exported: ' + new Date().toLocaleString(),
-        'Filter: ' + (filterType||'all') + (search ? ' | Search: "'+search+'"' : '') + ' | Entries: ' + entries.length + ' (of ' + (summary.totalEntries||'?') + ' total)',
-        'EOD summary: trades=' + (summary.trades||0) + ' warns=' + (summary.warns||0) + ' errors=' + (summary.errors||0) + ' closedToday=' + (summary.closedToday||0) + ' cashEOD=$' + (summary.cashEOD||'?') + ' positionsEOD=' + (summary.positionsEOD||0),
-        '\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500',
-        ''
-      ];
-      entries.forEach(function(e){
-        var t = new Date(e.time).toLocaleTimeString();
-        var type = (e.type||'info').toUpperCase();
-        while (type.length < 8) type += ' ';
-        lines.push('['+t+'] '+type+' '+(e.message||''));
-      });
-      var text = lines.join(NL);
-
-      var doCopy = function(t) {
-        if (navigator.clipboard && navigator.clipboard.writeText) return navigator.clipboard.writeText(t);
-        var ta = document.createElement('textarea');
-        ta.value = t; ta.style.cssText = 'position:fixed;opacity:0';
-        document.body.appendChild(ta); ta.select(); document.execCommand('copy'); ta.remove();
-        return Promise.resolve();
-      };
-      return doCopy(text).then(function(){
-        btn.textContent = '\u2714 Copied ' + entries.length + ' entries';
-        setTimeout(function(){ btn.textContent = origText; btn.disabled = false; }, 3500);
-      });
-    })
-    .catch(function(err) {
-      btn.textContent = '! ' + (err.message || 'Failed');
-      setTimeout(function(){ btn.textContent = origText; btn.disabled = false; }, 4000);
-    });
 }
 
 // ── Score debug ──────────────────────────────────────────────────────────────
