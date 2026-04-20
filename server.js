@@ -35,8 +35,9 @@ const { sendEmail, sendMorningBriefing,
 const { getAgentMacroAnalysis, getAgentRescore,
         getAgentDayPlan }                                = require('./agent');
 const { getMacroNews, getUpcomingMacroEvents }           = require('./market');
-const { getTimeAdjustedStop, getTimeOfDayAnalysis }      = require('./exitEngine');
+const { getTimeAdjustedStop, getTimeOfDayAnalysis, applyExitUrgency } = require('./exitEngine');
 const { getRegimeRulebook }                              = require('./entryEngine');
+const { checkMacroShift, applyIntradayRegimeOverride }   = require('./scoring');
 const { executeCreditSpread: _execCreditSpread }         = require('./execution');
 const { getDrawdownProtocol, getPnLByTicker,
         getPnLBySector, getPnLByScoreRange, getTaxLog,
@@ -822,6 +823,13 @@ cron.schedule("0 13,14 * * 1", async () => {
   }
 });
 
+
+// Wire market.js callbacks to break circular dependency (market → scoring → market)
+registerMacroCallbacks({
+  checkMacroShift:             checkMacroShift,
+  applyIntradayRegimeOverride: applyIntradayRegimeOverride,
+  applyExitUrgency:            applyExitUrgency,
+});
 // - Express API -
 app.use(express.json());
 app.use(express.static(path.join(__dirname, "public")));
