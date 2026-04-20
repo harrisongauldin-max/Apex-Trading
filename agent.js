@@ -7,7 +7,9 @@ const AGENT_TOOLS = [];
 const fetch = require('node-fetch');
 const { ANTHROPIC_API_KEY, ANTHROPIC_MODEL } = require('./constants');
 const { state } = require('./state');
-const { getAccountPhase } = require('./signals');
+const { getAccountPhase ,
+  effectiveHeatCap, isMarketHours
+} = require('./signals');
 const { alpacaGet, getStockQuote, getStockBars, getIntradayBars } = require('./broker');
 
 // ─── Module-level cache ──────────────────────────────────────────
