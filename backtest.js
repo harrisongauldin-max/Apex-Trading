@@ -5,7 +5,9 @@ const { alpacaGet, getStockBars } = require('./broker');
 const { state, logEvent }         = require('./state');
 const { calcRSI, calcMACD, calcATR, calcMomentum } = require('./signals');
 const { WATCHLIST, MONTHLY_BUDGET, STOP_LOSS_PCT,
-        TAKE_PROFIT_PCT, MS_PER_DAY }              = require('./constants');
+        TAKE_PROFIT_PCT, MS_PER_DAY ,
+  ALPACA_DATA
+}              = require('./constants');
 
 async function fetchHistoricalBars(ticker, startDate, endDate) {
   // Fetch a large window of daily bars between two dates
