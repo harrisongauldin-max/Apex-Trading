@@ -27,6 +27,117 @@ const _slowCache     = new Map();
 let   _barsCache     = new Map();
 let   _marketauxCache = { data: [], fetchedAt: 0 };
 
+// ─── Constants (moved from monolith during V3.2 modular split) ──────────────
+const ALPACA_DATA       = 'https://data.alpaca.markets/v2';
+const ALPACA_OPT_SNAP   = 'https://data.alpaca.markets/v1beta1';
+const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY || '';
+
+const COMPANY_NAMES = {
+  NVDA:'Nvidia', AAPL:'Apple', MSFT:'Microsoft', AMZN:'Amazon', META:'Meta',
+  GOOGL:'Alphabet Google', AMD:'AMD Advanced Micro', AVGO:'Broadcom', ARM:'ARM Holdings',
+  MU:'Micron', SMCI:'Super Micro', CRM:'Salesforce', NOW:'ServiceNow', SNOW:'Snowflake',
+  CRWD:'CrowdStrike', PANW:'Palo Alto Networks', NET:'Cloudflare',
+  JPM:'JPMorgan', BAC:'Bank of America', C:'Citigroup', MS:'Morgan Stanley',
+  COIN:'Coinbase', HOOD:'Robinhood', MSTR:'MicroStrategy', SQ:'Block Square',
+  TSLA:'Tesla', NFLX:'Netflix', UBER:'Uber', SHOP:'Shopify',
+  DKNG:'DraftKings', NKE:'Nike', ROKU:'Roku', PLTR:'Palantir',
+  WFC:'Wells Fargo', BABA:'Alibaba', TTD:'The Trade Desk',
+  SPY:'S&P 500', QQQ:'Nasdaq',
+};
+
+const MACRO_BEARISH_KEYWORDS = [
+  { kw: 'fed rate hike',          w: 3 }, { kw: 'rate hike',               w: 2 },
+  { kw: 'hawkish',                w: 2 }, { kw: 'quantitative tightening', w: 2 },
+  { kw: 'tightening',             w: 1 },
+  { kw: 'inflation surge',        w: 3 }, { kw: 'cpi beat',                w: 3 },
+  { kw: 'inflation hot',          w: 2 }, { kw: 'pce beat',                w: 2 },
+  { kw: 'core inflation',         w: 2 },
+  { kw: 'tariff',                 w: 2 }, { kw: 'trade war',               w: 3 },
+  { kw: 'sanctions',              w: 2 }, { kw: 'export controls',         w: 2 },
+  { kw: 'chip ban',               w: 2 }, { kw: 'china tariff',            w: 3 },
+  { kw: 'china tensions',         w: 2 }, { kw: 'taiwan strait',           w: 3 },
+  { kw: 'war',                    w: 3 }, { kw: 'military strike',         w: 3 },
+  { kw: 'invasion',               w: 3 }, { kw: 'conflict escalation',     w: 3 },
+  { kw: 'blockade',               w: 2 }, { kw: 'strait',                  w: 2 },
+  { kw: 'recession',              w: 3 }, { kw: 'gdp miss',                w: 3 },
+  { kw: 'gdp contraction',        w: 3 }, { kw: 'unemployment rise',       w: 2 },
+  { kw: 'jobless claims surge',   w: 2 }, { kw: 'layoffs',                 w: 2 },
+  { kw: 'job cuts',               w: 1 },
+  { kw: 'bank failure',           w: 3 }, { kw: 'credit crunch',           w: 3 },
+  { kw: 'debt ceiling',           w: 2 }, { kw: 'default',                 w: 3 },
+  { kw: 'downgrade',              w: 2 }, { kw: 'bank run',                w: 3 },
+  { kw: 'regional banks',         w: 2 }, { kw: 'liquidity crisis',        w: 3 },
+  { kw: 'oil spike',              w: 2 }, { kw: 'energy crisis',           w: 2 },
+  { kw: 'supply shock',           w: 2 }, { kw: 'shortage',                w: 1 },
+  { kw: 'opec cut',               w: 2 }, { kw: 'production cut',          w: 2 },
+  { kw: 'yield inversion',        w: 2 }, { kw: '10-2 spread',             w: 2 },
+  { kw: 'volatility surge',       w: 2 }, { kw: 'government shutdown',     w: 2 },
+  { kw: 'shutdown',               w: 1 }, { kw: 'dollar strengthening',    w: 1 },
+  { kw: 'earnings miss',          w: 2 }, { kw: 'guidance cut',            w: 2 },
+  { kw: 'profit warning',         w: 2 },
+];
+
+const MACRO_BULLISH_KEYWORDS = [
+  { kw: 'fed rate cut',           w: 3 }, { kw: 'rate cut',                w: 2 },
+  { kw: 'dovish',                 w: 2 }, { kw: 'quantitative easing',     w: 2 },
+  { kw: 'easing',                 w: 1 }, { kw: 'stimulus',                w: 2 },
+  { kw: 'soft landing',           w: 2 }, { kw: 'pause rate',              w: 2 },
+  { kw: 'inflation cooling',      w: 2 }, { kw: 'cpi miss',                w: 3 },
+  { kw: 'inflation slows',        w: 2 }, { kw: 'pce miss',                w: 2 },
+  { kw: 'disinflation',           w: 2 },
+  { kw: 'strong jobs',            w: 2 }, { kw: 'unemployment falls',      w: 2 },
+  { kw: 'gdp beat',               w: 3 }, { kw: 'gdp growth',              w: 2 },
+  { kw: 'beat expectations',      w: 1 }, { kw: 'consumer confidence rises',w: 2 },
+  { kw: 'retail sales beat',      w: 2 }, { kw: 'earnings beat',           w: 2 },
+  { kw: 'record earnings',        w: 2 }, { kw: 'guidance raised',         w: 2 },
+  { kw: 'profit beat',            w: 2 },
+  { kw: 'ceasefire',              w: 3 }, { kw: 'peace deal',              w: 3 },
+  { kw: 'peace talks',            w: 2 }, { kw: 'truce',                   w: 3 },
+  { kw: 'accord',                 w: 2 }, { kw: 'end to conflict',         w: 3 },
+  { kw: 'deescalation',           w: 2 }, { kw: 'de-escalation',           w: 2 },
+  { kw: 'diplomatic',             w: 1 },
+  { kw: 'tariff pause',           w: 3 }, { kw: 'tariff suspended',        w: 3 },
+  { kw: 'tariff removed',         w: 3 }, { kw: 'tariff cut',              w: 2 },
+  { kw: 'trade deal',             w: 3 }, { kw: 'trade agreement',         w: 3 },
+  { kw: 'trade truce',            w: 2 }, { kw: 'sanctions lifted',        w: 2 },
+  { kw: 'sanctions relief',       w: 2 }, { kw: 'iran deal',               w: 3 },
+  { kw: 'us-iran',                w: 2 }, { kw: 'trump deal',              w: 2 },
+  { kw: 'trade resolution',       w: 2 }, { kw: 'agreement reached',       w: 2 },
+  { kw: 'china stimulus',         w: 2 }, { kw: 'pboc',                    w: 2 },
+  { kw: 'beijing stimulus',       w: 2 },
+  { kw: 'debt deal',              w: 2 }, { kw: 'budget deal',             w: 2 },
+  { kw: 'continuing resolution',  w: 1 },
+  { kw: 'ai breakthrough',        w: 1 }, { kw: 'nvidia beat',             w: 2 },
+  { kw: 'oil falls',              w: 2 }, { kw: 'energy prices drop',      w: 2 },
+  { kw: 'supply chain recovery',  w: 2 }, { kw: 'risk on',                 w: 1 },
+  { kw: 'market rally',           w: 1 }, { kw: 'stocks surge',            w: 1 },
+];
+
+const CREDIBLE_SOURCES = [
+  'reuters', 'bloomberg', 'ap ', 'associated press', 'wall street journal', 'wsj',
+  'financial times', 'ft ', 'cnbc', 'federal reserve', 'fed ', 'white house',
+  'treasury', 'sec ', 'imf', 'world bank', 'ecb', 'bank of england',
+  'new york times', 'washington post', 'the economist'
+];
+
+const SECTOR_MACRO_IMPACT = {
+  'rate hike':     { bearish: ['Technology', 'Financial'], bullish: [] },
+  'rate cut':      { bearish: [], bullish: ['Technology', 'Financial'] },
+  'oil spike':     { bearish: ['Consumer', 'Technology'], bullish: ['Energy'] },
+  'opec cut':      { bearish: ['Consumer', 'Technology'], bullish: ['Energy'] },
+  'oil falls':     { bearish: ['Energy'], bullish: ['Consumer', 'Technology'] },
+  'tariff':        { bearish: ['Technology', 'Consumer'], bullish: [] },
+  'china tariff':  { bearish: ['Technology', 'Consumer'], bullish: [] },
+  'trade deal':    { bearish: [], bullish: ['Technology', 'Consumer'] },
+  'recession':     { bearish: ['Financial', 'Consumer', 'Technology'], bullish: [] },
+  'stimulus':      { bearish: [], bullish: ['Technology', 'Financial', 'Consumer'] },
+  'chip ban':      { bearish: ['Technology'], bullish: [] },
+  'bank failure':  { bearish: ['Financial'], bullish: [] },
+  'ai breakthrough':{ bearish: [], bullish: ['Technology'] },
+};
+// ────────────────────────────────────────────────────────────────────────────
+
+
 function getCached(key, ttl = SLOW_CACHE_TTL) {
   const entry = _slowCache.get(key);
   if (entry && Date.now() - entry.ts < ttl) return entry.data;
