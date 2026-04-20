@@ -1,6 +1,11 @@
 // state.js — ARGO V3.2
 // State schema, Redis persistence, and logging.
 'use strict';
+
+function getETTime() {
+  return new Date(new Date().toLocaleString('en-US', {timeZone:'America/New_York'}));
+}
+const BACKUP_FILE = require('path').join(__dirname, 'state-backup.json');
 const fs   = require('fs');
 const path = require('path');
 const fetch = require('node-fetch');
