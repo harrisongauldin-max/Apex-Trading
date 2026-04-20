@@ -301,7 +301,8 @@ async function initState() {
         if (seedMax - seedMin >= 10) {
           // Valid range - seed is meaningful
           // V2.83: use P5-P95 trimmed range to prevent outlier poisoning
-          state._vixRolling = seedReadings.slice(-252);
+          state._vixDaily   = seedReadings.slice(-504); // 2yr daily for IVR percentile
+        state._vixRolling = seedReadings.slice(-252);  // keep for velocity calc
           const sortedSeed  = [...state._vixRolling].sort((a, b) => a - b);
           const seedP5  = sortedSeed[Math.floor(sortedSeed.length * 0.05)] || seedMin;
           const seedP95 = sortedSeed[Math.floor(sortedSeed.length * 0.95)] || seedMax;
