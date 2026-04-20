@@ -2,6 +2,7 @@
 // Order execution: credit spreads, debit spreads, single-leg options.
 // Handles order submission, fill confirmation, position state updates.
 'use strict';
+const fmt = (n) => '$' + (n||0).toFixed(2);
 const MAX_LOSS_PER_TRADE = 500;
 const VIX_REDUCE50 = 35;
 const VIX_REDUCE25 = 28;
@@ -10,13 +11,17 @@ const { alpacaGet, alpacaPost, alpacaDelete, getStockBars } = require('./broker'
 const { state, logEvent, markDirty, saveStateNow }          = require('./state');
 const { calcGreeks, getETTime,
         openRisk, heatPct, getDeployableCash, effectiveHeatCap,
-        calcCreditSpreadTP }                                 = require('./signals');
+        calcCreditSpreadTP ,
+  totalCap
+}                                 = require('./signals');
 const { CAPITAL_FLOOR, MIN_OPTION_PREMIUM, MIN_OI,
         MAX_SPREAD_PCT, EARLY_SPREAD_PCT, TARGET_DELTA_MIN,
         TARGET_DELTA_MAX, MONTHLY_BUDGET, INDIVIDUAL_STOCKS_ENABLED,
         WATCHLIST ,
   ALPACA_OPT_SNAP
 }                                          = require('./constants');
+const { confirmPendingOrder } = require('./closeEngine');
+const { getDTEExitParams } = require('./exitEngine');
 
 // ─── Injected dependencies ───────────────────────────────────────
 let _dryRunMode    = false;
