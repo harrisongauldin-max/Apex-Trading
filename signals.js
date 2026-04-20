@@ -3,7 +3,7 @@
 'use strict';
 const { alpacaGet, getStockBars, getIntradayBars } = require('./broker');
 const { state } = require('./state');
-const { MAX_HEAT, CAPITAL_FLOOR, MONTHLY_BUDGET } = require('./constants');
+const { MAX_HEAT, CAPITAL_FLOOR, MONTHLY_BUDGET , ALPACA_DATA } = require('./constants');
 let _log = (type, msg) => console.log(`[signals][${type}] ${msg}`);
 function setSignalsLogger(fn) { _log = fn; }
 
