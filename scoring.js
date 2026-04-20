@@ -117,6 +117,7 @@ function applyIntradayRegimeOverride(newMacro) {
       _intradayOverride: true,
       _overrideAt: new Date().toISOString(),
     };
+    markDirty();
     logEvent("macro", `[REGIME OVERRIDE] ${dayPlanRegime}-${intradayRegime} / ${dayPlanBias}-${newMacro.entryBias} (${confidence} confidence)`);
   } else if ((strongShift || extremeShift) && !overrideExpired) {
     logEvent("macro", `[REGIME OVERRIDE] Skipped - previous override still active (${overrideAge.toFixed(1)}h ago)`);
