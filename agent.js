@@ -6,7 +6,7 @@ const AGENT_MACRO_CACHE_MS = 5 * 60 * 1000  // 5 minutes;
 const AGENT_TOOLS = [];
 const fetch = require('node-fetch');
 const { ANTHROPIC_API_KEY, ANTHROPIC_MODEL } = require('./constants');
-const { state } = require('./state');
+const { state, markDirty } = require('./state');
 const { getAccountPhase ,
   effectiveHeatCap, isMarketHours
 } = require('./signals');
