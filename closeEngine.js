@@ -38,7 +38,9 @@ const { calcCreditSpreadTP, realizedPnL ,
   openRisk, totalCap
 }     = require('./signals');
 const { STOP_LOSS_PCT, TAKE_PROFIT_PCT, PDT_PROFIT_EXIT,
-        PDT_STOP_LOSS, FAST_STOP_PCT, MONTHLY_BUDGET }  = require('./constants');
+        PDT_STOP_LOSS, FAST_STOP_PCT, MONTHLY_BUDGET ,
+  ALPACA_KEY, BONUS_AMOUNT, MS_PER_DAY, PDT_LIMIT, REVENUE_THRESHOLD, WATCHLIST
+}  = require('./constants');
 
 // ─── Injected dependencies ───────────────────────────────────────
 let _dryRunMode    = false;
