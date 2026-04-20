@@ -5,7 +5,9 @@ let marketContext = {}; // populated by scanner
 const AGENT_MACRO_CACHE_MS = 5 * 60 * 1000  // 5 minutes;
 const AGENT_TOOLS = [];
 const fetch = require('node-fetch');
-const { ANTHROPIC_API_KEY, ANTHROPIC_MODEL } = require('./constants');
+const { ANTHROPIC_API_KEY, ANTHROPIC_MODEL ,
+  MS_PER_DAY, PDT_LIMIT, TRIGGER_COOLDOWN_MS
+} = require('./constants');
 const { state, markDirty } = require('./state');
 const { getAccountPhase ,
   effectiveHeatCap, isMarketHours
