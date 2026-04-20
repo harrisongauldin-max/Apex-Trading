@@ -1,6 +1,9 @@
 // agent.js — ARGO V3.2
 // Claude AI agent: macro analysis, position rescoring, morning briefing.
 'use strict';
+let marketContext = {}; // populated by scanner
+const AGENT_MACRO_CACHE_MS = 5 * 60 * 1000  // 5 minutes;
+const AGENT_TOOLS = [];
 const fetch = require('node-fetch');
 const { ANTHROPIC_API_KEY, ANTHROPIC_MODEL } = require('./constants');
 const { state } = require('./state');
