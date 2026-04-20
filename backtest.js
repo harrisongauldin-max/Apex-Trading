@@ -8,6 +8,7 @@ const { WATCHLIST, MONTHLY_BUDGET, STOP_LOSS_PCT,
         TAKE_PROFIT_PCT, MS_PER_DAY ,
   ALPACA_DATA
 }              = require('./constants');
+const { isGLDEntryAllowed, isTLTEntryAllowed, isXLEEntryAllowed } = require('./scoring');
 
 async function fetchHistoricalBars(ticker, startDate, endDate) {
   // Fetch a large window of daily bars between two dates
