@@ -33,12 +33,7 @@ const {
   getVIXReversionDays, getVIX,
 } = require('./market');
 
-const {
-  scoreIndexSetup, scorePutSetup, scoreMeanReversionCall,
-  detectMarketRegime, getRegimeModifier, applyIntradayRegimeOverride,
-  updateOversoldTracker, recordGateBlock, checkMacroShift,
-  checkSectorETF, isGLDEntryAllowed, isXLEEntryAllowed, isTLTEntryAllowed,
-} = require('./scoring');
+const { scoreIndexSetup, scorePutSetup, scoreMeanReversionCall, detectMarketRegime, getRegimeModifier, updateOversoldTracker, recordGateBlock, checkSectorETF, isGLDEntryAllowed, isXLEEntryAllowed, isTLTEntryAllowed } = require('./scoring');;
 
 const {
   getRegimeRulebook, scoreCandidate: EE_scoreCandidate, evaluateEntry,
@@ -57,9 +52,7 @@ const {
   runReconciliation, syncPositionPnLFromAlpaca,
 } = require('./reconciler');
 
-const {
-  getAgentDayPlan, getAgentMacroAnalysis, runAgentRescore, triggerRescore,
-} = require('./agent');
+const { runAgentRescore } = require('./agent');;
 
 const {
   getDrawdownProtocol, checkConcentrationRisk, checkAllFilters,
@@ -67,10 +60,7 @@ const {
   checkScaleIns, calcThesisIntegrity,
 } = require('./risk');
 
-const {
-  checkExits, fetchPositionData,
-  getTimeAdjustedStop, getDTEExitParams, applyExitUrgency, getTimeOfDayAnalysis,
-} = require('./exitEngine');
+const { checkExits, fetchPositionData } = require('./exitEngine');;
 
 const { sendMorningBriefing, sendEmail, setReportingContext, sendResendEmail } = require('./reporting');
 
