@@ -86,6 +86,7 @@ const {
 } = require('./constants');
 
 let scanRunning  = false;
+let _lastScanStart = 0;   // watchdog timestamp — set at scan start, reset on completion
 // Stub: getBenchmarkComparison not yet modularized
 async function getBenchmarkComparison() { return null; }
 // Stub: getEarningsQualityScore
@@ -2620,6 +2621,7 @@ module.exports = {
     scanRunning,
     dryRunMode,
     marketContext,
+    lastScanStart: _lastScanStart,
     circuit: getCircuitState(),
   }),
   setDryRunMode: (v) => { dryRunMode = v; },
