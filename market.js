@@ -19,10 +19,18 @@ const MACRO_EVENTS_2025 = [
   { date: "2026-06-10", event: "CPI Report", impact: "high" },
 ];
 const { calcRSI, getETTime }                    = require('./signals');
-const { checkMacroShift,
-        applyIntradayRegimeOverride }               = require('./scoring');
 const { getAgentMacroAnalysis }                    = require('./agent');
-const { applyExitUrgency }                         = require('./exitEngine');
+
+// Callbacks registered by scanner at boot to avoid circular dependency:
+// market.js → scoring.js → market.js (would cause undefined exports)
+let _checkMacroShift           = () => {};
+let _applyIntradayRegimeOverride = () => {};
+let _applyExitUrgency          = () => {};
+function registerMacroCallbacks(cbs) {
+  if (cbs.checkMacroShift)            _checkMacroShift            = cbs.checkMacroShift;
+  if (cbs.applyIntradayRegimeOverride) _applyIntradayRegimeOverride = cbs.applyIntradayRegimeOverride;
+  if (cbs.applyExitUrgency)           _applyExitUrgency           = cbs.applyExitUrgency;
+}
 const { SLOW_CACHE_TTL, BARS_CACHE_TTL, MARKETAUX_KEY,
         MS_PER_DAY, ALPACA_NEWS }                = require('./constants');
 
@@ -382,7 +390,7 @@ async function getMacroNews() {
       logEvent("macro", `Macro: ${signal} | ${sourceCount} | triggers: ${uniqueTriggers.join(", ")} | modifier: ${scoreModifier > 0 ? "+" : ""}${scoreModifier}`);
     }
     // Check for macro shift even on keyword path
-    checkMacroShift(signal);
+    _checkMacroShift(signal);
     // SCORE-1: Seed _agentMacro from keyword result when agent hasn't run yet
     // Without this, first scan after boot scores with no agent signal (neutral default)
     // even when macro is clearly bearish from keywords
@@ -441,9 +449,9 @@ async function getMacroNews() {
             else state._agentMacro.entryBias = "neutral";
           }
           // Apply intraday regime override if signal is strong enough
-          applyIntradayRegimeOverride(agentResult);
+          _applyIntradayRegimeOverride(agentResult);
           // AG-6: Apply exit urgency signal
-          applyExitUrgency(agentResult);
+          _applyExitUrgency(agentResult);
           // Map agent result to expected format
           const agentModeMap = {
             "strongly bearish": { modifier: -20, mode: "defensive" },
@@ -1037,5 +1045,5 @@ module.exports = {
   getDXY, getYieldCurve, getEarningsDate, getNewsForTicker, analyzeNews,
   scoreArticle, getAnalystActivity, getShortInterestSignal,
   getUpcomingMacroEvents, getMacroCalendarModifier, getPreMarketData,
-  checkVIXVelocity, getVIXReversionDays, getVIX, setMarketContext,
+  checkVIXVelocity, getVIXReversionDays, getVIX, setMarketContext, registerMacroCallbacks,
 };
