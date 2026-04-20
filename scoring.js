@@ -10,6 +10,8 @@ const { state }                           = require('./state');
 const { logEvent }                        = require('./state');
 const { MIN_SCORE, MIN_SCORE_CREDIT ,
   ANTHROPIC_API_KEY
+,
+  INDIVIDUAL_STOCKS_ENABLED
 }     = require('./constants');
 const { calcADX, getETTime } = require('./signals');
 const { setCache } = require('./market');
