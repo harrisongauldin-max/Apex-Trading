@@ -1,15 +1,22 @@
 // reporting.js — ARGO V3.2
 // Email delivery, morning briefings, end-of-day reports.
 'use strict';
+const fmt = (n) => '$' + (n||0).toFixed(2);
 const fetch = require('node-fetch');
-const { withTimeout } = require('./broker');
+const { withTimeout ,
+  alpacaGet, getStockBars
+} = require('./broker');
 const { state, logEvent, saveStateNow, markDirty } = require('./state');
 const { realizedPnL, openRisk, openCostBasis,
-        getETTime, isMarketHours }                 = require('./signals');
+        getETTime, isMarketHours ,
+  heatPct, stockValue, calcRSI, calcGreeks
+}                 = require('./signals');
 const { RESEND_API_KEY, GMAIL_USER, MONTHLY_BUDGET,
         CAPITAL_FLOOR ,
   ALPACA_DATA, ANTHROPIC_API_KEY
 }                            = require('./constants');
+const { countRecentDayTrades } = require('./risk');
+const { getNewsForTicker, getUpcomingMacroEvents } = require('./market');
 
 let _getAgentBriefing = async () => '';
 let _getMacroNews     = async () => ({});
