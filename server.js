@@ -82,19 +82,6 @@ function buildMonthlyReport() {
 }
 const executeCreditSpread = _execCreditSpread || (async () => null);
 
-function requireSecret(req, res, next) {
-  if (!ARGO_SECRET) {
-    // No secret configured -- log warning but allow (backwards compat during deploy)
-    logEvent("warn", "[AUTH] ARGO_SECRET not set -- destructive endpoints unprotected");
-    return next();
-  }
-  const provided = req.headers["x-argo-secret"] || req.body?.secret || "";
-  if (provided !== ARGO_SECRET) {
-    logEvent("warn", `[AUTH] Unauthorized request to ${req.path} from ${req.ip}`);
-    return res.status(401).json({ error: "Unauthorized" });
-  }
-  next();
-}
 
 async function initState() {
   const saved = await redisLoad();
@@ -572,14 +559,13 @@ setInterval(() => {
 // C3: Scan watchdog -- prevents permanent scanRunning=true lockout
 // If a scan hangs (Redis timeout, API freeze), scanRunning stays true and
 // subsequent scans are skipped silently. Watchdog force-resets after 90 seconds.
-let _lastScanStart = 0;
 const SCAN_WATCHDOG_MS = 90 * 1000;
 setInterval(() => {
   const _scanState = getScannerState();
+  const _lastScanStart = _scanState.lastScanStart || 0;
   if (_scanState.scanRunning && _lastScanStart > 0 && (Date.now() - _lastScanStart) > SCAN_WATCHDOG_MS) {
     logEvent("warn", `[WATCHDOG] Scan running ${((Date.now()-_lastScanStart)/1000).toFixed(0)}s -- force-resetting scanRunning`);
     resetScanLock();
-    _lastScanStart = 0;
   }
 }, 15 * 1000);
 
