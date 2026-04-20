@@ -14,7 +14,9 @@ const { calcGreeks, getETTime,
 const { CAPITAL_FLOOR, MIN_OPTION_PREMIUM, MIN_OI,
         MAX_SPREAD_PCT, EARLY_SPREAD_PCT, TARGET_DELTA_MIN,
         TARGET_DELTA_MAX, MONTHLY_BUDGET, INDIVIDUAL_STOCKS_ENABLED,
-        WATCHLIST }                                          = require('./constants');
+        WATCHLIST ,
+  ALPACA_OPT_SNAP
+}                                          = require('./constants');
 
 // ─── Injected dependencies ───────────────────────────────────────
 let _dryRunMode    = false;
