@@ -1754,21 +1754,25 @@ app.get("/api/test-options/:ticker", async (req, res) => {
 
 // Health check endpoint
 app.get("/api/health", (req, res) => {
-  const lastScan = state.lastScan ? new Date(state.lastScan) : null;
-  const msSinceLastScan = lastScan ? Date.now() - lastScan.getTime() : 999999;
-  res.json({
-    status:        "ok",
-    uptime:        process.uptime(),
-    lastScan:      state.lastScan,
-    msSinceLastScan,
-    positions:     state.positions.length,
-    cash:          state.cash,
-    vix:           state.vix,
-    marketContext: getMarketContext(),
-    sharpe:        calcSharpeRatio(),
-    var95:         calcVaR(),
-    mae:           calcMAE(),
-  });
+  try {
+    const lastScan = state.lastScan ? new Date(state.lastScan) : null;
+    const msSinceLastScan = lastScan ? Date.now() - lastScan.getTime() : 999999;
+    res.json({
+      status:        "ok",
+      uptime:        process.uptime(),
+      lastScan:      state.lastScan,
+      msSinceLastScan,
+      positions:     (state.positions||[]).length,
+      cash:          state.cash,
+      vix:           state.vix,
+      marketContext: getMarketContext(),
+      sharpe:        calcSharpeRatio(),
+      var95:         calcVaR(),
+      mae:           calcMAE(),
+    });
+  } catch(e) {
+    res.json({ status: "ok", uptime: process.uptime(), error: e.message });
+  }
 });
 
 // [duplicate /api/reset-circuit removed]
