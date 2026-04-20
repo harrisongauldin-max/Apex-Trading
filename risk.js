@@ -1,6 +1,9 @@
 // risk.js — ARGO V3.2
 // Risk management: drawdown, PDT, concentration, stress test, filters.
 'use strict';
+let _dryRunMode = false; // injected by scanner
+function setDryRunModeRisk(v) { _dryRunMode = v; }
+
 const fmt = (n) => '$' + (n||0).toFixed(2);
 const SUPPORT_BUFFER = 0.02;
 const PDT_DAYS = 5;
@@ -169,7 +172,7 @@ async function checkScaleIns() {
 
     if (chg >= 0.05 && state.cash > CAPITAL_FLOOR + addCost) {
       // Submit scale-in order to Alpaca
-      if (pos.contractSymbol && pos.ask > 0 && !dryRunMode) {
+      if (pos.contractSymbol && pos.ask > 0 && !_dryRunMode) {
         try {
           const scaleBody = {
             symbol:           pos.contractSymbol,
@@ -205,7 +208,7 @@ async function checkAllFilters(stock, price, prefetchedBars = null) { // OPT3: a
   // 1. Entry window — SPY/QQQ open at 9:30am, individual stocks at 9:45am
   const isIndexStock     = stock.isIndex || false;
   const eitherWindowOpen = isEntryWindow("call", isIndexStock) || isEntryWindow("put", isIndexStock);
-  if (!eitherWindowOpen && !dryRunMode) return { pass:false, reason:"Outside entry window" };
+  if (!eitherWindowOpen && !_dryRunMode) return { pass:false, reason:"Outside entry window" };
 
   // 2. Circuit breakers
   if (!state.circuitOpen)       return { pass:false, reason:"Daily circuit breaker tripped" };
@@ -470,4 +473,5 @@ module.exports = {
   isDayTrade, recordDayTrade, getStreakAnalysis,
   calcThesisIntegrity, getPnLByTicker, getPnLBySector,
   getPnLByScoreRange, getTaxLog,
+  setDryRunModeRisk,
 };
