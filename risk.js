@@ -1,17 +1,25 @@
 // risk.js — ARGO V3.2
 // Risk management: drawdown, PDT, concentration, stress test, filters.
 'use strict';
+const fmt = (n) => '$' + (n||0).toFixed(2);
 const SUPPORT_BUFFER = 0.02;
 const PDT_DAYS = 5;
 const PREMARKET_NEGATIVE = -0.02;
 const VIX_PAUSE = 18;
 const RESISTANCE_BUFFER = 0.02;
-const { state, logEvent, markDirty } = require('./state');
+const { state, logEvent, markDirty ,
+  saveStateNow
+} = require('./state');
 const { openRisk, openCostBasis, heatPct, realizedPnL,
-        totalCap, getETTime, getBusinessDaysAgo } = require('./signals');
+        totalCap, getETTime, getBusinessDaysAgo ,
+  effectiveHeatCap, isEntryWindow, getSupportResistance
+} = require('./signals');
 const { CAPITAL_FLOOR, MONTHLY_BUDGET, MAX_HEAT, MAX_SECTOR_PCT,
         PDT_LIMIT, MS_PER_DAY, STOP_LOSS_PCT,
         MIN_SCORE }                              = require('./constants');
+const { alpacaPost, getStockBars } = require('./broker');
+const { checkSectorETF } = require('./scoring');
+const { getOptionsPrice } = require('./execution');
 
 function getDrawdownProtocol() {
   const trades    = state.closedTrades || [];
