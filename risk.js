@@ -19,7 +19,6 @@ const { CAPITAL_FLOOR, MONTHLY_BUDGET, MAX_HEAT, MAX_SECTOR_PCT,
         MIN_SCORE }                              = require('./constants');
 const { alpacaPost, getStockBars } = require('./broker');
 const { checkSectorETF } = require('./scoring');
-const { getOptionsPrice } = require('./execution');
 
 function getDrawdownProtocol() {
   const trades    = state.closedTrades || [];
@@ -154,8 +153,11 @@ async function checkScaleIns() {
     // Use real options price for scale-in decision
     let curP = pos.currentPrice || pos.premium;
     if (pos.contractSymbol) {
-      const realP = await getOptionsPrice(pos.contractSymbol);
-      if (realP) curP = realP;
+      try {
+        const _snap = await alpacaGet(`/options/snapshots?symbols=${pos.contractSymbol}&feed=indicative`, 'https://data.alpaca.markets/v1beta1');
+        const _mid = _snap?.snapshots?.[pos.contractSymbol]?.latestQuote;
+        if (_mid) { const _p = (_mid.ap + _mid.bp) / 2; if (_p > 0) curP = _p; }
+      } catch(e) {}
     }
     const chg = pos.premium > 0 ? (curP - pos.premium) / pos.premium : 0;
 
