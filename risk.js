@@ -10,7 +10,8 @@ const { state, logEvent, markDirty } = require('./state');
 const { openRisk, openCostBasis, heatPct, realizedPnL,
         totalCap, getETTime, getBusinessDaysAgo } = require('./signals');
 const { CAPITAL_FLOOR, MONTHLY_BUDGET, MAX_HEAT, MAX_SECTOR_PCT,
-        PDT_LIMIT, MS_PER_DAY, STOP_LOSS_PCT }  = require('./constants');
+        PDT_LIMIT, MS_PER_DAY, STOP_LOSS_PCT,
+        MIN_SCORE }                              = require('./constants');
 
 function getDrawdownProtocol() {
   const trades    = state.closedTrades || [];
