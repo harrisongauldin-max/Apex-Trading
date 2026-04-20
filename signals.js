@@ -1,6 +1,11 @@
 // signals.js — ARGO V3.2
 // Technical indicators, portfolio math, market utilities.
 'use strict';
+
+// Local cache (mirrors market.js getCached/setCache — avoids circular dependency)
+const _localCache = new Map();
+function getCached(key, ttl=60000) { const e=_localCache.get(key); return (e&&Date.now()-e.ts<ttl)?e.data:null; }
+function setCache(key, data) { _localCache.set(key,{data,ts:Date.now()}); return data; }
 const { alpacaGet, getStockBars, getIntradayBars } = require('./broker');
 const { state } = require('./state');
 const { MAX_HEAT, CAPITAL_FLOOR, MONTHLY_BUDGET , ALPACA_DATA } = require('./constants');
