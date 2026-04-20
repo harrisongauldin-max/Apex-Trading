@@ -3,7 +3,7 @@
 'use strict';
 const MARKETAUX_CACHE_MS = 60 * 60 * 1000  // 60 minutes;
 const fetch = require('node-fetch');
-const { alpacaGet, getStockBars, getStockQuote } = require('./broker');
+const { alpacaGet, getStockBars, getStockQuote, withTimeout } = require('./broker');
 const { state, logEvent }                        = require('./state');
 
 // Macro calendar — key events that affect options pricing
@@ -25,6 +25,7 @@ const { SLOW_CACHE_TTL, BARS_CACHE_TTL, MARKETAUX_KEY,
 // ─── In-process cache ────────────────────────────────────────────
 const _slowCache     = new Map();
 let   _barsCache     = new Map();
+let   _marketauxCache = { data: [], fetchedAt: 0 };
 
 function getCached(key, ttl = SLOW_CACHE_TTL) {
   const entry = _slowCache.get(key);
