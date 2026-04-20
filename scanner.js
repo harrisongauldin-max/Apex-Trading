@@ -169,16 +169,35 @@ async function runScan() {
   // IVR 80+ = sell premium. IVR 20- = buy premium. IVR 50-80 = neutral.
   if (!state._vixRolling) state._vixRolling = [];
   state._vixRolling.push(newVIX);
-  if (state._vixRolling.length > 252) state._vixRolling.shift(); // 1 year rolling
+  if (state._vixRolling.length > 252) state._vixRolling.shift(); // short-term buffer for velocity
+
+  // _vixDaily: separate daily-bar array for IVR percentile — never flushed by intraday scans
+  // Seeded from VIXY at boot; appended once per calendar day with today's closing VIX
+  if (!state._vixDaily || state._vixDaily.length === 0) {
+    // First scan after boot with no daily history — copy seed from _vixRolling if it has range
+    const _vdMin = Math.min(...state._vixRolling), _vdMax = Math.max(...state._vixRolling);
+    if (_vdMax - _vdMin > 10) state._vixDaily = [...state._vixRolling]; // healthy seed
+  }
+  const _todayStr = new Date().toISOString().slice(0,10);
+  if (state._vixDailyLastDate !== _todayStr) {
+    if (!state._vixDaily) state._vixDaily = [];
+    state._vixDaily.push(parseFloat(newVIX.toFixed(2)));
+    if (state._vixDaily.length > 504) state._vixDaily.shift(); // 2 years daily
+    state._vixDailyLastDate = _todayStr;
+    markDirty();
+  }
   // OPT-1+5: Sort once per meaningful VIX change, read min/max from sorted ends
   // Cache sorted array -- VIX moves <0.5 pts between scans 95% of the time
   const _prevSortedVix = state._sortedVixCache;
   const _prevSortedVixVal = state._sortedVixCacheVal || 0;
   let sortedVix;
-  if (_prevSortedVix && Math.abs(newVIX - _prevSortedVixVal) < 0.5 && _prevSortedVix.length === state._vixRolling.length) {
+  const _ivrLen = (state._vixDaily && state._vixDaily.length > 30) ? state._vixDaily.length : state._vixRolling.length;
+  if (_prevSortedVix && Math.abs(newVIX - _prevSortedVixVal) < 0.5 && _prevSortedVix.length === _ivrLen) {
     sortedVix = _prevSortedVix; // use cached sort
   } else {
-    sortedVix = [...state._vixRolling].sort((a, b) => a - b);
+    // Use _vixDaily for percentile (stable 2yr history); fall back to _vixRolling
+    const _ivrSource = (state._vixDaily && state._vixDaily.length > 30) ? state._vixDaily : state._vixRolling;
+    sortedVix = [..._ivrSource].sort((a, b) => a - b);
     state._sortedVixCache    = sortedVix;
     state._sortedVixCacheVal = newVIX;
   }
@@ -225,7 +244,7 @@ async function runScan() {
                : state._ivRank >= 50 ? "elevated" // credit spreads allowed
                : state._ivRank >= 30 ? "normal"   // neutral
                : "low";                            // buy premium (debit preferred)
-  logEvent("scan", `[IV] Rank:${state._ivRank} (${state._ivEnv}) | VIX:${newVIX} | P5-P95:[${vixP5.toFixed(1)}-${vixP95.toFixed(1)}] | AbsRange:[${vixMin.toFixed(1)}-${vixMax.toFixed(1)}] | History:${state._vixRolling.length}d`);
+  logEvent("scan", `[IV] Rank:${state._ivRank} (${state._ivEnv}) | VIX:${newVIX} | P5-P95:[${vixP5.toFixed(1)}-${vixP95.toFixed(1)}] | AbsRange:[${vixMin.toFixed(1)}-${vixMax.toFixed(1)}] | Daily:${(state._vixDaily||[]).length}d`);
 
   // - Confirm any pending mleg order from previous scan -
   // Must run before entry logic - if filled, records position and clears pending
