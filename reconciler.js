@@ -5,6 +5,7 @@
 
 const { alpacaGet } = require('./broker');
 const { WATCHLIST }  = require('./constants');
+const { executeIronCondor, findContract } = require('./execution');
 
 // ─── Injected dependencies (set by server.js at boot) ────────────
 let _state         = null;
