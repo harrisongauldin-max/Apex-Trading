@@ -21,7 +21,7 @@ const { openRisk, openCostBasis, heatPct, realizedPnL,
         calcBetaWeightedDelta, calcSharpeRatio, calcVaR, calcMAE,
         calcRiskOfRuin, calcDrawdownDuration,
         getETTime, isMarketHours, isEntryWindow, calcCreditSpreadTP }   = require('./signals');
-const { runScan, getScannerState, setDryRunMode }        = require('./scanner');
+const { runScan, getScannerState, setDryRunMode, resetScanLock } = require('./scanner');
 // marketContext and dryRunMode live in scanner.js — read live via getScannerState()
 function getMarketContext() { return getScannerState().marketContext || {}; }
 let dryRunMode = false;
@@ -576,6 +576,7 @@ setInterval(() => {
   const _scanState = getScannerState();
   if (_scanState.scanRunning && _lastScanStart > 0 && (Date.now() - _lastScanStart) > SCAN_WATCHDOG_MS) {
     logEvent("warn", `[WATCHDOG] Scan running ${((Date.now()-_lastScanStart)/1000).toFixed(0)}s -- force-resetting scanRunning`);
+    resetScanLock();
     _lastScanStart = 0;
   }
 }, 15 * 1000);
