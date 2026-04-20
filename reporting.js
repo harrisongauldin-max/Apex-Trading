@@ -7,7 +7,9 @@ const { state, logEvent, saveStateNow, markDirty } = require('./state');
 const { realizedPnL, openRisk, openCostBasis,
         getETTime, isMarketHours }                 = require('./signals');
 const { RESEND_API_KEY, GMAIL_USER, MONTHLY_BUDGET,
-        CAPITAL_FLOOR }                            = require('./constants');
+        CAPITAL_FLOOR ,
+  ALPACA_DATA, ANTHROPIC_API_KEY
+}                            = require('./constants');
 
 let _getAgentBriefing = async () => '';
 let _getMacroNews     = async () => ({});
