@@ -437,6 +437,7 @@ async function getMacroNews() {
             // AG-9: schemaVersion - backward compat
             schemaVersion:    agentResult.schemaVersion    || 1,
           };
+          markDirty(); // persist updated agent macro signal
                     const _r = state._regimeClass;
           const _s = state._agentMacro.signal;
           if (_r === "B" || _r === "C") {
