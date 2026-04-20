@@ -3,8 +3,8 @@
 'use strict';
 const MARKETAUX_CACHE_MS = 60 * 60 * 1000  // 60 minutes;
 const fetch = require('node-fetch');
-const { alpacaGet, getStockBars, getStockQuote, withTimeout } = require('./broker');
-const { state, logEvent }                        = require('./state');
+const { alpacaGet, getStockBars, getStockQuote, withTimeout, getIntradayBars } = require('./broker');
+const { state, logEvent, markDirty }             = require('./state');
 
 // Macro calendar — key events that affect options pricing
 // Update dates as needed; daysTo is computed live from today
@@ -19,6 +19,10 @@ const MACRO_EVENTS_2025 = [
   { date: "2026-06-10", event: "CPI Report", impact: "high" },
 ];
 const { calcRSI, getETTime }                    = require('./signals');
+const { checkMacroShift,
+        applyIntradayRegimeOverride }               = require('./scoring');
+const { getAgentMacroAnalysis }                    = require('./agent');
+const { applyExitUrgency }                         = require('./exitEngine');
 const { SLOW_CACHE_TTL, BARS_CACHE_TTL, MARKETAUX_KEY,
         MS_PER_DAY, ALPACA_NEWS }                = require('./constants');
 
@@ -26,6 +30,10 @@ const { SLOW_CACHE_TTL, BARS_CACHE_TTL, MARKETAUX_KEY,
 const _slowCache     = new Map();
 let   _barsCache     = new Map();
 let   _marketauxCache = { data: [], fetchedAt: 0 };
+let _vixCache       = { value: 15, ts: 0 };   // cached VIX value + timestamp
+let lastVIXReading  = 0;                       // 0 = uninitialized; used by checkVIXVelocity
+let vixFallingPause = false;                   // true when VIX falling - suppresses put entries
+let marketContext   = null;                    // set externally by scanner before calls
 
 // ─── Constants (moved from monolith during V3.2 modular split) ──────────────
 const ALPACA_DATA       = 'https://data.alpaca.markets/v2';
@@ -1021,11 +1029,13 @@ async function getVIX() {
 }
 
 
+
+function setMarketContext(ctx) { marketContext = ctx; }
 module.exports = {
   getCached, setCache, getMacroNews, getFearAndGreed, getMarketBreadth,
   getSyntheticPCR, getVolTermStructure, getCBOESKEW, getSentimentSignal,
   getDXY, getYieldCurve, getEarningsDate, getNewsForTicker, analyzeNews,
   scoreArticle, getAnalystActivity, getShortInterestSignal,
   getUpcomingMacroEvents, getMacroCalendarModifier, getPreMarketData,
-  checkVIXVelocity, getVIXReversionDays, getVIX,
+  checkVIXVelocity, getVIXReversionDays, getVIX, setMarketContext,
 };
