@@ -24,8 +24,7 @@ const { openRisk, openCostBasis, heatPct, realizedPnL,
 const { runScan, getScannerState, setDryRunMode, resetScanLock } = require('./scanner');
 // marketContext and dryRunMode live in scanner.js — read live via getScannerState()
 function getMarketContext() { return getScannerState().marketContext || {}; }
-let dryRunMode = false;
-setInterval(() => { dryRunMode = getScannerState().dryRunMode || false; }, 1000);
+// dryRunMode lives in scanner.js - controlled via setDryRunMode()
 const { runReconciliation, syncPositionPnLFromAlpaca,
         initReconciler }                                  = require('./reconciler');
 const { closePosition, syncCashFromAlpaca }             = require('./closeEngine');
@@ -33,7 +32,8 @@ const { runBacktest }                                    = require('./backtest')
 const { sendEmail, sendMorningBriefing,
         initReporting, setReportingContext, sendResendEmail, premarketAssessment }             = require('./reporting');
 const { getAgentMacroAnalysis, getAgentRescore,
-        getAgentDayPlan }                                = require('./agent');
+        getAgentDayPlan , initAgent
+}                                = require('./agent');
 const { getMacroNews, getUpcomingMacroEvents,
         registerMacroCallbacks }                          = require('./market');
 const { getTimeAdjustedStop, getTimeOfDayAnalysis, applyExitUrgency } = require('./exitEngine');
@@ -818,6 +818,9 @@ registerMacroCallbacks({
   applyIntradayRegimeOverride: applyIntradayRegimeOverride,
   applyExitUrgency:            applyExitUrgency,
 });
+initAgent({
+  saveStateNow: saveStateNow,
+});
 // - Express API -
 app.use(express.json());
 app.use(express.static(path.join(__dirname, "public")));
@@ -882,7 +885,6 @@ app.get("/api/state", async (req, res) => {
     pdtCount:           countRecentDayTrades(),
     pdtRemaining:       Math.max(0, PDT_LIMIT - countRecentDayTrades()),
     alpacaDayTradesLeft: state._alpacaDayTradesLeft ?? null,
-    pdtSource:          state._alpacaDayTradeCount !== undefined ? "alpaca" : "internal",
     pdtSource:          state._alpacaDayTradeCount !== undefined ? "alpaca" : "internal",
     patternDayTrader:   state._patternDayTrader || false,
 
@@ -1397,13 +1399,13 @@ app.post("/api/scan", async (req,res) => {
 // Automatically re-disables dry run after the scan completes
 app.post("/api/test-scan", async (req, res) => {
   if (getScannerState().scanRunning) return res.json({ error: "Scan already running" });
-  const wasDryRun = dryRunMode;
-  dryRunMode = true;
+  const wasDryRun = getScannerState().dryRunMode;
+  setDryRunMode(true);
   res.json({ ok: true, message: "Test scan started - dry run forced for this cycle. Check /api/logs for results." });
   try {
     await runScan();
   } finally {
-    if (!wasDryRun) dryRunMode = false; // restore previous state
+    if (!wasDryRun) setDryRunMode(false); // restore previous state
   }
 });
 app.post("/api/close/:tkr", requireSecret,  async (req,res) => {
@@ -1511,12 +1513,12 @@ app.post("/api/dry-run-scan", async (req, res) => {
     waited += 500;
   }
   if (getScannerState().scanRunning) return res.json({ error: "Scan still running after 35s - try again" });
-  dryRunMode = true;
+  setDryRunMode(true);
   logEvent("scan", "- DRY RUN SCAN STARTED -");
   try {
     await runScan();
   } finally {
-    dryRunMode = false;
+    setDryRunMode(false);
     logEvent("scan", "- DRY RUN SCAN COMPLETE -");
   }
   // Return all dryrun log entries from this scan
