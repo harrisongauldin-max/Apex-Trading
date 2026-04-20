@@ -4,8 +4,7 @@
 'use strict';
 
 const { alpacaGet } = require('./broker');
-const { WATCHLIST, ALPACA_KEY, INDIVIDUAL_STOCKS_ENABLED,
-        TAKE_PROFIT_PCT, STOP_LOSS_PCT, MS_PER_DAY } = require('./constants');
+const { WATCHLIST }  = require('./constants');
 
 // ─── Injected dependencies (set by server.js at boot) ────────────
 let _state         = null;
@@ -13,8 +12,9 @@ let _log           = (type, msg) => console.log(`[reconciler][${type}] ${msg}`);
 let _redisSave     = async () => {};
 let _calcTP        = (vix) => 0.35;   // calcCreditSpreadTP
 let _indStockList  = [];
+let _markDirty     = () => {};    // injected by initReconciler
 
-function initReconciler({ state, logFn, redisSaveFn, calcCreditSpreadTP, indStockList }) {
+function initReconciler({ state, logFn, redisSaveFn, calcCreditSpreadTP, indStockList, markDirtyFn }) {
   _state        = state;
   if (logFn)           _log       = logFn;
   if (redisSaveFn)     _redisSave = redisSaveFn;
@@ -502,7 +502,7 @@ async function syncPositionPnLFromAlpaca() {
 
       updated++;
     }
-    if (updated > 0) markDirty();
+    if (updated > 0) _markDirty();
   } catch(e) { _log("warn", `[ALPACA SYNC] syncPositionPnLFromAlpaca error: ${e.message}`); }
 }
 
