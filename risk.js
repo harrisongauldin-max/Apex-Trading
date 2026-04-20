@@ -16,7 +16,9 @@ const { openRisk, openCostBasis, heatPct, realizedPnL,
 } = require('./signals');
 const { CAPITAL_FLOOR, MONTHLY_BUDGET, MAX_HEAT, MAX_SECTOR_PCT,
         PDT_LIMIT, MS_PER_DAY, STOP_LOSS_PCT,
-        MIN_SCORE }                              = require('./constants');
+        MIN_SCORE ,
+  EARNINGS_SKIP_DAYS, MIN_STOCK_PRICE, WATCHLIST
+}                              = require('./constants');
 const { alpacaPost, getStockBars } = require('./broker');
 const { checkSectorETF } = require('./scoring');
 
