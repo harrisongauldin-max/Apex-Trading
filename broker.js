@@ -2,6 +2,22 @@
 // All Alpaca API communication: HTTP, circuit breaker, retry.
 'use strict';
 
+// Local cache (mirrors market.js getCached/setCache — avoids circular dependency)
+const _localCache = new Map();
+function getCached(key, ttl=60000) { const e=_localCache.get(key); return (e&&Date.now()-e.ts<ttl)?e.data:null; }
+function setCache(key, data) { _localCache.set(key,{data,ts:Date.now()}); return data; }
+
+function getETTime() {
+  return new Date(new Date().toLocaleString('en-US', {timeZone:'America/New_York'}));
+}
+function isMarketHours() {
+  const et = getETTime();
+  const day = et.getDay();
+  if (day === 0 || day === 6) return false;
+  const h = et.getHours() + et.getMinutes()/60;
+  return h >= 9.5 && h < 16;
+}
+
 const fetch = require('node-fetch');
 const {
   ALPACA_KEY, ALPACA_SECRET, ALPACA_BASE, ALPACA_DATA,
