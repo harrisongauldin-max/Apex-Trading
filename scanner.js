@@ -2623,4 +2623,5 @@ module.exports = {
     circuit: getCircuitState(),
   }),
   setDryRunMode: (v) => { dryRunMode = v; },
+  resetScanLock:  () => { scanRunning = false; },
 };
