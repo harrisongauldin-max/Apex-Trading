@@ -1,6 +1,34 @@
 // closeEngine.js — ARGO V3.2
 // Position closing, partial closes, and order confirmation.
 'use strict';
+
+// Local copies from risk.js — avoids circular risk→execution→closeEngine→risk
+function isDayTrade(pos) {
+  if (!pos || !pos.openDate) return false;
+  if (pos.dteLabel && pos.dteLabel.includes('RECONCIL')) return false;
+  const etOptions = { timeZone: "America/New_York", year: "numeric", month: "2-digit", day: "2-digit" };
+  const openDay   = new Date(pos.openDate).toLocaleDateString("en-US", etOptions);
+  const today     = new Date().toLocaleDateString("en-US", etOptions);
+  return openDay === today;
+}
+
+function recordDayTrade(pos, reason) {
+  if (!state.dayTrades) state.dayTrades = [];
+  state.dayTrades.push({
+    ticker:    pos.ticker,
+    openTime:  pos.openDate,
+    closeTime: new Date().toISOString(),
+    reason,
+    pnl:       0, // will be updated by closePosition
+  });
+  // Keep only last 20 day trade records
+  if (state.dayTrades.length > 20) state.dayTrades = state.dayTrades.slice(-20);
+  const count = countRecentDayTrades();
+  logEvent("warn", `PDT: Day trade recorded for ${pos.ticker} — ${count}/${PDT_LIMIT} in rolling 5-day window`);
+  if (count >= PDT_LIMIT) {
+    logEvent("warn", `PDT LIMIT REACHED (${count}/${PDT_LIMIT}) — no new same-day CLOSES until window resets. New entries still allowed.`);
+  }
+}
 const WEEKLY_DD_LIMIT = 0.25;
 const FAST_PROFIT_PCT = 0.65;
 
@@ -11,7 +39,6 @@ const { calcCreditSpreadTP, realizedPnL ,
 }     = require('./signals');
 const { STOP_LOSS_PCT, TAKE_PROFIT_PCT, PDT_PROFIT_EXIT,
         PDT_STOP_LOSS, FAST_STOP_PCT, MONTHLY_BUDGET }  = require('./constants');
-const { isDayTrade, recordDayTrade } = require('./risk');
 
 // ─── Injected dependencies ───────────────────────────────────────
 let _dryRunMode    = false;
