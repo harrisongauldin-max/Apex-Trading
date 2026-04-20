@@ -34,7 +34,8 @@ const { sendEmail, sendMorningBriefing,
         initReporting, setReportingContext, sendResendEmail, premarketAssessment }             = require('./reporting');
 const { getAgentMacroAnalysis, getAgentRescore,
         getAgentDayPlan }                                = require('./agent');
-const { getMacroNews, getUpcomingMacroEvents }           = require('./market');
+const { getMacroNews, getUpcomingMacroEvents,
+        registerMacroCallbacks }                          = require('./market');
 const { getTimeAdjustedStop, getTimeOfDayAnalysis, applyExitUrgency } = require('./exitEngine');
 const { getRegimeRulebook }                              = require('./entryEngine');
 const { checkMacroShift, applyIntradayRegimeOverride }   = require('./scoring');
