@@ -20,7 +20,7 @@ const MACRO_EVENTS_2025 = [
 ];
 const { calcRSI, getETTime }                    = require('./signals');
 const { SLOW_CACHE_TTL, BARS_CACHE_TTL, MARKETAUX_KEY,
-        MS_PER_DAY }                             = require('./constants');
+        MS_PER_DAY, ALPACA_NEWS }                = require('./constants');
 
 // ─── In-process cache ────────────────────────────────────────────
 const _slowCache     = new Map();
