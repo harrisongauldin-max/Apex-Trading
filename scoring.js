@@ -2,11 +2,15 @@
 // All entry scoring: index spreads, put setups, mean reversion calls.
 // scoreIndexSetup reads state for VIX history, breadth, regime data.
 'use strict';
+let _prevMacroSignal = null; // tracks previous macro signal for shift detection
+const MACRO_TIERS = { strongly_bearish: -20, bearish: -10, mild_bearish: -5, neutral: 0, mild_bullish: 5, bullish: 10, strongly_bullish: 20 };
 
 const { getStockBars }                    = require('./broker');
 const { state }                           = require('./state');
 const { logEvent }                        = require('./state');
-const { MIN_SCORE, MIN_SCORE_CREDIT }     = require('./constants');
+const { MIN_SCORE, MIN_SCORE_CREDIT ,
+  ANTHROPIC_API_KEY
+}     = require('./constants');
 
 // ─── Injected dependencies ───────────────────────────────────────
 let _triggerRescore = () => {};
