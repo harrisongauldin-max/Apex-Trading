@@ -14,6 +14,8 @@ const { realizedPnL, openRisk, openCostBasis,
 const { RESEND_API_KEY, GMAIL_USER, MONTHLY_BUDGET,
         CAPITAL_FLOOR ,
   ALPACA_DATA, ANTHROPIC_API_KEY
+,
+  MS_PER_DAY
 }                            = require('./constants');
 const { countRecentDayTrades } = require('./risk');
 const { getNewsForTicker, getUpcomingMacroEvents } = require('./market');
