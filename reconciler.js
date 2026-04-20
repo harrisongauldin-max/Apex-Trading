@@ -117,18 +117,21 @@ async function runReconciliation() {
       if (!alpacaLeg) continue; // ghost detection will handle it
       // Only one leg exists in Alpaca — convert to naked position
       _log("warn", `[RECONCILE] ${pos.ticker} spread missing one leg (${sym}) — converting to naked`);
-      pos.isSpread     = false;
-      pos.isCreditSpread = false;
+      const _prevBuyStrike  = pos.buyStrike;
+      const _prevSellStrike = pos.sellStrike;
+      pos.isSpread       = false;
+      pos.isCreditSpread = false;  // critical: clear so dashboard renders as naked, not spread
       const legQty = parseInt(alpacaLeg.qty || 1);
-      pos.contracts    = Math.abs(legQty);
+      pos.contracts      = Math.abs(legQty);
       pos.contractSymbol = sym;
-      pos.buySymbol    = legQty > 0 ? sym : null;
-      pos.sellSymbol   = legQty < 0 ? sym : null;
-      pos.premium      = parseFloat(alpacaLeg.avg_entry_price || pos.premium || 0);
-      pos.maxLoss      = null;
-      pos.maxProfit    = null;
-      pos.buyStrike    = legQty > 0 ? pos.buyStrike : null;
-      pos.sellStrike   = legQty < 0 ? (pos.sellStrike || pos.buyStrike) : null;
+      pos.buySymbol      = legQty > 0 ? sym : null;
+      pos.sellSymbol     = legQty < 0 ? sym : null;
+      pos.premium        = parseFloat(alpacaLeg.avg_entry_price || pos.premium || 0);
+      pos.maxLoss        = null;
+      pos.maxProfit      = null;
+      // Preserve both strikes for display context even as naked position
+      pos.buyStrike      = _prevBuyStrike  || null;
+      pos.sellStrike     = _prevSellStrike || null;
     }
 
     // - Ghost detection - ARGO has position, Alpaca doesn't -
