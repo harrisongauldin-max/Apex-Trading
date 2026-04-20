@@ -19,6 +19,8 @@ const { CAPITAL_FLOOR, MIN_OPTION_PREMIUM, MIN_OI,
         TARGET_DELTA_MAX, MONTHLY_BUDGET, INDIVIDUAL_STOCKS_ENABLED,
         WATCHLIST ,
   ALPACA_OPT_SNAP
+,
+  ALPACA_OPTIONS, MAX_HEAT, STOP_LOSS_PCT, TAKE_PROFIT_PCT
 }                                          = require('./constants');
 const { confirmPendingOrder } = require('./closeEngine');
 const { getDTEExitParams } = require('./exitEngine');
