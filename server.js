@@ -345,6 +345,7 @@ async function initState() {
     redisSaveFn:        redisSave,
     calcCreditSpreadTP: calcCreditSpreadTP,
     indStockList:       [],
+    markDirtyFn:        markDirty,
   });
   await runReconciliation();
 
