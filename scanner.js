@@ -4,6 +4,7 @@
 // NOTE: This is a direct lift of runScan from server.js.
 //       Phase D.2 will decompose runScan into pure sub-functions.
 'use strict';
+const fmt = (n) => '$' + (n||0).toFixed(2);
 
 // ─── All module imports ──────────────────────────────────────────
 const {
