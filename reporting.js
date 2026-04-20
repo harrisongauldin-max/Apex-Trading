@@ -2,6 +2,7 @@
 // Email delivery, morning briefings, end-of-day reports.
 'use strict';
 const fetch = require('node-fetch');
+const { withTimeout } = require('./broker');
 const { state, logEvent, saveStateNow, markDirty } = require('./state');
 const { realizedPnL, openRisk, openCostBasis,
         getETTime, isMarketHours }                 = require('./signals');
