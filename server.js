@@ -8,25 +8,39 @@ const path    = require('path');
 const fs      = require('fs');
 
 const { state, markDirty, saveStateNow, flushStateIfDirty,
-        logEvent, redisSave, redisLoad, defaultState }   = require('./state');
-const { alpacaGet, alpacaPost, getStockBars,
-        getCircuitState, setBrokerLogger }               = require('./broker');
+        logEvent, redisSave, redisLoad, defaultState,
+        saveDailyLogToRedis }                             = require('./state');
+const { alpacaGet, alpacaPost, alpacaDelete,
+        getCircuitState, setBrokerLogger,
+        getStockQuote, getStockBars, getIntradayBars }    = require('./broker');
 const { openRisk, openCostBasis, heatPct, realizedPnL,
-        totalCap, effectiveHeatCap, getAccountPhase,
-        getETTime, isMarketHours, calcCreditSpreadTP }   = require('./signals');
-const { runScan, getScannerState, setDryRunMode }        = require('./scanner');
+        totalCap, stockValue, effectiveHeatCap, getAccountPhase,
+        getETTime, isMarketHours, isEntryWindow, calcCreditSpreadTP,
+        calcBetaWeightedDelta, calcDrawdownDuration,
+        calcRiskOfRuin, calcSharpeRatio, calcVaR,
+        setSignalsLogger }                                = require('./signals');
+const { runScan, getScannerState, setDryRunMode,
+        forceResetScanLock }                              = require('./scanner');
 const { runReconciliation, syncPositionPnLFromAlpaca,
         initReconciler }                                  = require('./reconciler');
-const { closePosition, syncCashFromAlpaca }             = require('./closeEngine');
-const { runBacktest }                                    = require('./backtest');
-const { sendEmail, sendMorningBriefing,
-        initReporting, setReportingContext }             = require('./reporting');
-const { getAgentMacroAnalysis, initAgent }               = require('./agent');
-const { getMacroNews }                                    = require('./market');
-const { calcRSI }                                         = require('./signals');
+const { closePosition, syncCashFromAlpaca }               = require('./closeEngine');
+const { runBacktest }                                     = require('./backtest');
+const { sendEmail, sendMorningBriefing, sendResendEmail,
+        initReporting, setReportingContext,
+        buildMonthlyReport, premarketAssessment,
+        updateAfterHoursContext }                         = require('./reporting');
+const { getAgentMacroAnalysis, initAgent,
+        getAgentRescore, getAgentDayPlan }                = require('./agent');
+const { getRegimeRulebook }                               = require('./entryEngine');
+const { executeCreditSpread }                             = require('./execution');
+const { getTimeAdjustedStop, getTimeOfDayAnalysis }       = require('./exitEngine');
+const { getMacroNews, getUpcomingMacroEvents }            = require('./market');
 const { getDrawdownProtocol, getPnLByTicker,
         getPnLBySector, getPnLByScoreRange, getTaxLog,
-        getStreakAnalysis, countRecentDayTrades, isDayTrade } = require('./risk');
+        getStreakAnalysis, countRecentDayTrades, isDayTrade,
+        calcThesisIntegrity }                             = require('./risk');
+const { calcRSI }                                         = require('./signals');
+
 const {
   ALPACA_KEY, ALPACA_SECRET, ALPACA_BASE, ALPACA_DATA, ALPACA_OPTIONS,
   ALPACA_OPT_SNAP, MONTHLY_BUDGET, CAPITAL_FLOOR,
@@ -530,13 +544,13 @@ setInterval(() => {
 // C3: Scan watchdog -- prevents permanent scanRunning=true lockout
 // If a scan hangs (Redis timeout, API freeze), scanRunning stays true and
 // subsequent scans are skipped silently. Watchdog force-resets after 90 seconds.
-let _lastScanStart = 0;
 const SCAN_WATCHDOG_MS = 90 * 1000;
 setInterval(() => {
   const _scanState = getScannerState();
-  if (_scanState.scanRunning && _lastScanStart > 0 && (Date.now() - _lastScanStart) > SCAN_WATCHDOG_MS) {
-    logEvent("warn", `[WATCHDOG] Scan running ${((Date.now()-_lastScanStart)/1000).toFixed(0)}s -- force-resetting scanRunning`);
-    _lastScanStart = 0;
+  const lastStart = _scanState.lastScanStart || 0;
+  if (_scanState.scanRunning && lastStart > 0 && (Date.now() - lastStart) > SCAN_WATCHDOG_MS) {
+    logEvent("warn", `[WATCHDOG] Scan stuck ${((Date.now()-lastStart)/1000).toFixed(0)}s — force-resetting lock`);
+    forceResetScanLock();
   }
 }, 15 * 1000);
 
@@ -560,7 +574,7 @@ setTimeout(async () => {
     logEvent("macro", "[AGENT] Running initial macro analysis on startup...");
     try {
       const macro = await getMacroNews();
-      if (macro) { marketContext.macro = macro; markDirty(); }
+      if (macro) { getScannerState().marketContext.macro = macro; markDirty(); }
     } catch(e) { logEvent("warn", `[AGENT] Startup macro failed: ${e.message}`); }
     _lastAgentInterval = Date.now();
   }
@@ -577,7 +591,7 @@ setInterval(async () => {
   try {
     const macro = await getMacroNews();
     if (macro) {
-      marketContext.macro = macro;
+      getScannerState().marketContext.macro = macro;
       markDirty();
     }
   } catch(e) { logEvent("warn", `[AGENT] Interval macro failed: ${e.message}`); }
