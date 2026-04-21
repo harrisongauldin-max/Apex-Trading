@@ -908,7 +908,14 @@ function scoreIndexSetup(stock, optionType, spyRSI, spyMACD, spyMomentum, breadt
     else if (spyRSI >= 45 && spyRSI <= 58 && ["trending_bull","recovery"].includes(regime)) {
       score += 12; reasons.push(`SPY RSI ${spyRSI} healthy dip in bull trend - ideal call entry (+12)`);
     }
-    else if (spyRSI >= 70)                                                        { score -= 15; reasons.push(`SPY RSI ${spyRSI} overbought for calls (-15)`); }
+    else if (spyRSI >= 70) {
+      if (isCreditCallMode) {
+        // Bear call spreads: RSI overbought = ideal — selling calls into an extended market
+        score += 12; reasons.push(`SPY RSI ${spyRSI} overbought - ideal for bear call spread (+12)`);
+      } else {
+        score -= 15; reasons.push(`SPY RSI ${spyRSI} overbought for debit calls (-15)`);
+      }
+    }
 
     // V2.81 change 4 (call side): RSI velocity penalty
     const rsiHistoryCallRaw = state._rsiHistory?.[stock.ticker] || [];
@@ -927,10 +934,18 @@ function scoreIndexSetup(stock, optionType, spyRSI, spyMACD, spyMomentum, breadt
     const macdRSIConflict = spyRSI <= 35 && spyMACD && spyMACD.includes("bearish");
     const macdMult = macdRSIConflict ? 0.4 : 1.0; // reduce MACD weight when RSI is extreme opposite
     if (macdRSIConflict) reasons.push(`MACD/RSI conflict - intraday RSI ${spyRSI} oversold, MACD dampened`);
-    if (spyMACD && spyMACD.includes("bullish crossover"))  { score += Math.round(15*macdMult); reasons.push(`SPY MACD bullish crossover (+${Math.round(15*macdMult)})`); }
-    else if (spyMACD && spyMACD.includes("bullish"))       { score += Math.round(8*macdMult);  reasons.push(`SPY MACD bullish (+${Math.round(8*macdMult)})`); }
-    else if (spyMACD && spyMACD.includes("bearish crossover")) { score -= Math.round(15*macdMult); reasons.push(`SPY MACD bearish crossover (-${Math.round(15*macdMult)})`); }
-    else if (spyMACD && spyMACD.includes("bearish"))       { score -= Math.round(5*macdMult);  reasons.push(`SPY MACD bearish (-${Math.round(5*macdMult)})`); }
+    if (isCreditCallMode) {
+      // Bear call spreads: bearish MACD = trend confirmation, bullish = wrong direction
+      if (spyMACD && spyMACD.includes("bearish crossover")) { score += 12; reasons.push(`SPY MACD bearish crossover - bear call spread confirmation (+12)`); }
+      else if (spyMACD && spyMACD.includes("bearish"))      { score += 6;  reasons.push(`SPY MACD bearish - bear call aligned (+6)`); }
+      else if (spyMACD && spyMACD.includes("bullish crossover")) { score -= 12; reasons.push(`SPY MACD bullish crossover - wrong for bear call spread (-12)`); }
+      else if (spyMACD && spyMACD.includes("bullish"))      { score -= 5;  reasons.push(`SPY MACD bullish - bear call caution (-5)`); }
+    } else {
+      if (spyMACD && spyMACD.includes("bullish crossover"))  { score += Math.round(15*macdMult); reasons.push(`SPY MACD bullish crossover (+${Math.round(15*macdMult)})`); }
+      else if (spyMACD && spyMACD.includes("bullish"))       { score += Math.round(8*macdMult);  reasons.push(`SPY MACD bullish (+${Math.round(8*macdMult)})`); }
+      else if (spyMACD && spyMACD.includes("bearish crossover")) { score -= Math.round(15*macdMult); reasons.push(`SPY MACD bearish crossover (-${Math.round(15*macdMult)})`); }
+      else if (spyMACD && spyMACD.includes("bearish"))       { score -= Math.round(5*macdMult);  reasons.push(`SPY MACD bearish (-${Math.round(5*macdMult)})`); }
+    }
 
     // - Breadth - normalized to recent history -
     // Raw 80% means nothing without context - normalized reading is more meaningful
