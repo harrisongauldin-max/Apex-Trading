@@ -465,9 +465,13 @@ const effectiveHeatCap = (strategyType) => {
 
 function getAccountPhase() {
   const accountVal = (state.alpacaCash || state.cash || 0) + openCostBasis();
-  if (accountVal >= 20000) return "preservation";
-  if (accountVal >= 15000) return "transition";
-  return "growth";
+  // Phase thresholds are relative to baseline — not fixed dollar amounts
+  // A $30k account reaching $36k (20% gain) = preservation, same as $10k reaching $12k
+  const baseline = state.accountBaseline || state.dayStartCash || 10000;
+  const gainPct  = baseline > 0 ? (accountVal - baseline) / baseline : 0;
+  if (gainPct >= 0.20) return "preservation";  // up 20%+ from baseline
+  if (gainPct >= 0.10) return "transition";     // up 10-20%
+  return "growth";                              // up <10% from baseline
 }
 
 function calcCreditSpreadTP(entryVix) {
