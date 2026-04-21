@@ -394,7 +394,12 @@ function scoreMeanReversionCall(stock, relStrength, adx, bars, vix) {
   const reasons = [];
 
   // Only applies when VIX is elevated (high fear = cheap relative calls)
-  if (vix < 25) return { score: 0, reasons: ["VIX too low for mean reversion (+0)"] };
+  // Recovery regime exemption: VIX compressing 35→20 over weeks means mean reversion
+  // calls are still valid (RSI 30 + quality stock + VIX 22 = genuine oversold opportunity)
+  // Without this exemption, ARGO goes silent exactly when win rates are highest post-crisis
+  const inRecoveryRegime = (state._agentMacro?.regime || "") === "recovery";
+  const vixFloorMR = inRecoveryRegime ? 20 : 25; // lower bar in recovery — VIX compressing is ok
+  if (vix < vixFloorMR) return { score: 0, reasons: [`VIX ${vix} too low for mean reversion${inRecoveryRegime ? " (recovery: floor 20)" : " (floor 25)"} (+0)`] };
 
   // Stock must be a quality name - use beta as proxy for quality/liquidity
   if ((stock.beta || 1) < 1.0) return { score: 0, reasons: ["Low beta - not a mean reversion candidate (+0)"] };
@@ -440,6 +445,201 @@ function scoreMeanReversionCall(stock, relStrength, adx, bars, vix) {
   else if (adx && adx < 30) { score += 5; reasons.push(`ADX ${adx} - trend weakening (+5)`); }
 
   return { score: Math.min(score, 100), reasons, isMeanReversion: true };
+}
+
+
+// ============================================================
+// scoreCreditSpread — purpose-built credit spread scorer
+// Called for: credit_call (bear call spread) and credit_put (bull put spread)
+// Replaces the patched isCreditCallMode inversions inside scoreIndexSetup.
+//
+// Credit spreads profit from TIME DECAY + TREND ALIGNMENT, not direction alone.
+// The short strike staying OTM is the thesis — not predicting a big move.
+// Six primary signals, supplementary capped at +15.
+// ============================================================
+function scoreCreditSpread(stock, tradeType, vix, ivRank, spyRSI, spyMACD, spyMomentum, breadth, agentMacro) {
+  let score = 0;
+  const reasons = [];
+  const isBearCall = tradeType === "credit_call"; // sell calls above = profit if market stays/falls
+  const isBullPut  = tradeType === "credit_put";  // sell puts below = profit if market stays/rises
+
+  const signal     = (agentMacro || {}).signal     || "neutral";
+  const confidence = (agentMacro || {}).confidence || "low";
+  const regime     = (agentMacro || {}).regime     || "neutral";
+  const vixOutlook = (agentMacro || {}).vixOutlook || (
+    vix >= 32 ? "spiking" : vix >= 25 ? "elevated_stable" : vix >= 20 ? "mean_reverting" : "falling"
+  );
+
+  // ── 1. IVR QUALITY — primary premium collection signal (0 to +30) ──────────
+  // High IVR = options expensive = collect richer premium = better R/R
+  // This is the core credit spread edge: sell overpriced premium in elevated vol
+  if (ivRank >= 70)      { score += 30; reasons.push(`IVR ${ivRank} - rich premium, ideal credit entry (+30)`); }
+  else if (ivRank >= 55) { score += 20; reasons.push(`IVR ${ivRank} - elevated premium (+20)`); }
+  else if (ivRank >= 45) { score += 12; reasons.push(`IVR ${ivRank} - adequate premium (+12)`); }
+  else if (ivRank >= 35) { score += 0;  reasons.push(`IVR ${ivRank} - borderline premium, marginal (+0)`); }
+  else                   { score -= 10; reasons.push(`IVR ${ivRank} - insufficient premium for credit spread (-10)`); }
+
+  // ── 2. TREND ALIGNMENT — short strike must be on the correct side (0 to +25) ─
+  // Bear call: short strike above market → needs market to stay flat/fall
+  // Bull put:  short strike below market → needs market to stay flat/rise
+  const bearTrend = ["trending_bear","breakdown"].includes(regime);
+  const bullTrend = ["trending_bull","recovery"].includes(regime);
+  if (isBearCall) {
+    if (bearTrend)       { score += 25; reasons.push(`Bear call: regime ${regime} - trend aligned with short strike above market (+25)`); }
+    else if (regime === "choppy") { score += 10; reasons.push("Bear call: choppy regime - short strike OTM likely (+10)"); }
+    else                 { score -= 20; reasons.push(`Bear call: regime ${regime} - bull trend fights bear call thesis (-20)`); }
+  } else { // isBullPut
+    if (bullTrend)       { score += 25; reasons.push(`Bull put: regime ${regime} - trend aligned with short strike below market (+25)`); }
+    else if (regime === "choppy") { score += 10; reasons.push("Bull put: choppy regime - short strike OTM likely (+10)"); }
+    else                 { score -= 20; reasons.push(`Bull put: regime ${regime} - bear trend fights bull put thesis (-20)`); }
+  }
+
+  // ── 3. AGENT SIGNAL — timing confirmation (0 to +20) ────────────────────────
+  // Credit spreads are structure plays, not directional bets — agent is a TIMING signal
+  // Bear call: bearish/neutral agent = short strike will stay OTM. Bullish = headwind.
+  // Bull put:  bullish/neutral agent = short strike will stay OTM. Bearish = headwind.
+  if (isBearCall) {
+    if (["strongly bearish","bearish"].includes(signal) && confidence === "high") { score += 20; reasons.push(`Agent ${signal} high confidence - bear call thesis strong (+20)`); }
+    else if (["strongly bearish","bearish"].includes(signal))                     { score += 15; reasons.push(`Agent ${signal} - bear call thesis confirmed (+15)`); }
+    else if (signal === "mild bearish")  { score += 8;  reasons.push("Agent mild bearish - bear call thesis adequate (+8)"); }
+    else if (signal === "neutral")       { score += 5;  reasons.push("Agent neutral - bear call viable (+5)"); }
+    else if (signal === "mild bullish")  { score -= 5;  reasons.push("Agent mild bullish - mild headwind for bear call (-5)"); }
+    else if (signal === "bullish")       { score -= 12; reasons.push("Agent bullish - bear call thesis challenged (-12)"); }
+    else                                 { score -= 18; reasons.push("Agent strongly bullish - bear call high risk (-18)"); }
+  } else { // isBullPut
+    if (["strongly bullish","bullish"].includes(signal) && confidence === "high") { score += 20; reasons.push(`Agent ${signal} high confidence - bull put thesis strong (+20)`); }
+    else if (["strongly bullish","bullish"].includes(signal))                     { score += 15; reasons.push(`Agent ${signal} - bull put thesis confirmed (+15)`); }
+    else if (signal === "mild bullish")  { score += 8;  reasons.push("Agent mild bullish - bull put thesis adequate (+8)"); }
+    else if (signal === "neutral")       { score += 5;  reasons.push("Agent neutral - bull put viable (+5)"); }
+    else if (signal === "mild bearish")  { score -= 5;  reasons.push("Agent mild bearish - mild headwind for bull put (-5)"); }
+    else if (signal === "bearish")       { score -= 12; reasons.push("Agent bearish - bull put thesis challenged (-12)"); }
+    else                                 { score -= 18; reasons.push("Agent strongly bearish - bull put high risk (-18)"); }
+  }
+
+  // ── 4. VIX STABILITY — gamma risk management (0 to +15) ─────────────────────
+  // Spiking VIX = gamma explosion risk — short strikes can breach fast
+  // Falling VIX = IV crush = collected premium loses value even if direction right
+  // Elevated stable = ideal — theta decays, gamma manageable, premium stays rich
+  if (vixOutlook === "elevated_stable")  { score += 15; reasons.push("VIX elevated stable - ideal theta decay environment (+15)"); }
+  else if (vixOutlook === "mean_reverting") { score += 8; reasons.push("VIX mean reverting - premium holding (+8)"); }
+  else if (vixOutlook === "spiking")     { score += 5;  reasons.push("VIX spiking - premium rich but gamma risk elevated (+5)"); }
+  else if (vixOutlook === "falling")     { score -= 10; reasons.push("VIX falling - IV crush, collected premium shrinks (-10)"); }
+
+  // ── 5. SHORT STRIKE OTM SAFETY — RSI confirms short side is far OTM (0 to +15) ─
+  // Bear call: RSI elevated = market extended = calls we sold are safely OTM
+  // Bull put:  RSI oversold = market compressed = puts we sold are safely OTM
+  if (isBearCall) {
+    if (spyRSI >= 65)      { score += 15; reasons.push(`SPY RSI ${spyRSI} elevated - bear call short strike safely OTM (+15)`); }
+    else if (spyRSI >= 55) { score += 8;  reasons.push(`SPY RSI ${spyRSI} above midpoint - bear call adequate buffer (+8)`); }
+    else if (spyRSI >= 45) { score += 3;  reasons.push(`SPY RSI ${spyRSI} - bear call marginal OTM buffer (+3)`); }
+    else if (spyRSI <= 35) { score -= 10; reasons.push(`SPY RSI ${spyRSI} oversold - bear call short strike at risk of breach (-10)`); }
+  } else { // isBullPut
+    if (spyRSI <= 35)      { score += 15; reasons.push(`SPY RSI ${spyRSI} oversold - bull put short strike safely OTM (+15)`); }
+    else if (spyRSI <= 45) { score += 8;  reasons.push(`SPY RSI ${spyRSI} below midpoint - bull put adequate buffer (+8)`); }
+    else if (spyRSI <= 55) { score += 3;  reasons.push(`SPY RSI ${spyRSI} - bull put marginal OTM buffer (+3)`); }
+    else if (spyRSI >= 70) { score -= 10; reasons.push(`SPY RSI ${spyRSI} overbought - bull put short strike at risk of breach (-10)`); }
+  }
+
+  // ── 6. BREADTH CONFIRMATION (0 to +10) ──────────────────────────────────────
+  // Bear call: weak breadth = few stocks advancing = market likely to stay flat/fall
+  // Bull put:  strong breadth = broad participation = market likely to stay flat/rise
+  if (isBearCall) {
+    if (breadth <= 35)      { score += 10; reasons.push(`Breadth ${breadth}% - weak, confirms bear call thesis (+10)`); }
+    else if (breadth <= 50) { score += 5;  reasons.push(`Breadth ${breadth}% - below neutral, supports bear call (+5)`); }
+    else if (breadth >= 70) { score -= 8;  reasons.push(`Breadth ${breadth}% - broad strength, bear call at risk (-8)`); }
+  } else { // isBullPut
+    if (breadth >= 65)      { score += 10; reasons.push(`Breadth ${breadth}% - strong, confirms bull put thesis (+10)`); }
+    else if (breadth >= 50) { score += 5;  reasons.push(`Breadth ${breadth}% - above neutral, supports bull put (+5)`); }
+    else if (breadth <= 30) { score -= 8;  reasons.push(`Breadth ${breadth}% - weak, bull put short strike at risk (-8)`); }
+  }
+
+  // ── 7. MACD DIRECTION (0 to +10) ────────────────────────────────────────────
+  if (isBearCall) {
+    if (spyMACD && spyMACD.includes("bearish crossover")) { score += 10; reasons.push("SPY MACD bearish crossover - bear call trend confirmed (+10)"); }
+    else if (spyMACD && spyMACD.includes("bearish"))      { score += 6;  reasons.push("SPY MACD bearish - bear call aligned (+6)"); }
+    else if (spyMACD && spyMACD.includes("bullish crossover")) { score -= 8; reasons.push("SPY MACD bullish crossover - bear call headwind (-8)"); }
+    else if (spyMACD && spyMACD.includes("bullish"))      { score -= 4;  reasons.push("SPY MACD bullish - bear call caution (-4)"); }
+  } else { // isBullPut
+    if (spyMACD && spyMACD.includes("bullish crossover")) { score += 10; reasons.push("SPY MACD bullish crossover - bull put trend confirmed (+10)"); }
+    else if (spyMACD && spyMACD.includes("bullish"))      { score += 6;  reasons.push("SPY MACD bullish - bull put aligned (+6)"); }
+    else if (spyMACD && spyMACD.includes("bearish crossover")) { score -= 8; reasons.push("SPY MACD bearish crossover - bull put headwind (-8)"); }
+    else if (spyMACD && spyMACD.includes("bearish"))      { score -= 4;  reasons.push("SPY MACD bearish - bull put caution (-4)"); }
+  }
+
+  // ── 8. INTRADAY RANGE — short strike OTM safety under chop (0 to +5, or -15) ───
+  // High daily range = SPY swings 2.5%+ high-to-low each session
+  // In this environment, a 5% OTM short strike has much less real buffer than on a 0.8% range day
+  // The short strike can approach intraday even if the daily close holds
+  // _spyAvgRange: 5-day rolling average of (daily high - daily low) / open
+  const spyAvgRange = state._spyAvgRange || 0;
+  if (spyAvgRange >= 0.025) {
+    score -= 15; reasons.push(`SPY 5d avg intraday range ${(spyAvgRange*100).toFixed(1)}% - high chop, short strike buffer reduced (-15)`);
+  } else if (spyAvgRange >= 0.020) {
+    score -= 8;  reasons.push(`SPY 5d avg intraday range ${(spyAvgRange*100).toFixed(1)}% - elevated range, credit spread caution (-8)`);
+  } else if (spyAvgRange > 0 && spyAvgRange < 0.015) {
+    score += 5;  reasons.push(`SPY 5d avg intraday range ${(spyAvgRange*100).toFixed(1)}% - stable range, short strike safely OTM (+5)`);
+  }
+
+  // ── TICKER-SPECIFIC AUGMENTATIONS ──────────────────────────────────────────
+  // TLT: bond ETF — rate/yield signals matter more than SPY breadth
+  if (stock.ticker === "TLT") {
+    const yieldEnv = state._yieldEnv || "normal"; // "inverted", "normal", "steepening"
+    // TLT credit calls (sell calls above): rates rising = TLT falling = short calls stay OTM
+    if (isBearCall) {
+      if (yieldEnv === "steepening") { score += 8; reasons.push("TLT: yield curve steepening - rates rising, calls OTM (+8)"); }
+      else if (yieldEnv === "normal") { score += 4; reasons.push("TLT: normal yield env - moderate rate pressure (+4)"); }
+      else if (yieldEnv === "inverted") { score -= 8; reasons.push("TLT: inverted yield curve - rate cut pressure, TLT may rally (-8)"); }
+    }
+    // TLT credit puts (sell puts below): rates falling = TLT rising = short puts stay OTM
+    if (isBullPut) {
+      if (yieldEnv === "inverted") { score += 8; reasons.push("TLT: inverted yield curve - rate cuts expected, TLT bid (+8)"); }
+      else if (yieldEnv === "steepening") { score -= 8; reasons.push("TLT: steepening - rising rates pressure TLT puts (-8)"); }
+    }
+  }
+
+  // GLD: commodity — DXY and equity correlation matter
+  if (stock.ticker === "GLD") {
+    const dxyChange = state._dxy?.change || 0; // 5-day DXY change %
+    // GLD credit calls (sell calls above): DXY strengthening = gold falls = calls stay OTM
+    if (isBearCall) {
+      if (dxyChange > 0.5)       { score += 8;  reasons.push(`GLD: DXY +${dxyChange.toFixed(1)}% - dollar strength, gold calls OTM (+8)`); }
+      else if (dxyChange < -0.5) { score -= 8;  reasons.push(`GLD: DXY ${dxyChange.toFixed(1)}% - dollar weakness, gold may rally through short call (-8)`); }
+    }
+    // GLD credit puts (sell puts below): DXY weakening = gold supported = short puts stay OTM
+    if (isBullPut) {
+      if (dxyChange < -0.5)      { score += 8;  reasons.push(`GLD: DXY ${dxyChange.toFixed(1)}% - dollar weakness, gold put safely OTM (+8)`); }
+      else if (dxyChange > 0.5)  { score -= 8;  reasons.push(`GLD: DXY +${dxyChange.toFixed(1)}% - dollar strength, gold may fall toward put (-8)`); }
+    }
+  }
+
+  // ── SUPPLEMENTARY — capped at +15 ───────────────────────────────────────────
+  let suppScore = 0;
+
+  // Regime duration (sustained trend = higher confidence short strike stays OTM)
+  const regimeDuration = state._regimeDuration || 0;
+  if (regimeDuration >= 5) { suppScore += 5; reasons.push(`Regime sustained ${regimeDuration}d - high conviction credit entry (+5)`); }
+  else if (regimeDuration >= 2) { suppScore += 3; reasons.push(`Regime sustained ${regimeDuration}d - confirmed (+3)`); }
+
+  // VIX 5-day sustained (not a flash spike — theta will have time to work)
+  const vixSustained = state._vixSustained || 0;
+  if (vixSustained >= 28) { suppScore += 5; reasons.push(`VIX 5d avg ${vixSustained.toFixed(1)} sustained elevated - theta environment reliable (+5)`); }
+  else if (vixSustained >= 25) { suppScore += 3; reasons.push(`VIX 5d avg ${vixSustained.toFixed(1)} sustained (+3)`); }
+
+  // SKEW elevated for credit puts (tail risk = put premium rich)
+  if (isBullPut) {
+    const skew = (state._skew?.skew || 0);
+    if (skew >= 140) { suppScore += 5; reasons.push(`SKEW ${skew} extreme - put premium doubly rich for bull put (+5)`); }
+    else if (skew >= 130) { suppScore += 3; reasons.push(`SKEW ${skew} elevated - put skew supports bull put (+3)`); }
+  }
+
+  // Agent high confidence adds conviction to any credit entry
+  if (confidence === "high") { suppScore += 3; reasons.push("Agent high confidence (+3)"); }
+
+  const cappedSupp = Math.min(15, suppScore);
+  if (cappedSupp > 0) score += cappedSupp;
+
+  score = Math.max(0, Math.min(100, score));
+  return { score, reasons, tradeType };
 }
 
 function scoreIndexSetup(stock, optionType, spyRSI, spyMACD, spyMomentum, breadth, vix, agentMacro) {
@@ -848,11 +1048,19 @@ function scoreIndexSetup(stock, optionType, spyRSI, spyMACD, spyMomentum, breadt
     const isCreditCallMode = tradeType === "credit";
 
     // - Agent macro signal - primary gate -
+    // Capitulation bypass: RSI <= 30 means the crash IS the thesis for MR calls.
+    // Strongly bearish agent + deeply oversold RSI = textbook mean reversion entry.
+    // Apply bypass for agent penalty only — regime bonus still applies below.
+    const mrCapitulationActive = spyRSI <= 30 && !isCreditCallMode;
     if (["strongly bullish","bullish"].includes(signal) && confidence === "high") { score += 35; reasons.push(`Agent ${signal} high confidence (+35)`); }
     else if (["strongly bullish","bullish"].includes(signal))                     { score += 25; reasons.push(`Agent ${signal} (+25)`); }
     else if (signal === "mild bullish")                                            { score += 8;  reasons.push("Agent mild bullish (+8)"); }
     else if (signal === "neutral" && spyRSI <= 35)                                { score += 20; reasons.push("Mean reversion call - SPY oversold on neutral macro (+20)"); }
     else if (signal === "neutral")                                                 { score += 0;  reasons.push("Agent neutral (+0)"); }
+    else if (mrCapitulationActive) {
+      // Bypass bearish agent penalty in capitulation — extreme oversold IS the MR entry signal
+      score += 5; reasons.push(`Agent ${signal} bypassed - RSI ${spyRSI} capitulation confirms MR call (+5)`);
+    }
     else if (signal === "mild bearish") {
       score -= 8; reasons.push(`Agent mild bearish (-8)`);
     }
@@ -860,7 +1068,6 @@ function scoreIndexSetup(stock, optionType, spyRSI, spyMACD, spyMomentum, breadt
       score -= 15; reasons.push(`Agent bearish (-15)`);
     }
     else { // strongly bearish
-      // Scale by signal strength - mild = -8, bullish = -15, strongly = -20
       const callPenalty = signal === "mild bearish" ? -8 : signal === "bearish" ? -15 : -20;
       score += callPenalty; reasons.push(`Agent ${signal} (${callPenalty})`);
     }
@@ -875,11 +1082,16 @@ function scoreIndexSetup(stock, optionType, spyRSI, spyMACD, spyMomentum, breadt
       if (isCreditCallMode) {
         // Bear call spread: structural alignment bonus — selling calls above a falling market
         score += 5; reasons.push(`Regime: ${regime} - bear call spread aligned with downtrend (+5)`);
+      } else if (mrCapitulationActive) {
+        // MR call in breakdown: RSI <= 30 = genuine capitulation — bypass regime penalty entirely
+        // The breakdown regime is the REASON this is a MR entry, not a reason to block it
+        const oversoldDays = state._oversoldCount?.[stock.ticker] || 0;
+        score += 10; reasons.push(`Regime: ${regime} - MR call capitulation bypass (RSI ${spyRSI}, ${oversoldDays}d oversold) - regime is the entry signal (+10 vs normal -25)`);
       } else {
-        // Capitulation bypass for mean reversion debit calls
+        // Capitulation bypass for mean reversion debit calls (RSI 31-35, multi-day)
         const oversoldDays = state._oversoldCount?.[stock.ticker] || 0;
         const vixNotSpiking = (state._agentMacro?.vixOutlook || "") !== "spiking";
-        const capitulationConfirmed = spyRSI <= 30 && oversoldDays >= 2 && vixNotSpiking;
+        const capitulationConfirmed = spyRSI <= 35 && oversoldDays >= 2 && vixNotSpiking;
         if (capitulationConfirmed) {
           score -= 10; reasons.push(`Regime: ${regime} - capitulation bypass active (RSI ${spyRSI} for ${oversoldDays}d + VIX stabilizing) (-10 vs normal -25)`);
         } else {
@@ -962,18 +1174,29 @@ function scoreIndexSetup(stock, optionType, spyRSI, spyMACD, spyMomentum, breadt
     else if (bNorm <= 30 && ["trending_bull","recovery"].includes(regime)) {
       score += 12; reasons.push(`Breadth ${breadth}% (${bNorm.toFixed(0)}th pctile) - low relative to recent in bull regime - ideal dip entry (+12)`);
     }
-    else if (bNorm <= 20)                  { score -= 8; reasons.push(`Breadth ${breadth}% (${bNorm.toFixed(0)}th pctile) - very weak relative to recent (-8)`); }
+    else if (bNorm <= 20 && !mrCapitulationActive) { score -= 8; reasons.push(`Breadth ${breadth}% (${bNorm.toFixed(0)}th pctile) - very weak relative to recent (-8)`); }
+    else if (bNorm <= 20 && mrCapitulationActive)  { score += 5;  reasons.push(`Breadth ${breadth}% (${bNorm.toFixed(0)}th pctile) - capitulation breadth, MR setup confirmed (+5)`); }
 
     // - VIX - absolute level matters for calls, not just direction -
     // Low VIX = cheap call premium = historically excellent call entry cost
     // High VIX = expensive calls + wrong macro environment for bull thesis
-    if (vix <= 18)            { score += 12; reasons.push(`VIX ${vix} - calls historically cheap, low premium (+12)`); }
-    else if (vix <= 22)       { score += 8;  reasons.push(`VIX ${vix} - moderate, calls reasonably priced (+8)`); }
-    else if (vix >= 35)       { score -= 10; reasons.push(`VIX ${vix} - calls expensive in fear environment (-10)`); }
-    // VIX direction (falling = calls gaining value, spiking = calls losing)
-    if (vixOutlook === "falling")      { score += 12; reasons.push("VIX compressing - call premium expanding (+12)"); }
-    else if (vixOutlook === "mean_reverting") { score += 6; reasons.push("VIX mean reverting - calls improving (+6)"); }
-    else if (vixOutlook === "spiking") { score -= 12; reasons.push("VIX spiking - calls losing value fast (-12)"); }
+    // MR capitulation bypass: VIX spiking IS the entry signal for MR calls — don't penalize it
+    if (mrCapitulationActive) {
+      // Mean reversion in fear: high VIX = cheap calls relative to future implied move
+      // scoreMeanReversionCall handles this correctly — replicate logic for index MR
+      if (vix >= 35)      { score += 15; reasons.push(`VIX ${vix} - extreme fear, MR calls historically cheap at capitulation (+15)`); }
+      else if (vix >= 25) { score += 8;  reasons.push(`VIX ${vix} - elevated fear, MR call entry (+8)`); }
+      if (vixOutlook === "spiking")       { score += 8;  reasons.push("VIX spiking - fear at peak, MR call entry signal (+8)"); }
+      else if (vixOutlook === "mean_reverting") { score += 5; reasons.push("VIX mean reverting - MR improving (+5)"); }
+    } else {
+      if (vix <= 18)            { score += 12; reasons.push(`VIX ${vix} - calls historically cheap, low premium (+12)`); }
+      else if (vix <= 22)       { score += 8;  reasons.push(`VIX ${vix} - moderate, calls reasonably priced (+8)`); }
+      else if (vix >= 35)       { score -= 10; reasons.push(`VIX ${vix} - calls expensive in fear environment (-10)`); }
+      // VIX direction (falling = calls gaining value, spiking = calls losing)
+      if (vixOutlook === "falling")      { score += 12; reasons.push("VIX compressing - call premium expanding (+12)"); }
+      else if (vixOutlook === "mean_reverting") { score += 6; reasons.push("VIX mean reverting - calls improving (+6)"); }
+      else if (vixOutlook === "spiking") { score -= 12; reasons.push("VIX spiking - calls losing value fast (-12)"); }
+    }
 
     // - VWAP (TA-C2: now used for index instruments) -
     // VWAP is calculated but was discarded for index instruments - fixed here
@@ -1092,12 +1315,14 @@ function scoreIndexSetup(stock, optionType, spyRSI, spyMACD, spyMomentum, breadt
   }
   // Full 100-point scale - cap at 100 not 95 to preserve resolution at high conviction
   score = Math.max(0, Math.min(100, score));
-  return { score, reasons, tradeType: tradeType || "spread" };
+  // Surface mrCapitulation flag so evaluateEntry can apply correct minScore
+  const _mrCapitulationFlag = optionType === "call" && spyRSI <= 30 && !["trending_bull","recovery"].includes(regime);
+  return { score, reasons, tradeType: tradeType || "spread", mrCapitulation: _mrCapitulationFlag };
 }
 
 
 module.exports = {
-  scoreIndexSetup, scorePutSetup, scoreMeanReversionCall,
+  scoreIndexSetup, scorePutSetup, scoreMeanReversionCall, scoreCreditSpread,
   detectMarketRegime, getRegimeModifier, applyIntradayRegimeOverride,
   updateOversoldTracker, recordGateBlock, checkMacroShift,
   checkSectorETF, isGLDEntryAllowed, isXLEEntryAllowed, isTLTEntryAllowed,
