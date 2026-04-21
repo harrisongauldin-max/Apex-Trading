@@ -4047,12 +4047,17 @@ async function loadTaxLog() {
   el.innerHTML = html + '</tbody></table>';
 }
 
-function setBudget() {
-  const val = parseFloat(document.getElementById('budget-input')?.value);
-  if (!val || val < 100) { alert('Enter a valid budget amount (min $100)'); return; }
-  fetch('/api/set-budget', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ budget: val }) })
-    .then(r => r.json()).then(d => { alert('Budget set to $' + val.toFixed(2)); fetchState(); })
-    .catch(e => alert('Error: ' + e.message));
+async function setBudget() {
+  const input = document.getElementById('budget-input');
+  const val   = parseFloat(input ? input.value : 0);
+  if (!val || isNaN(val) || val < 1000) { alert('Enter a valid budget (minimum $1,000)'); return; }
+  if (!confirm('Set budget and all baselines to $' + val.toLocaleString() + '?\nThis resets profit-lock and drawdown baseline.')) return;
+  try {
+    const r = await fetch('/api/set-budget', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ budget: val }) });
+    const d = await r.json();
+    if (d.ok) { alert(d.message); if (input) input.value = ''; fetchState(); }
+    else alert('Error: ' + (d.error || 'Unknown error'));
+  } catch(e) { alert('Request failed: ' + e.message); }
 }
 
 function blacklistTicker() {
@@ -4077,67 +4082,6 @@ function resetMonth() {
     .catch(e => alert('Error: ' + e.message));
 }
 
-
-// ── Auto-added: functions called by switchTab ────────────────────────────
-async function loadReport() {
-  const box = document.getElementById('report-box');
-  if (box) box.textContent = 'Loading...';
-  try {
-    const r = await fetch('/api/report');
-    const d = await r.json();
-    if (box) box.textContent = d.report || d.text || JSON.stringify(d, null, 2);
-  } catch(e) { if (box) box.textContent = 'Error: ' + e.message; }
-}
-async function loadTaxLog() {
-  const wrap = document.getElementById('tax-table-wrap');
-  try {
-    const r = await fetch('/api/tax-log');
-    const trades = await r.json();
-    if (!trades || !trades.length) { if(wrap) wrap.innerHTML = '<div class="no-data">No closed trades yet.</div>'; return; }
-    let h = '<table><thead><tr><th>DATE</th><th>TICKER</th><th>TYPE</th><th>P&L</th><th>EXIT</th></tr></thead><tbody>';
-    trades.forEach(function(t) { h += '<tr><td>'+(t.date||'--')+'</td><td>'+(t.ticker||'--')+'</td><td>'+(t.tradeType||'--')+'</td><td style="color:'+((t.pnl||0)>=0?'var(--green)':'var(--red)')+'">'+((t.pnl||0)>=0?'+':'')+(t.pnl||0).toFixed(2)+'</td><td>'+(t.reason||'--')+'</td></tr>'; });
-    h += '</tbody></table>';
-    if(wrap) wrap.innerHTML = h;
-  } catch(e) { if(wrap) wrap.innerHTML = '<div class="no-data">Error: ' + e.message + '</div>'; }
-}
-async function loadAttribution() {
-  const trades = state.closedTrades || [];
-  const wrap = document.getElementById('attr-ticker-wrap');
-  if (!trades.length) { if(wrap) wrap.innerHTML = '<div class="no-data">No closed trades yet.</div>'; return; }
-  const byTicker = {};
-  trades.forEach(function(t) { if(!byTicker[t.ticker]) byTicker[t.ticker]={trades:0,pnl:0}; byTicker[t.ticker].trades++; byTicker[t.ticker].pnl+=(t.pnl||0); });
-  let h = '<table><thead><tr><th>TICKER</th><th>TRADES</th><th>P&L</th></tr></thead><tbody>';
-  Object.entries(byTicker).sort(function(a,b){return b[1].pnl-a[1].pnl;}).forEach(function(e2) {
-    h += '<tr><td style="font-weight:700;color:var(--blue)">'+e2[0]+'</td><td>'+e2[1].trades+'</td><td style="color:'+(e2[1].pnl>=0?'var(--green)':'var(--red)')+'">'+((e2[1].pnl>=0?'+':'')+e2[1].pnl.toFixed(2))+'</td></tr>';
-  });
-  h += '</tbody></table>';
-  if(wrap) wrap.innerHTML = h;
-}
-function setBudget() {
-  const input = document.getElementById('budget-input');
-  const val = parseFloat(input ? input.value : 0);
-  if (!val || val < 100) { alert('Enter a valid budget (min $100)'); return; }
-  fetch('/api/set-budget',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({budget:val})})
-    .then(function(r){return r.json();}).then(function(){alert('Budget set to $'+val.toLocaleString());fetchState();}).catch(function(e){alert('Error: '+e.message);});
-}
-function blacklistTicker() {
-  const input = document.getElementById('blacklist-input');
-  const ticker = (input ? input.value : '').trim().toUpperCase();
-  if (!ticker) { alert('Enter a ticker to block'); return; }
-  fetch('/api/blacklist',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({ticker})})
-    .then(function(r){return r.json();}).then(function(){if(input)input.value='';fetchState();}).catch(function(e){alert('Error: '+e.message);});
-}
-function unblacklistTicker(ticker) {
-  fetch('/api/unblacklist',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({ticker})})
-    .then(function(r){return r.json();}).then(fetchState).catch(function(e){alert('Error: '+e.message);});
-}
-async function resetMonth() {
-  if (!confirm('Reset monthly P&L tracker?')) return;
-  const r = await fetch('/api/reset-month', {method:'POST'});
-  const d = await r.json();
-  alert(d.message || 'Monthly stats reset.');
-  fetchState();
-}
 
 </script>
 </body>
