@@ -21,10 +21,12 @@ const { closePosition, syncCashFromAlpaca }             = require('./closeEngine
 const { runBacktest }                                    = require('./backtest');
 const { sendEmail, sendMorningBriefing,
         initReporting, setReportingContext }             = require('./reporting');
-const { getAgentMacroAnalysis }                          = require('./agent');
+const { getAgentMacroAnalysis, initAgent }               = require('./agent');
+const { getMacroNews }                                    = require('./market');
+const { calcRSI }                                         = require('./signals');
 const { getDrawdownProtocol, getPnLByTicker,
         getPnLBySector, getPnLByScoreRange, getTaxLog,
-        getStreakAnalysis, countRecentDayTrades }        = require('./risk');
+        getStreakAnalysis, countRecentDayTrades, isDayTrade } = require('./risk');
 const {
   ALPACA_KEY, ALPACA_SECRET, ALPACA_BASE, ALPACA_DATA, ALPACA_OPTIONS,
   ALPACA_OPT_SNAP, MONTHLY_BUDGET, CAPITAL_FLOOR,
@@ -1875,6 +1877,18 @@ process.on("unhandledRejection", (reason, promise) => {
 
 // Boot sequence - load state from Redis then start server
 initState().then(() => {
+  // Wire agent dependencies — must run before any agent calls
+  initAgent({
+    logFn:               logEvent,
+    markDirty:           markDirty,
+    saveStateNow:        saveStateNow,
+    closePosition:       closePosition,
+    isDayTrade:          isDayTrade,
+    countRecentDayTrades: countRecentDayTrades,
+    getMacroNews:        getMacroNews,
+    calcRSI:             calcRSI,
+  });
+
   app.listen(PORT, () => {
     console.log(`ARGO V3.2 running on port ${PORT}`);
     console.log(`Alpaca key:  ${ALPACA_KEY?"SET":"NOT SET"}`);
