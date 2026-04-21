@@ -7,14 +7,13 @@
 const { state, logEvent, markDirty }           = require('./state');
 const { alpacaGet, getStockBars, getStockQuote, getCached: _getCached }
                                                 = require('./broker');
+const { triggerRescore }                       = require('./agent');
 const { calcRSI, openRisk, realizedPnL,
-        getTimeAdjustedStop, getDTEExitParams,
-        applyExitUrgency, getTimeOfDayAnalysis,
         getETTime, isMarketHours }             = require('./signals');
 const { getCached, setCache }                  = require('./market');
 const { analyzeNews }                          = require('./market');
 const { calcThesisIntegrity }                  = require('./risk');
-const { isDayTrade, triggerRescore }           = require('./risk');
+const { isDayTrade }                           = require('./risk');
 const {
   STOP_LOSS_PCT, FAST_STOP_PCT, FAST_STOP_HOURS, TAKE_PROFIT_PCT,
   PARTIAL_CLOSE_PCT, TRAIL_ACTIVATE_PCT, TRAIL_STOP_PCT,
@@ -26,6 +25,100 @@ const {
   EARNINGS_SKIP_DAYS, WATCHLIST,
 } = require('./constants');
 
+
+
+// ─── Functions that were in monolith but belong here ─────────────────────────
+
+function getTimeOfDayAnalysis() {
+  const trades = state.closedTrades || [];
+  if (trades.length < 5) return { best: "insufficient data", hourly: [] };
+  const hourly = {};
+  for (const trade of trades) {
+    if (!trade.openDate) continue;
+    const hour = new Date(trade.openDate).getHours();
+    if (!hourly[hour]) hourly[hour] = { wins: 0, losses: 0, pnl: 0, trades: 0 };
+    hourly[hour].trades++;
+    hourly[hour].pnl += trade.pnl || 0;
+    if ((trade.pnl || 0) > 0) hourly[hour].wins++;
+    else hourly[hour].losses++;
+  }
+  const sorted = Object.entries(hourly)
+    .map(([h, d]) => ({ hour: parseInt(h), ...d, winRate: d.trades ? Math.round(d.wins / d.trades * 100) : 0 }))
+    .sort((a, b) => b.pnl - a.pnl);
+  return {
+    best:   sorted[0] ? `${sorted[0].hour}:00 ET (${sorted[0].winRate}% WR, $${sorted[0].pnl.toFixed(0)} P&L)` : "insufficient data",
+    worst:  sorted[sorted.length-1] ? `${sorted[sorted.length-1].hour}:00 ET` : "--",
+    hourly: sorted,
+  };
+}
+
+function getTimeAdjustedStop(pos) {
+  const daysOpen = (Date.now() - new Date(pos.openDate).getTime()) / MS_PER_DAY;
+  const chgPct   = pos.currentPrice && pos.premium
+    ? (pos.currentPrice - pos.premium) / pos.premium : 0;
+  const isFlat   = Math.abs(chgPct) < 0.05;
+  let stopPct    = STOP_LOSS_PCT;
+  if      (daysOpen >= 8) stopPct = 0.15;
+  else if (daysOpen >= 6) stopPct = 0.20;
+  else if (daysOpen >= 4) stopPct = 0.25;
+  else if (daysOpen >= 2) stopPct = 0.30;
+  if (isFlat && daysOpen >= 4) stopPct = Math.min(stopPct, 0.20);
+  if (isFlat && daysOpen >= 6) stopPct = Math.min(stopPct, 0.12);
+  return stopPct;
+}
+
+function getDTEExitParams(dte, daysOpen = 0) {
+  const pdtRemaining = Math.max(0, PDT_LIMIT - countRecentDayTrades());
+  const pdtTight     = pdtRemaining <= 1;
+  const pdtLocked    = pdtRemaining === 0;
+  let overnightMult  = 1.0;
+  let overnightLabel = "";
+  if (dte <= 21) {
+    if      (daysOpen >= 2) { overnightMult = 0.65; overnightLabel = "(2D+)"; }
+    else if (daysOpen >= 1) { overnightMult = 0.80; overnightLabel = "(OVERNIGHT)"; }
+  } else {
+    if      (daysOpen >= 7) { overnightMult = 0.75; overnightLabel = "(7D+)"; }
+    else if (daysOpen >= 3) { overnightMult = 0.85; overnightLabel = "(3D+)"; }
+    else if (daysOpen >= 1) { overnightMult = 0.92; overnightLabel = "(OVERNIGHT)"; }
+  }
+  if (dte <= 21) {
+    const base = pdtLocked ? 0.12 : pdtTight ? 0.15 : 0.20;
+    const tp   = parseFloat((base * overnightMult).toFixed(3));
+    return { takeProfitPct: tp, partialPct: parseFloat((tp*0.60).toFixed(3)),
+             ridePct: parseFloat((tp*1.30).toFixed(3)), stopLossPct: 0.30, fastStopPct: 0.15,
+             trailActivate: pdtLocked ? 0.08 : pdtTight ? 0.10 : 0.12,
+             trailStop: pdtLocked ? 0.05 : 0.07,
+             label: (pdtLocked ? "SHORT-DTE(PDT-LOCKED)" : pdtTight ? "SHORT-DTE(PDT-TIGHT)" : "SHORT-DTE") + overnightLabel };
+  } else if (dte <= 45) {
+    const base = pdtLocked ? 0.25 : pdtTight ? 0.30 : 0.40;
+    const tp   = parseFloat((base * overnightMult).toFixed(3));
+    return { takeProfitPct: tp, partialPct: parseFloat((tp*0.55).toFixed(3)),
+             ridePct: parseFloat((tp*1.40).toFixed(3)), stopLossPct: 0.35, fastStopPct: 0.20,
+             trailActivate: pdtLocked ? 0.15 : pdtTight ? 0.18 : 0.22,
+             trailStop: pdtLocked ? 0.08 : pdtTight ? 0.10 : 0.12,
+             label: (pdtLocked ? "MONTHLY(PDT-LOCKED)" : pdtTight ? "MONTHLY(PDT-TIGHT)" : "MONTHLY") + overnightLabel };
+  } else {
+    const base = pdtLocked ? 0.35 : pdtTight ? 0.45 : 0.55;
+    const tp   = parseFloat((base * overnightMult).toFixed(3));
+    return { takeProfitPct: tp, partialPct: parseFloat((tp*0.55).toFixed(3)),
+             ridePct: parseFloat((tp*1.50).toFixed(3)), stopLossPct: 0.35, fastStopPct: 0.20,
+             trailActivate: pdtLocked ? 0.20 : pdtTight ? 0.25 : 0.30,
+             trailStop: pdtLocked ? 0.10 : pdtTight ? 0.12 : 0.15,
+             label: (pdtLocked ? "LEAPS(PDT-LOCKED)" : pdtTight ? "LEAPS(PDT-TIGHT)" : "LEAPS") + overnightLabel };
+  }
+}
+
+function applyExitUrgency(agentResult) {
+  if (!agentResult || !agentResult.exitUrgency) return;
+  const urgency = agentResult.exitUrgency;
+  if (urgency === "hold" || urgency === "monitor") return;
+  const positions = state.positions || [];
+  if (positions.length === 0) return;
+  if (urgency === "trim" || urgency === "exit") {
+    logEvent("macro", `[AGENT] exitUrgency=${urgency} - ${urgency === "exit" ? "scheduling exit on all losing positions" : "flagging for trim review"}`);
+    positions.forEach(p => { p._exitUrgencyFlag = urgency; p._exitUrgencySetAt = Date.now(); });
+  }
+}
 
 // ─── Pre-fetch position data (called by scanner before checkExits) ────
 async function fetchPositionData(positions) {
