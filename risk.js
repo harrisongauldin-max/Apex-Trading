@@ -1,11 +1,15 @@
 // risk.js — ARGO V3.2
 // Risk management: drawdown, PDT, concentration, stress test, filters.
 'use strict';
-const { state, logEvent, markDirty } = require('./state');
+const { state, logEvent, markDirty , saveStateNow } = require('./state');
 const { openRisk, openCostBasis, heatPct, realizedPnL,
         totalCap, getETTime }        = require('./signals');
 const { CAPITAL_FLOOR, MONTHLY_BUDGET, MAX_HEAT, MAX_SECTOR_PCT,
         PDT_LIMIT, MS_PER_DAY, STOP_LOSS_PCT }  = require('./constants');
+const { alpacaPost, getStockBars } = require('./broker');
+const { effectiveHeatCap, getBusinessDaysAgo, isEntryWindow } = require('./signals');
+const { checkSectorETF } = require('./scoring');
+const { getOptionsPrice } = require('./execution');
 // ─── Correlation groups (copied from server.js — needed for checkAllFilters) ──
 const CORRELATION_GROUPS = [
   ["NVDA", "AMD", "SMCI", "ARM", "AVGO", "MU"],
