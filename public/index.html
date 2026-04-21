@@ -1894,11 +1894,11 @@ function renderNativeSpread(p) {
   const shortStr = parseFloat(p.sellStrike||p.shortStrike) || null;
   const longStr  = parseFloat(p.buyStrike ||p.longStrike)  || null;
   const strikeDisplay = p.isCreditSpread
-    ? (shortStr && longStr ? \`$\${shortStr}/$\${longStr}\` : shortStr ? \`$\${shortStr}\` : longStr ? \`$\${longStr}\` : '--')
-    : (longStr && shortStr ? \`$\${longStr}/$\${shortStr}\` : longStr ? \`$\${longStr}\` : shortStr ? \`$\${shortStr}\` : '--');
-  const widthDisplay  = (width > 0 && !isNaN(width)) ? `$${width}` : '--';
+    ? \`$\${shortStr||'?'}/$\${longStr||'?'}\`
+    : \`$\${longStr||'?'}/$\${shortStr||'?'}\`;
+  const widthDisplay  = (width > 0 && !isNaN(width)) ? \`$\${width}\` : '--';
   const maxPrDisplay  = maxPr > 0 ? \`$\${maxPr.toFixed(0)}\` : '--';
-  const maxLsDisplay  = (maxLs > 0 && !isNaN(maxLs)) ? `$${maxLs.toFixed(0)}` : '--';
+  const maxLsDisplay  = (maxLs > 0 && !isNaN(maxLs)) ? \`$\${maxLs.toFixed(0)}\` : '--';
 
   return \`
   <div style="background:#050e1a;border:1px solid rgba(0,150,255,.3);border-radius:10px;padding:14px;margin-bottom:10px">
