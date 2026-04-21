@@ -90,6 +90,10 @@ function getRegimeRulebook(state) {
   //   Raw VIX >= 25 retained as structural floor (prevents credit entries in
   //   calm low-vol markets where IV can keep falling post-entry)
   const skewElevated      = (state._skew?.skew || 0) >= 130;
+  // High intraday range: 5-day avg SPY daily range >= 2.5% = volatile chop
+  // Short strikes less safe — reduce credit spread sizing
+  const spyAvgRange    = state._spyAvgRange || 0;
+  const highRangeChop  = spyAvgRange >= 0.025;  // 2.5%+ daily range = volatile chop
   // IVR threshold lowered 50→45: at IVR 45-50 with VIX >= 25, options are expensive enough
   // for credit spreads. The hard 50 cutoff was too rigid — IVR 49 with VIX 28 is credit-favorable.
   // Belt: require VIX >= 27 when IVR is in the 45-50 borderline zone for extra confirmation.
@@ -176,6 +180,7 @@ function getRegimeRulebook(state) {
     ivBoostDebit:  1.0,                    // never boost debit size in high IV
     oversold:      0.75,                   // RSI <= 40 in Regime B
     creditCrisis:  isCrisis && ivHigh ? 0.75 : isCrisis ? 0.5 : 1.0,
+    highRangeAdj:  highRangeChop ? 0.75 : 1.0,  // 0.75x when 5d avg range >= 2.5%
   };
 
   // ── Spread structure — professionally calibrated ──────────
@@ -278,6 +283,7 @@ function getRegimeRulebook(state) {
     ivElevated,
     ivHigh,
     creditAllowedVIX,
+    highRangeChop,
     agentSig,
     agentConf,
     agentBias,
@@ -319,11 +325,13 @@ function scoreCandidate(stock, rawPutScore, rawCallScore, putReasons, callReason
   const instrConstraint = rb.instrumentConstraints[ticker];
   const allowsCredit    = !instrConstraint || instrConstraint.allowedTypes.some(t => t.startsWith("credit"));
   let tradeType;
-  // TODO #5 FIX: Iron condor now reachable — activates when regime is choppy + IVR >= 60
-  // Choppy regime = no clear directional bias = ideal for premium collection on both sides
-  // IVR >= 60 = elevated IV makes both legs rich enough to collect meaningful premium
-  const isChoppy     = (rb.regimeName || "").includes("choppy"); // rb.isChoppy removed — not in returned object
-  const ironCondorOk = isIndex && isChoppy && rb.ivRank >= 60 && allowsCredit && !stock.isMeanReversion;
+  // Iron condor: intentionally disabled — no scorer implemented yet.
+  // scoreCandidate would use Math.max(putScore,callScore) which is a directional score,
+  // not appropriate for a delta-neutral premium collection structure.
+  // Re-enable when scoreIronCondor() is built and tested.
+  // Conditions when valid: choppy regime + IVR >= 60 + SPY/QQQ only
+  // const ironCondorOk = isIndex && isChoppy && rb.ivRank >= 60 && allowsCredit && !stock.isMeanReversion;
+  const ironCondorOk = false; // disabled — no scorer
   if (stock.isMeanReversion)
     tradeType = "debit_naked";
   else if (ironCondorOk && instrConstraint?.allowedTypes?.includes("iron_condor"))
@@ -387,7 +395,8 @@ function scoreCandidate(stock, rawPutScore, rawCallScore, putReasons, callReason
   const isCredit      = tradeType.startsWith("credit");
   const ivBoost       = isCredit ? rb.sizeMult.ivBoostCredit : rb.sizeMult.ivBoostDebit;
   const crisisAdj     = isCrisis && isCredit ? rb.sizeMult.creditCrisis : rb.sizeMult.base;
-  const sizeMod       = crisisAdj * ivBoost * (oversoldInBear ? rb.sizeMult.oversold : 1.0);
+  const highRangeAdj  = isCredit ? rb.sizeMult.highRangeAdj : 1.0; // only reduce credit spreads in high-range env
+  const sizeMod       = crisisAdj * ivBoost * (oversoldInBear ? rb.sizeMult.oversold : 1.0) * highRangeAdj;
 
   // Correlation heat multiplier removed from scan loop (panel simplification)
   // CORRELATED_GROUPS retained for reference but heatMultiplier no longer applied
