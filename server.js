@@ -31,7 +31,8 @@ const { sendEmail, sendMorningBriefing, sendResendEmail,
         buildMonthlyReport, premarketAssessment,
         updateAfterHoursContext }                         = require('./reporting');
 const { getAgentMacroAnalysis, initAgent,
-        getAgentRescore, getAgentDayPlan }                = require('./agent');
+        getAgentRescore, getAgentDayPlan,
+        getAgentPostMarketAssessment, getAgentPreEntryCheck } = require('./agent');
 const { getRegimeRulebook }                               = require('./entryEngine');
 const { executeCreditSpread }                             = require('./execution');
 const { getTimeAdjustedStop, getTimeOfDayAnalysis }       = require('./exitEngine');
@@ -541,6 +542,16 @@ setInterval(() => {
 setInterval(() => {
   flushStateIfDirty().catch(e => console.error("Flush interval error:", e.message));
 }, 30000);
+
+// C2: Reconciliation interval — every 3 minutes during market hours
+setInterval(async () => {
+  const et  = getETTime();
+  const day = et.getDay();
+  if (day === 0 || day === 6) return;
+  const etH = et.getHours() + et.getMinutes() / 60;
+  if (etH < 9.5 || etH > 16.1) return;
+  try { await runReconciliation(); } catch(e) { logEvent('warn', `[RECONCILE] Interval error: ${e.message}`); }
+}, 3 * 60 * 1000);
 
 // C3: Scan watchdog -- prevents permanent scanRunning=true lockout
 // If a scan hangs (Redis timeout, API freeze), scanRunning stays true and
@@ -1901,6 +1912,15 @@ initState().then(() => {
     countRecentDayTrades: countRecentDayTrades,
     getMacroNews:        getMacroNews,
     calcRSI:             calcRSI,
+  });
+
+  // Wire reconciler dependencies — must run before runReconciliation()
+  initReconciler({
+    state:             state,
+    logFn:             logEvent,
+    redisSaveFn:       saveStateNow,
+    calcCreditSpreadTP: calcCreditSpreadTP,
+    markDirtyFn:       markDirty,
   });
 
   app.listen(PORT, () => {
