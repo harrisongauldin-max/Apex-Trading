@@ -2608,7 +2608,14 @@ module.exports = {
   // Export mutable scanner state for server.js dashboard and API endpoints
   getScannerState: () => ({
     scanRunning, dryRunMode, marketContext,
+    lastScanStart: _lastScanStart,
     circuit: getCircuitState(),
   }),
+  // Watchdog escape hatch — called by server.new.js if scan is stuck > 90s
+  forceResetScanLock: () => {
+    logEvent('warn', '[WATCHDOG] Force-resetting stuck scanRunning lock');
+    scanRunning = false;
+    _lastScanStart = 0;
+  },
   setDryRunMode: (v) => { dryRunMode = v; },
 };
