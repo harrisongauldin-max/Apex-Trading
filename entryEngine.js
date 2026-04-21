@@ -4,6 +4,7 @@
 // Single source of truth for all entry decisions.
 // Three exports: getRegimeRulebook, scoreCandidate, evaluateEntry
 //
+const { scoreIndexSetup } = require('./scoring');
 // v3.2 changes (full combined panel — gate simplification + credit direction):
 //   1. Credit direction fix: bear regime → credit_call not credit_put
 //      High put score in bear = bearish DIRECTION → sell CALLS (bear call spread)
