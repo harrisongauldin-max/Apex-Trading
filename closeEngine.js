@@ -2,6 +2,9 @@
 // Position closing, partial closes, and order confirmation.
 'use strict';
 
+let dryRunMode = false; // set by scanner via setDryRunMode()
+function setDryRunMode(v) { dryRunMode = v; }
+
 // Local copies from risk.js — avoids circular risk→execution→closeEngine→risk
 function isDayTrade(pos) {
   if (!pos || !pos.openDate) return false;
@@ -41,6 +44,7 @@ const { STOP_LOSS_PCT, TAKE_PROFIT_PCT, PDT_PROFIT_EXIT,
         PDT_STOP_LOSS, FAST_STOP_PCT, MONTHLY_BUDGET ,
   ALPACA_KEY, BONUS_AMOUNT, MS_PER_DAY, PDT_LIMIT, REVENUE_THRESHOLD, WATCHLIST
 }  = require('./constants');
+const { countRecentDayTrades } = require('./risk');
 
 // ─── Injected dependencies ───────────────────────────────────────
 let _dryRunMode    = false;
@@ -824,4 +828,5 @@ async function confirmPendingOrder() {
 module.exports = {
   closePosition, partialClose, confirmPendingOrder, syncCashFromAlpaca,
   initCloseEngine,
+
 };
