@@ -4,6 +4,7 @@
 const fetch = require('node-fetch');
 const { ANTHROPIC_API_KEY, ANTHROPIC_MODEL, PDT_RULE_ACTIVE, PDT_LIMIT,
         MS_PER_DAY, OVERNIGHT_INTERVAL, SAME_DAY_INTERVAL, TRIGGER_COOLDOWN_MS,
+  AGENT_MACRO_CACHE_MS,
 } = require('./constants');
 const { state } = require('./state');
 const { alpacaGet, getStockQuote, getStockBars, getIntradayBars } = require('./broker');
@@ -814,9 +815,116 @@ async function triggerRescore(pos, triggerReason) {
 }
 
 
+
+// ─── Post-market overnight assessment ────────────────────────────────────────
+async function getAgentPostMarketAssessment(scanType = "post-market") {
+  if (!ANTHROPIC_API_KEY) return null;
+  const systemPrompt = `Post-market analyst for ARGO-V3.0. Return ONLY valid JSON - no markdown.
+{"overnightRisk":"low"|"medium"|"high","holdRecommendations":{},"tomorrowBias":"bullish"|"bearish"|"neutral","catalystsTomorrow":[],"reasoning":"1-2 sentences"}
+holdRecommendations: {ticker: "HOLD"|"MONITOR"|"EXIT_AT_OPEN"} for each open position.`;
+
+  const positions = (state.positions || []).map(p => ({
+    ticker: p.ticker, type: p.optionType, isSpread: p.isSpread,
+    pnlPct: p.currentPrice && p.premium ? ((p.currentPrice - p.premium)/p.premium*100).toFixed(1) : '0',
+    daysOpen: ((Date.now() - new Date(p.openDate).getTime())/MS_PER_DAY).toFixed(1),
+    expDate: p.expDate,
+  }));
+
+  const [headlines, mktStatus] = await Promise.all([
+    _getMacro().catch(() => ({ headlines: [] })),
+    Promise.resolve({}),
+  ]);
+
+  const userPrompt = `${scanType} assessment - ${new Date().toLocaleString('en-US', {timeZone:'America/New_York'})} ET
+VIX: ${state.vix} | Open positions: ${JSON.stringify(positions)}
+Recent headlines: ${(headlines.headlines || []).slice(0,5).join(' | ')}
+What is the overnight risk and tomorrow bias?`;
+
+  try {
+    const raw = await callClaudeAgent(systemPrompt, userPrompt, 500, false);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    parsed.generatedAt = new Date().toISOString();
+    _log("macro", `[POST-MARKET] overnight risk: ${parsed.overnightRisk} | tomorrow: ${parsed.tomorrowBias} | ${(parsed.reasoning||'').slice(0,80)}`);
+    for (const pos of (state.positions || [])) {
+      const rec = parsed.holdRecommendations?.[pos.ticker];
+      if (rec === "EXIT_AT_OPEN") {
+        pos._morningExitFlag = true;
+        pos._morningExitReason = `Post-market agent: overnight risk ${parsed.overnightRisk}`;
+        _log("warn", `[POST-MARKET] ${pos.ticker} flagged for exit at open - ${parsed.reasoning}`);
+      }
+    }
+    if (_saveStateNow) await _saveStateNow();
+    return parsed;
+  } catch(e) {
+    _log("warn", `[POST-MARKET] ${scanType} failed: ${e.message}`);
+    return null;
+  }
+}
+
+// ─── Pre-entry agent check (re-entry veto + borderline score review) ──────────
+async function getAgentPreEntryCheck(stock, score, reasons, optionType, isCreditMode = false) {
+  if (!ANTHROPIC_API_KEY) return { approved: true, reason: "no API key" };
+
+  const recentLoss = (state._recentLosses || {})[stock.ticker];
+  if (recentLoss) {
+    const hrsSinceLoss = (Date.now() - recentLoss.closedAt) / 3600000;
+    if (hrsSinceLoss < 24) {
+      const systemPrompt = `Options pre-entry analyst. Return JSON only: {"approved":true|false,"confidence":"high"|"medium"|"low","reason":"one sentence"}`;
+      const userPrompt = `Re-entry check: ${stock.ticker} ${optionType.toUpperCase()}
+Closed at a loss ${hrsSinceLoss.toFixed(1)}h ago (reason: ${recentLoss.reason}, P&L: ${recentLoss.pnlPct}%)
+Current: RSI ${stock.rsi} | MACD ${stock.macd} | Momentum ${stock.momentum}
+Entry macro was: ${recentLoss.agentSignal} | Current macro: ${(state._agentMacro||{}).signal||'neutral'}
+Score now: ${score}/100 | Top reasons: ${reasons.slice(0,3).join('; ')}
+Has the thesis genuinely changed since the loss? Approve re-entry?`;
+      const raw = await callClaudeAgent(systemPrompt, userPrompt, 200, false);
+      if (raw) {
+        try {
+          const parsed = JSON.parse(raw);
+          _log("filter", `[PRE-ENTRY] ${stock.ticker} re-entry check: ${parsed.approved ? 'APPROVED' : 'BLOCKED'} (${parsed.confidence}) - ${parsed.reason}`);
+          return parsed;
+        } catch(e) { return { approved: true, reason: "parse error - allowing" }; }
+      }
+      return { approved: true, reason: "agent unavailable - allowing" };
+    }
+  }
+
+  if (optionType === "put" && stock.rsi <= 35 && !isCreditMode) {
+    _log("filter", `[PRE-ENTRY] ${stock.ticker} hard blocked - RSI ${stock.rsi} <= 35`);
+    return { approved: false, confidence: "high", reason: `RSI ${stock.rsi} - stock already crashed` };
+  }
+  if (optionType === "put" && stock.rsi <= 35 && isCreditMode) {
+    return { approved: true, confidence: "high", reason: `RSI ${stock.rsi} oversold - ideal credit put spread entry` };
+  }
+
+  const hasBullishMACD = (stock.macd || "").includes("bullish");
+  const borderline = score < 80;
+  if (!borderline && !hasBullishMACD) {
+    return { approved: true, reason: "high-confidence setup - skipping pre-entry check" };
+  }
+
+  const systemPrompt = `Options pre-entry analyst. Return JSON only: {"approved":true|false,"confidence":"high"|"medium"|"low","reason":"one sentence"}`;
+  const userPrompt = `Pre-entry check: ${stock.ticker} ${optionType.toUpperCase()}
+RSI: ${stock.rsi} | MACD: ${stock.macd} | Momentum: ${stock.momentum}
+Score: ${score}/100 | Top reasons: ${reasons.slice(0,4).join('; ')}
+Macro: ${(state._agentMacro||{}).signal||'neutral'} (${(state._agentMacro||{}).confidence||'unknown'})
+VIX: ${state.vix}
+Should ARGO-V3.0 enter this ${optionType} position?`;
+
+  const raw = await callClaudeAgent(systemPrompt, userPrompt, 200, false);
+  if (!raw) return { approved: true, reason: "agent unavailable - allowing" };
+  try {
+    const parsed = JSON.parse(raw);
+    _log("filter", `[PRE-ENTRY] ${stock.ticker} ${optionType}: ${parsed.approved ? 'APPROVED' : 'BLOCKED'} (${parsed.confidence}) - ${parsed.reason}`);
+    return parsed;
+  } catch(e) { return { approved: true, reason: "parse error - allowing" }; }
+}
+
 module.exports = {
   callClaudeAgent, stripThinking,
   getAgentMacroAnalysis, getAgentRescore, getAgentDayPlan,
   getAgentMorningBriefing, runAgentRescore, triggerRescore,
   initAgent,
+  getAgentPostMarketAssessment,
+  getAgentPreEntryCheck,
 };
