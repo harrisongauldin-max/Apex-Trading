@@ -1,29 +1,45 @@
 // risk.js — ARGO V3.2
 // Risk management: drawdown, PDT, concentration, stress test, filters.
 'use strict';
-let _dryRunMode = false; // injected by scanner
-function setDryRunModeRisk(v) { _dryRunMode = v; }
-
-const fmt = (n) => '$' + (n||0).toFixed(2);
-const SUPPORT_BUFFER = 0.02;
-const PDT_DAYS = 5;
-const PREMARKET_NEGATIVE = -0.02;
-const VIX_PAUSE = 18;
-const RESISTANCE_BUFFER = 0.02;
-const { state, logEvent, markDirty ,
-  saveStateNow
-} = require('./state');
+const { state, logEvent, markDirty } = require('./state');
 const { openRisk, openCostBasis, heatPct, realizedPnL,
-        totalCap, getETTime, getBusinessDaysAgo ,
-  effectiveHeatCap, isEntryWindow, getSupportResistance
-} = require('./signals');
+        totalCap, getETTime }        = require('./signals');
 const { CAPITAL_FLOOR, MONTHLY_BUDGET, MAX_HEAT, MAX_SECTOR_PCT,
-        PDT_LIMIT, MS_PER_DAY, STOP_LOSS_PCT,
-        MIN_SCORE ,
-  EARNINGS_SKIP_DAYS, MIN_STOCK_PRICE, WATCHLIST
-}                              = require('./constants');
-const { alpacaPost, getStockBars } = require('./broker');
-const { checkSectorETF } = require('./scoring');
+        PDT_LIMIT, MS_PER_DAY, STOP_LOSS_PCT }  = require('./constants');
+// ─── Correlation groups (copied from server.js — needed for checkAllFilters) ──
+const CORRELATION_GROUPS = [
+  ["NVDA", "AMD", "SMCI", "ARM", "AVGO", "MU"],
+  ["AAPL", "MSFT", "GOOGL", "CRM", "NOW", "SNOW"],
+  ["AMZN", "META", "TTD", "ROKU"],
+  ["JPM", "BAC", "WFC", "C"],
+  ["MS"],
+  ["COIN", "HOOD", "MSTR", "SQ", "MARA"],
+  ["TSLA", "UBER"],
+  ["CRWD", "PANW", "NET"],
+  ["NFLX", "SHOP", "DKNG", "NKE"],
+  ["PLTR"],
+];
+
+function getCorrelatedGroup(ticker) {
+  for (const group of CORRELATION_GROUPS) {
+    if (!group.includes(ticker)) continue;
+    const existingInGroup = state.positions.filter(p => group.includes(p.ticker));
+    if (existingInGroup.length > 0) return group;
+  }
+  return null;
+}
+
+function getSupportResistance(bars) {
+  if (bars.length < 20) return { support: 0, resistance: Infinity };
+  const recent = bars.slice(-20);
+  const highs  = recent.map(b => b.h);
+  const lows   = recent.map(b => b.l);
+  return {
+    resistance: Math.max(...highs),
+    support:    Math.min(...lows),
+  };
+}
+
 
 function getDrawdownProtocol() {
   const trades    = state.closedTrades || [];
@@ -158,11 +174,8 @@ async function checkScaleIns() {
     // Use real options price for scale-in decision
     let curP = pos.currentPrice || pos.premium;
     if (pos.contractSymbol) {
-      try {
-        const _snap = await alpacaGet(`/options/snapshots?symbols=${pos.contractSymbol}&feed=indicative`, 'https://data.alpaca.markets/v1beta1');
-        const _mid = _snap?.snapshots?.[pos.contractSymbol]?.latestQuote;
-        if (_mid) { const _p = (_mid.ap + _mid.bp) / 2; if (_p > 0) curP = _p; }
-      } catch(e) {}
+      const realP = await getOptionsPrice(pos.contractSymbol);
+      if (realP) curP = realP;
     }
     const chg = pos.premium > 0 ? (curP - pos.premium) / pos.premium : 0;
 
@@ -172,7 +185,7 @@ async function checkScaleIns() {
 
     if (chg >= 0.05 && state.cash > CAPITAL_FLOOR + addCost) {
       // Submit scale-in order to Alpaca
-      if (pos.contractSymbol && pos.ask > 0 && !_dryRunMode) {
+      if (pos.contractSymbol && pos.ask > 0 && !dryRunMode) {
         try {
           const scaleBody = {
             symbol:           pos.contractSymbol,
@@ -208,7 +221,7 @@ async function checkAllFilters(stock, price, prefetchedBars = null) { // OPT3: a
   // 1. Entry window — SPY/QQQ open at 9:30am, individual stocks at 9:45am
   const isIndexStock     = stock.isIndex || false;
   const eitherWindowOpen = isEntryWindow("call", isIndexStock) || isEntryWindow("put", isIndexStock);
-  if (!eitherWindowOpen && !_dryRunMode) return { pass:false, reason:"Outside entry window" };
+  if (!eitherWindowOpen && !dryRunMode) return { pass:false, reason:"Outside entry window" };
 
   // 2. Circuit breakers
   if (!state.circuitOpen)       return { pass:false, reason:"Daily circuit breaker tripped" };
@@ -473,5 +486,4 @@ module.exports = {
   isDayTrade, recordDayTrade, getStreakAnalysis,
   calcThesisIntegrity, getPnLByTicker, getPnLBySector,
   getPnLByScoreRange, getTaxLog,
-  setDryRunModeRisk,
 };
