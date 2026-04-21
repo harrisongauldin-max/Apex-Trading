@@ -195,6 +195,36 @@ const INDIVIDUAL_STOCK_WATCHLIST = [
 ];
 
 
+
+// ─── Agent ────────────────────────────────────────────────────────────────────
+const AGENT_MACRO_CACHE_MS     = 3 * 60 * 1000;       // 3 min cache for macro analysis
+
+// ─── Instrument constraints ───────────────────────────────────────────────────
+// INSTRUMENT_CONSTRAINTS defined in entryEngine.js (authoritative)
+
+// ─── VIX tiers ────────────────────────────────────────────────────────────────
+const VIX_PAUSE                = 35;    // halt new entries above this
+const VIX_REDUCE25             = 25;    // reduce sizing 25% above this
+const VIX_REDUCE50             = 30;    // reduce sizing 50% above this
+
+// ─── Risk limits ─────────────────────────────────────────────────────────────
+const MAX_LOSS_PER_TRADE       = 900;   // max $ loss per trade
+const WEEKLY_DD_LIMIT          = 0.25;  // 25% weekly drawdown limit
+const PDT_DAYS                 = 5;     // rolling business day window for PDT count
+
+// ─── Pre-market thresholds ───────────────────────────────────────────────────
+const PREMARKET_NEGATIVE       = -0.01; // -1% gap = negative open signal
+const PREMARKET_STRONG_MOVE    = 0.015; // 1.5% gap = strong directional signal
+
+// ─── Support/resistance buffers ──────────────────────────────────────────────
+const SUPPORT_BUFFER           = 0.03;  // 3% above support = safe put entry
+const RESISTANCE_BUFFER        = 0.02;  // 2% below resistance = safe call entry
+
+// ─── Fast profit ─────────────────────────────────────────────────────────────
+const FAST_PROFIT_PCT          = 0.40;  // 40% gain in <4hrs triggers fast exit
+
+// ─── State ───────────────────────────────────────────────────────────────────
+const BACKUP_FILE              = 'state_backup.json';
 module.exports = {
   ALPACA_KEY, ALPACA_SECRET, ALPACA_BASE, ALPACA_DATA, ALPACA_OPTIONS,
   ALPACA_OPT_SNAP, ALPACA_NEWS, GMAIL_USER, RESEND_API_KEY,
@@ -211,4 +241,5 @@ module.exports = {
   PDT_PROFIT_EXIT, PDT_STOP_LOSS, MS_PER_DAY, TRIGGER_COOLDOWN_MS,
   SAME_DAY_INTERVAL, OVERNIGHT_INTERVAL, SLOW_CACHE_TTL, BARS_CACHE_TTL,
   INDIVIDUAL_STOCKS_ENABLED, STATE_FILE, WATCHLIST,
+  AGENT_MACRO_CACHE_MS, VIX_PAUSE, VIX_REDUCE25, VIX_REDUCE50, MAX_LOSS_PER_TRADE, WEEKLY_DD_LIMIT, PDT_DAYS, PREMARKET_NEGATIVE, PREMARKET_STRONG_MOVE, SUPPORT_BUFFER, RESISTANCE_BUFFER, FAST_PROFIT_PCT,
 };
