@@ -5,7 +5,8 @@ const { state, logEvent, markDirty , saveStateNow } = require('./state');
 const { openRisk, openCostBasis, heatPct, realizedPnL,
         totalCap, getETTime }        = require('./signals');
 const { CAPITAL_FLOOR, MONTHLY_BUDGET, MAX_HEAT, MAX_SECTOR_PCT,
-        PDT_LIMIT, MS_PER_DAY, STOP_LOSS_PCT }  = require('./constants');
+        PDT_LIMIT, MS_PER_DAY, STOP_LOSS_PCT,
+        WATCHLIST, EARNINGS_SKIP_DAYS, MIN_SCORE, MIN_STOCK_PRICE } = require('./constants');
 const { alpacaPost, getStockBars } = require('./broker');
 const { effectiveHeatCap, getBusinessDaysAgo, isEntryWindow } = require('./signals');
 const { checkSectorETF } = require('./scoring');
