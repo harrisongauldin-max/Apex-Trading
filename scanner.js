@@ -30,7 +30,7 @@ const {
   getAnalystActivity, getShortInterestSignal, getUpcomingMacroEvents,
   getMacroCalendarModifier, getPreMarketData, checkVIXVelocity,
   getVIXReversionDays, getVIX,
-} = require('./market');
+  getCached, setCache } = require('./market');
 
 const {
   scoreIndexSetup, scorePutSetup, scoreMeanReversionCall,
@@ -71,7 +71,7 @@ const {
   getTimeAdjustedStop, getDTEExitParams, applyExitUrgency, getTimeOfDayAnalysis,
 } = require('./exitEngine');
 
-const { sendMorningBriefing, sendEmail, setReportingContext } = require('./reporting');
+const { sendMorningBriefing, sendEmail, setReportingContext , getBenchmarkComparison, sendResendEmail } = require('./reporting');
 
 const {
   WATCHLIST, CAPITAL_FLOOR, MIN_SCORE, MIN_SCORE_CREDIT, MAX_HEAT,
@@ -87,6 +87,9 @@ const {
 let scanRunning  = false;
 let _scanGen       = 0;   // increments each scan - finally block only resets its own generation
 let _lastScanStart = 0;   // timestamp of last scan start — read by watchdog via getScannerState()
+
+// ─── Local utilities ─────────────────────────────────────────
+const fmt = (n) => '$' + (n || 0).toFixed(2);
 let lastMedScan  = 0;  // 5 minute tier
 let lastSlowScan = 0;  // 15 minute tier
 let lastHourScan = 0;  // 60 minute tier
