@@ -52,7 +52,7 @@ const {
   TAKE_PROFIT_PCT, FAST_STOP_HOURS, MS_PER_DAY, SCAN_INTERVAL,
   TRIGGER_COOLDOWN_MS, SAME_DAY_INTERVAL, OVERNIGHT_INTERVAL,
   MACRO_REVERSAL_PCT, SCAN_WATCHDOG_MS: _SCAN_WATCHDOG_MS,
-  INDIVIDUAL_STOCKS_ENABLED, INDIVIDUAL_STOCK_WATCHLIST,
+  INDIVIDUAL_STOCKS_ENABLED, INDIVIDUAL_STOCK_WATCHLIST, STATE_FILE,
 } = require('./constants');
 
 const app  = express();
@@ -1760,6 +1760,35 @@ app.post("/api/reset-month", requireSecret, async (req, res) => {
 // Use after Alpaca account resets where Redis still has old session data
 // Preserves: closedTrades, tradeJournal, positions, P&L history
 // Resets: dayStartCash, weekStartCash, peakCash, accountBaseline, monthlyProfit
+
+app.post("/api/set-budget", requireSecret, async (req, res) => {
+  try {
+    const { budget } = req.body;
+    const newBudget = parseFloat(budget);
+    if (!newBudget || isNaN(newBudget) || newBudget < 1000 || newBudget > 1000000) {
+      return res.status(400).json({ ok: false, error: "Budget must be between $1,000 and $1,000,000" });
+    }
+
+    // Update all baseline references to the new budget
+    state.customBudget    = newBudget;
+    state.cash            = newBudget;
+    state.dayStartCash    = newBudget;
+    state.weekStartCash   = newBudget;
+    state.peakCash        = newBudget;
+    state.accountBaseline = newBudget;
+    state.alpacaEquity    = newBudget;
+    state.monthlyProfit   = 0;
+    state.monthStart      = new Date().toLocaleDateString();
+
+    await saveStateNow();
+    logEvent("reset", `Budget set to $${newBudget.toFixed(2)} - all baselines reset. Profit-lock cleared.`);
+    res.json({ ok: true, budget: newBudget, message: `Budget set to $${newBudget.toFixed(2)}. All baselines updated.` });
+  } catch(e) {
+    logEvent("warn", `set-budget failed: ${e.message}`);
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
 app.post("/api/reset-baseline", requireSecret, async (req, res) => {
   try {
     // Get live Alpaca equity (cash + open position value) as the new reference point
