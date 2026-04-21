@@ -85,7 +85,8 @@ const {
 } = require('./constants');
 
 let scanRunning  = false;
-let _scanGen     = 0; // increments each scan - finally block only resets its own generation
+let _scanGen       = 0;   // increments each scan - finally block only resets its own generation
+let _lastScanStart = 0;   // timestamp of last scan start — read by watchdog via getScannerState()
 let lastMedScan  = 0;  // 5 minute tier
 let lastSlowScan = 0;  // 15 minute tier
 let lastHourScan = 0;  // 60 minute tier
