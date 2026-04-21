@@ -1376,13 +1376,13 @@ app.post("/api/scan",        async (req,res) => { res.json({ok:true}); runScan()
 // Automatically re-disables dry run after the scan completes
 app.post("/api/test-scan", async (req, res) => {
   if (getScannerState().scanRunning) return res.json({ error: "Scan already running" });
-  const wasDryRun = dryRunMode;
-  dryRunMode = true;
+  const wasDryRun = false; // scanner owns dryRunMode state
+  setDryRunMode(true);
   res.json({ ok: true, message: "Test scan started - dry run forced for this cycle. Check /api/logs for results." });
   try {
     await runScan();
   } finally {
-    if (!wasDryRun) dryRunMode = false; // restore previous state
+    if (!wasDryRun) setDryRunMode(false); // restore previous state
   }
 });
 app.post("/api/close/:tkr", requireSecret,  async (req,res) => {
@@ -1490,12 +1490,12 @@ app.post("/api/dry-run-scan", async (req, res) => {
     waited += 500;
   }
   if (getScannerState().scanRunning) return res.json({ error: "Scan still running after 35s - try again" });
-  dryRunMode = true;
+  setDryRunMode(true);
   logEvent("scan", "- DRY RUN SCAN STARTED -");
   try {
     await runScan();
   } finally {
-    dryRunMode = false;
+    setDryRunMode(false);
     logEvent("scan", "- DRY RUN SCAN COMPLETE -");
   }
   // Return all dryrun log entries from this scan
