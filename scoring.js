@@ -2,6 +2,8 @@
 // All entry scoring: index spreads, put setups, mean reversion calls.
 // scoreIndexSetup reads state for VIX history, breadth, regime data.
 'use strict';
+
+const SEMIS = ["NVDA", "AMD", "SMCI", "ARM", "AVGO", "MU"]; // semiconductor group for sector ETF check
 let _prevMacroSignal = null; // tracks previous macro signal for shift detection
 const MACRO_TIERS = { strongly_bearish: -20, bearish: -10, mild_bearish: -5, neutral: 0, mild_bullish: 5, bullish: 10, strongly_bullish: 20 };
 
