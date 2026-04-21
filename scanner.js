@@ -42,6 +42,7 @@ const {
 const {
   getRegimeRulebook, scoreCandidate: EE_scoreCandidate, evaluateEntry,
 } = require('./entryEngine');
+const { INSTRUMENT_CONSTRAINTS } = require('./entryEngine');
 
 const {
   executeCreditSpread, executeDebitSpread, executeTrade, executeIronCondor,
@@ -82,7 +83,7 @@ const {
   INDIVIDUAL_STOCKS_ENABLED, MONTHLY_BUDGET, MACRO_REVERSAL_PCT,
   TARGET_DELTA_MIN, TARGET_DELTA_MAX,
   ALPACA_KEY, ALPACA_SECRET, ALPACA_DATA, ALPACA_OPT_SNAP, ALPACA_OPTIONS,
-  MAX_GAP_PCT, MIN_STOCK_PRICE, GMAIL_USER, RESEND_API_KEY,
+  MAX_GAP_PCT, MIN_STOCK_PRICE, GMAIL_USER, RESEND_API_KEY, VIX_PAUSE, VIX_REDUCE25, VIX_REDUCE50,
 } = require('./constants');
 
 let scanRunning  = false;
