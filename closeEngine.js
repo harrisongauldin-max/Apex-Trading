@@ -95,18 +95,25 @@ async function syncCashFromAlpaca() {
     // Set accountBaseline on first sync if not already established
     if (!state.accountBaseline) state.accountBaseline = alpacaCash;
     const hasCustomBudget = state.customBudget && state.customBudget > 0 && state.customBudget !== MONTHLY_BUDGET;
-    if (!hasCustomBudget) {
-      const drift = Math.abs(alpacaCash - state.cash);
-      if (drift > 1.00) {
-        if (drift > 500) {
-          // Large drift = account reset — update all baselines
-          logEvent("scan", `[CASH SYNC] Large drift $${drift.toFixed(2)} — resetting baselines to $${alpacaCash.toFixed(2)}`);
-          state.dayStartCash  = alpacaCash;
-          state.weekStartCash = alpacaCash;
-          state.peakCash      = Math.max(state.peakCash || 0, alpacaCash);
-        } else {
-          logEvent("scan", `[CASH SYNC] Alpaca: $${alpacaCash.toFixed(2)} | ARGO: $${state.cash.toFixed(2)} | drift: $${drift.toFixed(2)} — syncing`);
-        }
+    // Always sync small drifts (<$500) — routine P&L from fills, credits, premium
+    // Only skip large-drift baseline reset when customBudget is set (prevents wiping a known starting balance)
+    // Small drift sync is always safe regardless of customBudget
+    const drift = Math.abs(alpacaCash - state.cash);
+    if (drift > 1.00) {
+      if (drift > 500 && hasCustomBudget) {
+        // Large drift with custom budget — could be an account reset, skip to avoid wiping baseline
+        logEvent("scan", `[CASH SYNC] Large drift $${drift.toFixed(2)} with custom budget — skipping baseline reset (manual /api/reset-baseline if needed)`);
+      } else if (drift > 500) {
+        // Large drift = account reset — update all baselines
+        logEvent("scan", `[CASH SYNC] Large drift $${drift.toFixed(2)} — resetting baselines to $${alpacaCash.toFixed(2)}`);
+        state.dayStartCash  = alpacaCash;
+        state.weekStartCash = alpacaCash;
+        state.peakCash      = Math.max(state.peakCash || 0, alpacaCash);
+        state.cash          = alpacaCash;
+        markDirty();
+      } else {
+        // Small drift — always sync regardless of customBudget (routine fills, credits, premium)
+        logEvent("scan", `[CASH SYNC] Alpaca: $${alpacaCash.toFixed(2)} | ARGO: $${state.cash.toFixed(2)} | drift: $${drift.toFixed(2)} — syncing`);
         state.cash = alpacaCash;
         markDirty();
       }
