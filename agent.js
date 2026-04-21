@@ -5,7 +5,7 @@ const fetch = require('node-fetch');
 const { ANTHROPIC_API_KEY, ANTHROPIC_MODEL, PDT_RULE_ACTIVE, PDT_LIMIT } = require('./constants');
 const { state } = require('./state');
 const { alpacaGet, getStockQuote, getStockBars, getIntradayBars } = require('./broker');
-const { getAccountPhase, effectiveHeatCap } = require('./signals');
+const { getAccountPhase, effectiveHeatCap , isMarketHours } = require('./signals');
 
 // ─── Module-level cache ──────────────────────────────────────────
 let _agentMacroCache = { result: null, fetchedAt: 0 };
