@@ -4,7 +4,6 @@
 // NOTE: This is a direct lift of runScan from server.js.
 //       Phase D.2 will decompose runScan into pure sub-functions.
 'use strict';
-const fmt = (n) => '$' + (n||0).toFixed(2);
 
 // ─── All module imports ──────────────────────────────────────────
 const {
@@ -33,7 +32,12 @@ const {
   getVIXReversionDays, getVIX,
 } = require('./market');
 
-const { scoreIndexSetup, scorePutSetup, scoreMeanReversionCall, detectMarketRegime, getRegimeModifier, updateOversoldTracker, recordGateBlock, checkSectorETF, isGLDEntryAllowed, isXLEEntryAllowed, isTLTEntryAllowed } = require('./scoring');;
+const {
+  scoreIndexSetup, scorePutSetup, scoreMeanReversionCall,
+  detectMarketRegime, getRegimeModifier, applyIntradayRegimeOverride,
+  updateOversoldTracker, recordGateBlock, checkMacroShift,
+  checkSectorETF, isGLDEntryAllowed, isXLEEntryAllowed, isTLTEntryAllowed,
+} = require('./scoring');
 
 const {
   getRegimeRulebook, scoreCandidate: EE_scoreCandidate, evaluateEntry,
@@ -42,57 +46,45 @@ const {
 const {
   executeCreditSpread, executeDebitSpread, executeTrade, executeIronCondor,
   findContract, calcPositionSize,
-
 } = require('./execution');
 
 const {
   closePosition, partialClose, confirmPendingOrder, syncCashFromAlpaca,
-
 } = require('./closeEngine');
 
 const {
   runReconciliation, syncPositionPnLFromAlpaca,
 } = require('./reconciler');
 
-const { runAgentRescore } = require('./agent');;
+const {
+  getAgentDayPlan, getAgentMacroAnalysis, runAgentRescore, triggerRescore,
+} = require('./agent');
 
 const {
   getDrawdownProtocol, checkConcentrationRisk, checkAllFilters,
   countRecentDayTrades, isDayTrade, getStreakAnalysis, runStressTest,
   checkScaleIns, calcThesisIntegrity,
-  setDryRunModeRisk
 } = require('./risk');
 
-const { checkExits, fetchPositionData 
-} = require('./exitEngine');;
+const {
+  checkExits, fetchPositionData,
+  getTimeAdjustedStop, getDTEExitParams, applyExitUrgency, getTimeOfDayAnalysis,
+} = require('./exitEngine');
 
-const { sendMorningBriefing, sendEmail, setReportingContext, sendResendEmail } = require('./reporting');
+const { sendMorningBriefing, sendEmail, setReportingContext } = require('./reporting');
 
 const {
   WATCHLIST, CAPITAL_FLOOR, MIN_SCORE, MIN_SCORE_CREDIT, MAX_HEAT,
   MAX_SECTOR_PCT, STOP_LOSS_PCT, FAST_STOP_PCT, FAST_STOP_HOURS,
   TAKE_PROFIT_PCT, PARTIAL_CLOSE_PCT, TRAIL_ACTIVATE_PCT, TRAIL_STOP_PCT,
-  BREAKEVEN_LOCK_PCT, PDT_LIMIT, PDT_PROFIT_EXIT, PDT_STOP_LOSS,
+  BREAKEVEN_LOCK_PCT, PDT_RULE_ACTIVE, PDT_LIMIT, PDT_PROFIT_EXIT, PDT_STOP_LOSS,
   MS_PER_DAY, TRIGGER_COOLDOWN_MS, SAME_DAY_INTERVAL, OVERNIGHT_INTERVAL,
   INDIVIDUAL_STOCKS_ENABLED, MONTHLY_BUDGET, MACRO_REVERSAL_PCT,
   TARGET_DELTA_MIN, TARGET_DELTA_MAX,
   ALPACA_KEY, ALPACA_SECRET, ALPACA_DATA, ALPACA_OPT_SNAP, ALPACA_OPTIONS,
-  INDIVIDUAL_STOCK_WATCHLIST,
-  GMAIL_USER, MAX_GAP_PCT, MIN_STOCK_PRICE, RESEND_API_KEY
 } = require('./constants');
 
 let scanRunning  = false;
-let _lastScanStart = 0;   // watchdog timestamp — set at scan start, reset on completion
-// Stub: getBenchmarkComparison not yet modularized
-async function getBenchmarkComparison() { return null; }
-// Stub: getEarningsQualityScore
-async function getEarningsQualityScore() { return { signal: 'neutral' }; }
-// Stub: getLiveSignals (alias for getDynamicSignals)
-async function getLiveSignals(ticker, bars, intraday) { return getDynamicSignals(ticker, bars, intraday); }
-// Stub: getCached/setCache
-const _scanCache = new Map();
-function getCached(key) { const v = _scanCache.get(key); return v && v.exp > Date.now() ? v.val : null; }
-function setCache(key, val, ttlMs=300000) { _scanCache.set(key, { val, exp: Date.now() + ttlMs }); }
 let _scanGen     = 0; // increments each scan - finally block only resets its own generation
 let lastMedScan  = 0;  // 5 minute tier
 let lastSlowScan = 0;  // 15 minute tier
@@ -169,35 +161,16 @@ async function runScan() {
   // IVR 80+ = sell premium. IVR 20- = buy premium. IVR 50-80 = neutral.
   if (!state._vixRolling) state._vixRolling = [];
   state._vixRolling.push(newVIX);
-  if (state._vixRolling.length > 252) state._vixRolling.shift(); // short-term buffer for velocity
-
-  // _vixDaily: separate daily-bar array for IVR percentile — never flushed by intraday scans
-  // Seeded from VIXY at boot; appended once per calendar day with today's closing VIX
-  if (!state._vixDaily || state._vixDaily.length === 0) {
-    // First scan after boot with no daily history — copy seed from _vixRolling if it has range
-    const _vdMin = Math.min(...state._vixRolling), _vdMax = Math.max(...state._vixRolling);
-    if (_vdMax - _vdMin > 10) state._vixDaily = [...state._vixRolling]; // healthy seed
-  }
-  const _todayStr = new Date().toISOString().slice(0,10);
-  if (state._vixDailyLastDate !== _todayStr) {
-    if (!state._vixDaily) state._vixDaily = [];
-    state._vixDaily.push(parseFloat(newVIX.toFixed(2)));
-    if (state._vixDaily.length > 504) state._vixDaily.shift(); // 2 years daily
-    state._vixDailyLastDate = _todayStr;
-    markDirty();
-  }
+  if (state._vixRolling.length > 252) state._vixRolling.shift(); // 1 year rolling
   // OPT-1+5: Sort once per meaningful VIX change, read min/max from sorted ends
   // Cache sorted array -- VIX moves <0.5 pts between scans 95% of the time
   const _prevSortedVix = state._sortedVixCache;
   const _prevSortedVixVal = state._sortedVixCacheVal || 0;
   let sortedVix;
-  const _ivrLen = (state._vixDaily && state._vixDaily.length > 30) ? state._vixDaily.length : state._vixRolling.length;
-  if (_prevSortedVix && Math.abs(newVIX - _prevSortedVixVal) < 0.5 && _prevSortedVix.length === _ivrLen) {
+  if (_prevSortedVix && Math.abs(newVIX - _prevSortedVixVal) < 0.5 && _prevSortedVix.length === state._vixRolling.length) {
     sortedVix = _prevSortedVix; // use cached sort
   } else {
-    // Use _vixDaily for percentile (stable 2yr history); fall back to _vixRolling
-    const _ivrSource = (state._vixDaily && state._vixDaily.length > 30) ? state._vixDaily : state._vixRolling;
-    sortedVix = [..._ivrSource].sort((a, b) => a - b);
+    sortedVix = [...state._vixRolling].sort((a, b) => a - b);
     state._sortedVixCache    = sortedVix;
     state._sortedVixCacheVal = newVIX;
   }
@@ -244,7 +217,7 @@ async function runScan() {
                : state._ivRank >= 50 ? "elevated" // credit spreads allowed
                : state._ivRank >= 30 ? "normal"   // neutral
                : "low";                            // buy premium (debit preferred)
-  logEvent("scan", `[IV] Rank:${state._ivRank} (${state._ivEnv}) | VIX:${newVIX} | P5-P95:[${vixP5.toFixed(1)}-${vixP95.toFixed(1)}] | AbsRange:[${vixMin.toFixed(1)}-${vixMax.toFixed(1)}] | Daily:${(state._vixDaily||[]).length}d`);
+  logEvent("scan", `[IV] Rank:${state._ivRank} (${state._ivEnv}) | VIX:${newVIX} | P5-P95:[${vixP5.toFixed(1)}-${vixP95.toFixed(1)}] | AbsRange:[${vixMin.toFixed(1)}-${vixMax.toFixed(1)}] | History:${state._vixRolling.length}d`);
 
   // - Confirm any pending mleg order from previous scan -
   // Must run before entry logic - if filled, records position and clears pending
@@ -833,7 +806,7 @@ async function runScan() {
 
   const macroBullish      = rb.gates.macroBullishBlock; // from rulebook (replaces old derivation)
   // pdtCount already computed before exit checks
-  const pdtBlocked    = !dryRunMode && pdtCount >= PDT_LIMIT;
+  const pdtBlocked    = PDT_RULE_ACTIVE && !dryRunMode && pdtCount >= PDT_LIMIT;
   if (pdtBlocked) logEvent("filter", `PDT limit reached (${pdtCount}/${PDT_LIMIT} day trades in 5 days) - same-day exits blocked, new entries still allowed`);
 
   // Agent macro signal gates puts - replaces blunt SPY recovery detector
@@ -1969,9 +1942,8 @@ async function runScan() {
       logEvent("filter", `[DRAWDOWN] Entries paused - drawdown critical (${ddProtocol.message})`);
       continue;
     }
-    const _circuit = getCircuitState();
-    if (_circuit.open) {
-      logEvent("filter", `[CIRCUIT] Entries paused - Alpaca API degraded (${_circuit.consecFails} consecutive failures)`);
+    if (_alpacaCircuitOpen) {
+      logEvent("filter", `[CIRCUIT] Entries paused - Alpaca API degraded (${_alpacaConsecFails} consecutive failures)`);
       continue;
     }
     // BF-W4: Block entries when spiral is active for the same type
@@ -2632,13 +2604,10 @@ async function runScan() {
 
 module.exports = {
   runScan,
+  // Export mutable scanner state for server.js dashboard and API endpoints
   getScannerState: () => ({
-    scanRunning,
-    dryRunMode,
-    marketContext,
-    lastScanStart: _lastScanStart,
+    scanRunning, dryRunMode, marketContext,
     circuit: getCircuitState(),
   }),
   setDryRunMode: (v) => { dryRunMode = v; },
-  resetScanLock:  () => { scanRunning = false; },
 };
