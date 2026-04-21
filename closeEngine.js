@@ -41,8 +41,9 @@ const { calcCreditSpreadTP, realizedPnL ,
   openRisk, totalCap
 }     = require('./signals');
 const { STOP_LOSS_PCT, TAKE_PROFIT_PCT, PDT_PROFIT_EXIT,
-        PDT_STOP_LOSS, FAST_STOP_PCT, MONTHLY_BUDGET ,
-  ALPACA_KEY, BONUS_AMOUNT, MS_PER_DAY, PDT_LIMIT, REVENUE_THRESHOLD, WATCHLIST
+        PDT_STOP_LOSS, FAST_STOP_PCT, MONTHLY_BUDGET,
+  ALPACA_KEY, BONUS_AMOUNT, MS_PER_DAY, PDT_LIMIT, REVENUE_THRESHOLD, WATCHLIST,
+  TRAIL_ACTIVATE_PCT
 }  = require('./constants');
 const { countRecentDayTrades } = require('./risk');
 
