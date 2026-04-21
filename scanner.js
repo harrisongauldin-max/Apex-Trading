@@ -2627,5 +2627,5 @@ module.exports = {
     scanRunning = false;
     _lastScanStart = 0;
   },
-  setDryRunMode: (v) => { dryRunMode = v; },
+  setDryRunMode: (v) => { dryRunMode = v; if (state) state._dryRunMode = v; },
 };
