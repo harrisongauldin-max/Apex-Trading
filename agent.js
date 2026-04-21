@@ -39,6 +39,22 @@ function initAgent({ logFn, markDirty, saveStateNow, closePosition,
   if (withTimeout)         _withTimeout = withTimeout;
 }
 
+
+// ─── Agent tool definitions (used when agent needs live data) ─────────────────
+const AGENT_TOOLS = [
+  { name: "getQuote",         description: "Get current live price and day change % for a stock ticker",
+    input_schema: { type: "object", properties: { ticker: { type: "string" } }, required: ["ticker"] } },
+  { name: "getLiveSignals",   description: "Get live technical signals for a stock: RSI, momentum, VWAP",
+    input_schema: { type: "object", properties: { ticker: { type: "string" } }, required: ["ticker"] } },
+  { name: "getPositionStatus",description: "Get full status of an open position including P&L, DTE, Greeks, entry reasons",
+    input_schema: { type: "object", properties: { ticker: { type: "string" } }, required: ["ticker"] } },
+  { name: "getMarketStatus",  description: "Get overall market status: SPY price/change, VIX, breadth, PDT remaining, cash",
+    input_schema: { type: "object", properties: {} } },
+  { name: "getIVRank",        description: "Get IV rank (0-100) for the market",
+    input_schema: { type: "object", properties: {} } },
+  { name: "getRegimeStatus",  description: "Get current regime class (A/B/C), days below 200MA, sustained VIX, SPY drawdown",
+    input_schema: { type: "object", properties: {} } },
+];
 async function callClaudeAgent(systemPrompt, userPrompt, maxTokens = 800, useTools = false, enableCache = true, timeoutMs = 30000) {
   if (!ANTHROPIC_API_KEY) return null;
   try {
