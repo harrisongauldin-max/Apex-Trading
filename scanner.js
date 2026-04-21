@@ -1948,8 +1948,9 @@ async function runScan() {
       logEvent("filter", `[DRAWDOWN] Entries paused - drawdown critical (${ddProtocol.message})`);
       continue;
     }
-    if (_alpacaCircuitOpen) {
-      logEvent("filter", `[CIRCUIT] Entries paused - Alpaca API degraded (${_alpacaConsecFails} consecutive failures)`);
+    const _circuit = getCircuitState();
+    if (_circuit.open) {
+      logEvent("filter", `[CIRCUIT] Entries paused - Alpaca API degraded (${_circuit.consecFails} consecutive failures)`);
       continue;
     }
     // BF-W4: Block entries when spiral is active for the same type
