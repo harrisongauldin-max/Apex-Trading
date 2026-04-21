@@ -1,17 +1,9 @@
 // agent.js — ARGO V3.2
 // Claude AI agent: macro analysis, position rescoring, morning briefing.
 'use strict';
-let marketContext = {}; // populated by scanner
-const AGENT_MACRO_CACHE_MS = 5 * 60 * 1000  // 5 minutes;
-const AGENT_TOOLS = [];
 const fetch = require('node-fetch');
-const { ANTHROPIC_API_KEY, ANTHROPIC_MODEL ,
-  MS_PER_DAY, PDT_LIMIT, TRIGGER_COOLDOWN_MS
-} = require('./constants');
-const { state, markDirty } = require('./state');
-const { getAccountPhase ,
-  effectiveHeatCap, isMarketHours
-} = require('./signals');
+const { ANTHROPIC_API_KEY, ANTHROPIC_MODEL, PDT_RULE_ACTIVE, PDT_LIMIT } = require('./constants');
+const { state } = require('./state');
 const { alpacaGet, getStockQuote, getStockBars, getIntradayBars } = require('./broker');
 
 // ─── Module-level cache ──────────────────────────────────────────
@@ -747,7 +739,7 @@ async function runAgentRescore() {
     const chg  = pos.premium > 0 ? (curP - pos.premium) / pos.premium : 0;
     const posIsPDTp = _isDayTrade(pos);
     const posAlpacaBalp = state.alpacaCash || state.cash || 0;
-    const posPDTProtectedp = posAlpacaBalp < 25000 && posIsPDTp;
+    const posPDTProtectedp = PDT_RULE_ACTIVE && posAlpacaBalp < 25000 && posIsPDTp;
     if (state.agentAutoExitEnabled &&
         rescore.recommendation === "EXIT" &&
         rescore.confidence === "high" &&
@@ -787,7 +779,7 @@ async function triggerRescore(pos, triggerReason) {
     const chg  = pos.premium > 0 ? (curP - pos.premium) / pos.premium : 0;
     const posIsPDT = _isDayTrade(pos);
     const posAlpacaBal = state.alpacaCash || state.cash || 0;
-    const posPDTProtected = posAlpacaBal < 25000 && posIsPDT;
+    const posPDTProtected = PDT_RULE_ACTIVE && posAlpacaBal < 25000 && posIsPDT;
     if (state.agentAutoExitEnabled &&
         rescore.recommendation === "EXIT" &&
         rescore.confidence === "high" &&
