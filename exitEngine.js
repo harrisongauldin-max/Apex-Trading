@@ -12,7 +12,7 @@ const { calcRSI, openRisk, realizedPnL,
         getETTime, isMarketHours }             = require('./signals');
 const { getCached, setCache }                  = require('./market');
 const { analyzeNews }                          = require('./market');
-const { calcThesisIntegrity, isDayTrade, countRecentDayTrades } = require('./risk');
+const { calcThesisIntegrity, isDayTrade } = require('./risk');
 const {
   STOP_LOSS_PCT, FAST_STOP_PCT, FAST_STOP_HOURS, TAKE_PROFIT_PCT,
   PARTIAL_CLOSE_PCT, TRAIL_ACTIVATE_PCT, TRAIL_STOP_PCT,
@@ -67,6 +67,7 @@ function getTimeAdjustedStop(pos) {
 }
 
 function getDTEExitParams(dte, daysOpen = 0) {
+  const { countRecentDayTrades } = require('./risk'); // lazy to break circular dep
   const pdtRemaining = Math.max(0, PDT_LIMIT - countRecentDayTrades());
   const pdtTight     = pdtRemaining <= 1;
   const pdtLocked    = pdtRemaining === 0;
