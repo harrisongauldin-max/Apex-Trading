@@ -9,7 +9,8 @@ const BACKUP_FILE = require('path').join(__dirname, 'state-backup.json');
 const fs   = require('fs');
 const path = require('path');
 const fetch = require('node-fetch');
-const { REDIS_URL, REDIS_TOKEN, REDIS_KEY, REDIS_SAVE_INTERVAL, STATE_FILE, MONTHLY_BUDGET } = require('./constants');
+const { REDIS_URL, REDIS_TOKEN, REDIS_KEY, REDIS_SAVE_INTERVAL, STATE_FILE, MONTHLY_BUDGET,
+} = require('./constants');
 
 let lastRedisSave = 0;
 let stateDirty    = false;
