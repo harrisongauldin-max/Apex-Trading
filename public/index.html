@@ -1894,44 +1894,44 @@ function renderNativeSpread(p) {
   const shortStr = parseFloat(p.sellStrike||p.shortStrike) || null;
   const longStr  = parseFloat(p.buyStrike ||p.longStrike)  || null;
   const strikeDisplay = p.isCreditSpread
-    ? \`$\${shortStr||'?'}/$\${longStr||'?'}\`
-    : \`$\${longStr||'?'}/$\${shortStr||'?'}\`;
-  const widthDisplay  = (width > 0 && !isNaN(width)) ? \`$\${width}\` : '--';
-  const maxPrDisplay  = maxPr > 0 ? \`$\${maxPr.toFixed(0)}\` : '--';
-  const maxLsDisplay  = (maxLs > 0 && !isNaN(maxLs)) ? \`$\${maxLs.toFixed(0)}\` : '--';
+    ? ('$' + (shortStr||'?') + '/' + '$' + (longStr||'?'))
+    : ('$' + (longStr||'?') + '/' + '$' + (shortStr||'?'));
+  const widthDisplay  = (width > 0 && !isNaN(width)) ? ('$' + width) : '--';
+  const maxPrDisplay  = maxPr > 0 ? ('$' + maxPr.toFixed(0)) : '--';
+  const maxLsDisplay  = (maxLs > 0 && !isNaN(maxLs)) ? ('$' + maxLs.toFixed(0)) : '--';
 
-  return \`
+  return `
   <div style="background:#050e1a;border:1px solid rgba(0,150,255,.3);border-radius:10px;padding:14px;margin-bottom:10px">
     <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;margin-bottom:12px">
       <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
-        <span style="font-size:16px;font-weight:700;color:var(--blue)">\${p.ticker}</span>
-        <span style="font-size:11px;color:var(--muted)">\${strikeDisplay} \${p.expDate}</span>
-        <span style="font-size:9px;padding:2px 7px;border-radius:10px;background:\${p.isCreditSpread?'rgba(0,255,136,.15)':'rgba(0,150,255,.15)'};color:\${p.isCreditSpread?'var(--green)':'var(--blue)'}">\${p.isCreditSpread?'CREDIT':'DEBIT'} SPREAD</span>
-        <span style="font-size:9px;padding:2px 7px;border-radius:10px;background:rgba(255,80,80,.15);color:#ff5050">\${optType}</span>
+        <span style="font-size:16px;font-weight:700;color:var(--blue)">${p.ticker}</span>
+        <span style="font-size:11px;color:var(--muted)">${strikeDisplay} ${p.expDate}</span>
+        <span style="font-size:9px;padding:2px 7px;border-radius:10px;background:${p.isCreditSpread?'rgba(0,255,136,.15)':'rgba(0,150,255,.15)'};color:${p.isCreditSpread?'var(--green)':'var(--blue)'}">${p.isCreditSpread?'CREDIT':'DEBIT'} SPREAD</span>
+        <span style="font-size:9px;padding:2px 7px;border-radius:10px;background:rgba(255,80,80,.15);color:#ff5050">${optType}</span>
       </div>
       <div style="display:flex;align-items:center;gap:8px">
-        <span style="font-size:11px;font-weight:700;color:\${scoreCol(score)}">Entry: \${score}/100</span>
-        \${rescoreBtn(p.ticker)}
-        \${closeBtn(p.ticker, p.buySymbol||p.contractSymbol||'')}
+        <span style="font-size:11px;font-weight:700;color:${scoreCol(score)}">Entry: ${score}/100</span>
+        ${rescoreBtn(p.ticker)}
+        ${closeBtn(p.ticker, p.buySymbol||p.contractSymbol||'')}
       </div>
     </div>
     <div style="background:rgba(0,0,0,.3);border-radius:8px;padding:10px 14px;margin-bottom:10px;display:flex;gap:24px;flex-wrap:wrap">
-      <div><div style="font-size:9px;color:var(--muted)">UNREALIZED P&amp;L</div><div style="font-size:20px;font-weight:700;color:\${dollarColor}">\${pnlSign(chgDollar)}$\${Math.abs(chgDollar).toFixed(2)}</div></div>
-      <div><div style="font-size:9px;color:var(--muted)">P&amp;L %</div><div style="font-size:20px;font-weight:700;color:\${pctColor}">\${pnlSign(chgDollar)}\${Math.abs(chgPct).toFixed(1)}%</div></div>
-      <div><div style="font-size:9px;color:var(--muted)">EST. POSITION VALUE</div><div style="font-size:16px;font-weight:700">$\${estValue.toFixed(2)}</div></div>
-      <div><div style="font-size:9px;color:var(--muted)">DTE</div><div style="font-size:16px;font-weight:700">\${dte}d</div></div>
+      <div><div style="font-size:9px;color:var(--muted)">UNREALIZED P&amp;L</div><div style="font-size:20px;font-weight:700;color:${dollarColor}">${pnlSign(chgDollar)}$${Math.abs(chgDollar).toFixed(2)}</div></div>
+      <div><div style="font-size:9px;color:var(--muted)">P&amp;L %</div><div style="font-size:20px;font-weight:700;color:${pctColor}">${pnlSign(chgDollar)}${Math.abs(chgPct).toFixed(1)}%</div></div>
+      <div><div style="font-size:9px;color:var(--muted)">EST. POSITION VALUE</div><div style="font-size:16px;font-weight:700">$${estValue.toFixed(2)}</div></div>
+      <div><div style="font-size:9px;color:var(--muted)">DTE</div><div style="font-size:16px;font-weight:700">${dte}d</div></div>
     </div>
     <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:8px">
-      <div><div style="font-size:9px;color:var(--muted)">\${p.isCreditSpread?'NET CREDIT':'NET DEBIT'}</div><div style="font-weight:700">\${fmt(prem)}</div></div>
-      <div><div style="font-size:9px;color:var(--muted)">SPREAD WIDTH</div><div style="font-weight:700">\${widthDisplay}</div></div>
-      <div><div style="font-size:9px;color:var(--muted)">MAX PROFIT</div><div style="font-weight:700;color:var(--green)">\${maxPrDisplay}</div></div>
-      <div><div style="font-size:9px;color:var(--muted)">MAX LOSS</div><div style="font-weight:700;color:var(--red)">\${maxLsDisplay}</div></div>
-      <div><div style="font-size:9px;color:var(--muted)">MARGIN</div><div style="font-weight:700">\${fmt(p.cost)}</div></div>
-      <div><div style="font-size:9px;color:var(--muted)">BREAKEVEN</div><div style="font-weight:700">$\${breakeven}</div></div>
-      <div><div style="font-size:9px;color:var(--muted)">CONTRACTS</div><div style="font-weight:700">\${c}x</div></div>
-      <div><div style="font-size:9px;color:var(--muted)">EXP DATE</div><div style="font-weight:700">\${p.expDate}</div></div>
+      <div><div style="font-size:9px;color:var(--muted)">${p.isCreditSpread?'NET CREDIT':'NET DEBIT'}</div><div style="font-weight:700">${fmt(prem)}</div></div>
+      <div><div style="font-size:9px;color:var(--muted)">SPREAD WIDTH</div><div style="font-weight:700">${widthDisplay}</div></div>
+      <div><div style="font-size:9px;color:var(--muted)">MAX PROFIT</div><div style="font-weight:700;color:var(--green)">${maxPrDisplay}</div></div>
+      <div><div style="font-size:9px;color:var(--muted)">MAX LOSS</div><div style="font-weight:700;color:var(--red)">${maxLsDisplay}</div></div>
+      <div><div style="font-size:9px;color:var(--muted)">MARGIN</div><div style="font-weight:700">${fmt(p.cost)}</div></div>
+      <div><div style="font-size:9px;color:var(--muted)">BREAKEVEN</div><div style="font-weight:700">$${breakeven}</div></div>
+      <div><div style="font-size:9px;color:var(--muted)">CONTRACTS</div><div style="font-weight:700">${c}x</div></div>
+      <div><div style="font-size:9px;color:var(--muted)">EXP DATE</div><div style="font-weight:700">${p.expDate}</div></div>
     </div>
-  </div>\`;
+  </div>`;
 }
 
 // ── Single leg card ────────────────────────────────────────────────────────
@@ -3986,6 +3986,157 @@ function renderScoreDebug(d, el) {
   }
 
   el.innerHTML = out;
+}
+
+
+// ── Missing function stubs ────────────────────────────────────────────────
+async function loadReport() {
+  const el = document.getElementById('report-box');
+  if (!el) return;
+  try {
+    const r = await fetch('/api/report');
+    const d = await r.json();
+    el.textContent = d.report || d.text || JSON.stringify(d, null, 2);
+  } catch(e) { el.textContent = 'Error loading report: ' + e.message; }
+}
+
+async function loadAttribution() {
+  const trades = state.closedTrades || [];
+  const byTicker = {}, bySector = {}, byScore = {};
+  trades.forEach(t => {
+    const k = t.ticker || '?';
+    if (!byTicker[k]) byTicker[k] = { pnl: 0, count: 0 };
+    byTicker[k].pnl += t.pnl || 0; byTicker[k].count++;
+    const s = t.sector || 'Unknown';
+    if (!bySector[s]) bySector[s] = { pnl: 0, count: 0 };
+    bySector[s].pnl += t.pnl || 0; bySector[s].count++;
+    const sc = t.score >= 85 ? '85+' : t.score >= 75 ? '75-84' : '70-74';
+    if (!byScore[sc]) byScore[sc] = { pnl: 0, count: 0 };
+    byScore[sc].pnl += t.pnl || 0; byScore[sc].count++;
+  });
+  const renderAttr = (data, wrap) => {
+    const el = document.getElementById(wrap);
+    if (!el) return;
+    if (!Object.keys(data).length) { el.innerHTML = '<div class="no-data">No closed trades yet.</div>'; return; }
+    const rows = Object.entries(data).sort((a,b) => b[1].pnl - a[1].pnl).map(([k,v]) =>
+      '<div style="display:flex;justify-content:space-between;padding:6px 0;border-bottom:1px solid var(--border)">' +
+      '<span style="font-weight:700">' + k + '</span>' +
+      '<span>' + v.count + ' trades</span>' +
+      '<span style="color:' + (v.pnl>=0?'var(--green)':'var(--red)') + ';font-weight:700">' + (v.pnl>=0?'+':'') + '$' + v.pnl.toFixed(2) + '</span></div>'
+    ).join('');
+    el.innerHTML = '<div class="card">' + rows + '</div>';
+  };
+  renderAttr(byTicker, 'attr-ticker-wrap');
+  renderAttr(bySector, 'attr-sector-wrap');
+  renderAttr(byScore,  'attr-score-wrap');
+}
+
+async function loadTaxLog() {
+  const el = document.getElementById('tax-table-wrap');
+  if (!el) return;
+  const trades = state.closedTrades || [];
+  if (!trades.length) { el.innerHTML = '<div class="no-data">No closed trades yet.</div>'; return; }
+  let html = '<table><thead><tr><th>TICKER</th><th>TYPE</th><th>OPEN</th><th>CLOSE</th><th>P&L</th><th>EXIT</th></tr></thead><tbody>';
+  trades.forEach(t => {
+    const col = (t.pnl||0) >= 0 ? 'var(--green)' : 'var(--red)';
+    html += '<tr><td>' + (t.ticker||'-') + '</td><td>' + (t.optionType||'-').toUpperCase() + '</td>' +
+      '<td>' + (t.openDate||'-') + '</td><td>' + (t.closeDate||t.date||'-') + '</td>' +
+      '<td style="color:' + col + '">' + ((t.pnl||0)>=0?'+':'') + '$' + (t.pnl||0).toFixed(2) + '</td>' +
+      '<td>' + (t.reason||'-') + '</td></tr>';
+  });
+  el.innerHTML = html + '</tbody></table>';
+}
+
+function setBudget() {
+  const val = parseFloat(document.getElementById('budget-input')?.value);
+  if (!val || val < 100) { alert('Enter a valid budget amount (min $100)'); return; }
+  fetch('/api/set-budget', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ budget: val }) })
+    .then(r => r.json()).then(d => { alert('Budget set to $' + val.toFixed(2)); fetchState(); })
+    .catch(e => alert('Error: ' + e.message));
+}
+
+function blacklistTicker() {
+  const input = document.getElementById('blacklist-input');
+  const ticker = (input?.value || '').toUpperCase().trim();
+  if (!ticker) return;
+  fetch('/api/blacklist', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ ticker }) })
+    .then(r => r.json()).then(d => { input.value = ''; fetchState(); })
+    .catch(e => alert('Error: ' + e.message));
+}
+
+function unblacklistTicker(ticker) {
+  fetch('/api/unblacklist', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ ticker }) })
+    .then(r => r.json()).then(() => fetchState())
+    .catch(e => alert('Error: ' + e.message));
+}
+
+function resetMonth() {
+  if (!confirm('Reset monthly revenue counter? This does not affect trade history.')) return;
+  fetch('/api/reset-month', { method:'POST' })
+    .then(r => r.json()).then(d => { alert(d.message || 'Monthly reset done.'); fetchState(); })
+    .catch(e => alert('Error: ' + e.message));
+}
+
+
+// ── Auto-added: functions called by switchTab ────────────────────────────
+async function loadReport() {
+  const box = document.getElementById('report-box');
+  if (box) box.textContent = 'Loading...';
+  try {
+    const r = await fetch('/api/report');
+    const d = await r.json();
+    if (box) box.textContent = d.report || d.text || JSON.stringify(d, null, 2);
+  } catch(e) { if (box) box.textContent = 'Error: ' + e.message; }
+}
+async function loadTaxLog() {
+  const wrap = document.getElementById('tax-table-wrap');
+  try {
+    const r = await fetch('/api/tax-log');
+    const trades = await r.json();
+    if (!trades || !trades.length) { if(wrap) wrap.innerHTML = '<div class="no-data">No closed trades yet.</div>'; return; }
+    let h = '<table><thead><tr><th>DATE</th><th>TICKER</th><th>TYPE</th><th>P&L</th><th>EXIT</th></tr></thead><tbody>';
+    trades.forEach(function(t) { h += '<tr><td>'+(t.date||'--')+'</td><td>'+(t.ticker||'--')+'</td><td>'+(t.tradeType||'--')+'</td><td style="color:'+((t.pnl||0)>=0?'var(--green)':'var(--red)')+'">'+((t.pnl||0)>=0?'+':'')+(t.pnl||0).toFixed(2)+'</td><td>'+(t.reason||'--')+'</td></tr>'; });
+    h += '</tbody></table>';
+    if(wrap) wrap.innerHTML = h;
+  } catch(e) { if(wrap) wrap.innerHTML = '<div class="no-data">Error: ' + e.message + '</div>'; }
+}
+async function loadAttribution() {
+  const trades = state.closedTrades || [];
+  const wrap = document.getElementById('attr-ticker-wrap');
+  if (!trades.length) { if(wrap) wrap.innerHTML = '<div class="no-data">No closed trades yet.</div>'; return; }
+  const byTicker = {};
+  trades.forEach(function(t) { if(!byTicker[t.ticker]) byTicker[t.ticker]={trades:0,pnl:0}; byTicker[t.ticker].trades++; byTicker[t.ticker].pnl+=(t.pnl||0); });
+  let h = '<table><thead><tr><th>TICKER</th><th>TRADES</th><th>P&L</th></tr></thead><tbody>';
+  Object.entries(byTicker).sort(function(a,b){return b[1].pnl-a[1].pnl;}).forEach(function(e2) {
+    h += '<tr><td style="font-weight:700;color:var(--blue)">'+e2[0]+'</td><td>'+e2[1].trades+'</td><td style="color:'+(e2[1].pnl>=0?'var(--green)':'var(--red)')+'">'+((e2[1].pnl>=0?'+':'')+e2[1].pnl.toFixed(2))+'</td></tr>';
+  });
+  h += '</tbody></table>';
+  if(wrap) wrap.innerHTML = h;
+}
+function setBudget() {
+  const input = document.getElementById('budget-input');
+  const val = parseFloat(input ? input.value : 0);
+  if (!val || val < 100) { alert('Enter a valid budget (min $100)'); return; }
+  fetch('/api/set-budget',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({budget:val})})
+    .then(function(r){return r.json();}).then(function(){alert('Budget set to $'+val.toLocaleString());fetchState();}).catch(function(e){alert('Error: '+e.message);});
+}
+function blacklistTicker() {
+  const input = document.getElementById('blacklist-input');
+  const ticker = (input ? input.value : '').trim().toUpperCase();
+  if (!ticker) { alert('Enter a ticker to block'); return; }
+  fetch('/api/blacklist',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({ticker})})
+    .then(function(r){return r.json();}).then(function(){if(input)input.value='';fetchState();}).catch(function(e){alert('Error: '+e.message);});
+}
+function unblacklistTicker(ticker) {
+  fetch('/api/unblacklist',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({ticker})})
+    .then(function(r){return r.json();}).then(fetchState).catch(function(e){alert('Error: '+e.message);});
+}
+async function resetMonth() {
+  if (!confirm('Reset monthly P&L tracker?')) return;
+  const r = await fetch('/api/reset-month', {method:'POST'});
+  const d = await r.json();
+  alert(d.message || 'Monthly stats reset.');
+  fetchState();
 }
 
 </script>
