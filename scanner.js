@@ -2586,9 +2586,10 @@ async function runScan() {
   } finally {
     // Reset failure counter on successful scan completion
     if (!state._scanFailures) state._scanFailures = 0;
-    // Only reset scanRunning if this scan still owns it
-    // (poll loops release scanRunning early - a new scan may have started)
-    if (_scanGen === thisScanGen) scanRunning = false;
+    // Always release the lock — the generation guard was causing permanent deadlocks
+    // when a crash in catch() allowed a new scan to start and increment _scanGen
+    // before finally ran, leaving scanRunning=true forever.
+    scanRunning = false;
   }
 }
 
