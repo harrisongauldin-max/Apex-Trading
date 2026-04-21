@@ -196,11 +196,14 @@ async function runScan() {
     const formulaIVR = Math.min(95, Math.max(5, parseFloat(((newVIX - 12) / 33 * 100).toFixed(1))));
     state._ivRank = formulaIVR;
   }
-  // V2.84 fix: if IVR comes out very low (<=5) but VIX is objectively elevated (>=25),
-  // the rolling window has no low-VIX baseline (fresh start or reset during high-VIX period)
-  // Fall back to formula which is calibrated on full 2012-2024 cycle
+  // V2.84 fix: if IVR comes out very low (<=20) but VIX is objectively elevated (>=25),
+  // the rolling window has no low-VIX baseline (fresh start or reset during high-VIX period).
+  // Also fires when P5 of rolling window is within 2pts of current VIX — meaning VIX is
+  // near the bottom of the observed range, so rank underestimates true expensiveness.
+  // Fall back to formula which is calibrated on full 2012-2024 cycle.
   // VIX 29 = ~52nd percentile historically. VIX 35 = ~70th. VIX 20 = ~24th.
-  if (state._ivRank <= 5 && newVIX >= 20) {
+  const _windowTooNarrowForRank = vixP5 > 0 && (newVIX - vixP5) < 2.0 && newVIX >= 25;
+  if ((state._ivRank <= 20 || _windowTooNarrowForRank) && newVIX >= 20) {
     const formulaIVR = Math.min(95, Math.max(5, parseFloat(((newVIX - 12) / 33 * 100).toFixed(1))));
     // Critical: if VIX is BELOW the rolling window P5, IV is at a relative LOW.
     // Premium is contracting — credit spreads are less attractive, not more.
