@@ -3,6 +3,8 @@
 'use strict';
 
 // Local cache (mirrors market.js getCached/setCache — avoids circular dependency)
+const _sigCache = new Map(); // 90-second signal cache per ticker
+
 const _localCache = new Map();
 function getCached(key, ttl=60000) { const e=_localCache.get(key); return (e&&Date.now()-e.ts<ttl)?e.data:null; }
 function setCache(key, data) { _localCache.set(key,{data,ts:Date.now()}); return data; }
@@ -270,7 +272,7 @@ async function getDynamicSignals(ticker, bars, intradayBars = null, realOptionsI
   // Cache signals within scan window - same bars = same signals
   const sigKey = `sigs:${ticker}:${(bars||[]).length}`;
   // OPT-3: 90s TTL -- intraday momentum changes minute-to-minute, 5min cache is too stale
-  const sigCached = _slowCache.get(sigKey);
+  const sigCached = _sigCache.get(sigKey);
   if (sigCached && (Date.now() - sigCached.ts) < 90000) return sigCached.data;
   // Use prefetched intraday bars if provided, otherwise fetch now
   if (!intradayBars) intradayBars = await getIntradayBars(ticker);
