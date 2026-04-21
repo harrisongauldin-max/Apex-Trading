@@ -2,6 +2,9 @@
 // Order execution: credit spreads, debit spreads, single-leg options.
 // Handles order submission, fill confirmation, position state updates.
 'use strict';
+
+let dryRunMode = false; // set by scanner via setDryRunMode()
+function setDryRunMode(v) { dryRunMode = v; }
 const fmt = (n) => '$' + (n||0).toFixed(2);
 const MAX_LOSS_PER_TRADE = 500;
 const VIX_REDUCE50 = 35;
@@ -1270,4 +1273,5 @@ module.exports = {
   findContract, bsStrikeForDelta, getOptionsPrice,
   initExecution,
   calcPositionSize,
+
 };;;
