@@ -12,13 +12,12 @@ const { calcRSI, openRisk, realizedPnL,
         getETTime, isMarketHours }             = require('./signals');
 const { getCached, setCache }                  = require('./market');
 const { analyzeNews }                          = require('./market');
-const { calcThesisIntegrity }                  = require('./risk');
-const { isDayTrade }                           = require('./risk');
+const { calcThesisIntegrity, isDayTrade, countRecentDayTrades } = require('./risk');
 const {
   STOP_LOSS_PCT, FAST_STOP_PCT, FAST_STOP_HOURS, TAKE_PROFIT_PCT,
   PARTIAL_CLOSE_PCT, TRAIL_ACTIVATE_PCT, TRAIL_STOP_PCT,
   BREAKEVEN_LOCK_PCT, RIDE_TARGET_PCT, TIME_STOP_DAYS, TIME_STOP_MOVE,
-  PDT_RULE_ACTIVE, PDT_PROFIT_EXIT, PDT_STOP_LOSS, MA50_BUFFER, MS_PER_DAY,
+  PDT_RULE_ACTIVE, PDT_LIMIT, PDT_PROFIT_EXIT, PDT_STOP_LOSS, MA50_BUFFER, MS_PER_DAY,
   MONTHLY_BUDGET, IV_COLLAPSE_PCT, SAME_DAY_INTERVAL, OVERNIGHT_INTERVAL,
   TRIGGER_COOLDOWN_MS,
   ANTHROPIC_API_KEY,
