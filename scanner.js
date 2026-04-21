@@ -33,7 +33,7 @@ const {
   getCached, setCache } = require('./market');
 
 const {
-  scoreIndexSetup, scorePutSetup, scoreMeanReversionCall,
+  scoreIndexSetup, scorePutSetup, scoreMeanReversionCall, scoreCreditSpread,
   detectMarketRegime, getRegimeModifier, applyIntradayRegimeOverride,
   updateOversoldTracker, recordGateBlock, checkMacroShift,
   checkSectorETF, isGLDEntryAllowed, isXLEEntryAllowed, isTLTEntryAllowed,
@@ -658,6 +658,17 @@ async function runScan() {
     marketContext.fearGreed   = fg;
     marketContext.dxy         = dxy;
     marketContext.yieldCurve  = yc;
+    // Wire DXY and yield curve into state so scoreCreditSpread can read them
+    // scoreCreditSpread reads state._dxy and state._yieldEnv — these were never set
+    if (dxy) state._dxy = { ...dxy, updatedAt: Date.now() };
+    // _yieldEnv: derive from yield curve signal for TLT scoring
+    // yc.signal: "steepening" = rising long rates (TLT falls), "flattening" = falling long rates (TLT rallies)
+    // "normal" = flat curve. Map to _yieldEnv for TLT augmentation in scoreCreditSpread.
+    if (yc && yc.signal) {
+      state._yieldEnv = yc.signal === "steepening" ? "steepening"
+                      : yc.signal === "flattening" ? "inverted"  // flattening = long rates falling = TLT bid = like inverted
+                      : "normal";
+    }
     // Real put/call ratio — OPT-PCCE: 15min gate, daily bar
     if (!state._pcceCheckedAt || Date.now() - state._pcceCheckedAt > 15 * 60 * 1000) {
       state._pcceCheckedAt = Date.now();
@@ -749,6 +760,28 @@ async function runScan() {
     } catch(e) { logEvent("warn", `[MA] SPY 200MA fetch failed: ${e.message} — below200MACallBlock disabled`); }
   }
   const spyReturn    = spyBars.length >= 5 ? (spyBars[spyBars.length-1].c - spyBars[0].o) / spyBars[0].o : 0;
+
+  // - SPY 5-DAY AVERAGE INTRADAY RANGE -
+  // Measures how much SPY moves high-to-low each day as % of open
+  // High range (2.5%+) = volatile chop — short strikes less safe, credit spread risk elevated
+  // Updated every scan from daily bars. Same rolling pattern as _vixSustained.
+  if (spyBars.length >= 2) {
+    const todayBar = spyBars[spyBars.length - 1];
+    const todayRange = todayBar.o > 0 ? (todayBar.h - todayBar.l) / todayBar.o : 0;
+    if (!state._spyRangeHistory) state._spyRangeHistory = [];
+    // Only push once per day — check last entry date vs today
+    const _lastRangeDate = state._spyRangeDateLast || '';
+    if (_lastRangeDate !== _todayStr && todayRange > 0) {
+      state._spyRangeHistory.push(parseFloat(todayRange.toFixed(5)));
+      if (state._spyRangeHistory.length > 5) state._spyRangeHistory.shift();
+      state._spyRangeDateLast = _todayStr;
+    }
+    if (state._spyRangeHistory.length >= 1) {
+      state._spyAvgRange = parseFloat(
+        (state._spyRangeHistory.reduce((s, r) => s + r, 0) / state._spyRangeHistory.length).toFixed(5)
+      );
+    }
+  }
   const spyRecovering = (() => {
     if (spyIntraday.length >= 15) {
       const recent  = spyIntraday.slice(-15);
@@ -1633,8 +1666,28 @@ async function runScan() {
         : scoringMacroBase;
       const putResult  = scoreIndexSetup(liveStock, "put",  spyRSI, spyMACD, spyMomentum, breadthVal, state.vix, scoringMacro);
       const callResult = scoreIndexSetup(liveStock, "call", spyRSI, spyMACD, spyMomentum, breadthVal, state.vix, scoringMacro);
-      putSetup  = { score: putResult.score,  reasons: putResult.reasons,  tradeType: putResult.tradeType  || "spread", isMeanReversion: false };
-      callSetup = { score: callResult.score, reasons: callResult.reasons, tradeType: callResult.tradeType || "spread", isMeanReversion: false };
+
+      // Credit spread scoring: use purpose-built scorer instead of patched scoreIndexSetup
+      // scoreIndexSetup is calibrated for debit directional entries — credit spreads have
+      // a different thesis (IV premium collection, trend alignment, theta decay).
+      // scoreCreditSpread scores IVR quality, trend alignment, VIX stability, OTM safety.
+      let putSetupRaw  = { score: putResult.score,  reasons: putResult.reasons,  tradeType: putResult.tradeType  || "spread" };
+      let callSetupRaw = { score: callResult.score, reasons: callResult.reasons, tradeType: callResult.tradeType || "spread" };
+
+      if (creditCallModeActive && isBearTrend) {
+        // Bear call spread: replace call score with dedicated credit scorer
+        const creditCallResult = scoreCreditSpread(liveStock, "credit_call", state.vix, state._ivRank || 50, spyRSI, spyMACD, spyMomentum, breadthVal, scoringMacroBase);
+        callSetupRaw = { score: creditCallResult.score, reasons: creditCallResult.reasons, tradeType: "credit_call" };
+        logEvent("filter", `${liveStock.ticker} credit spread score: ${creditCallResult.score}/100 (dedicated scorer)`);
+      } else if (creditModeActive && !isBearTrend) {
+        // Bull put spread (Regime A / choppy): replace put score with dedicated credit scorer
+        const creditPutResult = scoreCreditSpread(liveStock, "credit_put", state.vix, state._ivRank || 50, spyRSI, spyMACD, spyMomentum, breadthVal, scoringMacroBase);
+        putSetupRaw = { score: creditPutResult.score, reasons: creditPutResult.reasons, tradeType: "credit_put" };
+        logEvent("filter", `${liveStock.ticker} bull put spread score: ${creditPutResult.score}/100 (dedicated scorer)`);
+      }
+
+      putSetup  = { score: putSetupRaw.score,  reasons: putSetupRaw.reasons,  tradeType: putSetupRaw.tradeType,  isMeanReversion: false };
+      callSetup = { score: callSetupRaw.score, reasons: callSetupRaw.reasons, tradeType: callSetupRaw.tradeType, isMeanReversion: false };
       // Correlation suppression: QQQ correlated to SPY (0.90+)
       // Panel decision (7/8): allow both simultaneously at score -80 same direction
       // High conviction overrides correlation block - both signals are independently strong
@@ -1681,7 +1734,11 @@ async function runScan() {
         // In bear regime, credit mode routes to credit_call (sell calls above market)
         // In choppy/bull, credit mode routes to credit_put (sell puts below market)
         const _gldCreditType  = isBearTrend ? "credit_call" : "credit_put";
-        const _gldIntentType  = (creditModeActive && putSetup.score >= MIN_SCORE) ? _gldCreditType : "debit_put";
+        // Fix: use best available score to determine GLD credit intent
+        // In bear trend, creditCallModeActive → check callSetup.score; in bull/choppy → putSetup.score
+        const _gldBestScore   = isBearTrend ? callSetup.score : putSetup.score;
+        const _gldCreditMode  = creditCallModeActive || creditModeActive;
+        const _gldIntentType  = (_gldCreditMode && _gldBestScore >= MIN_SCORE) ? _gldCreditType : "debit_put";
         const gldPutGate  = isGLDEntryAllowed("put",  dxy5d, spy5dReturn, state.vix, liveStock.rsi, liveStock.price || 0, gldMA20Live, _gldIntentType);
         if (!gldCallGate.allowed) { callSetup.score = 0; logEvent("filter", gldCallGate.reason); }
         if (!gldPutGate.allowed)  { putSetup.score  = 0; logEvent("filter", gldPutGate.reason);  }
