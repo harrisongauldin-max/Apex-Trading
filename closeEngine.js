@@ -687,6 +687,33 @@ async function confirmPendingOrder() {
         state.todayTrades++; // B2: increment for credit spread fills
         state._pendingOrder = null;
         logEvent("trade", `[CREDIT SPREAD] ENTERED ${pending.ticker} $${pending.sellStrike}/$${pending.buyStrike} exp ${pending.expDate} | credit $${netCredit} | margin $${marginRequired}`);
+
+        // Journal entry for credit spread OPEN
+        state.tradeJournal.unshift({
+          time:         new Date().toISOString(),
+          ticker:       pending.ticker,
+          action:       "OPEN",
+          optionType:   pending.optionType,
+          isSpread:     true,
+          isCreditSpread: true,
+          strike:       pending.sellStrike,
+          expDate:      pending.expDate,
+          buyStrike:    pending.buyStrike,
+          sellStrike:   pending.sellStrike,
+          spreadLabel:  `$${pending.sellStrike}/$${pending.buyStrike}`,
+          premium:      netCredit,
+          cost:         marginRequired,
+          contracts:    pending.contracts,
+          score:        pending.score,
+          scoreReasons: pending.scoreReasons || [],
+          delta:        null,
+          iv:           null,
+          vix:          state.vix,
+          tradeType:    "credit_spread",
+          reasoning:    `[BEAR CALL SPREAD] Score ${pending.score}/100. Sell $${pending.sellStrike} / Buy $${pending.buyStrike} ${pending.expDate}. Net credit $${netCredit.toFixed(2)}. Max profit $${maxProfit.toFixed(0)}. Max loss $${maxLoss.toFixed(0)}.`,
+        });
+        if (state.tradeJournal.length > 100) state.tradeJournal = state.tradeJournal.slice(0, 100);
+
         await syncCashFromAlpaca();
         await saveStateNow();
         return;
