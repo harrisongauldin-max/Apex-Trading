@@ -12,13 +12,14 @@ const { state, markDirty, saveStateNow, flushStateIfDirty,
         saveDailyLogToRedis }                             = require('./state');
 const { alpacaGet, alpacaPost, alpacaDelete,
         getCircuitState, setBrokerLogger,
-        getStockQuote, getStockBars, getIntradayBars }    = require('./broker');
+        getStockQuote, getStockBars, getIntradayBars,
+        alpacaHeaders, withTimeout }                      = require('./broker');
 const { openRisk, openCostBasis, heatPct, realizedPnL,
         totalCap, stockValue, effectiveHeatCap, getAccountPhase,
         getETTime, isMarketHours, isEntryWindow, calcCreditSpreadTP,
         calcBetaWeightedDelta, calcDrawdownDuration,
         calcRiskOfRuin, calcSharpeRatio, calcVaR,
-        setSignalsLogger }                                = require('./signals');
+        setSignalsLogger, calcMAE }                       = require('./signals');
 const { runScan, getScannerState, setDryRunMode,
         forceResetScanLock }                              = require('./scanner');
 const { runReconciliation, syncPositionPnLFromAlpaca,
