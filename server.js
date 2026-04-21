@@ -1,6 +1,3 @@
-'use strict';
-// Suppress node-fetch punycode deprecation (cosmetic only, Node 22 native fetch available)
-process.env.NODE_NO_WARNINGS = '1';
 // server.js — ARGO V3.2
 // Express API shell, schedulers, and boot sequence (~600 lines).
 'use strict';
@@ -11,50 +8,33 @@ const path    = require('path');
 const fs      = require('fs');
 
 const { state, markDirty, saveStateNow, flushStateIfDirty,
-        logEvent, redisSave, redisLoad, defaultState,
-        saveDailyLogToRedis }                             = require('./state');
-const { alpacaGet, alpacaPost, getStockBars, getStockQuote,
-        getIntradayBars, getCircuitState, setBrokerLogger,
-        alpacaHeaders, withTimeout }                     = require('./broker');
+        logEvent, redisSave, redisLoad, defaultState }   = require('./state');
+const { alpacaGet, alpacaPost, getStockBars,
+        getCircuitState, setBrokerLogger }               = require('./broker');
 const { openRisk, openCostBasis, heatPct, realizedPnL,
-        totalCap, effectiveHeatCap, getAccountPhase, stockValue,
-        calcBetaWeightedDelta, calcSharpeRatio, calcVaR, calcMAE,
-        calcRiskOfRuin, calcDrawdownDuration,
-        getETTime, isMarketHours, isEntryWindow, calcCreditSpreadTP }   = require('./signals');
-const { runScan, getScannerState, setDryRunMode, resetScanLock } = require('./scanner');
-// marketContext and dryRunMode live in scanner.js — read live via getScannerState()
-function getMarketContext() { return getScannerState().marketContext || {}; }
-// dryRunMode lives in scanner.js - controlled via setDryRunMode()
+        totalCap, effectiveHeatCap, getAccountPhase,
+        getETTime, isMarketHours, calcCreditSpreadTP }   = require('./signals');
+const { runScan, getScannerState, setDryRunMode }        = require('./scanner');
 const { runReconciliation, syncPositionPnLFromAlpaca,
         initReconciler }                                  = require('./reconciler');
 const { closePosition, syncCashFromAlpaca }             = require('./closeEngine');
 const { runBacktest }                                    = require('./backtest');
 const { sendEmail, sendMorningBriefing,
-        initReporting, setReportingContext, sendResendEmail, premarketAssessment }             = require('./reporting');
-const { getAgentMacroAnalysis, getAgentRescore,
-        getAgentDayPlan , initAgent
-}                                = require('./agent');
-const { getMacroNews, getUpcomingMacroEvents,
-        registerMacroCallbacks }                          = require('./market');
-const { getTimeAdjustedStop, getTimeOfDayAnalysis, applyExitUrgency } = require('./exitEngine');
-const { getRegimeRulebook }                              = require('./entryEngine');
-const { checkMacroShift, applyIntradayRegimeOverride }   = require('./scoring');
-const { executeCreditSpread: _execCreditSpread }         = require('./execution');
+        initReporting, setReportingContext }             = require('./reporting');
+const { getAgentMacroAnalysis }                          = require('./agent');
 const { getDrawdownProtocol, getPnLByTicker,
         getPnLBySector, getPnLByScoreRange, getTaxLog,
-        getStreakAnalysis, countRecentDayTrades,
-        calcThesisIntegrity }                           = require('./risk');
+        getStreakAnalysis, countRecentDayTrades }        = require('./risk');
 const {
   ALPACA_KEY, ALPACA_SECRET, ALPACA_BASE, ALPACA_DATA, ALPACA_OPTIONS,
   ALPACA_OPT_SNAP, MONTHLY_BUDGET, CAPITAL_FLOOR,
   REDIS_URL, REDIS_TOKEN, REDIS_KEY, REDIS_SAVE_INTERVAL,
   ANTHROPIC_API_KEY, RESEND_API_KEY, GMAIL_USER, MARKETAUX_KEY,
-  WATCHLIST, PDT_LIMIT, MAX_HEAT, STOP_LOSS_PCT,
-  TAKE_PROFIT_PCT, FAST_STOP_HOURS, MS_PER_DAY,
+  WATCHLIST, PDT_RULE_ACTIVE, PDT_LIMIT, MAX_HEAT, STOP_LOSS_PCT,
+  TAKE_PROFIT_PCT, FAST_STOP_HOURS, MS_PER_DAY, SCAN_INTERVAL,
   TRIGGER_COOLDOWN_MS, SAME_DAY_INTERVAL, OVERNIGHT_INTERVAL,
-  MACRO_REVERSAL_PCT,
+  MACRO_REVERSAL_PCT, SCAN_WATCHDOG_MS: _SCAN_WATCHDOG_MS,
   INDIVIDUAL_STOCKS_ENABLED,
-  INDIVIDUAL_STOCK_WATCHLIST, STATE_FILE,
 } = require('./constants');
 
 const app  = express();
@@ -65,23 +45,19 @@ app.use(express.static(path.join(__dirname, 'public')));
 
 setBrokerLogger((type, msg) => logEvent(type, msg), null);
 
-// ─── Stubs for functions referenced in routes but not yet modularized ─
-const INSTRUMENT_CONSTRAINTS = {};
-const fmt = (n) => '$' + (n||0).toFixed(2);
-async function updateAfterHoursContext() { /* stub */ }
-async function getAgentPostMarketAssessment(label) {
-  logEvent('macro', `[${label}] Post-market assessment (stub — agent not yet modularized)`);
+function requireSecret(req, res, next) {
+  if (!ARGO_SECRET) {
+    // No secret configured -- log warning but allow (backwards compat during deploy)
+    logEvent("warn", "[AUTH] ARGO_SECRET not set -- destructive endpoints unprotected");
+    return next();
+  }
+  const provided = req.headers["x-argo-secret"] || req.body?.secret || "";
+  if (provided !== ARGO_SECRET) {
+    logEvent("warn", `[AUTH] Unauthorized request to ${req.path} from ${req.ip}`);
+    return res.status(401).json({ error: "Unauthorized" });
+  }
+  next();
 }
-async function getAgentPreEntryCheck(stock, score, reasons, optionType) {
-  return { pass: true, confidence: 'medium', reasoning: 'Pre-entry check stub' };
-}
-function buildMonthlyReport() {
-  const trades = state.closedTrades || [];
-  const pnl = trades.reduce((s,t) => s + (t.pnl||0), 0);
-  return `Monthly Report: ${trades.length} trades | P&L: $${pnl.toFixed(2)}`;
-}
-const executeCreditSpread = _execCreditSpread || (async () => null);
-
 
 async function initState() {
   const saved = await redisLoad();
@@ -301,8 +277,7 @@ async function initState() {
         if (seedMax - seedMin >= 10) {
           // Valid range - seed is meaningful
           // V2.83: use P5-P95 trimmed range to prevent outlier poisoning
-          state._vixDaily   = seedReadings.slice(-504); // 2yr daily for IVR percentile
-        state._vixRolling = seedReadings.slice(-252);  // keep for velocity calc
+          state._vixRolling = seedReadings.slice(-252);
           const sortedSeed  = [...state._vixRolling].sort((a, b) => a - b);
           const seedP5  = sortedSeed[Math.floor(sortedSeed.length * 0.05)] || seedMin;
           const seedP95 = sortedSeed[Math.floor(sortedSeed.length * 0.95)] || seedMax;
@@ -340,14 +315,6 @@ async function initState() {
   }
 
   // - POSITION RECONCILIATION - runs on startup and every 5 minutes -
-  initReconciler({
-    state,
-    logFn:              logEvent,
-    redisSaveFn:        redisSave,
-    calcCreditSpreadTP: calcCreditSpreadTP,
-    indStockList:       [],
-    markDirtyFn:        markDirty,
-  });
   await runReconciliation();
 
 
@@ -561,13 +528,13 @@ setInterval(() => {
 // C3: Scan watchdog -- prevents permanent scanRunning=true lockout
 // If a scan hangs (Redis timeout, API freeze), scanRunning stays true and
 // subsequent scans are skipped silently. Watchdog force-resets after 90 seconds.
+let _lastScanStart = 0;
 const SCAN_WATCHDOG_MS = 90 * 1000;
 setInterval(() => {
   const _scanState = getScannerState();
-  const _lastScanStart = _scanState.lastScanStart || 0;
   if (_scanState.scanRunning && _lastScanStart > 0 && (Date.now() - _lastScanStart) > SCAN_WATCHDOG_MS) {
     logEvent("warn", `[WATCHDOG] Scan running ${((Date.now()-_lastScanStart)/1000).toFixed(0)}s -- force-resetting scanRunning`);
-    resetScanLock();
+    _lastScanStart = 0;
   }
 }, 15 * 1000);
 
@@ -591,7 +558,7 @@ setTimeout(async () => {
     logEvent("macro", "[AGENT] Running initial macro analysis on startup...");
     try {
       const macro = await getMacroNews();
-      if (macro) { markDirty(); } // macro stored in state._agentMacro by agent module
+      if (macro) { marketContext.macro = macro; markDirty(); }
     } catch(e) { logEvent("warn", `[AGENT] Startup macro failed: ${e.message}`); }
     _lastAgentInterval = Date.now();
   }
@@ -608,7 +575,7 @@ setInterval(async () => {
   try {
     const macro = await getMacroNews();
     if (macro) {
-      // macro stored in state._agentMacro — no local marketContext write needed
+      marketContext.macro = macro;
       markDirty();
     }
   } catch(e) { logEvent("warn", `[AGENT] Interval macro failed: ${e.message}`); }
@@ -812,16 +779,6 @@ cron.schedule("0 13,14 * * 1", async () => {
   }
 });
 
-
-// Wire market.js callbacks to break circular dependency (market → scoring → market)
-registerMacroCallbacks({
-  checkMacroShift:             checkMacroShift,
-  applyIntradayRegimeOverride: applyIntradayRegimeOverride,
-  applyExitUrgency:            applyExitUrgency,
-});
-initAgent({
-  saveStateNow: saveStateNow,
-});
 // - Express API -
 app.use(express.json());
 app.use(express.static(path.join(__dirname, "public")));
@@ -829,7 +786,6 @@ app.use(express.static(path.join(__dirname, "public")));
 // C12: Shared-secret auth for destructive endpoints
 // Set ARGO_SECRET env var in Railway. Without it all destructive ops are blocked.
 const ARGO_SECRET = process.env.ARGO_SECRET || "";
-
 function requireSecret(req, res, next) {
   if (!ARGO_SECRET) {
     // No secret configured -- log warning but allow (backwards compat during deploy)
@@ -845,7 +801,6 @@ function requireSecret(req, res, next) {
 }
 
 app.get("/api/state", async (req, res) => {
-  try {
   res.json({
     ...state,
     heatPct:       parseFloat((heatPct()*100).toFixed(1)),
@@ -860,7 +815,7 @@ app.get("/api/state", async (req, res) => {
       correct120: state._agentAccuracy.correct120,
       pending:    state._agentAccuracy.pending.length,
     } : null,
-    alpacaCircuit: { open: getCircuitState().open, consecFails: getCircuitState().consecFails },
+    alpacaCircuit: { open: _alpacaCircuitOpen, consecFails: _alpacaConsecFails },
     avgScanIntervalMs: state._avgScanIntervalMs || 0,
     portfolioBetaDelta: state._portfolioBetaDelta || 0,
     accountPhase: getAccountPhase(),
@@ -887,11 +842,12 @@ app.get("/api/state", async (req, res) => {
     pdtRemaining:       Math.max(0, PDT_LIMIT - countRecentDayTrades()),
     alpacaDayTradesLeft: state._alpacaDayTradesLeft ?? null,
     pdtSource:          state._alpacaDayTradeCount !== undefined ? "alpaca" : "internal",
+    pdtSource:          state._alpacaDayTradeCount !== undefined ? "alpaca" : "internal",
     patternDayTrader:   state._patternDayTrader || false,
 
     tickerBlacklist:    state.tickerBlacklist || [],
     pdtLimit:           PDT_LIMIT,
-    pdtBlocked:         countRecentDayTrades() >= PDT_LIMIT,
+    pdtBlocked:         PDT_RULE_ACTIVE && countRecentDayTrades() >= PDT_LIMIT,
     exitStats:          state.exitStats || {},
     agentMacro:         state._agentMacro || null,
     dayPlan:            state._dayPlan || null,
@@ -903,19 +859,19 @@ app.get("/api/state", async (req, res) => {
     scanFailures:       state._scanFailures || 0,
     ivrDebitBlocked:    (state._ivRank || 50) < 15,
     ivrCaution:         (state._ivRank || 50) >= 15 && (state._ivRank || 50) < 25,
-    macroCalendar:      getMarketContext().macroCalendar,
+    macroCalendar:      marketContext.macroCalendar,
     upcomingEvents:     getUpcomingMacroEvents(7),
-    regime:             getMarketContext().regime,
-    concentration:      getMarketContext().concentration,
-    stressTest:         getMarketContext().stressTest,
-    drawdownProtocol:   getMarketContext().drawdownProtocol,
-    benchmark:          getMarketContext().benchmark,
+    regime:             marketContext.regime,
+    concentration:      marketContext.concentration,
+    stressTest:         marketContext.stressTest,
+    drawdownProtocol:   marketContext.drawdownProtocol,
+    benchmark:          marketContext.benchmark,
     timeOfDay:          getTimeOfDayAnalysis(),
-    monteCarlo:         getMarketContext().monteCarlo,
-    kelly:              getMarketContext().kelly,
-    relativeValue:      getMarketContext().relativeValue,
-    globalMarket:       getMarketContext().globalMarket,
-    streaks:            getMarketContext().streaks,
+    monteCarlo:         marketContext.monteCarlo,
+    kelly:              marketContext.kelly,
+    relativeValue:      marketContext.relativeValue,
+    globalMarket:       marketContext.globalMarket,
+    streaks:            marketContext.streaks,
     calmar:             calcCalmarRatio(),
     informationRatio:   calcInformationRatio(),
     drawdownDuration:   calcDrawdownDuration(),
@@ -931,10 +887,6 @@ app.get("/api/state", async (req, res) => {
     lastScanScores:     state._lastScanScores || {},
     watchlist:          WATCHLIST.map(w => ({ ticker: w.ticker, sector: w.sector, beta: w.beta, isPrimary: w.isPrimary, catalyst: w.catalyst })),
   });
-  } catch(e) {
-    logEvent("error", `/api/state threw: ${e.message}`);
-    res.status(500).json({ error: e.message, stack: e.stack?.split("\n")[1] });
-  }
 });
 
 // - TEST ENDPOINT: Thesis integrity simulator -
@@ -1390,23 +1342,20 @@ app.get("/api/logs/history", async (req, res) => {
   }
 });
 
-app.post("/api/scan", async (req,res) => {
-  res.json({ok:true});
-  runScan().catch(e => logEvent("error", `Manual scan error: ${e.message}`));
-});
+app.post("/api/scan",        async (req,res) => { res.json({ok:true}); runScan(); });
 
 // - Test scan - forces a dry run scan regardless of market hours or day -
 // Use this after-hours to verify scoring, filter logic, and exit checks
 // Automatically re-disables dry run after the scan completes
 app.post("/api/test-scan", async (req, res) => {
   if (getScannerState().scanRunning) return res.json({ error: "Scan already running" });
-  const wasDryRun = getScannerState().dryRunMode;
-  setDryRunMode(true);
+  const wasDryRun = dryRunMode;
+  dryRunMode = true;
   res.json({ ok: true, message: "Test scan started - dry run forced for this cycle. Check /api/logs for results." });
   try {
     await runScan();
   } finally {
-    if (!wasDryRun) setDryRunMode(false); // restore previous state
+    if (!wasDryRun) dryRunMode = false; // restore previous state
   }
 });
 app.post("/api/close/:tkr", requireSecret,  async (req,res) => {
@@ -1514,12 +1463,12 @@ app.post("/api/dry-run-scan", async (req, res) => {
     waited += 500;
   }
   if (getScannerState().scanRunning) return res.json({ error: "Scan still running after 35s - try again" });
-  setDryRunMode(true);
+  dryRunMode = true;
   logEvent("scan", "- DRY RUN SCAN STARTED -");
   try {
     await runScan();
   } finally {
-    setDryRunMode(false);
+    dryRunMode = false;
     logEvent("scan", "- DRY RUN SCAN COMPLETE -");
   }
   // Return all dryrun log entries from this scan
@@ -1754,25 +1703,21 @@ app.get("/api/test-options/:ticker", async (req, res) => {
 
 // Health check endpoint
 app.get("/api/health", (req, res) => {
-  try {
-    const lastScan = state.lastScan ? new Date(state.lastScan) : null;
-    const msSinceLastScan = lastScan ? Date.now() - lastScan.getTime() : 999999;
-    res.json({
-      status:        "ok",
-      uptime:        process.uptime(),
-      lastScan:      state.lastScan,
-      msSinceLastScan,
-      positions:     (state.positions||[]).length,
-      cash:          state.cash,
-      vix:           state.vix,
-      marketContext: getMarketContext(),
-      sharpe:        calcSharpeRatio(),
-      var95:         calcVaR(),
-      mae:           calcMAE(),
-    });
-  } catch(e) {
-    res.json({ status: "ok", uptime: process.uptime(), error: e.message });
-  }
+  const lastScan = state.lastScan ? new Date(state.lastScan) : null;
+  const msSinceLastScan = lastScan ? Date.now() - lastScan.getTime() : 999999;
+  res.json({
+    status:        "ok",
+    uptime:        process.uptime(),
+    lastScan:      state.lastScan,
+    msSinceLastScan,
+    positions:     state.positions.length,
+    cash:          state.cash,
+    vix:           state.vix,
+    marketContext,
+    sharpe:        calcSharpeRatio(),
+    var95:         calcVaR(),
+    mae:           calcMAE(),
+  });
 });
 
 // [duplicate /api/reset-circuit removed]
