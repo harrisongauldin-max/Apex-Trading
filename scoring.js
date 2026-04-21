@@ -844,6 +844,8 @@ function scoreIndexSetup(stock, optionType, spyRSI, spyMACD, spyMomentum, breadt
     // Thesis A: Mean Reversion Call - RSI crash + high VIX + capitulation
     // Thesis B: Trending Bull Call  - VIX compression + breadth thrust + momentum
     // Both share this path but scoring weights differ by regime/RSI context
+    // Hoisted to call branch scope so RSI and MACD blocks can reference it
+    const isCreditCallMode = tradeType === "credit";
 
     // - Agent macro signal - primary gate -
     if (["strongly bullish","bullish"].includes(signal) && confidence === "high") { score += 35; reasons.push(`Agent ${signal} high confidence (+35)`); }
@@ -870,7 +872,6 @@ function scoreIndexSetup(stock, optionType, spyRSI, spyMACD, spyMomentum, breadt
       // Credit calls (bear call spreads) in Regime B: legitimate directional premium trade
       // Debit calls in bear regime: wrong — fighting the trend
       // tradeType === "credit" when creditModeActive (scoringMacro has tradeType:"credit")
-      const isCreditCallMode = tradeType === "credit";
       if (isCreditCallMode) {
         // Bear call spread: structural alignment bonus — selling calls above a falling market
         score += 5; reasons.push(`Regime: ${regime} - bear call spread aligned with downtrend (+5)`);
