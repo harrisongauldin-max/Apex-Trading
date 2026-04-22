@@ -1371,6 +1371,8 @@ function renderMetrics() {
   const pdtSource    = state.pdtSource || "internal";
   const pdtEl        = document.getElementById('pdt-remaining');
   const pdtCard      = document.getElementById('pdt-card');
+  // Hide PDT card entirely when rule is inactive (sunset April 21 2026)
+  if (pdtCard) pdtCard.style.display = state.pdtRuleActive === false ? 'none' : '';
   const pdtSub       = document.getElementById('pdt-sub');
   pdtEl.textContent  = pdtBlocked ? 'BLOCKED' : pdtRemaining;
   pdtSub.textContent = pdtUsed + ' of ' + pdtLimit + ' used · ' + (pdtSource === 'alpaca' ? '✓ Alpaca' : '⚠ internal');
@@ -1547,11 +1549,19 @@ function renderMetrics() {
   const mc = state.monteCarlo || {}; // mc = monteCarlo
   const mcMed = document.getElementById("mc-median");
   if (mcMed && mc.median !== undefined) {
-    mcMed.textContent = (mc.median >= 0 ? "+" : "") + "$" + Math.abs(mc.median).toFixed(0);
-    mcMed.style.color = mc.median >= 0 ? "var(--green)" : "var(--red)";
-    document.getElementById("mc-prob").textContent = (mc.probProfit || 0) + "% chance of profit";
-    document.getElementById("mc-range").textContent = "$" + (mc.percentile5||0).toFixed(0) + " / +" + "$" + (mc.percentile95||0).toFixed(0);
-    document.getElementById("mc-range").style.color = "var(--muted)";
+    if (mc.median != null) {
+      mcMed.textContent = (mc.median >= 0 ? "+" : "") + "$" + Math.abs(mc.median).toFixed(0);
+      mcMed.style.color = mc.median >= 0 ? "var(--green)" : "var(--red)";
+      document.getElementById("mc-prob").textContent = (mc.probProfit || 0) + "% chance of profit";
+      document.getElementById("mc-range").textContent = (mc.percentile5 != null ? "$"+mc.percentile5.toFixed(0) : "$0") + " / +$" + (mc.percentile95 != null ? mc.percentile95.toFixed(0) : "0");
+      document.getElementById("mc-range").style.color = "var(--muted)";
+    } else {
+      mcMed.textContent = "--";
+      mcMed.style.color = "var(--muted)";
+      document.getElementById("mc-prob").textContent = mc.message || "Need 10+ closed trades";
+      document.getElementById("mc-range").textContent = "-- / --";
+      document.getElementById("mc-range").style.color = "var(--muted)";
+    }
   }
 
   // Kelly
@@ -1559,11 +1569,15 @@ function renderMetrics() {
   const kellyEl = document.getElementById("kelly-contracts");
   if (kellyEl && kelly.contracts !== undefined) {
     kellyEl.textContent = kelly.contracts + "x contracts";
-    kellyEl.style.color = kelly.winRate >= 55 ? "var(--green)" : "var(--gold)";
-    document.getElementById("kelly-detail").textContent = kelly.winRate + "% win rate · " + kelly.payoffRatio + "x payoff";
-    document.getElementById("kelly-factor").textContent = kelly.kelly || "--";
-    document.getElementById("kelly-factor").style.color = (kelly.kelly||0) > 0 ? "var(--green)" : "var(--red)";
-    document.getElementById("kelly-half").textContent = "half-Kelly: " + (kelly.halfKelly || "--");
+    const hasKellyData = kelly.winRate != null && kelly.payoffRatio != null;
+    kellyEl.style.color = (kelly.winRate >= 55) ? "var(--green)" : "var(--gold)";
+    document.getElementById("kelly-detail").textContent = hasKellyData
+      ? (kelly.winRate.toFixed(0) + "% win rate · " + kelly.payoffRatio.toFixed(2) + "x payoff")
+      : (kelly.note || "Need 10+ trades");
+    document.getElementById("kelly-factor").textContent = kelly.kelly != null ? kelly.kelly.toFixed(3) : "--";
+    document.getElementById("kelly-factor").style.color = (kelly.kelly > 0) ? "var(--green)" : "var(--muted)";
+    document.getElementById("kelly-half").textContent = kelly.halfKelly != null
+      ? ("half-Kelly: " + kelly.halfKelly.toFixed(3)) : "half-Kelly: --";
   }
 
   // Beta-weighted delta
