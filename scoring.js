@@ -532,15 +532,15 @@ function scoreCreditSpread(stock, tradeType, vix, ivRank, spyRSI, spyMACD, spyMo
   // Bear call: RSI elevated = market extended = calls we sold are safely OTM
   // Bull put:  RSI oversold = market compressed = puts we sold are safely OTM
   if (isBearCall) {
-    if (spyRSI >= 65)      { score += 15; reasons.push(`SPY RSI ${spyRSI} elevated - bear call short strike safely OTM (+15)`); }
-    else if (spyRSI >= 55) { score += 8;  reasons.push(`SPY RSI ${spyRSI} above midpoint - bear call adequate buffer (+8)`); }
-    else if (spyRSI >= 45) { score += 3;  reasons.push(`SPY RSI ${spyRSI} - bear call marginal OTM buffer (+3)`); }
-    else if (spyRSI <= 35) { score -= 10; reasons.push(`SPY RSI ${spyRSI} oversold - bear call short strike at risk of breach (-10)`); }
+    if (spyRSI >= 65)      { score += 15; reasons.push(`${stock.ticker} RSI ${spyRSI} elevated - bear call short strike safely OTM (+15)`); }
+    else if (spyRSI >= 55) { score += 8;  reasons.push(`${stock.ticker} RSI ${spyRSI} above midpoint - bear call adequate buffer (+8)`); }
+    else if (spyRSI >= 45) { score += 3;  reasons.push(`${stock.ticker} RSI ${spyRSI} - bear call marginal OTM buffer (+3)`); }
+    else if (spyRSI <= 35) { score -= 10; reasons.push(`${stock.ticker} RSI ${spyRSI} oversold - bear call short strike at risk of breach (-10)`); }
   } else { // isBullPut
-    if (spyRSI <= 35)      { score += 15; reasons.push(`SPY RSI ${spyRSI} oversold - bull put short strike safely OTM (+15)`); }
-    else if (spyRSI <= 45) { score += 8;  reasons.push(`SPY RSI ${spyRSI} below midpoint - bull put adequate buffer (+8)`); }
-    else if (spyRSI <= 55) { score += 3;  reasons.push(`SPY RSI ${spyRSI} - bull put marginal OTM buffer (+3)`); }
-    else if (spyRSI >= 70) { score -= 10; reasons.push(`SPY RSI ${spyRSI} overbought - bull put short strike at risk of breach (-10)`); }
+    if (spyRSI <= 35)      { score += 15; reasons.push(`${stock.ticker} RSI ${spyRSI} oversold - bull put short strike safely OTM (+15)`); }
+    else if (spyRSI <= 45) { score += 8;  reasons.push(`${stock.ticker} RSI ${spyRSI} below midpoint - bull put adequate buffer (+8)`); }
+    else if (spyRSI <= 55) { score += 3;  reasons.push(`${stock.ticker} RSI ${spyRSI} - bull put marginal OTM buffer (+3)`); }
+    else if (spyRSI >= 70) { score -= 10; reasons.push(`${stock.ticker} RSI ${spyRSI} overbought - bull put short strike at risk of breach (-10)`); }
   }
 
   // ── 6. BREADTH CONFIRMATION (0 to +10) ──────────────────────────────────────
@@ -880,17 +880,17 @@ function scoreIndexSetup(stock, optionType, spyRSI, spyMACD, spyMomentum, breadt
       // RSI >=70 + IVR >=70 (expensive options) = move may be priced in, reduce bonus
       const ivpNow = stock.ivPercentile || 50;
       if (ivpNow <= 30 && inBearOrChoppy) {
-        score += 25; reasons.push(`SPY RSI ${spyRSI} overbought + IVP ${ivpNow}% cheap puts - ideal debit put entry (+25)`);
+        score += 25; reasons.push(`${stock.ticker} RSI ${spyRSI} overbought + IVP ${ivpNow}% cheap puts - ideal debit put entry (+25)`);
       } else if (inBearOrChoppy) {
-        score += 20; reasons.push(`SPY RSI ${spyRSI} overbought in bear/choppy regime (+20)`);
+        score += 20; reasons.push(`${stock.ticker} RSI ${spyRSI} overbought in bear/choppy regime (+20)`);
       } else {
-        score += 5;  reasons.push(`SPY RSI ${spyRSI} overbought in bull regime - trend may continue, reduced bonus (+5)`);
+        score += 5;  reasons.push(`${stock.ticker} RSI ${spyRSI} overbought in bull regime - trend may continue, reduced bonus (+5)`);
       }
     }
-    else if (spyRSI >= 60)                                                        { score += 10; reasons.push(`SPY RSI ${spyRSI} elevated (+10)`); }
+    else if (spyRSI >= 60)                                                        { score += 10; reasons.push(`${stock.ticker} RSI ${spyRSI} elevated (+10)`); }
     else if (spyRSI >= 45 && spyRSI < 60 && inBearOrChoppy && entryBias === "puts_on_bounces") {
       // RSI 45-60 in Regime B bounce-fade = mild overbought recovery — valid put entry zone
-      score += 8; reasons.push(`SPY RSI ${spyRSI} in bounce zone - puts_on_bounces Regime B (+8)`);
+      score += 8; reasons.push(`${stock.ticker} RSI ${spyRSI} in bounce zone - puts_on_bounces Regime B (+8)`);
     }
     else if (spyRSI <= 35)                                                        {
       // Credit spreads: oversold = sell fear premium (survivable, not ideal) - reduced bonus
@@ -901,12 +901,12 @@ function scoreIndexSetup(stock, optionType, spyRSI, spyMACD, spyMomentum, breadt
         // V2.81 change 2 (joint): RSI <=35 + IVP >=70 = ideal credit put (fear premium at peak)
         const ivpNow = stock.ivPercentile || 50;
         if (ivpNow >= 70) {
-          score += 10; reasons.push(`SPY RSI ${spyRSI} oversold + IVP ${ivpNow}% - fear premium elevated, credit put viable (+10)`);
+          score += 10; reasons.push(`${stock.ticker} RSI ${spyRSI} oversold + IVP ${ivpNow}% - fear premium elevated, credit put viable (+10)`);
         } else {
-          score += 5;  reasons.push(`SPY RSI ${spyRSI} oversold - credit put survivable but not ideal (+5)`);
+          score += 5;  reasons.push(`${stock.ticker} RSI ${spyRSI} oversold - credit put survivable but not ideal (+5)`);
         }
       } else {
-        score = 0; reasons.push(`SPY RSI ${spyRSI} oversold - debit put hard block (stock already crashed) (+0)`); return { score: 0, reasons, tradeType };
+        score = 0; reasons.push(`${stock.ticker} RSI ${spyRSI} oversold - debit put hard block (stock already crashed) (+0)`); return { score: 0, reasons, tradeType };
       }
     }
     else if (spyRSI <= 45) {
@@ -917,14 +917,14 @@ function scoreIndexSetup(stock, optionType, spyRSI, spyMACD, spyMomentum, breadt
       const inBearTrend = ["trending_bear","breakdown"].includes(regime);
       if (inBearTrend) {
         if (spyRSI <= 40) {
-          score += 0; reasons.push(`SPY RSI ${spyRSI} oversold in bear trend - trend intact, no penalty but size reduced (+0)`);
+          score += 0; reasons.push(`${stock.ticker} RSI ${spyRSI} oversold in bear trend - trend intact, no penalty but size reduced (+0)`);
           // Note: 0.75x sizing applied at execution via regimeBOversoldMod check
           reasons.push(`[OVERSOLD-BEAR] RSI ${spyRSI} <=40 in Regime B - 0.75x sizing applied at execution`);
         } else {
-          score += 0; reasons.push(`SPY RSI ${spyRSI} oversold in bear trend - downtrend intact, no penalty (+0)`);
+          score += 0; reasons.push(`${stock.ticker} RSI ${spyRSI} oversold in bear trend - downtrend intact, no penalty (+0)`);
         }
       } else {
-        score -= 15; reasons.push(`SPY RSI ${spyRSI} oversold for puts - stock already crashed in bull regime (-15)`);
+        score -= 15; reasons.push(`${stock.ticker} RSI ${spyRSI} oversold for puts - stock already crashed in bull regime (-15)`);
       }
     }
 
@@ -1113,23 +1113,23 @@ function scoreIndexSetup(stock, optionType, spyRSI, spyMACD, spyMomentum, breadt
     const intradayOversoldScans = state._intradayOversoldScans?.[stock.ticker] || 0;
     const mrStabilized = intradayOversoldScans >= 3; // 3 scans = ~30 seconds of stability
     if (spyRSI <= 25) {
-      if (mrStabilized) { score += 25; reasons.push(`SPY RSI ${spyRSI} extreme oversold - stabilized (${intradayOversoldScans} scans) - mean reversion call (+25)`); }
-      else              { score += 10; reasons.push(`SPY RSI ${spyRSI} extreme oversold - not yet stabilized (${intradayOversoldScans}/3 scans) - partial credit (+10)`); }
+      if (mrStabilized) { score += 25; reasons.push(`${stock.ticker} RSI ${spyRSI} extreme oversold - stabilized (${intradayOversoldScans} scans) - mean reversion call (+25)`); }
+      else              { score += 10; reasons.push(`${stock.ticker} RSI ${spyRSI} extreme oversold - not yet stabilized (${intradayOversoldScans}/3 scans) - partial credit (+10)`); }
     }
     else if (spyRSI <= 35) {
-      if (mrStabilized) { score += 18; reasons.push(`SPY RSI ${spyRSI} deeply oversold - stabilized - mean reversion (+18)`); }
-      else              { score += 8;  reasons.push(`SPY RSI ${spyRSI} deeply oversold - awaiting stabilization (${intradayOversoldScans}/3 scans) (+8)`); }
+      if (mrStabilized) { score += 18; reasons.push(`${stock.ticker} RSI ${spyRSI} deeply oversold - stabilized - mean reversion (+18)`); }
+      else              { score += 8;  reasons.push(`${stock.ticker} RSI ${spyRSI} deeply oversold - awaiting stabilization (${intradayOversoldScans}/3 scans) (+8)`); }
     }
-    else if (spyRSI <= 42)                                                        { score += 10; reasons.push(`SPY RSI ${spyRSI} oversold (+10)`); }
+    else if (spyRSI <= 42)                                                        { score += 10; reasons.push(`${stock.ticker} RSI ${spyRSI} oversold (+10)`); }
     else if (spyRSI >= 45 && spyRSI <= 58 && ["trending_bull","recovery"].includes(regime)) {
-      score += 12; reasons.push(`SPY RSI ${spyRSI} healthy dip in bull trend - ideal call entry (+12)`);
+      score += 12; reasons.push(`${stock.ticker} RSI ${spyRSI} healthy dip in bull trend - ideal call entry (+12)`);
     }
     else if (spyRSI >= 70) {
       if (isCreditCallMode) {
         // Bear call spreads: RSI overbought = ideal — selling calls into an extended market
-        score += 12; reasons.push(`SPY RSI ${spyRSI} overbought - ideal for bear call spread (+12)`);
+        score += 12; reasons.push(`${stock.ticker} RSI ${spyRSI} overbought - ideal for bear call spread (+12)`);
       } else {
-        score -= 15; reasons.push(`SPY RSI ${spyRSI} overbought for debit calls (-15)`);
+        score -= 15; reasons.push(`${stock.ticker} RSI ${spyRSI} overbought for debit calls (-15)`);
       }
     }
 
@@ -1370,5 +1370,223 @@ module.exports = {
   updateOversoldTracker, recordGateBlock, checkMacroShift,
   checkSectorETF, isGLDEntryAllowed, isXLEEntryAllowed, isTLTEntryAllowed,
   estimateCreditRR,
+  scoreDebitCallSpread,
   initScoring,
 };
+
+// ============================================================
+// scoreDebitCallSpread — purpose-built debit call spread scorer
+// Panel consensus 4/22/2026:
+// Thesis: buy OTM calls, sell further OTM calls to reduce cost.
+// Profit from confirmed bullish momentum. Theta works AGAINST you.
+// You need directional accuracy + magnitude + timing.
+// Min score 75 (higher bar than credit spreads — needs actual move).
+// Seven primary signals + supplementary capped at +15.
+// ============================================================
+function scoreDebitCallSpread(stock, vix, ivRank, rsi, macd, momentum, breadth, agentMacro, state) {
+  let score = 0;
+  const reasons = [];
+
+  const signal     = (agentMacro || {}).signal     || "neutral";
+  const confidence = (agentMacro || {}).confidence || "low";
+  const regime     = (agentMacro || {}).regime     || "neutral";
+  const entryBias  = (agentMacro || {}).entryBias  || "neutral";
+  const vixOutlook = (agentMacro || {}).vixOutlook || (
+    vix >= 32 ? "spiking" : vix >= 25 ? "elevated_stable" : vix >= 20 ? "mean_reverting" : "falling"
+  );
+
+  // Hard blocks — force score to 0 immediately
+  // Debit calls need the market to move UP — these conditions make that impossible
+  const isBearRegime  = ["trending_bear","breakdown"].includes(regime);
+  const agentBearish  = ["bearish","strongly bearish"].includes(signal);
+  const agentAggressive = signal === "aggressive" || signal === "strongly bullish";
+  const vixSpiking    = vixOutlook === "spiking";
+
+  if (agentBearish) {
+    reasons.push(`Agent ${signal} — debit call hard block (bearish macro = calls fail) (BLOCK)`);
+    return { score: 0, reasons, tradeType: "debit_call" };
+  }
+  if (vix > 35) {
+    reasons.push(`VIX ${vix.toFixed(1)} > 35 — debit calls blocked in crisis (premium too expensive) (BLOCK)`);
+    return { score: 0, reasons, tradeType: "debit_call" };
+  }
+  if (rsi > 80) {
+    reasons.push(`RSI ${rsi.toFixed(0)} > 80 — overbought hard block, calls will decay (BLOCK)`);
+    return { score: 0, reasons, tradeType: "debit_call" };
+  }
+  if (macd && macd.includes("bearish crossover") && rsi > 65) {
+    reasons.push(`MACD bearish crossover + RSI ${rsi.toFixed(0)} — exhaustion pattern, debit call blocked (BLOCK)`);
+    return { score: 0, reasons, tradeType: "debit_call" };
+  }
+
+  // ── 1. TREND ALIGNMENT — primary gate (0 to +25) ─────────────────────────
+  // Debit calls need the market trending up or transitioning to up.
+  // Score reflects how well the current trend supports a bullish move.
+  const spyAbove50MA  = state._spyMA50  && state._liveSPY && state._liveSPY > state._spyMA50;
+  const spyAbove200MA = state._spyMA200 && state._liveSPY && state._liveSPY > state._spyMA200;
+  const spyPctBelow50 = state._spyMA50  && state._liveSPY ? (state._spyMA50 - state._liveSPY) / state._spyMA50 : 0;
+
+  if (spyAbove50MA && spyAbove200MA) {
+    score += 25; reasons.push("SPY above 50MA and 200MA - confirmed bull regime, calls aligned (+25)");
+  } else if (spyAbove50MA && !spyAbove200MA) {
+    score += 15; reasons.push("SPY above 50MA but below 200MA - recovering, calls viable (+15)");
+  } else if (spyPctBelow50 < 0.02) {
+    score += 5;  reasons.push(`SPY ${(spyPctBelow50*100).toFixed(1)}% below 50MA - near support, bounce possible (+5)`);
+  } else if (spyPctBelow50 < 0.05) {
+    score -= 10; reasons.push(`SPY ${(spyPctBelow50*100).toFixed(1)}% below 50MA - downtrend, calls fight the trend (-10)`);
+  } else {
+    score -= 20; reasons.push(`SPY ${(spyPctBelow50*100).toFixed(1)}% below 50MA - severe downtrend, debit calls blocked (-20)`);
+  }
+
+  // ── 2. MOMENTUM QUALITY — debit calls need momentum (0 to +25) ───────────
+  // MACD crossover is the highest-conviction signal — trend just starting.
+  // Bearish signals heavily penalized — momentum must be directionally correct.
+  if (macd && macd.includes("bullish crossover")) {
+    score += 25; reasons.push("MACD bullish crossover - trend just started, best debit call entry (+25)");
+  } else if (macd && macd.includes("bullish")) {
+    score += 15; reasons.push("MACD bullish - uptrend confirmed (+15)");
+  } else if (!macd || macd === "neutral" || macd.includes("steady")) {
+    score += 5;  reasons.push("MACD neutral/steady - ambiguous momentum, small bonus (+5)");
+  } else if (macd && macd.includes("bearish crossover")) {
+    score -= 20; reasons.push("MACD bearish crossover - trend reversing, debit call high risk (-20)");
+  } else if (macd && macd.includes("bearish")) {
+    score -= 15; reasons.push("MACD bearish - downtrend, debit call fights momentum (-15)");
+  }
+
+  // ── 3. RSI POSITIONING — room to run (0 to +20) ──────────────────────────
+  // Ideal: mid-range RSI with room to move up. Overbought = no room.
+  // Oversold bounce in recovery regime gets bonus — mean reversion call thesis.
+  const isRecoveryRegime = ["recovery","recovering"].includes(regime);
+  if (rsi >= 45 && rsi <= 60) {
+    score += 20; reasons.push(`${stock.ticker} RSI ${rsi.toFixed(0)} in 45-60 ideal zone - has room to run (+20)`);
+  } else if (rsi >= 35 && rsi < 45) {
+    score += 15; reasons.push(`${stock.ticker} RSI ${rsi.toFixed(0)} recovering from oversold - bounce setup (+15)`);
+  } else if (rsi >= 60 && rsi <= 70) {
+    score += 8;  reasons.push(`${stock.ticker} RSI ${rsi.toFixed(0)} elevated but not extreme (+8)`);
+  } else if (rsi > 70 && rsi <= 80) {
+    score -= 5;  reasons.push(`${stock.ticker} RSI ${rsi.toFixed(0)} overbought - calls may stall (-5)`);
+  } else if (rsi < 35 && isRecoveryRegime) {
+    score += 10; reasons.push(`${stock.ticker} RSI ${rsi.toFixed(0)} extreme oversold in recovery regime - mean reversion (+10)`);
+  } else if (rsi < 35) {
+    score -= 10; reasons.push(`${stock.ticker} RSI ${rsi.toFixed(0)} deeply oversold - no upside catalyst (-10)`);
+  }
+
+  // ── 4. VOLUME CONFIRMATION (0 to +15) ────────────────────────────────────
+  // Calls on low-volume rallies are traps — institutional selling into retail buying.
+  const volPace = stock.volPaceRatio || stock._volPace || 1.0;
+  if (volPace >= 1.5) {
+    score += 15; reasons.push(`Volume pace ${volPace.toFixed(1)}x - strong institutional participation (+15)`);
+  } else if (volPace >= 1.2) {
+    score += 10; reasons.push(`Volume pace ${volPace.toFixed(1)}x - above average (+10)`);
+  } else if (volPace >= 0.8) {
+    score += 5;  reasons.push(`Volume pace ${volPace.toFixed(1)}x - normal (+5)`);
+  } else {
+    score -= 10; reasons.push(`Volume pace ${volPace.toFixed(1)}x - low conviction rally, fade risk (-10)`);
+  }
+
+  // ── 5. BREADTH EXPANSION (0 to +15) ──────────────────────────────────────
+  // A real bull move needs broad participation. Narrow rallies fail.
+  if (breadth >= 65) {
+    score += 15; reasons.push(`Breadth ${breadth.toFixed(0)}% - broad participation, call thesis confirmed (+15)`);
+  } else if (breadth >= 50) {
+    score += 10; reasons.push(`Breadth ${breadth.toFixed(0)}% - majority advancing (+10)`);
+  } else if (breadth >= 35) {
+    score += 3;  reasons.push(`Breadth ${breadth.toFixed(0)}% - marginal participation (+3)`);
+  } else {
+    score -= 10; reasons.push(`Breadth ${breadth.toFixed(0)}% - narrow rally, weak foundation for calls (-10)`);
+  }
+  // Breadth direction — distribution is a warning
+  const breadthChange = state._breadthChange || 0;
+  if (breadthChange <= -5) {
+    score -= 8;  reasons.push(`Breadth falling ${breadthChange.toFixed(0)}pts - distribution signal (-8)`);
+  } else if (breadthChange >= 5) {
+    score += 5;  reasons.push(`Breadth expanding ${breadthChange.toFixed(0)}pts - accumulation signal (+5)`);
+  }
+
+  // ── 6. IV TIMING — debit calls hurt by high IV (-10 to +10) ──────────────
+  // High IVR = expensive options = IV crush risk post-entry.
+  // Low IVR = cheap options = ideal for buying premium.
+  if (ivRank < 30) {
+    score += 10; reasons.push(`IVR ${ivRank.toFixed(0)} low - cheap options, ideal for debit calls (+10)`);
+  } else if (ivRank < 50) {
+    score += 5;  reasons.push(`IVR ${ivRank.toFixed(0)} fair value - debit calls viable (+5)`);
+  } else if (ivRank < 70) {
+    score += 0;  reasons.push(`IVR ${ivRank.toFixed(0)} elevated - debit calls neutral (IV crush risk) (+0)`);
+  } else {
+    score -= 10; reasons.push(`IVR ${ivRank.toFixed(0)} high - expensive options, IV crush risk post-entry (-10)`);
+  }
+
+  // ── 7. AGENT MACRO TIMING (0 to +15) ─────────────────────────────────────
+  // Agent as timing signal — directional confirmation for bull thesis.
+  if (agentAggressive) {
+    score += 15; reasons.push("Agent strongly bullish - debit call timing ideal (+15)");
+  } else if (signal === "bullish" && confidence === "high") {
+    score += 15; reasons.push("Agent bullish high confidence - debit call confirmed (+15)");
+  } else if (signal === "bullish") {
+    score += 12; reasons.push("Agent bullish - debit call thesis supported (+12)");
+  } else if (signal === "mild bullish") {
+    score += 8;  reasons.push("Agent mild bullish - debit call adequate (+8)");
+  } else if (signal === "neutral") {
+    score += 3;  reasons.push("Agent neutral - debit call marginal (+3)");
+  } else if (signal === "mild bearish") {
+    score -= 5;  reasons.push("Agent mild bearish - debit call headwind (-5)");
+  }
+  // strongly bearish already hard-blocked above
+
+  // ── SUPPLEMENTARY — capped at +15 ────────────────────────────────────────
+  let suppScore = 0;
+
+  // Pre-market gap up (overnight accumulation = institutional buying)
+  const spyGapUp = state._spyGapUp || 0;
+  if (spyGapUp > 0.03) {
+    suppScore += 0; reasons.push(`Pre-market gap +${(spyGapUp*100).toFixed(1)}% - too extended, chase risk (+0)`);
+  } else if (spyGapUp > 0.015) {
+    suppScore += 8; reasons.push(`Pre-market gap +${(spyGapUp*100).toFixed(1)}% - overnight accumulation (+8)`);
+  }
+
+  // VIX direction — falling VIX = fear receding = calls benefit
+  const vixMom = state._vixMomentum || 0; // positive = VIX rising
+  if (vixMom < -0.5) {
+    suppScore += 8; reasons.push(`VIX falling ${vixMom.toFixed(1)}pts - fear receding, call-friendly (+8)`);
+  } else if (vixMom > 0.5) {
+    suppScore -= 8; reasons.push(`VIX rising ${vixMom.toFixed(1)}pts - fear increasing, calls at risk (-8)`);
+  }
+
+  // Momentum state
+  if (momentum === "recovering" || momentum === "building") {
+    suppScore += 5; reasons.push(`Momentum ${momentum} - positive directional signal (+5)`);
+  } else if (momentum === "strong") {
+    suppScore += 3; reasons.push("Momentum strong - trend intact (+3)");
+  } else if (momentum === "weak" || momentum === "fading") {
+    suppScore -= 5; reasons.push(`Momentum ${momentum} - weakening, debit call caution (-5)`);
+  }
+
+  // GLD-specific: DXY weakening = gold rally = GLD calls supported
+  if (stock.ticker === "GLD") {
+    const dxyChange = state._dxy?.change || 0;
+    if (dxyChange < -0.5) {
+      suppScore += 8;  reasons.push(`GLD: DXY ${dxyChange.toFixed(1)}% - dollar weakness supports gold calls (+8)`);
+    } else if (dxyChange > 0.5) {
+      suppScore -= 8;  reasons.push(`GLD: DXY +${dxyChange.toFixed(1)}% - dollar strength pressures gold calls (-8)`);
+    }
+  }
+
+  // TLT-specific: rate cut expectations = TLT calls valid
+  if (stock.ticker === "TLT") {
+    const yieldEnv = state._yieldEnv || "normal";
+    if (yieldEnv === "inverted") {
+      suppScore += 8;  reasons.push("TLT: inverted yield curve - rate cuts expected, TLT calls supported (+8)");
+    } else if (yieldEnv === "steepening") {
+      suppScore -= 8;  reasons.push("TLT: yield steepening - rising rates hurt TLT calls (-8)");
+    }
+  }
+
+  // Agent high confidence
+  if (confidence === "high" && signal !== "neutral") {
+    suppScore += 3; reasons.push("Agent high confidence (+3)");
+  }
+
+  score += Math.min(15, Math.max(-15, suppScore));
+  score = Math.max(0, Math.min(100, score));
+  return { score, reasons, tradeType: "debit_call" };
+}
