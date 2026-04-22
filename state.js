@@ -109,7 +109,7 @@ async function redisSave(data) {
       };
     }),
     // tradeLog is display-only - keep last 100
-    tradeLog: (data.tradeLog || []).slice(0, 100),
+    tradeLog: (data.tradeLog || []).slice(0, 1000),
     // closedTrades - keep last 200 (was 500)
     closedTrades: (data.closedTrades || []).slice(0, 200),
     // stockTrades - keep last 50
@@ -279,7 +279,7 @@ async function flushStateIfDirty() {
 function logEvent(type, message) {
   const entry = { time: new Date().toISOString(), type, message };
   state.tradeLog.unshift(entry);
-  if (state.tradeLog.length > 500) state.tradeLog = state.tradeLog.slice(0, 500);
+  if (state.tradeLog.length > 1000) state.tradeLog = state.tradeLog.slice(0, 1000);
   // V2.83: also append to daily log buffer for EOD archival to Redis
   // Separate from tradeLog so the live 500-entry rolling buffer is not affected
   if (!state._dailyLogBuffer) state._dailyLogBuffer = [];
