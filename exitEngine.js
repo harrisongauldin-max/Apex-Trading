@@ -192,14 +192,31 @@ async function checkExits(positions, posSnapshots, posQuotes, posNewsCache, ctx)
           }
           pos.currentPrice = curP;
           pos.realData = true;
-          // Update greeks from buy leg
-          const buyGreeks = buySnap?.greeks || {};
-          if (buyGreeks.delta) pos.greeks = {
-            delta: parseFloat(buyGreeks.delta || 0).toFixed(3),
-            theta: parseFloat(buyGreeks.theta || 0).toFixed(3),
-            gamma: parseFloat(buyGreeks.gamma || 0).toFixed(4),
-            vega:  parseFloat(buyGreeks.vega  || 0).toFixed(3),
-          };
+          // Compute NET spread Greeks = buy leg - sell leg
+          // For credit spreads: short the sell leg (negative delta/vega/gamma, positive theta)
+          // Using buy leg alone gives wrong sign — net must account for both legs
+          const buyGreeks  = buySnap?.greeks  || {};
+          const sellGreeks = sellSnap?.greeks || {};
+          if (buyGreeks.delta || sellGreeks.delta) {
+            const buyD  = parseFloat(buyGreeks.delta  || 0);
+            const sellD = parseFloat(sellGreeks.delta || 0);
+            const buyT  = parseFloat(buyGreeks.theta  || 0);
+            const sellT = parseFloat(sellGreeks.theta || 0);
+            const buyG  = parseFloat(buyGreeks.gamma  || 0);
+            const sellG = parseFloat(sellGreeks.gamma || 0);
+            const buyV  = parseFloat(buyGreeks.vega   || 0);
+            const sellV = parseFloat(sellGreeks.vega  || 0);
+            // Net = long (buy) leg minus short (sell) leg
+            // Credit spread: sold sell leg, bought buy leg
+            // net delta = buy delta - sell delta (negative — short call spread has negative delta)
+            // net theta = buy theta - sell theta (positive — short leg theta dominates, positive for credit)
+            pos.greeks = {
+              delta: (buyD - sellD).toFixed(3),
+              theta: (buyT - sellT).toFixed(3),
+              gamma: (buyG - sellG).toFixed(4),
+              vega:  (buyV - sellV).toFixed(3),
+            };
+          }
         }
       }
       if (!curP) curP = pos.currentPrice || pos.premium;
