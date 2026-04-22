@@ -549,9 +549,14 @@ async function executeCreditSpread(stock, price, score, scoreReasons, vix, optio
     const targetDTE    = (spreadParamsOverride && spreadParamsOverride.targetDTE)        || 35; // panel: 35 DTE lands on monthlies, matches TP/stop calibration
     const minDTE       = (spreadParamsOverride && spreadParamsOverride.minDTE)           || 21; // panel: raised from 14 to match 35 DTE target (avoid weeklies)
     const minCreditRR  = (spreadParamsOverride && spreadParamsOverride.minCreditRatio)   || 0.25;  // panel CRITICAL #1: 0.20 is breakeven, 0.25 is true EV-positive floor
-    // Spread width: price-relative so TLT($86)->$5, SPY($675)->$15
-    const baseWidth    = (spreadParamsOverride && spreadParamsOverride.creditWidth)      || 10; // panel: $10 wide — better R/R + margin efficiency on $10k account
-    const spreadWidth  = Math.max(5, Math.min(baseWidth, Math.round(price * 0.025)));
+    // Spread width: price-relative from entryEngine spreadParams (panel 4/22/2026)
+    // creditWidthPct: VIX>35=1.5%, VIX28-35=1.0%, VIX20-28=0.8%, VIX<20=disabled
+    // Clamp: min $2 (bid-ask eats smaller credits), max $15 (SPY cap)
+    const widthPct     = (spreadParamsOverride && spreadParamsOverride.creditWidthPct) || 0.010;
+    const baseWidth    = (spreadParamsOverride && spreadParamsOverride.creditWidth)    || 10;
+    const priceRelWidth = widthPct > 0 ? Math.round(price * widthPct * 2) / 2 : baseWidth; // round to $0.50
+    const spreadWidth  = Math.max(2, Math.min(15, priceRelWidth));
+    logEvent("filter", `${stock.ticker} credit width: $${spreadWidth} (${(widthPct*100).toFixed(1)}% of $${price.toFixed(0)} price)`);
 
     // -- STEP 1: Target strike via B-S delta inversion ----------------------
     // Use live IV from prefetch, fallback to VIX/100
@@ -763,7 +768,7 @@ async function executeCreditSpread(stock, price, score, scoreReasons, vix, optio
     // This requires ~80% win rate to break even -- achievable with proper strike selection
     // Worse than 4:1 (e.g. TLT $97 profit / $903 loss = 9.3:1) is not a viable strategy
     const rrRatioCred = maxLoss > 0 ? maxProfit / maxLoss : 0;
-    const MIN_CREDIT_RR = (spreadParamsOverride && spreadParamsOverride.minCreditRatio) || 0.33; // 0.33 = genuine positive EV at delta 0.20 (0.25 was breakeven only)
+    const MIN_CREDIT_RR = (spreadParamsOverride && spreadParamsOverride.minCreditRatio) || 0.26; // VIX-tiered: 0.25 crisis, 0.26 elevated, 0.28 normal (inverse to VIX — higher IV = higher win rate)
     if (rrRatioCred < MIN_CREDIT_RR) {
       // Cache actual market R/R in state so score debug shows real execution viability
       if (!state._lastCreditRR) state._lastCreditRR = {};
@@ -1283,8 +1288,231 @@ async function executeTrade(stock, price, score, scoreReasons, vix, optionType =
 }
 
 
+
+// ============================================================
+// executeDebitCallSpread — debit call spread execution
+// Panel 4/22/2026: buy OTM call + sell further OTM call to reduce cost.
+// Profit from confirmed upward move. Theta works against you.
+// Parameters: price-relative width, 40% max debit/width gate.
+// ============================================================
+async function executeDebitCallSpread(stock, price, score, scoreReasons, vix, sizeMod = 1.0, spreadParamsOverride = null) {
+  try {
+    // Panel parameters from rulebook
+    const longDeltaTarget  = (spreadParamsOverride && spreadParamsOverride.debitCallLongDelta)   || 0.42; // buy leg: just OTM, delta-responsive
+    const shortDeltaTarget = (spreadParamsOverride && spreadParamsOverride.debitCallShortDelta)  || 0.22; // sell leg: caps upside, reduces cost
+    const targetDTE        = (spreadParamsOverride && spreadParamsOverride.debitCallTargetDTE)   || (vix >= 28 ? 28 : 21);
+    const minDTE           = (spreadParamsOverride && spreadParamsOverride.debitCallMinDTE)       || 14;
+    const maxDebitPct      = (spreadParamsOverride && spreadParamsOverride.debitCallMaxDebitPct)  || 0.40; // max debit as % of width (R/R floor)
+
+    // Price-relative width: 1.2% of price at VIX 28+, 1.5% at VIX 20-28
+    const widthPct   = (spreadParamsOverride && spreadParamsOverride.debitCallWidthPct) || (vix >= 28 ? 0.012 : 0.015);
+    const rawWidth   = Math.round(price * widthPct * 2) / 2; // round to $0.50
+    const spreadWidth = Math.max(2, Math.min(15, rawWidth));
+
+    logEvent("filter", `${stock.ticker} debit call spread: $${spreadWidth} wide (${(widthPct*100).toFixed(1)}% of $${price.toFixed(0)}) | long delta ${longDeltaTarget} / short delta ${shortDeltaTarget} | DTE~${targetDTE}`);
+
+    // -- STEP 1: Find buy (long) leg — delta 0.40-0.45, just OTM call -------
+    const today    = getETTime();
+    const fetchMin = new Date(today.getTime() + minDTE * 86400000).toISOString().split("T")[0];
+    const fetchMax = new Date(today.getTime() + Math.min(45, targetDTE + 14) * 86400000).toISOString().split("T")[0];
+    const chainUrl = `/options/contracts?underlying_symbol=${stock.ticker}&expiration_date_gte=${fetchMin}&expiration_date_lte=${fetchMax}&type=call&limit=200`;
+
+    let chainContracts = [];
+    let pageToken = null, pages = 0;
+    do {
+      const url  = pageToken ? `${chainUrl}&page_token=${pageToken}` : chainUrl;
+      const page = await alpacaGet(url, ALPACA_OPTIONS);
+      if (!page || !page.option_contracts) break;
+      chainContracts = chainContracts.concat(page.option_contracts);
+      pageToken = page.next_page_token || null;
+      pages++;
+    } while (pageToken && pages < 5);
+
+    if (!chainContracts.length) {
+      logEvent("filter", `${stock.ticker} debit call spread: no contracts in window ${fetchMin}->${fetchMax}`);
+      return null;
+    }
+    logEvent("filter", `${stock.ticker} debit call spread: ${chainContracts.length} contracts in window`);
+
+    // Sort by DTE closeness first, then strike proximity
+    chainContracts.sort((a, b) => {
+      const aExpDTE = Math.round((new Date(a.expiration_date) - today) / 86400000);
+      const bExpDTE = Math.round((new Date(b.expiration_date) - today) / 86400000);
+      const aDTEDist = Math.abs(aExpDTE - targetDTE);
+      const bDTEDist = Math.abs(bExpDTE - targetDTE);
+      if (Math.abs(aDTEDist - bDTEDist) > 7) return aDTEDist - bDTEDist;
+      // Within same expiry: prefer strike closest to ATM (long leg should be near current price)
+      const aDist = Math.abs(parseFloat(a.strike_price) - price);
+      const bDist = Math.abs(parseFloat(b.strike_price) - price);
+      return aDist - bDist;
+    });
+
+    // Fetch snapshots for top 50 candidates
+    const candidateSymbols = chainContracts.slice(0, 50).map(c => c.symbol);
+    const snapBatches = [];
+    for (let i = 0; i < candidateSymbols.length; i += 25)
+      snapBatches.push(candidateSymbols.slice(i, i + 25).join(","));
+    const snapResults = await Promise.all(snapBatches.map(b =>
+      alpacaGet(`/options/snapshots?symbols=${b}&feed=indicative`, ALPACA_OPT_SNAP)
+    ));
+    const snapshots = snapResults.reduce((acc, r) => ({ ...acc, ...(r?.snapshots || {}) }), {});
+
+    // Find long leg: closest delta to longDeltaTarget, call above current price
+    let longContract = null;
+    let _bestDeltaDist = Infinity;
+    for (const c of chainContracts.slice(0, 50)) {
+      const snap   = snapshots[c.symbol];
+      if (!snap) continue;
+      const quote  = snap.latestQuote || {};
+      const greeks = snap.greeks || {};
+      const bid    = parseFloat(quote.bp || 0);
+      const ask    = parseFloat(quote.ap || 0);
+      const mid    = bid > 0 && ask > 0 ? (bid + ask) / 2 : 0;
+      if (mid <= 0) continue;
+      const delta  = Math.abs(parseFloat(greeks.delta || 0));
+      if (delta < 0.25 || delta > 0.60) continue; // long leg range
+      const strike = parseFloat(c.strike_price);
+      if (strike <= price * 0.995) continue; // must be OTM (above price)
+      const deltaDist = Math.abs(delta - longDeltaTarget);
+      if (deltaDist >= _bestDeltaDist) continue;
+      _bestDeltaDist = deltaDist;
+      longContract = {
+        symbol:  c.symbol,
+        strike,
+        expDate: c.expiration_date,
+        expDays: Math.round((new Date(c.expiration_date) - today) / 86400000),
+        premium: parseFloat(mid.toFixed(2)),
+        bid, ask,
+        spread:  ask > 0 ? (ask - bid) / ask : 1,
+        greeks:  { delta: parseFloat(greeks.delta || 0).toFixed(3) },
+      };
+    }
+
+    if (!longContract) {
+      logEvent("filter", `${stock.ticker} debit call spread: no valid long leg found (delta ${longDeltaTarget})`);
+      return null;
+    }
+    logEvent("filter", `${stock.ticker} long leg: $${longContract.strike} | ${longContract.expDays}DTE | delta${longContract.greeks.delta} | $${longContract.premium}`);
+
+    // -- STEP 2: Bid-ask stability gate on long leg --------------------------
+    const MAX_SPREAD_PCT = 0.20;
+    const longSpreadPct  = longContract.bid > 0 ? (longContract.ask - longContract.bid) / ((longContract.ask + longContract.bid) / 2) : 1;
+    if (longSpreadPct > MAX_SPREAD_PCT) {
+      logEvent("filter", `${stock.ticker} debit call spread: long leg bid-ask ${(longSpreadPct*100).toFixed(0)}% unstable — skip`);
+      return null;
+    }
+
+    // -- STEP 3: Find short leg — same expiry, spreadWidth OTM from long ----
+    const shortStrikeTarget = longContract.strike + spreadWidth;
+    const sameExpiry = chainContracts.filter(c => c.expiration_date === longContract.expDate);
+    sameExpiry.sort((a, b) =>
+      Math.abs(parseFloat(a.strike_price) - shortStrikeTarget) -
+      Math.abs(parseFloat(b.strike_price) - shortStrikeTarget)
+    );
+
+    // Pre-fetch snapshots for short leg candidates
+    const shortCandidates    = sameExpiry.slice(0, 20);
+    const shortSymbolsNeeded = shortCandidates.map(c => c.symbol).filter(s => !snapshots[s]);
+    if (shortSymbolsNeeded.length > 0) {
+      const shortBatches = [];
+      for (let i = 0; i < shortSymbolsNeeded.length; i += 25)
+        shortBatches.push(shortSymbolsNeeded.slice(i, i + 25).join(","));
+      const shortSnaps = await Promise.all(shortBatches.map(b =>
+        alpacaGet(`/options/snapshots?symbols=${b}&feed=indicative`, ALPACA_OPT_SNAP).catch(() => null)
+      ));
+      shortSnaps.forEach(r => { if (r?.snapshots) Object.assign(snapshots, r.snapshots); });
+    }
+
+    let shortContract = null;
+    for (const c of shortCandidates) {
+      const snap   = snapshots[c.symbol];
+      if (!snap) continue;
+      const quote  = snap.latestQuote || {};
+      const greeks = snap.greeks || {};
+      const bid    = parseFloat(quote.bp || 0);
+      const ask    = parseFloat(quote.ap || 0);
+      const mid    = bid > 0 && ask > 0 ? (bid + ask) / 2 : 0;
+      if (mid <= 0) continue;
+      const delta  = Math.abs(parseFloat(greeks.delta || 0));
+      if (delta < 0.08 || delta > 0.40) continue; // short leg range
+      const strike = parseFloat(c.strike_price);
+      if (strike <= longContract.strike) continue; // must be further OTM
+      const shortSpreadPct = bid > 0 ? (ask - bid) / ((ask + bid) / 2) : 1;
+      if (shortSpreadPct > MAX_SPREAD_PCT) continue; // bid-ask stability
+      shortContract = {
+        symbol:  c.symbol,
+        strike,
+        expDate: c.expiration_date,
+        premium: parseFloat(mid.toFixed(2)),
+        bid, ask,
+        greeks:  { delta: parseFloat(greeks.delta || 0).toFixed(3) },
+      };
+      break;
+    }
+
+    if (!shortContract) {
+      logEvent("filter", `${stock.ticker} debit call spread: no valid short leg found near $${shortStrikeTarget}`);
+      return null;
+    }
+    logEvent("filter", `${stock.ticker} short leg: $${shortContract.strike} | delta${shortContract.greeks.delta} | $${shortContract.premium}`);
+
+    // -- STEP 4: R/R validation — max debit 40% of width ---------------------
+    const actualWidth = shortContract.strike - longContract.strike;
+    if (actualWidth < spreadWidth * 0.5) {
+      logEvent("filter", `${stock.ticker} debit call spread: width $${actualWidth} too narrow`);
+      return null;
+    }
+
+    const netDebit  = parseFloat((longContract.premium - shortContract.premium).toFixed(2));
+    if (netDebit <= 0) {
+      logEvent("filter", `${stock.ticker} debit call spread: no debit (${netDebit}) — legs mispriced`);
+      return null;
+    }
+
+    const debitRatio = netDebit / actualWidth;
+    if (debitRatio > maxDebitPct) {
+      logEvent("filter", `${stock.ticker} debit call spread: debit ratio ${(debitRatio*100).toFixed(0)}% > ${(maxDebitPct*100).toFixed(0)}% max (paying too much for too little upside)`);
+      return null;
+    }
+
+    const maxProfit = parseFloat((actualWidth - netDebit).toFixed(2));
+    const maxLoss   = netDebit;
+    const rrRatio   = maxProfit / maxLoss;
+    logEvent("filter", `${stock.ticker} debit call spread: buy $${longContract.strike} / sell $${shortContract.strike} | width $${actualWidth} | debit $${netDebit} | R/R ${rrRatio.toFixed(1)}:1 | max profit $${(maxProfit*100).toFixed(0)}/contract`);
+
+    // -- STEP 5: Sizing -------------------------------------------------------
+    const scoreBaseMult    = score >= 90 ? 2.0 : score >= 85 ? 1.5 : score >= 80 ? 1.25 : 1.0;
+    const rawContracts     = Math.max(1, Math.floor(scoreBaseMult * sizeMod));
+    const preFillCap       = (state.closedTrades || []).length < 30 ? 3 : 99;
+    const contracts        = Math.min(preFillCap, rawContracts);
+    const costPer1         = parseFloat((netDebit * 100).toFixed(2));
+    const profitableCount  = (state.closedTrades || []).filter(t => t.pnl > 0).length;
+    const capPct           = profitableCount >= 20 ? 0.20 : 0.15;
+    const cashCap          = Math.floor((state.cash * capPct) / costPer1);
+    const finalContracts   = Math.max(1, Math.min(contracts, cashCap));
+
+    // Heat check
+    const totalCost = finalContracts * costPer1;
+    const projectedHeat = totalCost / (state.cash || 30000);
+    if (projectedHeat > 0.15 && !state.positions.length) {
+      logEvent("filter", `${stock.ticker} debit call spread: heat ${(projectedHeat*100).toFixed(0)}% exceeds 15% cap`);
+      return null;
+    }
+
+    if (finalContracts > 1) logEvent("scan", `[SIZING] ${stock.ticker} debit call spread: ${finalContracts}x (score ${score} sizeMod ${sizeMod.toFixed(2)})`);
+
+    // -- STEP 6: Submit mleg order -------------------------------------------
+    // Debit call spread: BUY long leg + SELL short leg simultaneously
+    return await executeSpreadTrade(stock, price, score, scoreReasons, vix, "call", longContract, shortContract, false, "debit_call");
+
+  } catch(e) {
+    logEvent("error", `executeDebitCallSpread(${stock.ticker}): ${e.message}`);
+    return null;
+  }
+}
+
 module.exports = {
-  executeCreditSpread, executeDebitSpread, executeIronCondor,
+  executeCreditSpread, executeDebitSpread, executeDebitCallSpread, executeIronCondor,
   executeSpreadTrade, executeTrade,
   findContract, bsStrikeForDelta, getOptionsPrice,
   initExecution,
