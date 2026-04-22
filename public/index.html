@@ -3954,12 +3954,42 @@ function renderScoreDebug(d, el) {
       // Credit score banner — shown prominently when credit mode active
       if (creditScore !== null) {
         var creditCol = scoreColor(creditScore, effectiveMin);
-        var creditWouldEnter = creditScore >= effectiveMin && !blocked;
+        var rrEst = r2.rrEstimate || null;
+        var rrViable = !rrEst || rrEst.viable;
+        var scoreOk = creditScore >= effectiveMin;
+        var creditWouldEnter = scoreOk && rrViable && !blocked;
         var creditLabel = creditType === 'credit_call' ? 'BEAR CALL SPREAD' : 'BULL PUT SPREAD';
-        out += '<div style="background:rgba(0,196,255,.08);border:1px solid rgba(0,196,255,.3);border-radius:6px;padding:8px 12px;margin-bottom:10px;display:flex;justify-content:space-between;align-items:center">';
+        // Status label: show R/R failure explicitly so it's clear why entry is blocked
+        var statusLabel, statusColor;
+        if (!scoreOk) {
+          statusLabel = 'score ' + creditScore + ' < min ' + effectiveMin;
+          statusColor = 'var(--muted)';
+        } else if (!rrViable && rrEst) {
+          statusLabel = 'R/R FAIL: est. ' + (rrEst.estimatedRR*100).toFixed(0) + '% < ' + Math.round((r2.effectiveMin||65)) + '% min';
+          statusColor = '#ff9944';
+        } else if (blocked) {
+          statusLabel = 'blocked';
+          statusColor = '#ff5555';
+        } else {
+          statusLabel = '&#9654; WOULD ENTER';
+          statusColor = '#00ff88';
+        }
+        var rrAge = rrEst && rrEst.ts ? Math.round((Date.now()-rrEst.ts)/60000) : null;
+        var rrAgeStr = rrAge !== null ? (rrAge < 2 ? 'just now' : rrAge+'min ago') : '';
+        var rrLine = rrEst
+          ? '<div style="font-size:9px;color:var(--muted);margin-top:3px">' +
+            'market R/R: $' + (rrEst.netCredit||0).toFixed(2) + ' credit / $' + ((rrEst.netCredit||0)+(rrEst.maxLoss||0)).toFixed(0) + ' wide' +
+            ' → <strong style="color:'+(rrEst.viable?'#00ff88':'#ff9944')+'">' + ((rrEst.rr||rrEst.estimatedRR||0)*100).toFixed(0) + '%</strong>' +
+            (rrAgeStr ? ' <span style="color:#336688">('+rrAgeStr+')</span>' : '') +
+            '</div>'
+          : '<div style="font-size:9px;color:#336688;margin-top:3px">no execution data yet — R/R unknown until first scan attempt</div>';
+        out += '<div style="background:rgba(0,196,255,.08);border:1px solid rgba(0,196,255,.3);border-radius:6px;padding:8px 12px;margin-bottom:10px">';
+        out += '<div style="display:flex;justify-content:space-between;align-items:center">';
         out += '<span style="font-size:9px;color:#00c4ff;letter-spacing:1px">'+creditLabel+'</span>';
         out += '<span style="font-size:22px;font-weight:700;color:'+creditCol+'">'+creditScore+'</span>';
-        out += '<span style="font-size:9px;color:'+(creditWouldEnter?'#00ff88':'var(--muted)')+'">'+(creditWouldEnter?'&#9654; WOULD ENTER':'below min '+effectiveMin)+'</span>';
+        out += '<span style="font-size:9px;color:'+statusColor+'">'+statusLabel+'</span>';
+        out += '</div>';
+        out += rrLine;
         out += '</div>';
       }
 
