@@ -1625,6 +1625,40 @@ app.post("/api/emergency-close", requireSecret, async (req, res) => {
 });
 
 // - Agent auto-exit toggle endpoint -
+// Cancel all open/pending orders on Alpaca — does NOT affect filled positions
+// Use when ARGO has ghost orders that failed to cancel during retry
+app.post("/api/cancel-pending-orders", requireSecret, async (req, res) => {
+  try {
+    const openOrders = await alpacaGet("/orders?status=open&limit=50");
+    if (!openOrders || !Array.isArray(openOrders)) {
+      return res.json({ ok: true, cancelled: 0, message: "No open orders found" });
+    }
+    let cancelled = 0, failed = 0;
+    for (const ord of openOrders) {
+      try {
+        await alpacaPost(`/orders/${ord.id}/cancel`, {});
+        cancelled++;
+        logEvent("warn", `[CANCEL] Cancelled open order ${ord.id} (${ord.symbol || "mleg"} ${ord.side || ""} ${ord.qty || ""} @ ${ord.limit_price || "mkt"})`);
+      } catch(e) {
+        failed++;
+        logEvent("warn", `[CANCEL] Failed to cancel order ${ord.id}: ${e.message}`);
+      }
+    }
+    // Clear any pending order state in ARGO
+    if (state._pendingOrder) {
+      logEvent("warn", `[CANCEL] Cleared ARGO _pendingOrder state (was ${state._pendingOrder.ticker})`);
+      state._pendingOrder = null;
+      await saveStateNow();
+    }
+    logEvent("warn", `[CANCEL] Cancelled ${cancelled} orders, ${failed} failed`);
+    res.json({ ok: true, cancelled, failed, message: `Cancelled ${cancelled} open orders` });
+  } catch(e) {
+    logEvent("error", `cancel-pending-orders: ${e.message}`);
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
+
 app.post("/api/agent-auto-exit", requireSecret, (req, res) => {
   const { enabled } = req.body;
   state.agentAutoExitEnabled = !!enabled;
