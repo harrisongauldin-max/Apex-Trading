@@ -823,10 +823,19 @@ async function confirmPendingOrder() {
       markDirty();
 
     } else if (age > 30 && !pending._retried) {
-      // Unfilled after 30s - retry with spread-aware concession
-      // Scale concession to bid-ask spread: narrow spread = small concession, wide = larger
-      // Market maker fix: $0.05 static is too small in VIX 35+ wide markets
-      await alpacaPost(`/orders/${pending.orderId}/cancel`, {}).catch(() => {});
+      // Unfilled after 30s - cancel original and retry with concession
+      // CRITICAL: verify cancel succeeded before submitting retry
+      // If cancel fails silently, both orders remain live → multiple fills / ghost orders
+      const cancelResp = await alpacaPost(`/orders/${pending.orderId}/cancel`, {}).catch(e => ({ _err: e.message }));
+      // Wait 1s for cancel to propagate on Alpaca's side
+      await new Promise(r => setTimeout(r, 1000));
+      // Verify original is actually cancelled before proceeding
+      const cancelCheck = await alpacaGet(`/orders/${pending.orderId}`).catch(() => null);
+      const cancelConfirmed = !cancelCheck || ["canceled","expired","rejected","done_for_day"].includes(cancelCheck.status);
+      if (!cancelConfirmed) {
+        logEvent("warn", `[SPREAD] Cancel unconfirmed (status: ${cancelCheck?.status}) - holding pending, will retry next scan`);
+        return; // don't submit retry - original may still fill
+      }
       const spreadPct     = pending.spreadPct || 0.05; // bid-ask spread % at entry time
       const rawConcession = Math.max(0.05, Math.min(0.20, parseFloat((pending.netDebitLimit * spreadPct * 0.5).toFixed(2))));
       // B6: credit spreads accept less premium to improve fill (subtract); debits pay more (add)
@@ -849,6 +858,14 @@ async function confirmPendingOrder() {
     } else if (pending._retried && age > 60) {
       // Retry also unfilled after 60s total - cancel and give up
       await alpacaPost(`/orders/${pending.orderId}/cancel`, {}).catch(() => {});
+      // Wait for cancel to propagate
+      await new Promise(r => setTimeout(r, 1000));
+      const finalCheck = await alpacaGet(`/orders/${pending.orderId}`).catch(() => null);
+      const finalCancelled = !finalCheck || ["canceled","expired","rejected","done_for_day","filled"].includes(finalCheck?.status);
+      if (!finalCancelled) {
+        logEvent("warn", `[SPREAD] Retry cancel unconfirmed (${finalCheck?.status}) - will check again next scan`);
+        return;
+      }
       logEvent("warn", `[SPREAD] Retry also unfilled - spread cancelled`);
       state._pendingOrder = null;
       markDirty();
