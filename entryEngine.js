@@ -204,7 +204,7 @@ function getRegimeRulebook(state) {
   //   0.25 floor provides ~4% EV buffer above breakeven at delta 0.20.
   //   Breakeven R/R formula: loss_prob / win_prob = delta / (1-delta)
   //   At delta 0.20: breakeven = 0.20/0.80 = 25%. So 0.25 is the TRUE minimum.
-  const minCreditRatio  = 0.25;  // floor — EV-positive minimum at delta 0.20 (panel CRITICAL #1)
+  const minCreditRatio  = 0.33;  // floor — genuine positive EV at delta 0.20 (0.25 was breakeven, not EV-positive)
   const targetCreditRatio = 0.30; // target — seek 30% when conditions allow
 
   // Change 3 (OT + Natenberg 1994 Ch.8): DTE targets per regime
