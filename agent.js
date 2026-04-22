@@ -854,7 +854,7 @@ What is the overnight risk and tomorrow bias?`;
         _log("warn", `[POST-MARKET] ${pos.ticker} flagged for exit at open - ${parsed.reasoning}`);
       }
     }
-    if (_saveStateNow) await _saveStateNow();
+    if (_saveNow) await _saveNow();
     return parsed;
   } catch(e) {
     _log("warn", `[POST-MARKET] ${scanType} failed: ${e.message}`);
