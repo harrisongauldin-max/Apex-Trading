@@ -2095,11 +2095,19 @@ async function runScan() {
     const _creditType      = (creditCallModeActive && isBearTrend) ? "credit_call"
                            : (creditModeActive && !isBearTrend)    ? "credit_put" : null;
     const _effectiveMin    = _creditType ? MIN_SCORE_CREDIT : MIN_SCORE;
+
+    // Use real market R/R from last execution attempt — far more accurate than any estimate
+    // _lastCreditRR is written by execution.js every time the R/R gate fires
+    const _rrEst = (state._lastCreditRR && state._lastCreditRR[stock.ticker])
+      ? state._lastCreditRR[stock.ticker]
+      : null;
+
     state._scoreDebug[stock.ticker] = {
       ts: Date.now(), price, putScore, callScore,
       creditScore: _creditScore,   // from scoreCreditSpread (dedicated scorer)
       creditType:  _creditType,    // credit_call or credit_put
       effectiveMin: _effectiveMin, // 65 for credits, 70 for debits
+      rrEstimate:  _rrEst,         // analytical R/R viability check
       putReasons: putSetup.reasons, callReasons: callSetup.reasons,
       signals: { rsi: signals.rsi, dailyRsi: signals.dailyRsi, macd: signals.macd,
         momentum: signals.momentum, ivPercentile: signals.ivPercentile,
