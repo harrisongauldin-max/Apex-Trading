@@ -763,7 +763,7 @@ async function executeCreditSpread(stock, price, score, scoreReasons, vix, optio
     // This requires ~80% win rate to break even -- achievable with proper strike selection
     // Worse than 4:1 (e.g. TLT $97 profit / $903 loss = 9.3:1) is not a viable strategy
     const rrRatioCred = maxLoss > 0 ? maxProfit / maxLoss : 0;
-    const MIN_CREDIT_RR = (spreadParamsOverride && spreadParamsOverride.minCreditRatio) || 0.25; // panel CRITICAL #1: 0.25 is true EV-positive minimum at delta 0.20 (0.20 was breakeven)
+    const MIN_CREDIT_RR = (spreadParamsOverride && spreadParamsOverride.minCreditRatio) || 0.33; // 0.33 = genuine positive EV at delta 0.20 (0.25 was breakeven only)
     if (rrRatioCred < MIN_CREDIT_RR) {
       // Richard/Gilfoyle/Dinesh: width retry — compute narrowest width achieving 25% R/R
       // Algebraic inversion: credit/(width-credit) >= 0.25  →  maxWidth = 5 × netCredit
