@@ -33,7 +33,7 @@ const { sendEmail, sendMorningBriefing, sendResendEmail,
 const { getAgentMacroAnalysis, initAgent,
         getAgentRescore, getAgentDayPlan,
         getAgentPostMarketAssessment, getAgentPreEntryCheck } = require('./agent');
-const { getRegimeRulebook }                               = require('./entryEngine');
+const { getRegimeRulebook, INSTRUMENT_CONSTRAINTS }       = require('./entryEngine');
 const { executeCreditSpread }                             = require('./execution');
 const { getTimeAdjustedStop, getTimeOfDayAnalysis }       = require('./exitEngine');
 const { getMacroNews, getUpcomingMacroEvents }            = require('./market');
@@ -1251,7 +1251,12 @@ app.get("/api/score-debug", (req, res) => {
 
     // Build per-instrument results from scan snapshots
     const snapshots = state._scoreDebug || {};
-    const results = WATCHLIST.map(stock => {
+    // Include both index ETFs and individual stocks in score debug
+    const allWatchlist = [
+      ...WATCHLIST,
+      ...(INDIVIDUAL_STOCKS_ENABLED ? INDIVIDUAL_STOCK_WATCHLIST : []),
+    ];
+    const results = allWatchlist.map(stock => {
       const snap = snapshots[stock.ticker];
       if (!snap) return { ticker: stock.ticker, noData: true };
 
@@ -1310,19 +1315,33 @@ app.get("/api/score-debug", (req, res) => {
 });
 
 app.get("/api/logs", (req, res) => {
-  const limit  = Math.min(parseInt(req.query.limit || 100), 200);
+  const limit  = Math.min(parseInt(req.query.limit || 200), 5000);
   const filter = req.query.filter || null; // e.g. ?filter=trade,warn,circuit
   const since  = req.query.since  || null; // ISO timestamp - only return newer
+  const search = req.query.search || null; // text search across message
   const types  = filter ? filter.split(",").map(t => t.trim().toLowerCase()) : null;
-  let logs = state.tradeLog || [];
+
+  // Use daily log buffer (up to 5000 entries) when filtering or searching
+  // Falls back to rolling tradeLog for unfiltered recent view
+  const useFullDay = !!(types || since || search);
+  let logs = useFullDay
+    ? (state._dailyLogBuffer || state.tradeLog || []).slice().reverse() // daily buffer is oldest-first, reverse for newest-first
+    : (state.tradeLog || []);
+
   if (since) {
     const sinceMs = new Date(since).getTime();
     logs = logs.filter(e => new Date(e.time).getTime() > sinceMs);
   }
-  if (types) logs = logs.filter(e => types.includes(e.type));
+  if (types)  logs = logs.filter(e => types.includes(e.type));
+  if (search) {
+    const q = search.toLowerCase();
+    logs = logs.filter(e => (e.message || e.msg || "").toLowerCase().includes(q));
+  }
+
   res.json({
     logs:      logs.slice(0, limit),
-    total:     (state.tradeLog || []).length,
+    total:     useFullDay ? (state._dailyLogBuffer || []).length : (state.tradeLog || []).length,
+    source:    useFullDay ? "daily" : "recent",
     generated: new Date().toISOString(),
     cash:      state.cash,
     positions: (state.positions || []).length,
