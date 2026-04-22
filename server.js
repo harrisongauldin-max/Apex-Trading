@@ -1279,22 +1279,38 @@ app.get("/api/score-debug", (req, res) => {
       if (gates.creditCallModeActive) modeIndicators.push("credit CALL mode");
 
       const instrConstraint = INSTRUMENT_CONSTRAINTS[stock.ticker] || null;
+
+      // Use credit score when in credit mode — it's the actual score that determines entry
+      // bestScore for display: credit score takes priority over debit score when active
+      const activeCreditScore = snap.creditScore ?? null;
+      const displayScore = activeCreditScore !== null ? activeCreditScore : bestScore;
+      const displayType  = snap.creditType || bestType;
+      const effectiveMin = snap.effectiveMin || (snap.creditType ? 65 : 70);
+
+      // wouldEnter: use the score that matches the active trade type
+      const scorePassesMin = displayScore >= effectiveMin;
+      const constraintPass = !instrConstraint || instrConstraint.allowedTypes.includes(
+        snap.creditType || (bestType === "put" ? "debit_put" : "debit_call")
+      );
+
       return {
-        ticker:      stock.ticker,
-        price:       snap.price,
+        ticker:       stock.ticker,
+        price:        snap.price,
         ageSec,
-        putScore:    snap.putScore,
-        callScore:   snap.callScore,
-        bestScore,
-        bestType,
-        effectiveMin: snap.effectiveMin,
-        wouldEnter:  bestScore >= snap.effectiveMin && blocks.length === 0,
-      modeIndicators,
+        putScore:     snap.putScore,
+        callScore:    snap.callScore,
+        creditScore:  activeCreditScore,
+        creditType:   snap.creditType || null,
+        bestScore:    displayScore,
+        bestType:     displayType,
+        effectiveMin,
+        wouldEnter:   scorePassesMin && blocks.length === 0 && constraintPass,
+        modeIndicators,
         blocks,
-        constraint:  instrConstraint ? `${instrConstraint.allowedTypes.join("/")} only${instrConstraint.reason ? " - " + instrConstraint.reason : ""}` : null,
-        putReasons:  snap.putReasons  || [],
-        callReasons: snap.callReasons || [],
-        signals:     snap.signals     || {},
+        constraint:   instrConstraint ? `${instrConstraint.allowedTypes.join("/")} only${instrConstraint.reason ? " - " + instrConstraint.reason : ""}` : null,
+        putReasons:   snap.putReasons  || [],
+        callReasons:  snap.callReasons || [],
+        signals:      snap.signals     || {},
       };
     });
 
