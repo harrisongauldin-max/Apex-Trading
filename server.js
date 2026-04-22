@@ -1236,6 +1236,7 @@ app.get("/api/score-debug", (req, res) => {
       creditAllowedVIX:    _dbRb.creditAllowedVIX,
       vix:                 _dbRb.vix,
       spyPrice:            state._liveSPY || 0,
+      spyDayChange:        state._spyDayChange || 0,
       spy50MA:             state._spyMA50 || 0,
       spy200MA:            state._spyMA200 || 0,
       regimeDuration:      state._regimeDuration || 0,
