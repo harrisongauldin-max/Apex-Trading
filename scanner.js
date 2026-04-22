@@ -2088,9 +2088,18 @@ async function runScan() {
     };
     // Save score snapshot AFTER all zeroing/adjustments - reflects actual execution scores
     if (!state._scoreDebug) state._scoreDebug = {};
+    // Determine effective credit score from the setup that was actually used
+    const _creditCallScore = (creditCallModeActive && isBearTrend) ? callSetup.score : null;
+    const _creditPutScore  = (creditModeActive && !isBearTrend)    ? putSetup.score  : null;
+    const _creditScore     = _creditCallScore ?? _creditPutScore ?? null;
+    const _creditType      = (creditCallModeActive && isBearTrend) ? "credit_call"
+                           : (creditModeActive && !isBearTrend)    ? "credit_put" : null;
+    const _effectiveMin    = _creditType ? MIN_SCORE_CREDIT : MIN_SCORE;
     state._scoreDebug[stock.ticker] = {
       ts: Date.now(), price, putScore, callScore,
-      effectiveMin: MIN_SCORE,
+      creditScore: _creditScore,   // from scoreCreditSpread (dedicated scorer)
+      creditType:  _creditType,    // credit_call or credit_put
+      effectiveMin: _effectiveMin, // 65 for credits, 70 for debits
       putReasons: putSetup.reasons, callReasons: callSetup.reasons,
       signals: { rsi: signals.rsi, dailyRsi: signals.dailyRsi, macd: signals.macd,
         momentum: signals.momentum, ivPercentile: signals.ivPercentile,
