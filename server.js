@@ -1281,17 +1281,24 @@ app.get("/api/score-debug", (req, res) => {
       const instrConstraint = INSTRUMENT_CONSTRAINTS[stock.ticker] || null;
 
       // Use credit score when in credit mode — it's the actual score that determines entry
-      // bestScore for display: credit score takes priority over debit score when active
       const activeCreditScore = snap.creditScore ?? null;
       const displayScore = activeCreditScore !== null ? activeCreditScore : bestScore;
       const displayType  = snap.creditType || bestType;
       const effectiveMin = snap.effectiveMin || (snap.creditType ? 65 : 70);
+      const rrEst        = snap.rrEstimate || null;
 
-      // wouldEnter: use the score that matches the active trade type
+      // wouldEnter: score must pass min AND R/R must be viable AND no blocks AND constraint ok
       const scorePassesMin = displayScore >= effectiveMin;
+      const rrPassesMin    = !rrEst || rrEst.viable; // no estimate = don't penalize (non-credit)
       const constraintPass = !instrConstraint || instrConstraint.allowedTypes.includes(
         snap.creditType || (bestType === "put" ? "debit_put" : "debit_call")
       );
+
+      // Build R/R block message if estimate says it will fail
+      const rrBlock = (rrEst && !rrEst.viable)
+        ? [`execution gate: ${rrEst.reason}`]
+        : [];
+      const allBlocks = [...blocks, ...rrBlock];
 
       return {
         ticker:       stock.ticker,
@@ -1304,9 +1311,10 @@ app.get("/api/score-debug", (req, res) => {
         bestScore:    displayScore,
         bestType:     displayType,
         effectiveMin,
-        wouldEnter:   scorePassesMin && blocks.length === 0 && constraintPass,
+        rrEstimate:   rrEst,
+        wouldEnter:   scorePassesMin && rrPassesMin && allBlocks.length === 0 && constraintPass,
         modeIndicators,
-        blocks,
+        blocks:       allBlocks,
         constraint:   instrConstraint ? `${instrConstraint.allowedTypes.join("/")} only${instrConstraint.reason ? " - " + instrConstraint.reason : ""}` : null,
         putReasons:   snap.putReasons  || [],
         callReasons:  snap.callReasons || [],
@@ -1317,6 +1325,7 @@ app.get("/api/score-debug", (req, res) => {
     res.json({
       timestamp:   new Date().toISOString(),
       lastScan:    state.lastScan,
+      lastCreditRR: state._lastCreditRR || {},
       gates,
       agentSignal: agentMacro.signal     || "unknown",
       agentConf:   agentMacro.confidence || "unknown",
