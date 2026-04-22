@@ -779,7 +779,11 @@ async function executeCreditSpread(stock, price, score, scoreReasons, vix, optio
       // Richard/Gilfoyle/Dinesh: width retry — compute narrowest width achieving 25% R/R
       // Algebraic inversion: credit/(width-credit) >= 0.25  →  maxWidth = 5 × netCredit
       // sameExpiry + snapshots already in memory — zero extra Alpaca calls
-      const _retryWidth = Math.max(3, Math.round(5 * netCredit)); // $3 floor (Dinesh)
+      // Dynamic retry width: solve credit/(width-credit) >= MIN_CREDIT_RR algebraically
+      // width <= credit * (1 + 1/MIN_CREDIT_RR). Was hardcoded to 5x (= 1 + 1/0.25 = 25% floor).
+      // Now uses actual MIN_CREDIT_RR so retry is consistent with the VIX-tiered floor.
+      const _retryMultiplier = 1 + (1 / MIN_CREDIT_RR); // e.g. at 26%: 1 + 3.846 = 4.846
+      const _retryWidth = Math.max(2, Math.round(netCredit * _retryMultiplier * 2) / 2); // round to $0.50
       if (_retryWidth >= actualWidth) {
         logEvent("filter", `${stock.ticker} credit spread R/R ${(rrRatioCred*100).toFixed(0)}% (credit $${netCredit} / risk $${maxLoss}) — below ${(MIN_CREDIT_RR*100).toFixed(0)}% minimum — skip`);
         return null;
