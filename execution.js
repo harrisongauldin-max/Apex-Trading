@@ -765,6 +765,12 @@ async function executeCreditSpread(stock, price, score, scoreReasons, vix, optio
     const rrRatioCred = maxLoss > 0 ? maxProfit / maxLoss : 0;
     const MIN_CREDIT_RR = (spreadParamsOverride && spreadParamsOverride.minCreditRatio) || 0.33; // 0.33 = genuine positive EV at delta 0.20 (0.25 was breakeven only)
     if (rrRatioCred < MIN_CREDIT_RR) {
+      // Cache actual market R/R in state so score debug shows real execution viability
+      if (!state._lastCreditRR) state._lastCreditRR = {};
+      state._lastCreditRR[stock.ticker] = {
+        ts: Date.now(), rr: rrRatioCred, netCredit, maxLoss, width: actualWidth,
+        viable: false, reason: `market R/R ${(rrRatioCred*100).toFixed(0)}% < ${(MIN_CREDIT_RR*100).toFixed(0)}% min ($${netCredit} credit on $${actualWidth} wide)`
+      };
       // Richard/Gilfoyle/Dinesh: width retry — compute narrowest width achieving 25% R/R
       // Algebraic inversion: credit/(width-credit) >= 0.25  →  maxWidth = 5 × netCredit
       // sameExpiry + snapshots already in memory — zero extra Alpaca calls
@@ -799,10 +805,20 @@ async function executeCreditSpread(stock, price, score, scoreReasons, vix, optio
       const _retryMaxLoss = parseFloat((_retryWidth - _retryCredit).toFixed(2));
       const _retryRR      = _retryMaxLoss > 0 ? _retryCredit / _retryMaxLoss : 0;
       if (_retryRR < MIN_CREDIT_RR || _retryCredit <= 0) {
+        if (!state._lastCreditRR) state._lastCreditRR = {};
+        state._lastCreditRR[stock.ticker] = {
+          ts: Date.now(), rr: rrRatioCred, retryRR: _retryRR, netCredit, maxLoss, width: actualWidth,
+          viable: false, reason: `market R/R ${(rrRatioCred*100).toFixed(0)}% — retry $${_retryWidth} wide also fails (${(_retryRR*100).toFixed(0)}%)`
+        };
         logEvent("filter", `${stock.ticker} credit spread R/R ${(rrRatioCred*100).toFixed(0)}% — retry $${_retryWidth} wide also fails (${(_retryRR*100).toFixed(0)}%) — skip`);
         return null;
       }
       // Retry succeeded — update longContract and reassign lets so all downstream uses correct values
+      if (!state._lastCreditRR) state._lastCreditRR = {};
+      state._lastCreditRR[stock.ticker] = {
+        ts: Date.now(), rr: _retryRR, netCredit: _retryCredit, width: _retryWidth,
+        viable: true, reason: `R/R ${(_retryRR*100).toFixed(0)}% via retry $${_retryWidth} wide`
+      };
       logEvent("filter", `${stock.ticker} [R/R RETRY] $${actualWidth}→$${_retryWidth} wide | ${(rrRatioCred*100).toFixed(0)}%→${(_retryRR*100).toFixed(0)}% R/R | credit $${_retryCredit}`);
       longContract = {
         symbol:  _retryCandidate.c.symbol,
