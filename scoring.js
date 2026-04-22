@@ -231,6 +231,9 @@ function isXLEEntryAllowed(optionType, xleRSI, xleMomentum, vix, xlePrice, xleMA
   // If dailyRSI >= 40, the intraday crash is noise within a valid daily trend — allow entry.
   // If dailyRSI <= 40, the selloff is a genuine trend move — block debit put (already crashed).
   if (optionType === "put") {
+    // Block if dailyRSI <= 35 — stock has already crashed on a daily basis, put has no edge
+    // Don't require intraday RSI to confirm — daily trend exhaustion is sufficient alone
+    if (xleDailyRSI && xleDailyRSI <= 35) return { allowed: false, reason: `XLE put blocked - dailyRSI ${xleDailyRSI?.toFixed(0)} deeply oversold (stock already crashed, put thesis gone)` };
     const dailyRsiOversold = !xleDailyRSI || xleDailyRSI <= 40; // conservative: block if unknown
     if (xleRSI && xleRSI <= 35 && dailyRsiOversold) return { allowed: false, reason: `XLE put blocked - RSI ${xleRSI?.toFixed(0)} intraday oversold + dailyRSI ${xleDailyRSI?.toFixed(0)||"?"} confirms trend exhaustion` };
     if (xleRSI && xleRSI <= 35 && !dailyRsiOversold) { logEvent("filter", `XLE intraday RSI ${xleRSI?.toFixed(0)} oversold but dailyRSI ${xleDailyRSI?.toFixed(0)} valid — intraday noise, allowing put entry`); }
