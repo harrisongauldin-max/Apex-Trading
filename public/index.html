@@ -3965,6 +3965,22 @@ function renderScoreDebug(d, el) {
       if (ageStr) out += '<div style="font-size:10px;color:var(--muted)">'+ageStr+'</div>';
       out += '</div></div>';
 
+      // Debit call score banner — shown when in Regime A / recovery (not credit mode)
+      var debitCallScore  = r2.debitCallScore != null ? r2.debitCallScore : null;
+      var debitCallActive = r2.debitCallActive || false;
+      if (debitCallActive && debitCallScore !== null) {
+        var dcMin = 75;
+        var dcCol = scoreColor(debitCallScore, dcMin);
+        var dcWouldEnter = debitCallScore >= dcMin && !blocked;
+        var dcStatusLabel = dcWouldEnter ? '&#9654; WOULD ENTER' : ('score ' + debitCallScore + ' < min ' + dcMin);
+        var dcStatusColor = dcWouldEnter ? '#00ff88' : 'var(--muted)';
+        out += '<div style="background:rgba(0,255,136,.08);border:1px solid rgba(0,255,136,.3);border-radius:6px;padding:8px 12px;margin-bottom:10px;display:flex;justify-content:space-between;align-items:center">';
+        out += '<span style="font-size:9px;color:#00ff88;letter-spacing:1px">DEBIT CALL SPREAD</span>';
+        out += '<span style="font-size:22px;font-weight:700;color:'+dcCol+'">'+debitCallScore+'</span>';
+        out += '<span style="font-size:9px;color:'+dcStatusColor+'">'+dcStatusLabel+'</span>';
+        out += '</div>';
+      }
+
       // Credit score banner — shown prominently when credit mode active
       if (creditScore !== null) {
         var creditCol = scoreColor(creditScore, effectiveMin);
