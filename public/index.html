@@ -2358,51 +2358,154 @@ function renderActivityLog() {
 
 async function renderJournal() {
   const wrap = document.getElementById('journal-wrap');
-  let journal = state.tradeJournal || [];
-  try { const r = await fetch('/api/journal'); if (r.ok) journal = await r.json(); } catch(e) {}
-  journal = journal || [];
-  if (!journal.length) { wrap.innerHTML = '<div class="no-data">No journal entries yet.</div>'; return; }
-  wrap.innerHTML = journal.slice(0, 30).map(e => {
-    const isOpen  = e.action === 'OPEN';
-    const color   = isOpen ? 'var(--green)' : (e.pnl >= 0 ? 'var(--blue)' : 'var(--red)');
-    const score   = e.score;
-    const scoreColor = score >= 85 ? 'var(--green)' : score >= 70 ? 'var(--blue)' : 'var(--orange)';
-    return `
-    <div class="journal-entry">
+
+  // Build unified trade history from closedTrades (authoritative P&L)
+  // matched with tradeJournal OPEN entries (for scoreReasons/entry context)
+  const closed  = (state.closedTrades || []).slice().reverse(); // newest first
+  const journal = state.tradeJournal  || [];
+
+  // Also get any open positions (show as OPEN at top)
+  const openPositions = state.positions || [];
+
+  if (!closed.length && !openPositions.length) {
+    wrap.innerHTML = '<div class="no-data">No trades yet. Journal populates after first entry and exit.</div>';
+    return;
+  }
+
+  // Match closed trade to its OPEN journal entry by ticker + optionType + approximate time
+  function findOpenEntry(trade) {
+    return journal.find(j => j.action === 'OPEN' &&
+      j.ticker === trade.ticker &&
+      j.optionType === trade.optionType
+    );
+  }
+
+  // Render an open position card
+  function renderOpenCard(pos) {
+    const tradeType = pos.isCreditSpread ? 'CREDIT' : pos.isSpread ? 'DEBIT' : 'NAKED';
+    const typeBg    = pos.isCreditSpread ? 'rgba(0,255,136,.15)' : pos.isSpread ? 'rgba(0,150,255,.15)' : 'rgba(100,100,100,.1)';
+    const typeCol   = pos.isCreditSpread ? 'var(--green)' : pos.isSpread ? 'var(--blue)' : 'var(--muted)';
+    const pnlStr    = pos.pnl != null ? ((pos.pnl >= 0 ? '+' : '') + parseFloat(pos.pnl).toFixed(2)) : '--';
+    const pnlCol    = (pos.pnl || 0) >= 0 ? 'var(--green)' : 'var(--red)';
+    const score     = pos.score || 0;
+    const scoreCol  = score >= 85 ? 'var(--green)' : score >= 70 ? 'var(--blue)' : 'var(--orange)';
+    const spreadLabel = pos.isCreditSpread
+      ? `$${pos.sellStrike}C/$${pos.buyStrike}C · ${pos.expDate||''}`
+      : pos.buyStrike && pos.sellStrike
+        ? `$${pos.buyStrike}/$${pos.sellStrike} · ${pos.expDate||''}`
+        : pos.strike ? `$${pos.strike}${pos.optionType==='put'?'P':'C'} · ${pos.expDate||''}` : pos.optionType;
+    const openDate  = pos.entryTime ? new Date(pos.entryTime).toLocaleString() : (pos.openDate || '--');
+    const scoreReasons = pos.scoreReasons || [];
+    return `<div class="journal-entry" style="border-left:3px solid var(--green)">
       <div class="journal-header">
-        <div style="display:flex;align-items:center;gap:10px">
-          <span class="journal-ticker">${e.ticker}</span>
-          <span style="font-size:10px;padding:2px 8px;border-radius:10px;background:${isOpen?'rgba(0,255,136,.1)':'rgba(0,196,255,.1)'};color:${color}">${e.action}</span>
-          ${isOpen ? `<span style="font-size:10px;color:var(--muted)">${
-            e.isSpread && e.buyStrike && e.sellStrike
-              ? '$'+e.buyStrike+'/'+'$'+e.sellStrike+((e.optionType==='call'?'C':'P')+'-SPRD')
-              : e.strike
-                ? '$'+e.strike+(e.optionType==='put'?'P':'C')+' · '+(e.expDate||'?')
-                : e.optionType
-                  ? e.optionType.toUpperCase()
-                  : '--'
-          }</span>` : ''}
-          ${e.isCreditSpread ? '<span style="font-size:9px;padding:2px 6px;border-radius:10px;background:rgba(0,255,136,.15);color:var(--green)">CREDIT</span>' : e.isSpread ? '<span style="font-size:9px;padding:2px 6px;border-radius:10px;background:rgba(0,150,255,.15);color:var(--blue)">DEBIT</span>' : ''}
+        <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+          <span class="journal-ticker">${pos.ticker}</span>
+          <span style="font-size:10px;padding:2px 8px;border-radius:10px;background:rgba(0,255,136,.1);color:var(--green)">OPEN</span>
+          <span style="font-size:10px;color:var(--muted)">${spreadLabel}</span>
+          <span style="font-size:9px;padding:2px 6px;border-radius:10px;background:${typeBg};color:${typeCol}">${tradeType}</span>
         </div>
         <div style="display:flex;align-items:center;gap:8px">
-          ${score ? `<span class="journal-score" style="background:rgba(0,196,255,.1);color:${scoreColor}">${score}/100</span>` : ''}
-          ${!isOpen && e.pnl !== undefined ? `<span style="font-weight:700;color:${e.pnl>=0?'var(--green)':'var(--red)'}">${e.pnl>=0?'+':''}${(e.pnl||0).toFixed(2)}</span>` : ''}
+          ${score ? `<span class="journal-score" style="background:rgba(0,196,255,.1);color:${scoreCol}">${score}/100</span>` : ''}
+          <span style="font-weight:700;color:${pnlCol}">${pnlStr}</span>
         </div>
       </div>
-      <div class="journal-reasoning">${e.reasoning || '--'}</div>
-      ${(isOpen && e.scoreReasons && e.scoreReasons.length) ? ('<div style="margin-top:4px;padding:4px 0;border-top:1px solid #1a2a3a">' + e.scoreReasons.map(function(r) {
-        var isNeg = r.indexOf('(-') > -1 || r.indexOf('contradicts') > -1 || r.indexOf('bad for') > -1 || r.indexOf('capped') > -1 || r.indexOf('fighting') > -1 || r.indexOf('Neither') > -1;
+      <div class="journal-reasoning">
+        ${pos.isCreditSpread
+          ? `Bear call spread. Sold $${pos.sellStrike}C / Bought $${pos.buyStrike}C. Credit $${pos.premium}. Max profit $${pos.maxProfit ? (pos.maxProfit*100*(pos.contracts||1)).toFixed(0) : '--'}. Max loss $${pos.maxLoss ? (pos.maxLoss*100*(pos.contracts||1)).toFixed(0) : '--'}. ${pos.contracts||1} contract(s).`
+          : `Entry $${pos.premium}. ${pos.contracts||1} contract(s).`}
+      </div>
+      ${scoreReasons.length ? ('<div style="margin-top:4px;padding:4px 0;border-top:1px solid #1a2a3a">' + scoreReasons.slice(0,8).map(function(r) {
+        var isNeg = r.indexOf('(-') > -1;
         var isPos = !isNeg && r.indexOf('(+') > -1 && r.indexOf('+0)') === -1;
-        var col = isNeg ? '#ff7766' : isPos ? '#88dd88' : '#666';
-        return '<span style="font-size:10px;color:' + col + ';display:block;line-height:1.5">' + r + '</span>';
+        return '<span style="font-size:10px;color:' + (isNeg?'#ff7766':isPos?'#88dd88':'#666') + ';display:block;line-height:1.5">' + r + '</span>';
       }).join('') + '</div>') : ''}
       <div class="journal-meta">
-        <span>${new Date(e.time).toLocaleString()}</span>
-        ${isOpen ? `<span>δ ${e.delta}</span><span>IV ${e.iv}%</span><span>VIX ${e.vix}</span>` : `<span>Reason: ${e.reason}</span><span style="font-size:9px;padding:1px 5px;border-radius:8px;background:${e.tradeType==='credit_spread'?'rgba(0,255,136,.12)':e.tradeType==='debit_spread'?'rgba(0,150,255,.12)':'rgba(100,100,100,.1)'};color:${e.tradeType==='credit_spread'?'var(--green)':e.tradeType==='debit_spread'?'var(--blue)':'var(--muted)'}">${(e.tradeType||'naked').replace('_',' ').toUpperCase()}</span>`}
-        ${e.catalyst ? `<span>Catalyst: ${e.catalyst}</span>` : ''}
+        <span>Opened: ${openDate}</span>
+        <span>DTE: ${pos.expDays || '--'}</span>
+        <span>VIX: ${pos.entryVIX || '--'}</span>
       </div>
     </div>`;
-  }).join('');
+  }
+
+  // Render a closed trade card
+  function renderClosedCard(trade) {
+    const openEntry = findOpenEntry(trade);
+    const won       = trade.pnl > 0;
+    const pnlCol    = won ? 'var(--green)' : 'var(--red)';
+    const pnlStr    = (trade.pnl >= 0 ? '+' : '') + parseFloat(trade.pnl || 0).toFixed(2);
+    const pctStr    = (trade.pct >= 0 ? '+' : '') + parseFloat(trade.pct || 0).toFixed(1) + '%';
+    const score     = trade.entryScore || 0;
+    const scoreCol  = score >= 85 ? 'var(--green)' : score >= 70 ? 'var(--blue)' : 'var(--orange)';
+    const typeLabel = trade.tradeType === 'credit_spread' ? 'CREDIT' : trade.tradeType === 'debit_spread' ? 'DEBIT' : 'NAKED';
+    const typeBg    = trade.tradeType === 'credit_spread' ? 'rgba(0,255,136,.15)' : trade.tradeType === 'debit_spread' ? 'rgba(0,150,255,.15)' : 'rgba(100,100,100,.1)';
+    const typeCol   = trade.tradeType === 'credit_spread' ? 'var(--green)' : trade.tradeType === 'debit_spread' ? 'var(--blue)' : 'var(--muted)';
+    const maxProfitPct = trade.pctOfMaxProfit != null ? trade.pctOfMaxProfit.toFixed(1) + '% of max' : '';
+    const spreadLabel = trade.sellStrike && trade.buyStrike
+      ? `$${trade.sellStrike}/$${trade.buyStrike} · ${trade.optionType?.toUpperCase()}`
+      : trade.buyStrike ? `$${trade.buyStrike} ${trade.optionType?.toUpperCase()}` : trade.optionType;
+    const scoreReasons = (openEntry && openEntry.scoreReasons) || [];
+    const closeDate = trade.closeTime ? new Date(trade.closeTime).toLocaleString() : (trade.date || '--');
+    return `<div class="journal-entry" style="border-left:3px solid ${pnlCol};opacity:0.9">
+      <div class="journal-header">
+        <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+          <span class="journal-ticker">${trade.ticker}</span>
+          <span style="font-size:10px;padding:2px 8px;border-radius:10px;background:${won?'rgba(0,196,255,.1)':'rgba(255,80,80,.1)'};color:${pnlCol}">CLOSED</span>
+          <span style="font-size:10px;color:var(--muted)">${spreadLabel}</span>
+          <span style="font-size:9px;padding:2px 6px;border-radius:10px;background:${typeBg};color:${typeCol}">${typeLabel}</span>
+        </div>
+        <div style="display:flex;align-items:center;gap:8px">
+          ${score ? `<span class="journal-score" style="background:rgba(0,196,255,.1);color:${scoreCol}">${score}/100</span>` : ''}
+          <span style="font-weight:700;color:${pnlCol}">${pnlStr}</span>
+          <span style="font-size:10px;color:${pnlCol}">${pctStr}</span>
+        </div>
+      </div>
+      <div class="journal-reasoning">
+        <strong style="color:${pnlCol}">${won ? '✓ WIN' : '✗ LOSS'}</strong> — 
+        ${trade.tradeType === 'credit_spread'
+          ? `Sold $${trade.sellStrike}/$${trade.buyStrike} spread. ${maxProfitPct ? maxProfitPct + ' profit captured.' : ''}`
+          : ''
+        }
+        Closed: <em>${trade.reason || '--'}</em>. 
+        Held ${trade.daysHeld || 0}d. 
+        Entry VIX ${trade.entryVIX || '--'} → Exit VIX ${trade.exitVIX || '--'}.
+        Entry signal: ${trade.entryMacro || '--'}.
+      </div>
+      ${scoreReasons.length ? ('<div style="margin-top:4px;padding:4px 0;border-top:1px solid #1a2a3a">' + scoreReasons.slice(0,6).map(function(r) {
+        var isNeg = r.indexOf('(-') > -1;
+        var isPos = !isNeg && r.indexOf('(+') > -1 && r.indexOf('+0)') === -1;
+        return '<span style="font-size:10px;color:' + (isNeg?'#ff7766':isPos?'#88dd88':'#666') + ';display:block;line-height:1.5">' + r + '</span>';
+      }).join('') + '</div>') : ''}
+      <div class="journal-meta">
+        <span>Closed: ${closeDate}</span>
+        ${trade.maxProfit ? `<span>Max P: $${(trade.maxProfit*100*(trade.contracts||1)).toFixed(0)}</span>` : ''}
+        ${trade.maxLoss   ? `<span>Max L: $${(trade.maxLoss*100*(trade.contracts||1)).toFixed(0)}</span>`   : ''}
+        <span>Regime: ${trade.regime || '--'}</span>
+      </div>
+    </div>`;
+  }
+
+  // Summary bar
+  const totalPnL  = closed.reduce((s, t) => s + (t.pnl || 0), 0);
+  const wins      = closed.filter(t => t.pnl > 0).length;
+  const winRate   = closed.length ? ((wins / closed.length) * 100).toFixed(0) : '--';
+  const pnlCol    = totalPnL >= 0 ? 'var(--green)' : 'var(--red)';
+
+  let html = '';
+  if (closed.length) {
+    html += `<div style="background:var(--panel);border:1px solid var(--border);border-radius:8px;padding:10px 14px;margin-bottom:12px;display:flex;gap:20px;flex-wrap:wrap;font-size:11px;color:var(--muted)">
+      <span>Closed trades: <strong style="color:var(--text)">${closed.length}</strong></span>
+      <span>Win rate: <strong style="color:var(--text)">${winRate}%</strong> (${wins}/${closed.length})</span>
+      <span>Total P&L: <strong style="color:${pnlCol}">${totalPnL >= 0 ? '+' : ''}${totalPnL.toFixed(2)}</strong></span>
+      ${openPositions.length ? `<span>Open: <strong style="color:var(--green)">${openPositions.length}</strong></span>` : ''}
+    </div>`;
+  }
+
+  // Open positions first
+  openPositions.forEach(pos => { html += renderOpenCard(pos); });
+  // Then closed trades newest first (already reversed)
+  closed.slice(0, 50).forEach(trade => { html += renderClosedCard(trade); });
+
+  wrap.innerHTML = html || '<div class="no-data">No trades yet.</div>';
 }
 
 function renderStocks() {
