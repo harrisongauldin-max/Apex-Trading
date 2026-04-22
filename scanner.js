@@ -33,7 +33,7 @@ const {
   getCached, setCache } = require('./market');
 
 const {
-  scoreIndexSetup, scorePutSetup, scoreMeanReversionCall, scoreCreditSpread,
+  scoreIndexSetup, scorePutSetup, scoreMeanReversionCall, scoreCreditSpread, scoreDebitCallSpread,
   detectMarketRegime, getRegimeModifier, applyIntradayRegimeOverride,
   updateOversoldTracker, recordGateBlock, checkMacroShift,
   checkSectorETF, isGLDEntryAllowed, isXLEEntryAllowed, isTLTEntryAllowed,
@@ -45,7 +45,7 @@ const {
 const { INSTRUMENT_CONSTRAINTS } = require('./entryEngine');
 
 const {
-  executeCreditSpread, executeDebitSpread, executeTrade, executeIronCondor,
+  executeCreditSpread, executeDebitSpread, executeDebitCallSpread, executeTrade, executeIronCondor,
   findContract, calcPositionSize,
 } = require('./execution');
 
@@ -741,7 +741,12 @@ async function runScan() {
     getStockBars("SPY", 5),
     getIntradayBars("SPY"),
   ]);
-  if (spyPrice) state._liveSPY = spyPrice;
+  if (spyPrice) {
+    state._liveSPY = spyPrice;
+    // Track SPY day change for debit call gate (don't buy calls into a down day)
+    const spyPrevClose = state._spyPrevClose || spyPrice;
+    state._spyDayChange = spyPrevClose > 0 ? (spyPrice - spyPrevClose) / spyPrevClose : 0;
+  }
   // Compute SPY 200MA once per day at scan time — needed for below200MACallBlock gate
   const _ma200Date = state._spyMA200Date || "";
   const _todayStr  = new Date().toLocaleDateString("en-US", { timeZone: "America/New_York" });
@@ -856,6 +861,7 @@ async function runScan() {
   const spyGapUp = (() => {
     if (spyBars.length >= 2) {
       const prevClose  = spyBars[spyBars.length-2].c;
+    if (prevClose) state._spyPrevClose = prevClose; // used for _spyDayChange
       const curSPY     = spyBars[spyBars.length-1].c;
       const gapPct     = (curSPY - prevClose) / prevClose;
       const etMinSince = (scanET.getHours() - 9) * 60 + scanET.getMinutes() - 30;
@@ -1684,6 +1690,12 @@ async function runScan() {
         const creditPutResult = scoreCreditSpread(liveStock, "credit_put", state.vix, state._ivRank || 50, spyRSI, spyMACD, spyMomentum, breadthVal, scoringMacroBase);
         putSetupRaw = { score: creditPutResult.score, reasons: creditPutResult.reasons, tradeType: "credit_put" };
         logEvent("filter", `${liveStock.ticker} bull put spread score: ${creditPutResult.score}/100 (dedicated scorer)`);
+      } else if (!isBearTrend && !creditCallModeActive) {
+        // Regime A / recovery: score debit call spreads with dedicated scorer
+        // Only runs when not in credit mode — debit calls and credit spreads don't co-exist
+        const debitCallResult = scoreDebitCallSpread(liveStock, state.vix, state._ivRank || 50, spyRSI, spyMACD, spyMomentum, breadthVal, scoringMacroBase, state);
+        callSetupRaw = { score: debitCallResult.score, reasons: debitCallResult.reasons, tradeType: "debit_call" };
+        logEvent("filter", `${liveStock.ticker} debit call spread score: ${debitCallResult.score}/100 (dedicated scorer)`);
       }
 
       putSetup  = { score: putSetupRaw.score,  reasons: putSetupRaw.reasons,  tradeType: putSetupRaw.tradeType,  isMeanReversion: false };
@@ -2088,13 +2100,15 @@ async function runScan() {
     };
     // Save score snapshot AFTER all zeroing/adjustments - reflects actual execution scores
     if (!state._scoreDebug) state._scoreDebug = {};
-    // Determine effective credit score from the setup that was actually used
-    const _creditCallScore = (creditCallModeActive && isBearTrend) ? callSetup.score : null;
-    const _creditPutScore  = (creditModeActive && !isBearTrend)    ? putSetup.score  : null;
-    const _creditScore     = _creditCallScore ?? _creditPutScore ?? null;
-    const _creditType      = (creditCallModeActive && isBearTrend) ? "credit_call"
-                           : (creditModeActive && !isBearTrend)    ? "credit_put" : null;
-    const _effectiveMin    = _creditType ? MIN_SCORE_CREDIT : MIN_SCORE;
+    // Determine effective score from the setup that was actually used
+    const _creditCallScore  = (creditCallModeActive && isBearTrend) ? callSetup.score : null;
+    const _creditPutScore   = (creditModeActive && !isBearTrend)    ? putSetup.score  : null;
+    const _debitCallScore   = (!isBearTrend && !creditCallModeActive) ? callSetup.score : null;
+    const _creditScore      = _creditCallScore ?? _creditPutScore ?? null;
+    const _creditType       = (creditCallModeActive && isBearTrend) ? "credit_call"
+                            : (creditModeActive && !isBearTrend)    ? "credit_put" : null;
+    const _debitCallActive  = (!isBearTrend && !creditCallModeActive && _debitCallScore !== null);
+    const _effectiveMin     = _creditType ? MIN_SCORE_CREDIT : (_debitCallActive ? 75 : MIN_SCORE);
 
     // Use real market R/R from last execution attempt — far more accurate than any estimate
     // _lastCreditRR is written by execution.js every time the R/R gate fires
@@ -2104,9 +2118,11 @@ async function runScan() {
 
     state._scoreDebug[stock.ticker] = {
       ts: Date.now(), price, putScore, callScore,
-      creditScore: _creditScore,   // from scoreCreditSpread (dedicated scorer)
-      creditType:  _creditType,    // credit_call or credit_put
-      effectiveMin: _effectiveMin, // 65 for credits, 70 for debits
+      creditScore: _creditScore,      // from scoreCreditSpread (dedicated scorer)
+      creditType:  _creditType,       // credit_call or credit_put
+      debitCallScore: _debitCallScore, // from scoreDebitCallSpread (Regime A)
+      debitCallActive: _debitCallActive,
+      effectiveMin: _effectiveMin,    // 65 credits, 75 debit_call, 70 debits
       rrEstimate:  _rrEst,         // analytical R/R viability check
       putReasons: putSetup.reasons, callReasons: callSetup.reasons,
       signals: { rsi: signals.rsi, dailyRsi: signals.dailyRsi, macd: signals.macd,
@@ -2475,7 +2491,9 @@ async function runScan() {
     const useCreditCallSpread = intentType === "credit_call" && stock.isIndex && !isMeanReversion;
     const useIronCondor       = intentType === "iron_condor" && stock.isIndex && !isMeanReversion && !dryRunMode
       && !state.positions.some(p => p.ticker === stock.ticker);
-    const useSpread           = !useCreditSpread && !useCreditCallSpread && !useIronCondor
+    const useDebitCallSpread  = intentType === "debit_call"  && stock.isIndex && !isMeanReversion
+      && rb.spreadParams?.debitCallEnabled !== false; // disabled in crisis (VIX>35)
+    const useSpread           = !useCreditSpread && !useCreditCallSpread && !useIronCondor && !useDebitCallSpread
       && stock.isIndex && !isMeanReversion && intentType !== "debit_naked";
     const ivSizeMult          = rb.sizeMult.ivBoostCredit && intentType.startsWith("credit")
       ? rb.sizeMult.ivBoostCredit : 1.0;
@@ -2488,9 +2506,10 @@ async function runScan() {
     // Gilfoyle: log which execution branch fires — critical for diagnosing silent non-entries
     const _branch = useIronCondor ? "iron_condor"
       : (useCreditSpread || useCreditCallSpread) ? `credit_${optionType}`
+      : useDebitCallSpread ? "debit_call"
       : (useSpread || isMeanReversion) ? `debit_${optionType}`
       : "none";
-    logEvent("filter", `${stock.ticker} execution branch: ${_branch} (creditSpread:${useCreditSpread} creditCall:${useCreditCallSpread} debit:${useSpread} MR:${isMeanReversion})`);
+    logEvent("filter", `${stock.ticker} execution branch: ${_branch} (creditSpread:${useCreditSpread} creditCall:${useCreditCallSpread} debitCall:${useDebitCallSpread} debit:${useSpread} MR:${isMeanReversion})`);
     if (useIronCondor) {
       state._lastEntryType = "iron_condor";
       logEvent("scan", `[IRON CONDOR] ${stock.ticker} choppy + IVR ${ivRankNow} - attempting iron condor`);
@@ -2513,6 +2532,13 @@ async function runScan() {
       // No debit fallback here — credit and debit are mutually exclusive strategies.
       // If credit R/R fails, the market is saying premium isn't rich enough to sell.
       // The correct response is to wait, not switch to buying puts into a crashed market.
+    } else if (useDebitCallSpread) {
+      // Debit call spread — Regime A / recovery — buy OTM call, sell further OTM call
+      state._lastEntryType = "debit_call";
+      const _dcSizeMod = sizeMod || 1.0;
+      logEvent("scan", `[DEBIT CALL] ${stock.ticker} ${rb.regimeName} regime - attempting debit call spread`);
+      const dcPos = await executeDebitCallSpread(stock, price, score, reasons, state.vix, _dcSizeMod, rb.spreadParams);
+      entered = !!dcPos;
     } else if (useSpread || isMeanReversion) {
       // Debit spread (directional) or MR call spread - both handled by executeDebitSpread
       const debitPos = await executeDebitSpread(stock, price, optionType, state.vix, score, reasons, sizeMod || 1.0, isMeanReversion);
