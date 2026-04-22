@@ -3932,8 +3932,11 @@ function renderScoreDebug(d, el) {
       var r2 = scores[ticker];
       var ps = r2.putScore || 0;
       var cs = r2.callScore || 0;
-      var pc = scoreColor(ps, minScore);
-      var cc = scoreColor(cs, minScore);
+      var creditScore = r2.creditScore != null ? r2.creditScore : null;
+      var creditType  = r2.creditType || null;
+      var effectiveMin = r2.effectiveMin || minScore;
+      var pc = scoreColor(ps, effectiveMin);
+      var cc = scoreColor(cs, effectiveMin);
       var blocked = (r2.blocked && r2.blocked.length) ? r2.blocked : null;
       var ageMs = r2.ts ? (Date.now()-r2.ts) : null;
       var ageStr = ageMs !== null ? (ageMs < 60000 ? Math.round(ageMs/1000)+'s ago' : Math.round(ageMs/60000)+'m ago') : '';
@@ -3948,16 +3951,31 @@ function renderScoreDebug(d, el) {
       if (ageStr) out += '<div style="font-size:10px;color:var(--muted)">'+ageStr+'</div>';
       out += '</div></div>';
 
-      // Score boxes
+      // Credit score banner — shown prominently when credit mode active
+      if (creditScore !== null) {
+        var creditCol = scoreColor(creditScore, effectiveMin);
+        var creditWouldEnter = creditScore >= effectiveMin && !blocked;
+        var creditLabel = creditType === 'credit_call' ? 'BEAR CALL SPREAD' : 'BULL PUT SPREAD';
+        out += '<div style="background:rgba(0,196,255,.08);border:1px solid rgba(0,196,255,.3);border-radius:6px;padding:8px 12px;margin-bottom:10px;display:flex;justify-content:space-between;align-items:center">';
+        out += '<span style="font-size:9px;color:#00c4ff;letter-spacing:1px">'+creditLabel+'</span>';
+        out += '<span style="font-size:22px;font-weight:700;color:'+creditCol+'">'+creditScore+'</span>';
+        out += '<span style="font-size:9px;color:'+(creditWouldEnter?'#00ff88':'var(--muted)')+'">'+(creditWouldEnter?'&#9654; WOULD ENTER':'below min '+effectiveMin)+'</span>';
+        out += '</div>';
+      }
+
+      // Score boxes — debit put and call scores for reference
       out += '<div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:10px">';
       ['put','call'].forEach(function(type) {
         var score = type==='put' ? ps : cs;
         var col   = type==='put' ? pc : cc;
-        var wouldEnter = score >= minScore && !blocked;
+        // Only show WOULD ENTER for debit scores when not in credit mode
+        var isActiveType = creditScore === null && score >= effectiveMin && !blocked;
+        var label = creditScore !== null ? 'debit ref' : (isActiveType ? '&#9654; WOULD ENTER' : 'below min');
+        var labelColor = isActiveType ? '#00ff88' : (creditScore !== null ? '#336688' : 'var(--muted)');
         out += '<div style="background:rgba(0,0,0,.25);border-radius:6px;padding:8px;text-align:center">';
         out += '<div style="font-size:9px;color:var(--muted);letter-spacing:1px;margin-bottom:4px">'+type.toUpperCase()+'</div>';
         out += '<div style="font-size:26px;font-weight:700;color:'+col+'">'+score+'</div>';
-        out += '<div style="font-size:9px;margin-top:3px;color:'+(wouldEnter?'#00ff88':'var(--muted)')+'">'+(wouldEnter?'&#9654; WOULD ENTER':'below min')+'</div>';
+        out += '<div style="font-size:9px;margin-top:3px;color:'+labelColor+'">'+label+'</div>';
         out += '</div>';
       });
       out += '</div>';
