@@ -133,6 +133,7 @@ function getRegimeRulebook(state) {
   // Flat score table: regime + trade type only (B1/B2 removed, agentMinAdj removed)
   const minScorePut    = isBullRegime ? 85 : 70;  // bear: 70, bull: 85 (fighting trend)
   const minScoreCall   = isBullRegime ? 75 : 85;  // bear: 85 (fighting trend), bull: 75
+  const minScoreDebitCall = 75;  // panel: higher bar than credit — needs actual directional move
   const minScoreCredit = isBullRegime ? 75 : 65;  // credits: 65 bear, 75 bull
   const agentMinAdj    = 0;                        // removed — stale agent uses keyword fallback
 
@@ -204,7 +205,8 @@ function getRegimeRulebook(state) {
   //   0.25 floor provides ~4% EV buffer above breakeven at delta 0.20.
   //   Breakeven R/R formula: loss_prob / win_prob = delta / (1-delta)
   //   At delta 0.20: breakeven = 0.20/0.80 = 25%. So 0.25 is the TRUE minimum.
-  const minCreditRatio  = 0.33;  // floor — genuine positive EV at delta 0.20 (0.25 was breakeven, not EV-positive)
+  // minCreditRatio now computed in spreadParams as VIX-tiered value — see spreadParams.minCreditRatio
+  const minCreditRatio  = vix >= 35 ? 0.25 : vix >= 28 ? 0.26 : vix >= 20 ? 0.28 : 0.33;
   const targetCreditRatio = 0.30; // target — seek 30% when conditions allow
 
   // Change 3 (OT + Natenberg 1994 Ch.8): DTE targets per regime
@@ -243,16 +245,27 @@ function getRegimeRulebook(state) {
     debitWidth:        vix >= 35 ? 20 : vix >= 25 ? 15 : 10,
     maxDebitRatio:     0.40,
 
-    // Credit spread parameters — professionally calibrated
-    // Adaptive width: narrower in calm IV (concentrate credit/risk), wider in crisis (premium covers it)
-    // Richard: width is the primary R/R lever — scales with VIX, not price alone
-    creditWidth:       vix >= 35 ? 15   // Crisis C: premium rich, width doesn't matter
-                     : vix >= 28 ? 10   // Elevated B2: standard panel-approved
-                     : vix >= 22 ? 7    // Normal B1/A: tighten to improve R/R
-                     : 5,               // Low IV: narrow — credit is scarce
+    // Credit spread parameters — price-relative width (panel 4/22/2026)
+    // Width expressed as % of underlying price — same economic bet across all instruments
+    // $10 wide on SPY ($710) = 1.4%. $10 wide on TLT ($87) = 11.5%. Completely different bets.
+    // Panel: VIX > 35: 1.5% | VIX 28-35: 1.0% | VIX 20-28: 0.8% | VIX < 20: disabled
+    // Execution clamps: min $2 (bid-ask eats smaller), max $15 (SPY cap)
+    // _priceForWidth computed in scanner and passed via spreadParamsOverride.price
+    creditWidthPct:    vix >= 35 ? 0.015   // Crisis: premium rich, wider ok
+                     : vix >= 28 ? 0.010   // Elevated: standard
+                     : vix >= 20 ? 0.008   // Normal: tighten
+                     : 0,                  // Low vol: disable credit spreads (negative EV)
+    creditWidth:       10,                 // Legacy fallback — overridden by execution price-relative calc
     creditOTMpct,
-    minCreditRatio,
-    targetCreditRatio,  // aspirational target — server.js enforces minCreditRatio only
+    // VIX-tiered R/R floor — INVERSE to VIX (higher VIX = higher win rate = need less stated R/R)
+    // Panel 4/22/2026: 33% was theoretically right but practically blocked all entries in B/VIX28
+    // At VIX 28: IV/RV spread ~6-10 pts = structural edge. 26% R/R + 80% win rate = +EV.
+    // At VIX <20: IV/RV spread near zero. Need higher stated R/R to compensate.
+    minCreditRatio:    vix >= 35 ? 0.25   // Crisis: massive IV premium = high win rate = 25% ok
+                     : vix >= 28 ? 0.26   // Elevated: IV premium substantial
+                     : vix >= 20 ? 0.28   // Normal: IV premium shrinking
+                     : 0.33,              // Low vol: disabled above but 0.33 floor if ever reached
+    targetCreditRatio,  // aspirational target — execution enforces minCreditRatio only
 
     // DTE management (Change 3)
     targetDTE,
@@ -264,11 +277,22 @@ function getRegimeRulebook(state) {
     shortDeltaMin,  // floor — executeCreditSpread now selects by delta proximity to target
 
     // Vega exposure management (Change 4 — GS/VS + Natenberg)
-    // TODO: maxPortfolioVega and ivBoostVegaThresh are defined here but not yet
-    // enforced in server.js executeCreditSpread — ivBoost currently applied without
-    // vega check. Wire in when portfolio grows to multi-position size.
     maxPortfolioVega,
     ivBoostVegaThresh,
+
+    // Debit call spread parameters (panel 4/22/2026)
+    // Panel: buy delta 0.40-0.45 (just OTM, responsive), sell delta 0.20-0.25 (cap upside)
+    // Width: 1.0-1.5% of price — captures realistic upside without overpaying
+    // Max debit: 40% of width — debit R/R equivalent of credit R/R floor
+    // DTE: 21-28 days — enough time for move, not so much theta punishes
+    // Disabled when: VIX > 35 (crisis), agent bearish, SPY down >1% on day
+    debitCallLongDelta:  0.42,           // buy leg — just OTM, delta-responsive
+    debitCallShortDelta: 0.22,           // sell leg — caps upside, reduces cost
+    debitCallWidthPct:   vix >= 28 ? 0.012 : vix >= 20 ? 0.015 : 0.010, // price-relative
+    debitCallMaxDebitPct: 0.40,          // max debit as % of spread width (R/R floor)
+    debitCallTargetDTE:  vix >= 28 ? 28 : 21,  // shorter DTE in elevated vol
+    debitCallMinDTE:     14,
+    debitCallEnabled:    !isCrisis && vix <= 35, // disabled in crisis
   };
 
   return {
@@ -298,6 +322,7 @@ function getRegimeRulebook(state) {
     minScorePut,
     minScoreCall,
     minScoreCredit,
+    minScoreDebitCall,
     baseMinScore: BASE_MIN_SCORE,
   };
 }
@@ -479,6 +504,22 @@ function evaluateEntry(candidate, rulebook, state, context = {}) {
       return { pass: false, reason: "SPY below 200MA — debit calls fight the trend in Regime B" };
     if (g.crisisDebitBlock && !tradeType.startsWith("credit"))
       return { pass: false, reason: "Regime C — debit calls blocked" };
+    // Debit call spread specific gates (panel 4/22/2026)
+    if (tradeType === "debit_call") {
+      // SPY down >1% on the day — don't buy calls into a down day
+      const spyDayChg = state._spyDayChange || 0;
+      if (spyDayChg < -0.01)
+        return { pass: false, reason: `debit call: SPY down ${(spyDayChg*100).toFixed(1)}% today — no calls into down day` };
+      // Entry window: 10:15am - 2:30pm ET only (needs opening direction confirmed)
+      if (etHour < 10.25)
+        return { pass: false, reason: "debit call: before 10:15am ET — wait for opening direction to confirm" };
+      if (etHour >= 14.5)
+        return { pass: false, reason: "debit call: after 2:30pm ET — insufficient time for move to develop" };
+      // MACD bearish = momentum against bull thesis
+      const macdSig = (context.signals || {}).macd || "neutral";
+      if (macdSig.includes("bearish crossover"))
+        return { pass: false, reason: "debit call: MACD bearish crossover — momentum reversing, call blocked" };
+    }
   }
 
   // ── Stagger gate ──────────────────────────────────────────
@@ -519,6 +560,7 @@ function evaluateEntry(candidate, rulebook, state, context = {}) {
     && rb.gates.putsOnBounceMode;
   let minScore = tradeType.startsWith("credit")   ? rb.minScoreCredit
                : isPutsOnBouncesDebit             ? rb.minScoreCredit  // 65 in Regime B fade mode
+               : tradeType === "debit_call"        ? (rb.minScoreDebitCall || 75) // panel: 75 min for debit calls
                : optionType === "put"             ? rb.minScorePut
                : rb.minScoreCall;
 
