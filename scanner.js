@@ -438,35 +438,36 @@ async function runScan() {
 
     // Earnings plays removed - SPY/QQQ don't have earnings dates
 
-    // Macro news on 5-min tier - catches breaking news within 5 minutes not 15
-    // AUTHORITY: agent is primary. Keywords are fallback when agent hasn't run yet.
-    const macro = await getMacroNews();
+    // ── Macro authority — agent is the only signal source ─────────────────
+    // Keywords eliminated. Agent runs on headline delta in server.new.js interval.
+    // Scanner reads state._agentMacro directly — no keyword scoring, no fallback.
+    // Staleness: agent internally caps at 90 minutes. Scanner warns if > 30 min.
     const agentMacroForAuth = state._agentMacro;
-    const agentAuthAge = agentMacroForAuth && agentMacroForAuth.timestamp
+    const agentAuthAge = agentMacroForAuth?.timestamp
       ? (Date.now() - new Date(agentMacroForAuth.timestamp).getTime()) / 60000 : 999;
-    const agentAuthFresh = agentAuthAge < 10; // agent ran within 10 minutes = use it exclusively
-    if (agentAuthFresh && agentMacroForAuth) {
-      // Agent is fresh - use agent signal, merge in keyword triggers for context only
+
+    if (agentMacroForAuth) {
+      // Use agent signal — fresh or held (stability threshold filters noise)
+      const staleSuffix = agentAuthAge > 30 ? ` (⚠️ ${agentAuthAge.toFixed(0)}min stale)` : '';
       marketContext.macro = {
-        ...macro,
-        signal:        agentMacroForAuth.signal || macro.signal,
-        scoreModifier: agentMacroForAuth.scoreModifier || macro.scoreModifier || 0,
-        mode:          agentMacroForAuth.mode || macro.mode,
-        macroAuthority: "agent",
+        signal:        agentMacroForAuth.signal || 'neutral',
+        scoreModifier: agentMacroForAuth.modifier || 0,
+        mode:          agentMacroForAuth.mode || 'normal',
+        macroAuthority:'agent',
+        confidence:    agentMacroForAuth.confidence || 'low',
         agentLastUpdated: agentMacroForAuth.timestamp,
+        triggers:      agentMacroForAuth.catalysts || [],
       };
+      if (agentAuthAge > 30 && !dryRunMode) {
+        logEvent("warn", `[MACRO] Agent signal is ${agentAuthAge.toFixed(0)}min old — headline delta may be suppressing calls`);
+      }
+      if (marketContext.macro.mode !== 'normal') {
+        logEvent("macro", `[5min] Macro: ${marketContext.macro.signal} via agent (${marketContext.macro.scoreModifier > 0 ? '+' : ''}${marketContext.macro.scoreModifier}) age:${agentAuthAge.toFixed(0)}min${staleSuffix}`);
+      }
     } else {
-      // Agent stale - use keywords at 50% score modifier weight
-      marketContext.macro = {
-        ...macro,
-        scoreModifier: Math.round((macro.scoreModifier || 0) * 0.5),
-        macroAuthority: "keyword_fallback",
-        agentLastUpdated: agentMacroForAuth?.timestamp || null,
-      };
-      if (!dryRunMode) logEvent("warn", `[MACRO] Agent stale (${agentAuthAge.toFixed(0)}min) - keyword fallback active, score modifier halved`);
-    }
-    if (marketContext.macro.mode !== "normal") {
-      logEvent("macro", `[5min] Macro: ${marketContext.macro.signal} via ${marketContext.macro.macroAuthority} (${marketContext.macro.scoreModifier > 0 ? "+" : ""}${marketContext.macro.scoreModifier}) | ${(marketContext.macro.triggers||[]).slice(0,3).join(", ")}`);
+      // No agent signal yet — neutral until first call completes
+      marketContext.macro = { signal: 'neutral', scoreModifier: 0, mode: 'normal', macroAuthority: 'pending', triggers: [] };
+      if (!dryRunMode) logEvent("warn", `[MACRO] No agent signal yet — neutral until startup analysis completes`);
     }
 
     // Strongly bearish macro - close all calls immediately
