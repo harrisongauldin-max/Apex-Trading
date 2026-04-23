@@ -969,6 +969,36 @@ async function runScan() {
   const skewElevated      = (state._skew?.skew || 0) >= 130;
   const creditAllowedVIX  = rb.creditAllowedVIX; // entryEngine v2.0: IVR>=50 AND VIX>=25 (both required)
 
+  // ── Overnight scan intelligence — read pre-market compute if available ────
+  // Stored by getAgentOvernightScan("premarket-compute") at 7:30am CT (8:30am ET)
+  // Provides: instrument biases, suppress window, wait-for-open flag, strike targets
+  const overnightScan = state._overnightScan || null;
+  const overnightAge  = overnightScan?.generatedAt
+    ? (Date.now() - new Date(overnightScan.generatedAt).getTime()) / 3600000 // hours
+    : 999;
+  const useOvernightBias = overnightScan && overnightAge < 12; // stale after 12 hours
+
+  if (useOvernightBias) {
+    // Suppress entries until specified CT time (FOMC, CPI, etc.)
+    if (overnightScan.suppressUntil) {
+      const [supHH, supMM] = overnightScan.suppressUntil.replace(/[^0-9:]/g,'').split(':').map(Number);
+      const etNow = getETTime();
+      const ctHour = etNow.getHours() - 1; // ET → CT (rough, handles EDT)
+      const ctMin  = etNow.getMinutes();
+      if (ctHour < supHH || (ctHour === supHH && ctMin < supMM)) {
+        logEvent("scan", `[OVERNIGHT] Entries suppressed until ${overnightScan.suppressUntil} CT (${overnightScan.catalysts?.join(', ') || 'scheduled event'})`);
+      }
+    }
+    // Log wait-for-open flag if set
+    if (overnightScan.waitForOpen && etHourNow < 10.5) { // before 9:30am CT
+      logEvent("scan", `[OVERNIGHT] Wait-for-open flag set: ${overnightScan.waitReason || 'pre-market volatility'}`);
+    }
+    // Log overnight regime assessment
+    if (overnightScan.scanType === 'premarket-compute') {
+      logEvent("scan", `[OVERNIGHT] Pre-market: ${overnightScan.regime} | ${overnightScan.signal} (${overnightScan.confidence}) | bias: ${overnightScan.entryBias} | risk: ${overnightScan.riskLevel}`);
+    }
+  }
+
   // Strategy log
   const strategyMode = regimeClass === "C" ? "CRISIS - bear call credits only"
     : regimeClass === "B" ? "BEAR TREND - bear call credits + debit puts on bounces"
@@ -1655,6 +1685,15 @@ async function runScan() {
       const agentMacro  = state._agentMacro || {};
       // V2.81: use daily RSI for scoring thresholds (panel fix -- 1-min RSI is noise at regime level)
       // intraday RSI (liveStock.rsi) retained for VWAP/timing logs only
+      // Overnight instrument bias — skip instrument if flagged
+      if (useOvernightBias && overnightScan.instrumentBias) {
+        const instrBias = overnightScan.instrumentBias[stock.ticker];
+        if (instrBias === 'skip') {
+          logEvent("filter", `${stock.ticker} overnight scan: instrument flagged SKIP — avoiding today`);
+          continue;
+        }
+      }
+
       const spyRSI      = liveStock.dailyRsi || liveStock.rsi || 50;
       const spyMACD     = liveStock.macd || "neutral";
       const spyMomentum = liveStock.momentum || "steady";
