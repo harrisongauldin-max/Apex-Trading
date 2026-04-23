@@ -768,7 +768,7 @@ async function executeCreditSpread(stock, price, score, scoreReasons, vix, optio
     // This requires ~80% win rate to break even -- achievable with proper strike selection
     // Worse than 4:1 (e.g. TLT $97 profit / $903 loss = 9.3:1) is not a viable strategy
     const rrRatioCred = maxLoss > 0 ? maxProfit / maxLoss : 0;
-    const MIN_CREDIT_RR = (spreadParamsOverride && spreadParamsOverride.minCreditRatio) || 0.26; // VIX-tiered: 0.25 crisis, 0.26 elevated, 0.28 normal (inverse to VIX — higher IV = higher win rate)
+    const MIN_CREDIT_RR = (spreadParamsOverride && spreadParamsOverride.minCreditRatio) || 0.20; // PAPER: 0.20 floor — meaningful entries. Production: 0.26/0.28.
     if (rrRatioCred < MIN_CREDIT_RR) {
       // Cache actual market R/R in state so score debug shows real execution viability
       if (!state._lastCreditRR) state._lastCreditRR = {};
