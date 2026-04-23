@@ -267,10 +267,12 @@ function getRegimeRulebook(state) {
     // Panel 4/22/2026: 33% was theoretically right but practically blocked all entries in B/VIX28
     // At VIX 28: IV/RV spread ~6-10 pts = structural edge. 26% R/R + 80% win rate = +EV.
     // At VIX <20: IV/RV spread near zero. Need higher stated R/R to compensate.
-    minCreditRatio:    vix >= 35 ? 0.25   // Crisis: massive IV premium = high win rate = 25% ok
-                     : vix >= 28 ? 0.26   // Elevated: IV premium substantial
-                     : vix >= 20 ? 0.28   // Normal: IV premium shrinking
-                     : 0.33,              // Low vol: disabled above but 0.33 floor if ever reached
+    // PAPER TRADING: 0.20 across all VIX buckets — generates entries while keeping losses meaningful.
+    // Production targets (pre June 4): 0.25 crisis / 0.26 elevated / 0.28 normal.
+    minCreditRatio:    vix >= 35 ? 0.20
+                     : vix >= 28 ? 0.20
+                     : vix >= 20 ? 0.20
+                     : 0.25,             // Low vol: disabled above but floor if ever reached
     targetCreditRatio,  // aspirational target — execution enforces minCreditRatio only
 
     // DTE management (Change 3)
