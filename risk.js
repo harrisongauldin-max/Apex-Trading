@@ -226,12 +226,12 @@ async function checkAllFilters(stock, price, prefetchedBars = null) { // OPT3: a
   const fails = [];
 
   // 0. Entry attempt cooldown — if a pending order for this ticker was recently force-cleared
-  // (cancel deadlock or retry failure), block new entries for 15 minutes to prevent ghost orders
+  // (cancel deadlock or retry failure), block new entries for 60 minutes to prevent repeat deadlock cycles
   // accumulating on Alpaca while ARGO doesn't know the previous order's status
   if (state._entryAttemptCooldown && !state._dryRunMode) {
     const lastAttempt = state._entryAttemptCooldown[stock.ticker];
     if (lastAttempt) {
-      const cooldownMs  = 15 * 60 * 1000; // 15 minutes
+      const cooldownMs  = 60 * 60 * 1000; // 60 minutes — long enough to prevent repeat deadlock cycles
       const elapsed     = Date.now() - lastAttempt;
       if (elapsed < cooldownMs) {
         const remaining = Math.ceil((cooldownMs - elapsed) / 60000);
