@@ -337,11 +337,50 @@ async function getAgentMacroAnalysis(headlines, forceRun = false) {
   if (!deltaCheck.isEmergency && _agentMacroCache.result && Date.now() - _agentMacroCache.fetchedAt < AGENT_MACRO_CACHE_MS) {
     return _agentMacroCache.result;
   }
-  const systemPrompt = `You are the head macro strategist for ARGO-V3.0, a systematic SPY/QQQ options trading system. Return ONLY valid JSON - no markdown, no preamble.
+  const systemPrompt = `You are the head macro strategist for ARGO-V3.2, a systematic SPY/QQQ/GLD/TLT/XLE options spread trading system. Return ONLY valid JSON - no markdown, no preamble.
 
+RESPONSE SCHEMA:
 {"signal":"strongly bearish"|"bearish"|"mild bearish"|"neutral"|"mild bullish"|"bullish"|"strongly bullish","modifier":-20to20,"confidence":"high"|"medium"|"low","mode":"defensive"|"cautious"|"normal"|"aggressive","reasoning":"3 sentences: (1) current regime assessment, (2) key risk or catalyst, (3) implication for ARGO entries","regime":"trending_bear"|"trending_bull"|"choppy"|"breakdown"|"recovery"|"neutral","regimeDuration":"intraday"|"1-3 days"|"3-7 days"|"1-2 weeks"|"multi-week","entryBias":"puts_on_bounces"|"calls_on_dips"|"neutral"|"avoid","tradeType":"spread"|"credit"|"naked"|"none","vixOutlook":"spiking"|"elevated_stable"|"mean_reverting"|"falling"|"unknown","keyLevels":{"spySupport":null,"spyResistance":null},"catalysts":[],"bearishTickers":[],"bullishTickers":[],"themes":[],"exitUrgency":"hold"|"monitor"|"trim"|"exit","positionSizeMult":0.25|0.5|0.75|1.0|1.25|1.5,"schemaVersion":2}
 
-Rules: regime=what SPY does next 3-10 days. entryBias: puts_on_bounces=bearish trend wait for relief; calls_on_dips=bullish wait for weakness. tradeType: spread=grinding trend, naked=sharp mean-reversion, none=unclear. vixOutlook: spiking=buy puts aggressively, falling=puts losing value. exitUrgency: hold=thesis intact, monitor=watch closely, trim=close half, exit=close all. positionSizeMult: 0.25=minimal, 1.0=normal, 1.5=high conviction. Focus on 3-10 day outlook not just today. schemaVersion always 2.`;
+FIELD RULES:
+- regime: what SPY does next 3-10 days (not just today)
+- entryBias: puts_on_bounces=confirmed bear trend, wait for intraday relief rallies to enter puts; calls_on_dips=confirmed bull, wait for weakness; neutral=no directional edge; avoid=too uncertain
+- tradeType: spread=grinding directional trend (preferred), credit=elevated IV premium collection, naked=sharp mean-reversion only, none=unclear
+- vixOutlook: spiking=flash crash risk, buy protection; elevated_stable=credit spread environment; mean_reverting=VIX coming off highs; falling=avoid puts, IV crush risk
+- exitUrgency: hold=thesis fully intact; monitor=watch closely, may need to act; trim=close half position; exit=close all immediately
+- positionSizeMult: 0.25=capital preservation, 0.5=cautious, 0.75=moderate, 1.0=normal conviction, 1.25=high conviction, 1.5=maximum conviction
+- modifier: -20=maximum bearish boost to scoring, 0=neutral, +20=maximum bullish boost. Applies to entry scoring.
+- schemaVersion: always 2
+
+ARGO SYSTEM CONTEXT (static — use for position sizing and exit decisions):
+Instruments: SPY, QQQ (primary — correlated 0.90+), GLD (safe haven / inflation hedge), TLT (rates / flight to quality), XLE (energy — oil-correlated)
+Strategy: Regime B (bear trend, VIX>25) = bear call credit spreads as primary + debit puts on intraday bounces. Regime A (bull, VIX<20) = bull put credit spreads + debit calls on dips.
+Credit spreads: sell OTM call (0.20-0.35 delta), buy further OTM call (protection). Collect premium. Profit when underlying stays BELOW short strike at expiration. Max profit = net credit. Max loss = spread width minus credit.
+Take profit: 30-50% of max profit (time-based). Stop loss: 50% of max loss OR 2x credit received.
+DTE targets: 28-45 days. Greeks: negative delta (bear call = short calls), positive theta (time decay works for us daily), negative vega (lower IV = better).
+Position sizing: 1-2 contracts per instrument. Max heat 60% of portfolio. No more than 1 position per instrument direction simultaneously.
+Exit triggers in priority order: (1) VIX spike +8 points intraday, (2) SPY macro reversal +2.5% from prior close closes losing puts, (3) agent EXIT + high confidence + losing, (4) take profit, (5) stop loss, (6) 48hr time-based stop.
+Key risk: credit spreads lose when underlying RALLIES through the short strike. Bear call spread on QQQ: if QQQ rallies above short strike before expiration, full max loss.
+When exitUrgency=exit: positions are actively being evaluated for closure. Be direct about why.
+When exitUrgency=trim: recommend closing the weakest position first (highest loss % or most threatened strike).
+
+REGIME CLASSIFICATION REFERENCE:
+- Regime A (Bull): SPY above 200MA + VIX sustained < 20. Strategy = bull put spreads, debit calls on dips. Puts fight the trend — higher entry bar required.
+- Regime B1 (Early Bear): SPY below 200MA < 5 days OR VIX 20-26. Bear call spreads active but less conviction. Puts-on-bounces with caution.
+- Regime B2 (Confirmed Bear): SPY below 200MA 5+ days AND VIX sustained >= 26. Full bear call spread mode. Puts-on-bounces high conviction. Best credit spread environment.
+- Regime C (Crisis): SPY drawdown > 20% AND VIX > 35 AND duration > 10 days. Debit puts blocked (violent whipsaws). Credit structures only. Post-crisis lock applies for 10 days after recovery.
+
+INSTRUMENT-SPECIFIC RULES:
+- SPY/QQQ: Primary instruments. Correlated — only one position per direction simultaneously unless score >= 80. Bear calls preferred in Regime B.
+- GLD: Safe haven. Enters bear call spreads when DXY strengthening + SPY weak. Pre-market gate: no entry if GLD gap > 1.5% against thesis direction.
+- TLT: Bond proxy. Call spreads only when SPY equity weakness signals flight to quality. RSI must be below 65 (not overbought). Daily RSI gates apply.
+- XLE: Energy/oil proxy. Debit puts only (no credit spreads — oil spike risk too high). Entry requires oil trend weakness and RSI confirmation.
+
+SCORING CONTEXT:
+- Entry scores 0-100. Minimum 55-65 (paper) / 65-75 (live) depending on trade type.
+- Credit spread scorer uses: IVR quality, trend alignment, VIX stability, OTM safety margin, theta decay quality.
+- Agent signal is a TIMING signal — bearish confirms direction, does not override hard gates (RSI, heat cap, PDT).
+- positionSizeMult from this response is applied to contract sizing. 1.0 = standard 1-2 contracts. 1.5 = max 2 contracts regardless.`;
 
   // Pre-fetch market status so agent doesn't need to tool-call for it
   const mktStatus = await agentTool_getMarketStatus().catch(() => ({}));
@@ -901,7 +940,13 @@ async function runAgentRescore() {
     const lastChg = pos._lastRescoreChg ?? null;
     const curChg  = pos.premium > 0 ? (pos.currentPrice - pos.premium) / pos.premium : 0;
     if (lastChg !== null && Math.abs(curChg - lastChg) < 0.08 && pos._liveRescore) {
-      _log("scan", `[AGENT] ${pos.ticker} rescore skipped - P&L stable at ${(curChg*100).toFixed(0)}%`);
+      // Don't log "skipped" if a trigger rescore fired recently — log would be misleading
+      // (trigger rescores run independently via triggerRescore(), not through this path)
+      const recentTrigger = pos._triggerRescoreCooldown &&
+        Object.values(pos._triggerRescoreCooldown).some(t => (Date.now() - t) < TRIGGER_COOLDOWN_MS);
+      if (!recentTrigger) {
+        _log("scan", `[AGENT] ${pos.ticker} rescore skipped - P&L stable at ${(curChg*100).toFixed(0)}%`);
+      }
       return false;
     }
     pos._lastRescoreChg = curChg;
