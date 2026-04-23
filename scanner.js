@@ -1693,10 +1693,10 @@ async function runScan() {
     // Panel fix: flat min score replaces 0.80x multiplier
     // timeOfDayMult kept at 1.0 - score penalty is now applied via timeOfDayMinScore gate below
     const timeOfDayMult = 1.0; // no longer used as multiplier - kept for compatibility
-    // Entry window gate: block new entries after 3pm (MR exception handled at execution)
-    // Normal entries: 3:00pm cutoff
-    // Mean reversion calls: 3:30pm cutoff (capitulation has genuine overnight edge)
-    const entryWindowClosed = etHourNow >= 15.0; // scan-level etHourNow
+    // Entry window gate: block new entries after 3:30pm ET (2:30pm CT)
+    // Normal entries: 3:30pm cutoff — was incorrectly 3:00pm, fixed
+    // Mean reversion calls: also 3:30pm cutoff (capitulation has genuine overnight edge)
+    const entryWindowClosed = etHourNow >= 15.5; // scan-level etHourNow
     // Afternoon minimum handled by evaluateEntry via rb.gates.afternoonMinActive
 
     // - F7: Weekly trend filter -
