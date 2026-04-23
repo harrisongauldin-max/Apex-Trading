@@ -192,6 +192,8 @@ async function checkExits(positions, posSnapshots, posQuotes, posNewsCache, ctx)
           }
           pos.currentPrice = curP;
           pos.realData = true;
+          // Store individual leg prices for dashboard display
+          pos._legPrices = { buy: parseFloat(buyMid.toFixed(2)), sell: parseFloat(sellMid.toFixed(2)) };
           // Compute NET spread Greeks = buy leg - sell leg
           // For credit spreads: short the sell leg (negative delta/vega/gamma, positive theta)
           // Using buy leg alone gives wrong sign — net must account for both legs
