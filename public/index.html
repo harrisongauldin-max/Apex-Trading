@@ -3932,6 +3932,7 @@ function switchTab(name) {
   if (name==='theta')       loadTheta();
   if (name==='attribution') loadAttribution();
   if (name==='tax')         loadTaxLog();
+  if (name==='journal')     renderJournal();
 }
 
 // ── Init ──────────────────────────────────────────────────────────────────
@@ -4347,27 +4348,45 @@ async function loadReport() {
 
 async function loadAttribution() {
   const trades = state.closedTrades || [];
+  const openPos = state.positions   || [];
   const byTicker = {}, bySector = {}, byScore = {};
+
+  // Closed trades
   trades.forEach(t => {
     const k = t.ticker || '?';
-    if (!byTicker[k]) byTicker[k] = { pnl: 0, count: 0 };
+    if (!byTicker[k]) byTicker[k] = { pnl: 0, count: 0, open: 0 };
     byTicker[k].pnl += t.pnl || 0; byTicker[k].count++;
     const s = t.sector || 'Unknown';
-    if (!bySector[s]) bySector[s] = { pnl: 0, count: 0 };
+    if (!bySector[s]) bySector[s] = { pnl: 0, count: 0, open: 0 };
     bySector[s].pnl += t.pnl || 0; bySector[s].count++;
-    const sc = t.score >= 85 ? '85+' : t.score >= 75 ? '75-84' : '70-74';
-    if (!byScore[sc]) byScore[sc] = { pnl: 0, count: 0 };
+    const entryScore = t.entryScore || t.score || 0;
+    const sc = entryScore >= 85 ? '85+' : entryScore >= 75 ? '75-84' : entryScore >= 65 ? '65-74' : 'below 65';
+    if (!byScore[sc]) byScore[sc] = { pnl: 0, count: 0, open: 0 };
     byScore[sc].pnl += t.pnl || 0; byScore[sc].count++;
   });
+
+  // Open positions — show as pending (no realised P&L yet)
+  openPos.forEach(p => {
+    const k = p.ticker || '?';
+    if (!byTicker[k]) byTicker[k] = { pnl: 0, count: 0, open: 0 };
+    byTicker[k].open++;
+    const s = p.sector || 'Unknown';
+    if (!bySector[s]) bySector[s] = { pnl: 0, count: 0, open: 0 };
+    bySector[s].open++;
+    const sc = (p.score||0) >= 85 ? '85+' : (p.score||0) >= 75 ? '75-84' : (p.score||0) >= 65 ? '65-74' : 'below 65';
+    if (!byScore[sc]) byScore[sc] = { pnl: 0, count: 0, open: 0 };
+    byScore[sc].open++;
+  });
+
   const renderAttr = (data, wrap) => {
     const el = document.getElementById(wrap);
     if (!el) return;
-    if (!Object.keys(data).length) { el.innerHTML = '<div class="no-data">No closed trades yet.</div>'; return; }
-    const rows = Object.entries(data).sort((a,b) => b[1].pnl - a[1].pnl).map(([k,v]) =>
-      '<div style="display:flex;justify-content:space-between;padding:6px 0;border-bottom:1px solid var(--border)">' +
+    if (!Object.keys(data).length) { el.innerHTML = '<div class="no-data">No trades yet — open positions will appear here once closed.</div>'; return; }
+    const rows = Object.entries(data).sort((a,b) => (b[1].count + b[1].open) - (a[1].count + a[1].open)).map(([k,v]) =>
+      '<div style="display:flex;justify-content:space-between;align-items:center;padding:6px 0;border-bottom:1px solid var(--border)">' +
       '<span style="font-weight:700">' + k + '</span>' +
-      '<span>' + v.count + ' trades</span>' +
-      '<span style="color:' + (v.pnl>=0?'var(--green)':'var(--red)') + ';font-weight:700">' + (v.pnl>=0?'+':'') + '$' + v.pnl.toFixed(2) + '</span></div>'
+      '<span style="font-size:10px;color:var(--muted)">' + v.count + ' closed' + (v.open ? ' · <span style="color:var(--green)">' + v.open + ' open</span>' : '') + '</span>' +
+      '<span style="color:' + (v.count === 0 ? 'var(--muted)' : v.pnl>=0?'var(--green)':'var(--red)') + ';font-weight:700">' + (v.count === 0 ? '--' : (v.pnl>=0?'+':'') + '$' + v.pnl.toFixed(2)) + '</span></div>'
     ).join('');
     el.innerHTML = '<div class="card">' + rows + '</div>';
   };
