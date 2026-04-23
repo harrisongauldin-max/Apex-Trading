@@ -31,7 +31,7 @@ const { sendEmail, sendMorningBriefing, sendResendEmail,
         buildMonthlyReport, premarketAssessment,
         updateAfterHoursContext }                         = require('./reporting');
 const { getAgentMacroAnalysis, initAgent,
-        getAgentRescore, getAgentDayPlan,
+        getAgentRescore, getAgentDayPlan, getAgentOvernightScan,
         getAgentPostMarketAssessment, getAgentPreEntryCheck } = require('./agent');
 const { getRegimeRulebook, INSTRUMENT_CONSTRAINTS }       = require('./entryEngine');
 const { executeCreditSpread }                             = require('./execution');
@@ -638,12 +638,18 @@ cron.schedule("30 11,12 * * 1-5", async () => {
   }
 });
 
-// 8:30am ET final assessment (fires at :30 past the hour, checks ET hour = 8)
+// 8:30am ET (7:30am CT) final assessment + pre-market strike pre-computation
+// This is the most important pre-open scan — runs with live pre-market prices
 cron.schedule("30 12,13 * * 1-5", async () => {
   const et = getETTime();
   if (et.getHours() === 8 && et.getMinutes() === 30) {
-    logEvent("macro", "[DAY PLAN] 8:30am ET final assessment starting...");
+    logEvent("macro", "[DAY PLAN] 8:30am ET (7:30am CT) final assessment + pre-market compute starting...");
+    // Run day plan first (fast, sets regime/signal baseline)
     await getAgentDayPlan("8:30am-final");
+    // Then run pre-market compute (adds strike targets, instrument biases, gap analysis)
+    // Slight delay so day plan is stored first
+    await new Promise(r => setTimeout(r, 3000));
+    await getAgentOvernightScan("premarket-compute");
   }
 });
 
@@ -752,6 +758,23 @@ cron.schedule("0 22,23 * * 1-5", async () => {
     await getAgentPostMarketAssessment("6pm-evening");
   }
 });
+
+// ── OVERNIGHT SCANS (CT-aware) ─────────────────────────────────────────────
+// 11:00pm CT (midnight ET) — overnight news digest
+// Fires at :00 UTC 05:00 on weekdays (11pm CT = 5am UTC next day, but we use ET check)
+// Using 11pm CT = midnight ET: cron at UTC 04:00/05:00, check ET hour = 0
+cron.schedule("0 4,5 * * 2-6", async () => {
+  const et = getETTime();
+  if (et.getHours() === 0 && et.getMinutes() === 0) {
+    logEvent("macro", "[OVERNIGHT] 11pm CT midnight digest starting...");
+    await getAgentOvernightScan("midnight-digest");
+  }
+});
+
+// 7:30am CT (8:30am ET) — pre-market strike pre-computation
+// Fires at :30 UTC 12:00/13:00, already handled by existing 8:30am ET cron
+// We extend the existing 8:30am ET cron to ALSO run the overnight premarket scan
+// (handled below by modifying the existing cron logic)
 
 // Saturday 8:00am ET weekly assessment - ET-hour aware
 cron.schedule("0 12,13 * * 6", async () => {
@@ -913,6 +936,7 @@ app.get("/api/state", async (req, res) => {
     skew:               state._skew || null,
     aaii:               state._aaii || null,
     lastScanScores:     state._lastScanScores || {},
+    overnightScan:      state._overnightScan || null,
     watchlist:          WATCHLIST.map(w => ({ ticker: w.ticker, sector: w.sector, beta: w.beta, isPrimary: w.isPrimary, catalyst: w.catalyst })),
   });
 });
