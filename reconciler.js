@@ -423,6 +423,26 @@ async function syncPositionPnLFromAlpaca() {
       alpacaBySymbol[ap.symbol] = ap;
     }
 
+    // ── Drift detection: if any ARGO position has symbols Alpaca doesn't know about,
+    // OR if Alpaca has option positions ARGO doesn't track, trigger full reconciliation.
+    // This ensures ARGO never silently tracks stale state for more than one scan cycle.
+    const argoSymbols = new Set();
+    for (const pos of _state.positions) {
+      [pos.contractSymbol, pos.buySymbol, pos.sellSymbol].filter(Boolean).forEach(s => argoSymbols.add(s));
+    }
+    const alpacaOptionSymbols = new Set(
+      alpacaPositions.filter(p => /^[A-Z]+\d{6}[CP]\d{8}$/.test(p.symbol)).map(p => p.symbol)
+    );
+    // Check if any ARGO symbol is missing from Alpaca (ghost) or any Alpaca symbol is missing from ARGO (orphan)
+    const hasGhost  = [...argoSymbols].some(s => !alpacaOptionSymbols.has(s));
+    const hasOrphan = [...alpacaOptionSymbols].some(s => !argoSymbols.has(s));
+    if (hasGhost || hasOrphan) {
+      const reason = hasGhost && hasOrphan ? 'ghost+orphan' : hasGhost ? 'ghost' : 'orphan';
+      _log('warn', `[ALPACA SYNC] Drift detected (${reason}) - triggering full reconciliation`);
+      await runReconciliation();
+      return; // runReconciliation already updated everything
+    }
+
     let updated = 0;
     for (const pos of _state.positions) {
       if (!pos.isSpread) {
