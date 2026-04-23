@@ -225,6 +225,24 @@ async function checkScaleIns() {
 async function checkAllFilters(stock, price, prefetchedBars = null) { // OPT3: accept pre-fetched bars
   const fails = [];
 
+  // 0. Entry attempt cooldown — if a pending order for this ticker was recently force-cleared
+  // (cancel deadlock or retry failure), block new entries for 15 minutes to prevent ghost orders
+  // accumulating on Alpaca while ARGO doesn't know the previous order's status
+  if (state._entryAttemptCooldown && !state._dryRunMode) {
+    const lastAttempt = state._entryAttemptCooldown[stock.ticker];
+    if (lastAttempt) {
+      const cooldownMs  = 15 * 60 * 1000; // 15 minutes
+      const elapsed     = Date.now() - lastAttempt;
+      if (elapsed < cooldownMs) {
+        const remaining = Math.ceil((cooldownMs - elapsed) / 60000);
+        return { pass: false, reason: `Entry cooldown: previous order for ${stock.ticker} force-cleared ${Math.floor(elapsed/60000)}min ago — waiting ${remaining}min (reconciler verifying state)` };
+      } else {
+        // Cooldown expired — clean up
+        delete state._entryAttemptCooldown[stock.ticker];
+      }
+    }
+  }
+
   // 1. Entry window — SPY/QQQ open at 9:30am, individual stocks at 9:45am
   const isIndexStock     = stock.isIndex || false;
   const eitherWindowOpen = isEntryWindow("call", isIndexStock) || isEntryWindow("put", isIndexStock);
