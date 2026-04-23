@@ -184,7 +184,7 @@ Rules:
 
   // Fetch overnight context
   const [headlines, mktStatus] = await Promise.all([
-    _getMacro().catch(() => ({ headlines: [] })),
+    _getMacro(state).catch(() => ({ headlines: [] })),
     agentTool_getMarketStatus().catch(() => ({})),
   ]);
   const headlineList = (headlines.headlines || headlines.topStories || []).slice(0, 15);
@@ -218,15 +218,128 @@ What is your strategic assessment for today's trading session?`;
   }
 }
 
-async function getAgentMacroAnalysis(headlines) {
+
+// ═══════════════════════════════════════════════════════════════════════════
+// HEADLINE INTELLIGENCE SYSTEM
+// Replaces keyword scoring as the macro signal source.
+//
+// Architecture (Silicon Valley panel approved):
+//   1. Headline novelty detection — fuzzy dedup, skip agent if no new headlines
+//   2. Emergency keyword triggers — 10 structural shock terms, force immediate call
+//   3. Hold last signal with staleness cap — 90 min max, then force full analysis
+//   4. No keyword scoring system — agent is the only macro signal
+//
+// State keys used:
+//   state._headlineCache       — Set of normalized headline fingerprints (last 60)
+//   state._headlineCacheTs     — Timestamp of last cache update
+//   state._agentMacroHistory   — Last 10 agent calls (already implemented)
+//   state._agentMacro          — Current agent macro signal
+// ═══════════════════════════════════════════════════════════════════════════
+
+// Emergency triggers — structural shocks that force immediate out-of-schedule agent call.
+// These are directionally unambiguous and rare. They don't score — they wake the agent.
+const EMERGENCY_TRIGGERS = [
+  'fed emergency',    // emergency Fed action
+  'emergency rate',   // out-of-cycle rate move
+  'circuit breaker',  // market-wide halt
+  'market halted',    // exchange halt
+  'trading halted',   // specific halt
+  'flash crash',      // rapid market drop
+  'margin calls',     // forced deleveraging
+  'bank run',         // deposit flight
+  'yen carry',        // carry trade unwind (Aug 2024 style)
+  'lehman',           // systemic bank failure reference
+  'systemic risk',    // contagion language
+  'contagion',        // financial contagion
+];
+
+// Normalize a headline to a fingerprint for fuzzy deduplication.
+// First 40 chars, lowercase, strip punctuation — catches same story from different sources.
+function _normalizeHeadline(h) {
+  return (h || '').toLowerCase().replace(/[^a-z0-9 ]/g, '').trim().slice(0, 40);
+}
+
+// Check headlines for emergency triggers — returns the trigger found or null.
+function _checkEmergencyTriggers(headlines) {
+  const text = headlines.join(' ').toLowerCase();
+  return EMERGENCY_TRIGGERS.find(t => text.includes(t)) || null;
+}
+
+// Compute which headlines are genuinely new since the last agent call.
+// Returns { newHeadlines, emergencyTrigger, hasNew }
+function _computeHeadlineDelta(headlines) {
+  if (!state._headlineCache) state._headlineCache = [];
+
+  const fingerprints = headlines.map(_normalizeHeadline);
+  const cachedSet    = new Set(state._headlineCache);
+  const newOnes      = headlines.filter((h, i) => !cachedSet.has(fingerprints[i]));
+  const emergencyTrigger = _checkEmergencyTriggers(newOnes);
+
+  // Update cache — keep last 60 fingerprints (covers ~20 minutes of news at Alpaca's pace)
+  const allFingerprints = [...state._headlineCache, ...fingerprints.filter(f => !cachedSet.has(f))];
+  state._headlineCache  = allFingerprints.slice(-60);
+  state._headlineCacheTs = Date.now();
+
+  return {
+    newHeadlines:    newOnes,
+    newCount:        newOnes.length,
+    emergencyTrigger,
+    hasNew:          newOnes.length > 0,
+  };
+}
+
+// Determine if the agent needs to run based on headline delta + staleness.
+// Returns: { shouldRun, reason, isEmergency }
+function _shouldRunMacroAgent(headlines) {
+  const lastSignal    = state._agentMacro;
+  const signalAgeMs   = lastSignal?.timestamp
+    ? Date.now() - new Date(lastSignal.timestamp).getTime() : Infinity;
+  const signalAgeMins = signalAgeMs / 60000;
+  const MAX_STALE_MS  = 90 * 60 * 1000; // 90 minutes — hard staleness cap
+
+  // Always run if no signal yet
+  if (!lastSignal) return { shouldRun: true, reason: 'no_prior_signal', isEmergency: false };
+
+  // Always run if signal is stale beyond 90 minutes
+  if (signalAgeMs > MAX_STALE_MS) return { shouldRun: true, reason: `stale_${signalAgeMins.toFixed(0)}min`, isEmergency: false };
+
+  // Compute headline delta
+  const delta = _computeHeadlineDelta(headlines);
+
+  // Emergency trigger — run immediately regardless of recency
+  if (delta.emergencyTrigger) return { shouldRun: true, reason: `emergency:${delta.emergencyTrigger}`, isEmergency: true };
+
+  // No new headlines — hold current signal
+  if (!delta.hasNew) return { shouldRun: false, reason: 'no_new_headlines', isEmergency: false };
+
+  // New headlines exist — run full analysis
+  return { shouldRun: true, reason: `${delta.newCount}_new_headlines`, isEmergency: false };
+}
+
+async function getAgentMacroAnalysis(headlines, forceRun = false) {
   if (!ANTHROPIC_API_KEY || !headlines || headlines.length === 0) return null;
-  // Return cached result if fresh
-  if (_agentMacroCache.result && Date.now() - _agentMacroCache.fetchedAt < AGENT_MACRO_CACHE_MS) {
+
+  // ── Headline delta gate — skip if nothing new, unless forced ─────────────
+  const deltaCheck = _shouldRunMacroAgent(headlines);
+  if (!forceRun && !deltaCheck.shouldRun) {
+    // No new headlines and signal is fresh — hold current signal
+    _log("scan", `[AGENT] Macro skipped — ${deltaCheck.reason} (signal: ${state._agentMacro?.signal || 'none'} age: ${state._agentMacro?.timestamp ? ((Date.now() - new Date(state._agentMacro.timestamp).getTime())/60000).toFixed(0) : '?'}min)`);
+    return state._agentMacro || null; // return held signal
+  }
+
+  if (deltaCheck.isEmergency) {
+    _log("macro", `[AGENT] ⚠️ EMERGENCY TRIGGER: "${deltaCheck.reason}" — forcing immediate full analysis`);
+  } else {
+    _log("scan", `[AGENT] Running macro analysis — reason: ${deltaCheck.reason}`);
+  }
+
+  // Return cached result if very fresh (< cache TTL) and not emergency
+  if (!deltaCheck.isEmergency && _agentMacroCache.result && Date.now() - _agentMacroCache.fetchedAt < AGENT_MACRO_CACHE_MS) {
     return _agentMacroCache.result;
   }
   const systemPrompt = `You are the head macro strategist for ARGO-V3.0, a systematic SPY/QQQ options trading system. Return ONLY valid JSON - no markdown, no preamble.
 
-{"signal":"strongly bearish"|"bearish"|"mild bearish"|"neutral"|"mild bullish"|"bullish"|"strongly bullish","modifier":-20to20,"confidence":"high"|"medium"|"low","mode":"defensive"|"cautious"|"normal"|"aggressive","reasoning":"1 sentence","regime":"trending_bear"|"trending_bull"|"choppy"|"breakdown"|"recovery"|"neutral","regimeDuration":"intraday"|"1-3 days"|"3-7 days"|"1-2 weeks"|"multi-week","entryBias":"puts_on_bounces"|"calls_on_dips"|"neutral"|"avoid","tradeType":"spread"|"credit"|"naked"|"none","vixOutlook":"spiking"|"elevated_stable"|"mean_reverting"|"falling"|"unknown","keyLevels":{"spySupport":null,"spyResistance":null},"catalysts":[],"bearishTickers":[],"bullishTickers":[],"themes":[],"exitUrgency":"hold"|"monitor"|"trim"|"exit","positionSizeMult":0.25|0.5|0.75|1.0|1.25|1.5,"schemaVersion":2}
+{"signal":"strongly bearish"|"bearish"|"mild bearish"|"neutral"|"mild bullish"|"bullish"|"strongly bullish","modifier":-20to20,"confidence":"high"|"medium"|"low","mode":"defensive"|"cautious"|"normal"|"aggressive","reasoning":"3 sentences: (1) current regime assessment, (2) key risk or catalyst, (3) implication for ARGO entries","regime":"trending_bear"|"trending_bull"|"choppy"|"breakdown"|"recovery"|"neutral","regimeDuration":"intraday"|"1-3 days"|"3-7 days"|"1-2 weeks"|"multi-week","entryBias":"puts_on_bounces"|"calls_on_dips"|"neutral"|"avoid","tradeType":"spread"|"credit"|"naked"|"none","vixOutlook":"spiking"|"elevated_stable"|"mean_reverting"|"falling"|"unknown","keyLevels":{"spySupport":null,"spyResistance":null},"catalysts":[],"bearishTickers":[],"bullishTickers":[],"themes":[],"exitUrgency":"hold"|"monitor"|"trim"|"exit","positionSizeMult":0.25|0.5|0.75|1.0|1.25|1.5,"schemaVersion":2}
 
 Rules: regime=what SPY does next 3-10 days. entryBias: puts_on_bounces=bearish trend wait for relief; calls_on_dips=bullish wait for weakness. tradeType: spread=grinding trend, naked=sharp mean-reversion, none=unclear. vixOutlook: spiking=buy puts aggressively, falling=puts losing value. exitUrgency: hold=thesis intact, monitor=watch closely, trim=close half, exit=close all. positionSizeMult: 0.25=minimal, 1.0=normal, 1.5=high conviction. Focus on 3-10 day outlook not just today. schemaVersion always 2.`;
 
@@ -369,22 +482,68 @@ Rules: regime=what SPY does next 3-10 days. entryBias: puts_on_bounces=bearish t
                        : openCallsCount >= 3 && openPutsCount === 0 ? "all_calls"
                        : "balanced";
 
-  const userPrompt = `Market snapshot (live data - no need to call getMarketStatus):
-- VIX: ${mktStatus.vix || state.vix || 20} | SPY: ${spyPrice || '--'} (${mktStatus.spy?.dayChangePct || '--'}%)
-- Breadth: ${mktStatus.breadth ? (mktStatus.breadth*100).toFixed(0)+'%' : '--'} | Fear&Greed: ${mktStatus.fearGreed || '--'}
-- Gap status: ${gapStatus}${spyMA50 ? ` | SPY vs 50MA: ${spyVsMA50}% (slope: ${spyMA50Slope}%/50d)` : ''}${spyMA200 ? ` | SPY vs 200MA: ${spyVsMA200}%` : ''}
-- IV Rank: ${state._ivRank || '--'} (${state._ivEnv || '--'}) | Regime: ${state._regimeClass || 'A'} (${state._regimeDuration || 0}d below 200MA) | VIX 5d avg: ${state._vixSustained || '--'}
-- SPY drawdown from 52wk high: ${state._spyDrawdown || '--'}% | Credit call mode: ${state.vix >= 25 && (state._regimeClass === 'B' || state._regimeClass === 'C') ? 'ACTIVE' : 'inactive'}
-- Account: $${acctCurrent.toFixed(0)} (${acctDrawdown}% vs baseline) | Phase: ${acctPhaseNow} | Heat: ${heatPctNow}%/${heatCapNow}% cap
-- Portfolio: ${openPutsCount}P / ${openCallsCount}C open | Correlation: ${correlAlert} | PDT remaining: ${mktStatus.pdtRemaining || '--'}
-- Options flow: ${state._optFlow ? Object.entries(state._optFlow).map(([t,f])=>`${t} ${f.volRatio}x vol`).join(', ') : 'no unusual activity'}
-- Time: ${new Date().toLocaleTimeString('en-US', {timeZone:'America/New_York'})} ET
-- Open positions: ${(state.positions||[]).map(p => p.ticker + '(' + (p.optionType==='put'?'P':'C') + '@' + (p.chgPct !== undefined ? (p.chgPct*100).toFixed(0)+'%' : '--') + ')').join(', ') || 'none'}
+  // ── Market structure data — all pre-computed in state, zero cost to include ──
+  const pcr          = state._pcr?.pcr     || null;
+  const termStruct   = state._termStructure || null;
+  const breadthTrend = state._breadthTrend  || null;
+  const breadthMom   = state._breadthMomentum || 0;
+  const zweig        = state._zweigThrust   || null;
+  const skew         = state._skew?.skew    || null;
 
-Headlines to analyze (newest first):
-${headlines.slice(0, 15).map((h, i) => (i+1) + '. ' + h).join('\n')}
+  // Sector relative strength (if tracked)
+  const sectorStr = state._sectorRS
+    ? Object.entries(state._sectorRS).map(([s,v]) => `${s}:${v>0?'+':''}${v.toFixed(1)}%`).join(' ')
+    : null;
 
-Respond with ONLY the JSON object. No words before or after. Start your response with { and end with }.`;
+  // Last 3 agent calls — give the agent memory of its own recent signals
+  const recentCalls  = (state._agentMacroHistory || []).slice(-3);
+  const historyLines = recentCalls.map((h,i) => {
+    const ago = Math.round((Date.now() - new Date(h.ts).getTime()) / 60000);
+    return `  ${ago}min ago: ${h.signal} (${h.confidence}) — ${h.reasoning?.slice(0,60) || ''}`;
+  }).join('\n');
+
+  // Open positions with full context for position-aware reasoning
+  const posLines = (state.positions||[]).map(p => {
+    const daysOpen = ((Date.now() - new Date(p.openDate||0).getTime()) / MS_PER_DAY).toFixed(1);
+    const pnlPct   = p.currentPrice && p.premium
+      ? ((p.currentPrice - p.premium) / p.premium * 100).toFixed(1) + '%' : '?';
+    if (p.isCreditSpread) {
+      return `  ${p.ticker} BEAR CALL $${p.sellStrike}/$${p.buyStrike} exp ${p.expDate} | ${daysOpen}d open | P&L: ${pnlPct} | VIX at entry: ${p.entryVIX||'?'}`;
+    }
+    return `  ${p.ticker} ${(p.optionType||'').toUpperCase()}${p.isSpread?'-SPRD':''} | ${daysOpen}d open | P&L: ${pnlPct}`;
+  }).join('\n') || '  none';
+
+  const userPrompt = `Market analysis — ${new Date().toLocaleTimeString('en-US', {timeZone:'America/Chicago'})} CT
+
+PRICE & REGIME:
+- SPY: $${spyPrice||'--'} (${mktStatus.spy?.dayChangePct||'--'}% today) | Gap: ${gapStatus}
+- SPY vs 50MA: ${spyVsMA50||'--'}% (slope: ${spyMA50Slope||'--'}%/50d) | vs 200MA: ${spyVsMA200||'--'}%
+- Regime: ${state._regimeClass||'A'}${state._regimeSubClass||''} | ${state._regimeDuration||0}d below 200MA | SPY drawdown: ${state._spyDrawdown||'--'}%
+
+VOLATILITY & FLOW:
+- VIX: ${mktStatus.vix||state.vix||20} (5d avg: ${state._vixSustained||'--'}) | IV Rank: ${state._ivRank||'--'} (${state._ivEnv||'--'})
+- VIX term structure: ${termStruct ? `near ${(termStruct.nearVol*100).toFixed(1)}% / far ${(termStruct.farVol*100).toFixed(1)}% — ${termStruct.structure}` : '--'}
+- Put/Call Ratio: ${pcr||'--'} | Skew: ${skew||'--'} | Credit call mode: ${state.vix>=25&&(state._regimeClass==='B'||state._regimeClass==='C')?'ACTIVE':'inactive'}
+
+BREADTH & SENTIMENT:
+- Breadth: ${mktStatus.breadth?(mktStatus.breadth*100).toFixed(0)+'%':'--'} (trend: ${breadthTrend||'--'} | momentum: ${breadthMom>0?'+':''}${breadthMom})
+- Fear&Greed: ${mktStatus.fearGreed||'--'} | Zweig thrust: ${zweig?JSON.stringify(zweig):'none'}
+${sectorStr ? `- Sector RS: ${sectorStr}` : ''}
+
+OPEN POSITIONS (${(state.positions||[]).length} total | heat: ${heatPctNow}%/${heatCapNow}% cap):
+${posLines}
+
+ACCOUNT:
+- Cash: $${acctCurrent.toFixed(0)} (${acctDrawdown}% vs baseline) | Phase: ${acctPhaseNow}
+- Portfolio: ${openPutsCount}P / ${openCallsCount}C | Correlation alert: ${correlAlert}
+
+YOUR RECENT SIGNALS (last 3 calls):
+${historyLines || '  no history yet'}
+
+TOP HEADLINES (${headlines.length} total, newest first):
+${headlines.slice(0, 20).map((h, i) => (i+1) + '. ' + h).join('\n')}
+
+Respond with ONLY the JSON object. No words before or after.`;
 
   // AG-8: Track agent health
   if (!state._agentHealth) state._agentHealth = { calls: 0, successes: 0, timeouts: 0, parseErrors: 0, lastSuccess: null };
@@ -457,6 +616,45 @@ Respond with ONLY the JSON object. No words before or after. Start your response
       if (state._agentAccuracy.pending.length > 50) {
         state._agentAccuracy.pending = state._agentAccuracy.pending.slice(-50);
       }
+    }
+
+    // ── Signal stability: only change if 2+ tiers different or structural event ──
+    // Prevents flip-flopping between mild bearish/neutral within same hour on noise.
+    const SIGNAL_TIERS = [
+      "strongly bullish", "bullish", "mild bullish",
+      "neutral",
+      "mild bearish", "bearish", "strongly bearish"
+    ];
+    const prevSignal   = (state._agentMacro || {}).signal || "neutral";
+    const prevTier     = SIGNAL_TIERS.indexOf(prevSignal);
+    const newTier      = SIGNAL_TIERS.indexOf(parsed.signal);
+    const tierDelta    = Math.abs(newTier - prevTier);
+    // Structural events that always allow signal change regardless of tier delta
+    const vixSpike     = (state.vix || 0) > (state._vixHistory?.slice(-2,-1)[0] || 0) + 3;
+    const breadthColl  = (state._breadthMomentum || 0) < -20;
+    const gapBig       = gapStatus.includes("gap_up") || gapStatus.includes("gap_down");
+    const structEvent  = vixSpike || breadthColl || gapBig;
+    if (tierDelta < 2 && !structEvent && prevSignal !== "neutral" && recentCalls.length >= 2) {
+      // Hold previous signal — change is within noise band
+      _log("macro", `[AGENT STABILITY] Signal held at '${prevSignal}' — new '${parsed.signal}' is only ${tierDelta} tier(s) different, no structural event`);
+      parsed.signal   = prevSignal;
+      parsed.modifier = (state._agentMacro || {}).modifier || parsed.modifier;
+      parsed._stabilityHeld = true;
+    } else if (tierDelta >= 2 || structEvent) {
+      _log("macro", `[AGENT STABILITY] Signal changed ${prevSignal} → ${parsed.signal} (${tierDelta} tiers${structEvent?' + structural event':''})`);
+    }
+
+    // ── Agent macro history — last 10 calls for context injection ──────────
+    if (!state._agentMacroHistory) state._agentMacroHistory = [];
+    state._agentMacroHistory.push({
+      ts:         new Date().toISOString(),
+      signal:     parsed.signal,
+      confidence: parsed.confidence,
+      reasoning:  parsed.reasoning,
+      modifier:   parsed.modifier,
+    });
+    if (state._agentMacroHistory.length > 10) {
+      state._agentMacroHistory = state._agentMacroHistory.slice(-10);
     }
 
     _checkMacroShift(parsed.signal);
@@ -831,7 +1029,7 @@ holdRecommendations: {ticker: "HOLD"|"MONITOR"|"EXIT_AT_OPEN"} for each open pos
   }));
 
   const [headlines, mktStatus] = await Promise.all([
-    _getMacro().catch(() => ({ headlines: [] })),
+    _getMacro(state).catch(() => ({ headlines: [] })),
     Promise.resolve({}),
   ]);
 
@@ -939,7 +1137,7 @@ async function getAgentOvernightScan(scanType = "midnight-digest") {
 
   // ── Fetch context ─────────────────────────────────────────────────────────
   const [headlines, mktStatus] = await Promise.all([
-    _getMacro().catch(() => ({ headlines: [] })),
+    _getMacro(state).catch(() => ({ headlines: [] })),
     agentTool_getMarketStatus().catch(() => ({})),
   ]);
   const headlineList = (headlines.headlines || headlines.topStories || []).slice(0, 20);
