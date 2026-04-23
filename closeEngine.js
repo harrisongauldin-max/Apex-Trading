@@ -661,6 +661,8 @@ async function confirmPendingOrder() {
           buyStrike: pending.buyStrike, sellStrike: pending.sellStrike,
           spreadWidth: Math.abs(pending.buyStrike - pending.sellStrike),
           buySymbol: pending.buySymbol, sellSymbol: pending.sellSymbol,
+          buyPremium:  pending.buyPremium  || 0,   // long leg entry price (protection leg)
+          sellPremium: pending.sellPremium || 0,   // short leg entry price (premium collected)
           contractSymbol: pending.sellSymbol,
           premium: netCredit, maxProfit, maxLoss, contracts: pending.contracts,
           expDate: pending.expDate, expDays: pending.expDays,
