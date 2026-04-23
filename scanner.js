@@ -598,7 +598,16 @@ async function runScan() {
         if (resolved30Total > 0)  state._agentAccuracy.acc30  = parseFloat((state._agentAccuracy.correct30  / resolved30Total  * 100).toFixed(1));
         if (resolved120Total > 0) state._agentAccuracy.acc120 = parseFloat((state._agentAccuracy.correct120 / resolved120Total * 100).toFixed(1));
         if (resolved30 > 0 || resolved120 > 0) {
-          logEvent("scan", `[AGENT ACC] 30min: ${state._agentAccuracy.acc30 || "--"}% | 120min: ${state._agentAccuracy.acc120 || "--"}% | n=${state._agentAccuracy.calls} directional calls`);
+          const acc30val  = state._agentAccuracy.acc30;
+          const acc120val = state._agentAccuracy.acc120;
+          logEvent("scan", `[AGENT ACC] 30min: ${acc30val || "--"}% | 120min: ${acc120val || "--"}% | n=${state._agentAccuracy.calls} directional calls`);
+          // Flag calibration concern if 30min accuracy is below random chance (50%)
+          // Agent macro is used for timing and regime framing — low short-term accuracy is expected
+          // but worth surfacing when sample size is sufficient (10+ resolved calls)
+          const resolved30Total = state._agentAccuracy.calls - state._agentAccuracy.pending.filter(p => !p.resolved30).length;
+          if (acc30val !== null && acc30val < 45 && resolved30Total >= 10) {
+            logEvent("warn", `[AGENT ACC] 30min accuracy ${acc30val}% below 45% threshold (n=${resolved30Total}) — agent useful for regime framing, not short-term direction`);
+          }
         }
       }
     }
