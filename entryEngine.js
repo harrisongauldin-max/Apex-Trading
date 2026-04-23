@@ -131,10 +131,12 @@ function getRegimeRulebook(state) {
   // Regime B: puts align with trend — lower bar, but still need clear signal
   // Credits: defined-risk structure lowers bar — premium collection not directional
   // Flat score table: regime + trade type only (B1/B2 removed, agentMinAdj removed)
-  const minScorePut    = isBullRegime ? 85 : 70;  // bear: 70, bull: 85 (fighting trend)
-  const minScoreCall   = isBullRegime ? 75 : 85;  // bear: 85 (fighting trend), bull: 75
-  const minScoreDebitCall = 75;  // panel: higher bar than credit — needs actual directional move
-  const minScoreCredit = isBullRegime ? 75 : 65;  // credits: 65 bear, 75 bull
+  // PAPER TRADING: Panel consensus thresholds — meaningful entries, not maximum noise.
+  // Production targets (pre June 4): put=70/85, call=75/85, credit=65/75, debitCall=75.
+  const minScorePut    = isBullRegime ? 70 : 55;
+  const minScoreCall   = isBullRegime ? 60 : 70;
+  const minScoreDebitCall = 65;
+  const minScoreCredit = isBullRegime ? 65 : 55;
   const agentMinAdj    = 0;                        // removed — stale agent uses keyword fallback
 
   const macroReversalThreshold = 0.025;            // unified (B1/B2 distinction removed)
@@ -206,7 +208,11 @@ function getRegimeRulebook(state) {
   //   Breakeven R/R formula: loss_prob / win_prob = delta / (1-delta)
   //   At delta 0.20: breakeven = 0.20/0.80 = 25%. So 0.25 is the TRUE minimum.
   // minCreditRatio now computed in spreadParams as VIX-tiered value — see spreadParams.minCreditRatio
-  const minCreditRatio  = vix >= 35 ? 0.25 : vix >= 28 ? 0.26 : vix >= 20 ? 0.28 : 0.33;
+  // PAPER TRADING: R/R floor lowered to generate entries and validate execution paths.
+  // Tighten before June 4 live deployment. Production targets: 0.25/0.26/0.28.
+  // PAPER TRADING: R/R floor at 0.20 — generates entries while keeping losses meaningful.
+  // Production targets (pre June 4): 0.25/0.26/0.28.
+  const minCreditRatio  = vix >= 35 ? 0.20 : vix >= 28 ? 0.20 : vix >= 20 ? 0.20 : 0.25;
   const targetCreditRatio = 0.30; // target — seek 30% when conditions allow
 
   // Change 3 (OT + Natenberg 1994 Ch.8): DTE targets per regime
@@ -289,7 +295,7 @@ function getRegimeRulebook(state) {
     debitCallLongDelta:  0.42,           // buy leg — just OTM, delta-responsive
     debitCallShortDelta: 0.22,           // sell leg — caps upside, reduces cost
     debitCallWidthPct:   vix >= 28 ? 0.012 : vix >= 20 ? 0.015 : 0.010, // price-relative
-    debitCallMaxDebitPct: 0.40,          // max debit as % of spread width (R/R floor)
+    debitCallMaxDebitPct: 0.55,          // PAPER: 0.55 — discipline on cost, not a hard block. Production: 0.40.
     debitCallTargetDTE:  vix >= 28 ? 28 : 21,  // shorter DTE in elevated vol
     debitCallMinDTE:     14,
     debitCallEnabled:    !isCrisis && vix <= 35, // disabled in crisis
