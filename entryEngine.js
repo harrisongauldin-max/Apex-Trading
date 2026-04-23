@@ -375,12 +375,29 @@ function scoreCandidate(stock, rawPutScore, rawCallScore, putReasons, callReason
     // credit_put (bull put spread) sells puts BELOW market — loses if bear trend continues
     // credit_call (bear call spread) sells calls ABOVE market — wins if bear trend continues
     // Panel unanimous: redirect to credit_call in Regime B so structure aligns with thesis
-    if (rb.isBearRegime && rb.gates.creditCallActive) {
+    //
+    // BOUNCE BYPASS (Gilfoyle panel 4/23/2026):
+    // When puts_on_bounces mode is active AND intraday conditions confirm an extended bounce,
+    // skip the credit redirect and enter a debit put spread instead.
+    // Logic: intraday RSI overbought (65+) + momentum not steady = bounce is extended, not just noise.
+    // This is ADDITIVE — the credit redirect path is unchanged for all other conditions.
+    const _intradayRsi  = signals.rsi || 50;
+    const _momentum     = signals.momentum || "steady";
+    const _isBounceEntry = rb.gates.putsOnBounceMode       // agent says puts_on_bounces
+      && rb.isBearRegime                                    // structural bear trend confirmed
+      && _intradayRsi >= 65                                 // intraday bounce is extended
+      && _momentum !== "steady" && _momentum !== "weak";   // momentum confirms move (not noise)
+    if (rb.isBearRegime && rb.gates.creditCallActive && !_isBounceEntry) {
+      // Normal path — credit redirect
       tradeType  = "credit_call";
       optionType = "call"; // flip so executeCreditSpread builds call spread ABOVE market
       const _redirectMsg = "[CREDIT REDIRECT] Bear regime: bearish signal → bear call spread (sell calls above market, not puts below)";
       putReasons.push(_redirectMsg);   // putReasons: visible in score debug
       callReasons.push(_redirectMsg);  // callReasons: visible in position scoreReasons after redirect
+    } else if (_isBounceEntry) {
+      // Bounce bypass — debit put spread on intraday bounce in bear trend
+      tradeType = "debit_put";         // optionType stays "put" — no flip
+      putReasons.push(`[BOUNCE BYPASS] puts_on_bounces + intraday RSI ${_intradayRsi} + momentum ${_momentum} → debit put spread`);
     } else {
       tradeType = "credit_put"; // valid in choppy + bull regimes (Regime A bullPutActive)
     }
