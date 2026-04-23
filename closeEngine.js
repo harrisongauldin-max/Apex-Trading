@@ -835,7 +835,20 @@ async function confirmPendingOrder() {
       const cancelCheck = await alpacaGet(`/orders/${pending.orderId}`).catch(() => null);
       const cancelConfirmed = !cancelCheck || ["canceled","expired","rejected","done_for_day"].includes(cancelCheck.status);
       if (!cancelConfirmed) {
-        logEvent("warn", `[SPREAD] Cancel unconfirmed (status: ${cancelCheck?.status}) - holding pending, will retry next scan`);
+        // Track cancel attempts — if Alpaca keeps returning 'new', force-clear after 5 attempts (~2.5min)
+        // This handles the case where an order is stuck in pre-submission limbo on Alpaca's side
+        // and will never transition out of 'new'. Reconciler will clean up any ghost positions.
+        pending._cancelAttempts = (pending._cancelAttempts || 0) + 1;
+        if (pending._cancelAttempts >= 5) {
+          logEvent("warn", `[SPREAD] Cancel unconfirmed after ${pending._cancelAttempts} attempts (status: ${cancelCheck?.status}) — force-clearing pending. Reconciler will verify Alpaca state.`);
+          // Record ticker cooldown — prevents ARGO re-entering same position immediately
+          if (!state._entryAttemptCooldown) state._entryAttemptCooldown = {};
+          state._entryAttemptCooldown[pending.ticker] = Date.now();
+          state._pendingOrder = null;
+          markDirty();
+          return;
+        }
+        logEvent("warn", `[SPREAD] Cancel unconfirmed (status: ${cancelCheck?.status}) - attempt ${pending._cancelAttempts}/5 - will retry next scan`);
         return; // don't submit retry - original may still fill
       }
       const spreadPct     = pending.spreadPct || 0.05; // bid-ask spread % at entry time
@@ -853,6 +866,8 @@ async function confirmPendingOrder() {
         markDirty();
       } else {
         logEvent("warn", `[SPREAD] Retry failed - clearing pending`);
+        if (!state._entryAttemptCooldown) state._entryAttemptCooldown = {};
+        state._entryAttemptCooldown[pending.ticker] = Date.now();
         state._pendingOrder = null;
         markDirty();
       }
@@ -865,10 +880,21 @@ async function confirmPendingOrder() {
       const finalCheck = await alpacaGet(`/orders/${pending.orderId}`).catch(() => null);
       const finalCancelled = !finalCheck || ["canceled","expired","rejected","done_for_day","filled"].includes(finalCheck?.status);
       if (!finalCancelled) {
-        logEvent("warn", `[SPREAD] Retry cancel unconfirmed (${finalCheck?.status}) - will check again next scan`);
+        pending._retryCancelAttempts = (pending._retryCancelAttempts || 0) + 1;
+        if (pending._retryCancelAttempts >= 5) {
+          logEvent("warn", `[SPREAD] Retry cancel unconfirmed after ${pending._retryCancelAttempts} attempts (${finalCheck?.status}) — force-clearing. Reconciler will verify.`);
+          if (!state._entryAttemptCooldown) state._entryAttemptCooldown = {};
+          state._entryAttemptCooldown[pending.ticker] = Date.now();
+          state._pendingOrder = null;
+          markDirty();
+          return;
+        }
+        logEvent("warn", `[SPREAD] Retry cancel unconfirmed (${finalCheck?.status}) - attempt ${pending._retryCancelAttempts}/5 - will check again next scan`);
         return;
       }
       logEvent("warn", `[SPREAD] Retry also unfilled - spread cancelled`);
+      if (!state._entryAttemptCooldown) state._entryAttemptCooldown = {};
+      state._entryAttemptCooldown[pending.ticker] = Date.now();
       state._pendingOrder = null;
       markDirty();
     }
