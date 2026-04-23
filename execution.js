@@ -769,6 +769,16 @@ async function executeCreditSpread(stock, price, score, scoreReasons, vix, optio
     // Worse than 4:1 (e.g. TLT $97 profit / $903 loss = 9.3:1) is not a viable strategy
     const rrRatioCred = maxLoss > 0 ? maxProfit / maxLoss : 0;
     const MIN_CREDIT_RR = (spreadParamsOverride && spreadParamsOverride.minCreditRatio) || 0.20; // PAPER: 0.20 floor — meaningful entries. Production: 0.26/0.28.
+
+    // Absolute minimum credit — filters marginal positions that scrape the R/R floor
+    // but collect so little premium ($50-70) they're not worth the execution risk and commissions.
+    // GLD/TLT options often hit this gate due to wider bid-ask spreads vs SPY/QQQ.
+    const MIN_ABS_CREDIT = (spreadParamsOverride && spreadParamsOverride.minAbsCredit) || 0.75;
+    if (netCredit < MIN_ABS_CREDIT) {
+      logEvent("filter", `${stock.ticker} credit spread: net credit $${netCredit} below $${MIN_ABS_CREDIT} absolute minimum — skip`);
+      return null;
+    }
+
     if (rrRatioCred < MIN_CREDIT_RR) {
       // Cache actual market R/R in state so score debug shows real execution viability
       if (!state._lastCreditRR) state._lastCreditRR = {};
@@ -813,13 +823,21 @@ async function executeCreditSpread(stock, price, score, scoreReasons, vix, optio
       const _retryCredit  = parseFloat((shortContract.premium - _rMid).toFixed(2));
       const _retryMaxLoss = parseFloat((_retryWidth - _retryCredit).toFixed(2));
       const _retryRR      = _retryMaxLoss > 0 ? _retryCredit / _retryMaxLoss : 0;
-      if (_retryRR < MIN_CREDIT_RR || _retryCredit <= 0) {
+      // Require retry to clear the floor by 3pp margin — prevents marginal entries that
+      // scrape over the minimum and produce tiny credits ($50-60) that rarely fill
+      const MIN_RETRY_RR  = MIN_CREDIT_RR + 0.03;
+      // Also re-check absolute minimum on retry credit — narrower spread may produce less credit
+      if (_retryCredit < MIN_ABS_CREDIT) {
+        logEvent("filter", `${stock.ticker} credit spread R/R retry: credit $${_retryCredit} below $${MIN_ABS_CREDIT} absolute minimum — skip`);
+        return null;
+      }
+      if (_retryRR < MIN_RETRY_RR || _retryCredit <= 0) {
         if (!state._lastCreditRR) state._lastCreditRR = {};
         state._lastCreditRR[stock.ticker] = {
           ts: Date.now(), rr: rrRatioCred, retryRR: _retryRR, netCredit, maxLoss, width: actualWidth,
-          viable: false, reason: `market R/R ${(rrRatioCred*100).toFixed(0)}% — retry $${_retryWidth} wide also fails (${(_retryRR*100).toFixed(0)}%)`
+          viable: false, reason: `market R/R ${(rrRatioCred*100).toFixed(0)}% — retry $${_retryWidth} wide also fails (${(_retryRR*100).toFixed(0)}% < ${(MIN_RETRY_RR*100).toFixed(0)}% required)`
         };
-        logEvent("filter", `${stock.ticker} credit spread R/R ${(rrRatioCred*100).toFixed(0)}% — retry $${_retryWidth} wide also fails (${(_retryRR*100).toFixed(0)}%) — skip`);
+        logEvent("filter", `${stock.ticker} credit spread R/R ${(rrRatioCred*100).toFixed(0)}% — retry $${_retryWidth} wide also fails (${(_retryRR*100).toFixed(0)}% < ${(MIN_RETRY_RR*100).toFixed(0)}% required) — skip`);
         return null;
       }
       // Retry succeeded — update longContract and reassign lets so all downstream uses correct values
