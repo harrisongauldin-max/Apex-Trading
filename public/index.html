@@ -2054,6 +2054,7 @@ function renderNativeSpread(p) {
     <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;margin-bottom:12px">
       <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
         <span style="font-size:16px;font-weight:700;color:var(--blue)">${p.ticker}</span>
+        ${p.price ? `<span style="font-size:14px;font-weight:700;color:var(--text)">$${parseFloat(p.price).toFixed(2)}</span>` : ''}
         <span style="font-size:11px;color:var(--muted)">${strikeDisplay} ${p.expDate}</span>
         <span style="font-size:9px;padding:2px 7px;border-radius:10px;background:${p.isCreditSpread?'rgba(0,255,136,.15)':'rgba(0,150,255,.15)'};color:${p.isCreditSpread?'var(--green)':'var(--blue)'}">${p.isCreditSpread?'CREDIT':'DEBIT'} SPREAD</span>
         <span style="font-size:9px;padding:2px 7px;border-radius:10px;background:rgba(255,80,80,.15);color:#ff5050">${optType}</span>
@@ -2080,6 +2081,29 @@ function renderNativeSpread(p) {
       <div><div style="font-size:9px;color:var(--muted)">CONTRACTS</div><div style="font-weight:700">${c}x</div></div>
       <div><div style="font-size:9px;color:var(--muted)">EXP DATE</div><div style="font-weight:700">${p.expDate}</div></div>
     </div>
+
+    <!-- Individual leg breakdown -->
+    ${(p.sellSymbol || p.buySymbol) ? `
+    <div style="margin-top:10px;border-top:1px solid rgba(255,255,255,.06);padding-top:10px">
+      <div style="font-size:9px;color:var(--muted);letter-spacing:1px;margin-bottom:6px">LEG BREAKDOWN</div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:6px">
+        <div style="background:rgba(255,80,80,.06);border:1px solid rgba(255,80,80,.2);border-radius:6px;padding:8px 10px">
+          <div style="font-size:9px;color:#ff5050;letter-spacing:1px;margin-bottom:4px">SHORT (SOLD)</div>
+          <div style="font-weight:700;color:var(--text)">$${p.sellStrike || p.shortStrike || '?'}${(p.optionType||'call').toUpperCase().slice(0,1)}</div>
+          <div style="font-size:10px;color:var(--muted)">${p.sellSymbol || '--'}</div>
+          <div style="font-size:10px;color:var(--muted)">Entry: $${parseFloat(p.sellPremium || p.entryShortPremium || p.premium || 0).toFixed(2)}</div>
+          ${p._legPrices && p._legPrices.sell ? '<div style="font-size:11px;font-weight:700;color:var(--text)">Now: $' + parseFloat(p._legPrices.sell).toFixed(2) + '</div>' : ''}
+        </div>
+        <div style="background:rgba(0,150,255,.06);border:1px solid rgba(0,150,255,.2);border-radius:6px;padding:8px 10px">
+          <div style="font-size:9px;color:var(--blue);letter-spacing:1px;margin-bottom:4px">LONG (BOUGHT)</div>
+          <div style="font-weight:700;color:var(--text)">$${p.buyStrike || p.longStrike || '?'}${(p.optionType||'call').toUpperCase().slice(0,1)}</div>
+          <div style="font-size:10px;color:var(--muted)">${p.buySymbol || '--'}</div>
+          <div style="font-size:10px;color:var(--muted)">Entry: $${parseFloat(p.buyPremium || p.entryLongPremium || 0).toFixed(2)}</div>
+          ${p._legPrices && p._legPrices.buy ? '<div style="font-size:11px;font-weight:700;color:var(--text)">Now: $' + parseFloat(p._legPrices.buy).toFixed(2) + '</div>' : ''}
+        </div>
+      </div>
+      ${p.price ? '<div style="margin-top:6px;font-size:10px;color:var(--muted)">Underlying: <strong style="color:var(--text)">$' + parseFloat(p.price).toFixed(2) + '</strong> · Breakeven: <strong style="color:var(--orange)">$' + breakeven + '</strong> · ' + (parseFloat(p.price) < parseFloat(breakeven) ? '<span style="color:var(--green)">✓ Below breakeven</span>' : '<span style="color:var(--red)">⚠ Above breakeven</span>') + '</div>' : ''}
+    </div>` : ''}
   </div>`;
 }
 
