@@ -927,6 +927,8 @@ async function executeCreditSpread(stock, price, score, scoreReasons, vix, optio
         sellSymbol:     shortContract.symbol,
         buyStrike:      longContract.strike,
         sellStrike:     shortContract.strike,
+        buyPremium:     parseFloat(longContract.premium.toFixed(2)),   // long leg entry price
+        sellPremium:    parseFloat(shortContract.premium.toFixed(2)),  // short leg entry price
         netCredit,
         netDebitLimit:  netCredit,
         finalCost:      marginRequired,
