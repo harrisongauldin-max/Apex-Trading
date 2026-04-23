@@ -470,6 +470,10 @@ async function runScan() {
       if (!dryRunMode) logEvent("warn", `[MACRO] No agent signal yet — neutral until startup analysis completes`);
     }
 
+    // Alias marketContext.macro as 'macro' for backward compatibility with all scan loop references
+    // Previously macro = await getMacroNews() — now it's set via agent authority block above
+    const macro = marketContext.macro;
+
     // Strongly bearish macro - close all calls immediately
     // ONLY fire if agent also confirms bearish - keyword scorer alone gives false positives
     // Agent signal takes priority: if agent ever said bullish/neutral, suppress keyword defensive
@@ -2076,6 +2080,9 @@ async function runScan() {
 
     // Apply macro modifier - boosts or suppresses all entries based on current events
     const macro       = marketContext.macro || { scoreModifier: 0, sectorBearish: [], sectorBullish: [] };
+    // macro.sectorBearish/sectorBullish existed on keyword macro — agent macro may not have them
+    const _macroSectorBearish = macro.sectorBearish || [];
+    const _macroSectorBullish = macro.sectorBullish || [];
     let macroCallMod  = macro.scoreModifier || 0;
     // Puts only benefit from genuinely bearish macro - neutral is not a put signal
     // If macro is neutral (modifier = 0), puts get 0 boost not a bonus
@@ -2095,8 +2102,8 @@ async function runScan() {
         : -(macro.scoreModifier || 0);
 
     // Extra sector-specific adjustment
-    if (macro.sectorBearish.includes(stock.sector)) { macroCallMod -= 10; macroPutMod += 10; }
-    if (macro.sectorBullish.includes(stock.sector)) { macroCallMod += 8;  macroPutMod -= 8; }
+    if (_macroSectorBearish.includes(stock.sector)) { macroCallMod -= 10; macroPutMod += 10; }
+    if (_macroSectorBullish.includes(stock.sector)) { macroCallMod += 8;  macroPutMod -= 8; }
 
     callSetup.score = Math.min(100, Math.max(0, callSetup.score + macroCallMod));
     putSetup.score  = Math.min(100, Math.max(0, putSetup.score  + macroPutMod));
