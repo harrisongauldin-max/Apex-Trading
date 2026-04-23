@@ -920,11 +920,211 @@ Should ARGO-V3.0 enter this ${optionType} position?`;
   } catch(e) { return { approved: true, reason: "parse error - allowing" }; }
 }
 
+
+// ─── Overnight market scan — pre-open intelligence for ARGO ──────────────────
+// Schedule: 11pm CT (midnight ET) for news digest + 7:30am CT (8:30am ET) for
+// pre-market strike pre-computation.
+//
+// Two modes:
+//   "midnight-digest"   — overnight news, macro events tomorrow, regime risk
+//   "premarket-compute" — pre-market prices, futures, strike pre-computation
+//
+// Output stored in state._overnightScan — read by scanner at first market scan.
+// ─────────────────────────────────────────────────────────────────────────────
+async function getAgentOvernightScan(scanType = "midnight-digest") {
+  if (!ANTHROPIC_API_KEY) return null;
+
+  const ctNow = new Date().toLocaleString("en-US", { timeZone: "America/Chicago" });
+  const etNow = new Date().toLocaleString("en-US", { timeZone: "America/New_York" });
+
+  // ── Fetch context ─────────────────────────────────────────────────────────
+  const [headlines, mktStatus] = await Promise.all([
+    _getMacro().catch(() => ({ headlines: [] })),
+    agentTool_getMarketStatus().catch(() => ({})),
+  ]);
+  const headlineList = (headlines.headlines || headlines.topStories || []).slice(0, 20);
+  const openPositions = (state.positions || []).map(p => ({
+    ticker: p.ticker, type: p.optionType,
+    isCreditSpread: p.isCreditSpread || false,
+    sellStrike: p.sellStrike, buyStrike: p.buyStrike,
+    expDate: p.expDate, expDays: p.expDays,
+    premium: p.premium, contracts: p.contracts || 1,
+    maxProfit: p.maxProfit, maxLoss: p.maxLoss,
+    pnlPct: p.currentPrice && p.premium
+      ? ((p.currentPrice - p.premium) / p.premium * 100).toFixed(1) + "%" : "?",
+  }));
+
+  // ── Pre-market data (7:30am CT / 8:30am ET mode only) ────────────────────
+  let premarketData = null;
+  if (scanType === "premarket-compute") {
+    try {
+      // Fetch live pre-market quotes for all instruments
+      const [spyQ, qqqQ, gldQ, tltQ, xleQ] = await Promise.all([
+        agentTool_getQuote("SPY").catch(() => null),
+        agentTool_getQuote("QQQ").catch(() => null),
+        agentTool_getQuote("GLD").catch(() => null),
+        agentTool_getQuote("TLT").catch(() => null),
+        agentTool_getQuote("XLE").catch(() => null),
+      ]);
+
+      // Compute expected strikes for each instrument at VIX-appropriate parameters
+      // VIX-tiered: width = 1.0% of price at VIX 28+, R/R floor = 26%
+      const vix = state.vix || 28;
+      const widthPct = vix >= 35 ? 0.015 : vix >= 28 ? 0.010 : 0.008;
+      const computeStrike = (price, deltaOTM = 0.04) => {
+        if (!price) return null;
+        const shortStrike = Math.round(price * (1 + deltaOTM));
+        const width = Math.max(2, Math.min(15, Math.round(price * widthPct * 2) / 2));
+        const longStrike = shortStrike + width;
+        return { price, shortStrike, longStrike, width, otmPct: (deltaOTM * 100).toFixed(1) + "%" };
+      };
+
+      premarketData = {
+        fetchedAt: ctNow + " CT",
+        vix,
+        widthPct: (widthPct * 100).toFixed(1) + "%",
+        instruments: {
+          SPY: computeStrike(spyQ),
+          QQQ: computeStrike(qqqQ),
+          GLD: computeStrike(gldQ),
+          TLT: computeStrike(tltQ),
+          XLE: computeStrike(xleQ),
+        },
+        // Gap from previous close (stored in state._spyPrevClose)
+        spyGapEst: state._spyPrevClose && spyQ
+          ? ((spyQ - state._spyPrevClose) / state._spyPrevClose * 100).toFixed(2) + "%"
+          : "unknown",
+      };
+    } catch(e) {
+      _log("warn", `[OVERNIGHT] Pre-market data fetch failed: ${e.message}`);
+    }
+  }
+
+  // ── System prompt ─────────────────────────────────────────────────────────
+  const systemPrompt = `You are ARGO's pre-market strategist. ARGO is a systematic options spread trading system.
+ARGO trades bear call spreads (Regime B), debit put spreads (bounces), and debit call spreads (Regime A recovery).
+All times are CENTRAL TIME (CT). Market opens 8:30am CT.
+
+Return ONLY valid JSON — no markdown, no preamble:
+
+{
+  "regime": "trending_bear"|"trending_bull"|"choppy"|"breakdown"|"recovery"|"neutral",
+  "signal": "strongly bearish"|"bearish"|"mild bearish"|"neutral"|"mild bullish"|"bullish"|"strongly bullish",
+  "confidence": "high"|"medium"|"low",
+  "vixOutlook": "spiking"|"elevated_stable"|"mean_reverting"|"falling",
+  "riskLevel": "low"|"medium"|"high",
+  "entryBias": "puts_on_bounces"|"calls_on_dips"|"neutral"|"avoid",
+  "tradeType": "spread"|"credit"|"debit"|"none",
+  "suppressUntil": null | "HH:MM CT",
+  "catalysts": [],
+  "keyLevels": { "spySupport": null, "spyResistance": null },
+  "instrumentBias": {
+    "SPY":  "bearish"|"neutral"|"bullish"|"skip",
+    "QQQ":  "bearish"|"neutral"|"bullish"|"skip",
+    "GLD":  "bearish"|"neutral"|"bullish"|"skip",
+    "TLT":  "bearish"|"neutral"|"bullish"|"skip",
+    "XLE":  "bearish"|"neutral"|"bullish"|"skip"
+  },
+  "openPositionRisk": "low"|"medium"|"high",
+  "earlyEntryWindow": true|false,
+  "waitForOpen": true|false,
+  "waitReason": null | "string",
+  "reasoning": "2-3 sentences covering regime, key risks, and instrument preference"
+}
+
+Rules:
+- suppressUntil: HH:MM CT if high-impact event before 11am CT (CPI 7:30am CT, FOMC 1:00pm CT, NFP 7:30am CT)
+- riskLevel high = FOMC day, CPI, NFP, or major earnings pre-market
+- earlyEntryWindow true = conditions look favorable for entry in first 30min after open (9:00am CT)
+- waitForOpen true = pre-market move suggests waiting 15-30min for volatility to settle
+- instrumentBias: "skip" means avoid this instrument today (e.g. XLE on OPEC day, TLT on Fed day)
+- openPositionRisk: risk to existing open positions from overnight/pre-market developments`;
+
+  // ── User prompt ───────────────────────────────────────────────────────────
+  const scanLabel = scanType === "premarket-compute" ? "Pre-market (7:30am CT)" : "Overnight digest (11pm CT)";
+  const userPrompt = `${scanLabel} — ${ctNow} CT (${etNow} ET)
+
+CURRENT STATE:
+- VIX: ${state.vix || "--"} | Regime: ${state._regimeClass || "--"} | IVR: ${state._ivRank || "--"}
+- Open positions: ${openPositions.length ? JSON.stringify(openPositions) : "none"}
+- Cash: $${(state.cash || 0).toFixed(2)} | Baseline: $${(state.accountBaseline || 30000).toFixed(2)}
+
+${premarketData ? `PRE-MARKET DATA (${premarketData.fetchedAt}):
+- SPY: $${premarketData.instruments.SPY?.price || "--"} | gap est: ${premarketData.spyGapEst}
+- QQQ: $${premarketData.instruments.QQQ?.price || "--"}
+- GLD: $${premarketData.instruments.GLD?.price || "--"}
+- TLT: $${premarketData.instruments.TLT?.price || "--"}
+- VIX: ${premarketData.vix} | Width target: ${premarketData.widthPct} of price
+
+ESTIMATED STRIKE TARGETS (bear call spreads, ${premarketData.widthPct} wide, ~4% OTM):
+${Object.entries(premarketData.instruments).map(([t, d]) =>
+  d ? `  ${t}: short $${d.shortStrike} / long $${d.longStrike} (${d.otmPct} OTM, $${d.width} wide)` : `  ${t}: no data`
+).join("\n")}` : ""}
+
+TODAY'S HEADLINES (${headlineList.length} items):
+${headlineList.slice(0, 15).map((h, i) => `${i+1}. ${h}`).join("\n") || "No headlines"}
+
+What is your ${scanType === "premarket-compute" ? "pre-market assessment and entry strategy for today" : "overnight assessment and tomorrow's trading outlook"}?`;
+
+  try {
+    const raw = await callClaudeAgent(systemPrompt, userPrompt, 600, false);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    parsed.generatedAt  = new Date().toISOString();
+    parsed.generatedCT  = ctNow;
+    parsed.scanType     = scanType;
+    parsed.premarketData = premarketData || null;
+
+    // Store in state — scanner reads this at first market scan
+    state._overnightScan = parsed;
+
+    // If premarket scan has a regime/signal, update dayPlan too
+    // This gives the 9:45am CT first scan pre-seeded intelligence
+    if (parsed.signal && parsed.regime) {
+      state._dayPlan = {
+        ...( state._dayPlan || {}),
+        signal:        parsed.signal,
+        regime:        parsed.regime,
+        confidence:    parsed.confidence,
+        entryBias:     parsed.entryBias,
+        tradeType:     parsed.tradeType,
+        riskLevel:     parsed.riskLevel,
+        vixOutlook:    parsed.vixOutlook,
+        suppressUntil: parsed.suppressUntil,
+        keyLevels:     parsed.keyLevels,
+        catalysts:     parsed.catalysts,
+        reasoning:     parsed.reasoning,
+        generatedAt:   parsed.generatedAt,
+        scanType:      scanType,
+      };
+      state._dayPlanDate = new Date().toLocaleDateString("en-US", { timeZone: "America/New_York" });
+    }
+
+    _log("macro", `[OVERNIGHT ${scanType.toUpperCase()}] ${parsed.regime} | ${parsed.signal} (${parsed.confidence}) | bias: ${parsed.entryBias} | risk: ${parsed.riskLevel}${parsed.suppressUntil ? " | suppress until " + parsed.suppressUntil : ""}${parsed.waitForOpen ? " | WAIT FOR OPEN" : ""} | ${(parsed.reasoning||"").slice(0,80)}`);
+
+    // Log instrument biases
+    if (parsed.instrumentBias) {
+      const biasStr = Object.entries(parsed.instrumentBias)
+        .filter(([,v]) => v !== "neutral")
+        .map(([t,v]) => `${t}:${v}`)
+        .join(" | ");
+      if (biasStr) _log("macro", `[OVERNIGHT] Instrument bias: ${biasStr}`);
+    }
+
+    if (_saveNow) await _saveNow();
+    return parsed;
+  } catch(e) {
+    _log("warn", `[OVERNIGHT] ${scanType} failed: ${e.message}`);
+    return null;
+  }
+}
+
 module.exports = {
   callClaudeAgent, stripThinking,
   getAgentMacroAnalysis, getAgentRescore, getAgentDayPlan,
   getAgentMorningBriefing, runAgentRescore, triggerRescore,
   initAgent,
   getAgentPostMarketAssessment,
+  getAgentOvernightScan,
   getAgentPreEntryCheck,
 };
