@@ -1570,9 +1570,20 @@ async function runScan() {
       }
       // Bear call credit: strongly prefer below VWAP (market already weak intraday)
       // putSetup/callSetup not yet initialized here -- creditCallModeActive already implies call direction
-      if (creditCallModeActive && price > vwap * 1.03) { // panel: raised 1%→3% — 1% fired on normal intraday moves
+      const _putsOnBounceActive = rb.gates.putsOnBounceMode && rb.isBearRegime;
+      if (creditCallModeActive && price > vwap * 1.03 && !_putsOnBounceActive) {
+        // Block credit calls when price is extended above VWAP — UNLESS puts_on_bounces is active
+        // (in that case, the above-VWAP condition is exactly what we want for a put fade entry)
         logEvent("filter", `[VWAP] ${stock.ticker} bear call skipped - price ABOVE VWAP by ${vwapPct}% (wait for intraday weakness)`);
         continue;
+      }
+      // Bounce mode: above VWAP is a PUT SIGNAL not a block — boost put score
+      if (_putsOnBounceActive && price > vwap * 1.02) {
+        const _bounceVwapPct = ((price - vwap) / vwap * 100).toFixed(1);
+        const _bounceBoost   = price > vwap * 1.04 ? 15 : price > vwap * 1.02 ? 10 : 5;
+        weaknessBoost += _bounceBoost;
+        weaknessReasons.push(`Bounce: $${_bounceVwapPct}% above VWAP — fade opportunity (+${_bounceBoost})`);
+        logEvent("filter", `[BOUNCE] ${stock.ticker} ${_bounceVwapPct}% above VWAP in puts_on_bounces mode — put fade boost +${_bounceBoost}`);
       }
     }
     if (vwap > 0 && price < vwap * 0.99) {
