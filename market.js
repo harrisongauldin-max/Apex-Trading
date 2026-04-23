@@ -62,56 +62,90 @@ const COMPANY_NAMES = {
 };
 
 const MACRO_BEARISH_KEYWORDS = [
+  // ── Fed / rates — specific data events only ───────────────────────────
   { kw: 'fed rate hike',          w: 3 }, { kw: 'rate hike',               w: 2 },
   { kw: 'hawkish',                w: 2 }, { kw: 'quantitative tightening', w: 2 },
-  { kw: 'tightening',             w: 1 },
+  // 'tightening' removed — fires on analysis/commentary, not events
+  // ── Inflation — hard data prints only ────────────────────────────────
   { kw: 'inflation surge',        w: 3 }, { kw: 'cpi beat',                w: 3 },
   { kw: 'inflation hot',          w: 2 }, { kw: 'pce beat',                w: 2 },
   { kw: 'core inflation',         w: 2 },
-  { kw: 'tariff',                 w: 2 }, { kw: 'trade war',               w: 3 },
+  // ── Trade / tariffs — specific escalations ────────────────────────────
+  { kw: 'tariff',                 w: 2 }, { kw: 'trade war',               w: 2 },
   { kw: 'sanctions',              w: 2 }, { kw: 'export controls',         w: 2 },
   { kw: 'chip ban',               w: 2 }, { kw: 'china tariff',            w: 3 },
-  { kw: 'china tensions',         w: 2 }, { kw: 'taiwan strait',           w: 3 },
-  { kw: 'war',                    w: 3 }, { kw: 'military strike',         w: 3 },
-  { kw: 'invasion',               w: 3 }, { kw: 'conflict escalation',     w: 3 },
-  { kw: 'blockade',               w: 2 }, { kw: 'strait',                  w: 2 },
+  { kw: 'china tensions',         w: 1 }, { kw: 'taiwan strait',           w: 2 },
+  // ── Geopolitical — reduced: priced-in background noise since 2022 ─────
+  { kw: 'war',                    w: 1 }, // was 3 — priced in, chronic background noise
+  { kw: 'military strike',        w: 2 }, // was 3 — still relevant as new events
+  { kw: 'invasion',               w: 2 }, // was 3
+  { kw: 'conflict escalation',    w: 1 }, // was 3 — too generic
+  { kw: 'blockade',               w: 2 },
+  // 'strait' removed — fires on geography (Strait of Hormuz), not events
+  // ── Macro / growth ────────────────────────────────────────────────────
   { kw: 'recession',              w: 3 }, { kw: 'gdp miss',                w: 3 },
   { kw: 'gdp contraction',        w: 3 }, { kw: 'unemployment rise',       w: 2 },
   { kw: 'jobless claims surge',   w: 2 }, { kw: 'layoffs',                 w: 2 },
-  { kw: 'job cuts',               w: 1 },
+  // 'job cuts' removed — fires on any company restructuring announcement
+  // ── Financial system ──────────────────────────────────────────────────
   { kw: 'bank failure',           w: 3 }, { kw: 'credit crunch',           w: 3 },
   { kw: 'debt ceiling',           w: 2 }, { kw: 'default',                 w: 3 },
-  { kw: 'downgrade',              w: 2 }, { kw: 'bank run',                w: 3 },
-  { kw: 'regional banks',         w: 2 }, { kw: 'liquidity crisis',        w: 3 },
+  { kw: 'downgrade',              w: 1 }, // was 2 — fires on analyst rating changes too
+  { kw: 'bank run',               w: 3 }, { kw: 'regional banks',          w: 1 }, // was 2 — SVB is 2023
+  { kw: 'liquidity crisis',       w: 3 }, { kw: 'credit spread widening',  w: 3 }, // new
+  // ── Energy / commodities ──────────────────────────────────────────────
   { kw: 'oil spike',              w: 2 }, { kw: 'energy crisis',           w: 2 },
-  { kw: 'supply shock',           w: 2 }, { kw: 'shortage',                w: 1 },
+  { kw: 'supply shock',           w: 2 },
+  // 'shortage' removed — structural/chronic (labor shortage, chip shortage always present)
   { kw: 'opec cut',               w: 2 }, { kw: 'production cut',          w: 2 },
+  // ── Rates / volatility ────────────────────────────────────────────────
   { kw: 'yield inversion',        w: 2 }, { kw: '10-2 spread',             w: 2 },
-  { kw: 'volatility surge',       w: 2 }, { kw: 'government shutdown',     w: 2 },
-  { kw: 'shutdown',               w: 1 }, { kw: 'dollar strengthening',    w: 1 },
+  { kw: 'treasury selloff',       w: 2 }, // new — specific bond market stress
+  { kw: 'yield spike',            w: 2 }, // new
+  { kw: 'volatility surge',       w: 2 }, { kw: 'vix spike',               w: 3 }, // new
+  { kw: 'flash crash',            w: 3 }, // new
+  { kw: 'circuit breaker',        w: 3 }, // new
+  // 'government shutdown' kept but 'shutdown' (generic) removed
+  { kw: 'government shutdown',    w: 2 },
+  // 'dollar strengthening' removed — too correlated with other rate signals
+  // ── Earnings ──────────────────────────────────────────────────────────
   { kw: 'earnings miss',          w: 2 }, { kw: 'guidance cut',            w: 2 },
   { kw: 'profit warning',         w: 2 },
 ];
 
 const MACRO_BULLISH_KEYWORDS = [
+  // ── Fed / rates ───────────────────────────────────────────────────────
   { kw: 'fed rate cut',           w: 3 }, { kw: 'rate cut',                w: 2 },
   { kw: 'dovish',                 w: 2 }, { kw: 'quantitative easing',     w: 2 },
   { kw: 'easing',                 w: 1 }, { kw: 'stimulus',                w: 2 },
   { kw: 'soft landing',           w: 2 }, { kw: 'pause rate',              w: 2 },
+  { kw: 'fed pivot',              w: 3 }, // new — specific regime-change signal
+  // ── Inflation ─────────────────────────────────────────────────────────
   { kw: 'inflation cooling',      w: 2 }, { kw: 'cpi miss',                w: 3 },
   { kw: 'inflation slows',        w: 2 }, { kw: 'pce miss',                w: 2 },
   { kw: 'disinflation',           w: 2 },
+  // ── Labor / growth ────────────────────────────────────────────────────
   { kw: 'strong jobs',            w: 2 }, { kw: 'unemployment falls',      w: 2 },
+  { kw: 'jobs report beat',       w: 2 }, // new
   { kw: 'gdp beat',               w: 3 }, { kw: 'gdp growth',              w: 2 },
-  { kw: 'beat expectations',      w: 1 }, { kw: 'consumer confidence rises',w: 2 },
-  { kw: 'retail sales beat',      w: 2 }, { kw: 'earnings beat',           w: 2 },
-  { kw: 'record earnings',        w: 2 }, { kw: 'guidance raised',         w: 2 },
-  { kw: 'profit beat',            w: 2 },
+  // 'beat expectations' removed — too generic, fires on any earnings recap
+  { kw: 'consumer confidence rises', w: 2 },
+  { kw: 'retail sales beat',      w: 2 }, { kw: 'retail beat',             w: 2 }, // new
+  { kw: 'ism beat',               w: 2 }, { kw: 'pmi beat',                w: 2 }, // new
+  { kw: 'consumer spending rises', w: 2 }, // new
+  // ── Earnings ──────────────────────────────────────────────────────────
+  { kw: 'earnings beat',          w: 2 }, { kw: 'record earnings',         w: 2 },
+  { kw: 'guidance raised',        w: 2 }, { kw: 'profit beat',             w: 2 },
+  { kw: 'beat and raise',         w: 3 }, // new — gold standard earnings outcome
+  { kw: 'buyback',                w: 1 }, { kw: 'share repurchase',        w: 1 }, // new
+  // ── Geopolitical resolution ───────────────────────────────────────────
   { kw: 'ceasefire',              w: 3 }, { kw: 'peace deal',              w: 3 },
   { kw: 'peace talks',            w: 2 }, { kw: 'truce',                   w: 3 },
-  { kw: 'accord',                 w: 2 }, { kw: 'end to conflict',         w: 3 },
-  { kw: 'deescalation',           w: 2 }, { kw: 'de-escalation',           w: 2 },
-  { kw: 'diplomatic',             w: 1 },
+  { kw: 'accord',                 w: 1 }, // was 2 — too generic, fires on any agreement
+  { kw: 'end to conflict',        w: 3 }, { kw: 'deescalation',            w: 2 },
+  { kw: 'de-escalation',          w: 2 },
+  // 'diplomatic' removed — fires on any foreign policy headline
+  // ── Trade / tariffs ───────────────────────────────────────────────────
   { kw: 'tariff pause',           w: 3 }, { kw: 'tariff suspended',        w: 3 },
   { kw: 'tariff removed',         w: 3 }, { kw: 'tariff cut',              w: 2 },
   { kw: 'trade deal',             w: 3 }, { kw: 'trade agreement',         w: 3 },
@@ -119,14 +153,17 @@ const MACRO_BULLISH_KEYWORDS = [
   { kw: 'sanctions relief',       w: 2 }, { kw: 'iran deal',               w: 3 },
   { kw: 'us-iran',                w: 2 }, { kw: 'trump deal',              w: 2 },
   { kw: 'trade resolution',       w: 2 }, { kw: 'agreement reached',       w: 2 },
+  // ── China stimulus ────────────────────────────────────────────────────
   { kw: 'china stimulus',         w: 2 }, { kw: 'pboc',                    w: 2 },
   { kw: 'beijing stimulus',       w: 2 },
+  // ── Fiscal ────────────────────────────────────────────────────────────
   { kw: 'debt deal',              w: 2 }, { kw: 'budget deal',             w: 2 },
   { kw: 'continuing resolution',  w: 1 },
+  // ── Tech / commodities ────────────────────────────────────────────────
   { kw: 'ai breakthrough',        w: 1 }, { kw: 'nvidia beat',             w: 2 },
   { kw: 'oil falls',              w: 2 }, { kw: 'energy prices drop',      w: 2 },
-  { kw: 'supply chain recovery',  w: 2 }, { kw: 'risk on',                 w: 1 },
-  { kw: 'market rally',           w: 1 }, { kw: 'stocks surge',            w: 1 },
+  { kw: 'supply chain recovery',  w: 2 },
+  // 'risk on', 'market rally', 'stocks surge' removed — retrospective reporting not signal
 ];
 
 const CREDIBLE_SOURCES = [
@@ -242,6 +279,47 @@ function scoreArticle(article) {
     sourceMult, recencyMult, isCredible };
 }
 
+// ── Keyword frequency tracker — decays weight for chronic background noise ───
+// Called from getMacroNews after scoreArticle runs on all articles.
+// If the same keyword has appeared in every scan for 48+ hours it's background
+// noise (e.g. "war" since 2022). Decay its effective weight to 0.5x.
+// State key: state._keywordFrequency = { keyword: { count, firstSeen, lastSeen } }
+function updateKeywordFrequency(triggers, stateRef) {
+  if (!stateRef) return;
+  if (!stateRef._keywordFrequency) stateRef._keywordFrequency = {};
+  const now     = Date.now();
+  const DECAY_AFTER_MS = 48 * 60 * 60 * 1000; // 48 hours of continuous presence
+
+  for (const t of triggers) {
+    const kw = t.kw;
+    if (!stateRef._keywordFrequency[kw]) {
+      stateRef._keywordFrequency[kw] = { count: 0, firstSeen: now, lastSeen: now };
+    }
+    const entry = stateRef._keywordFrequency[kw];
+    entry.count++;
+    entry.lastSeen = now;
+  }
+
+  // Prune keywords not seen in 6 hours (no longer in headlines)
+  for (const kw of Object.keys(stateRef._keywordFrequency)) {
+    const entry = stateRef._keywordFrequency[kw];
+    if (now - entry.lastSeen > 6 * 60 * 60 * 1000) {
+      delete stateRef._keywordFrequency[kw]; // headline moved on — reset decay
+    }
+  }
+}
+
+function getKeywordDecayMult(kw, stateRef) {
+  if (!stateRef?._keywordFrequency?.[kw]) return 1.0;
+  const entry    = stateRef._keywordFrequency[kw];
+  const ageMs    = Date.now() - entry.firstSeen;
+  const DECAY_MS = 48 * 60 * 60 * 1000;
+  if (ageMs >= DECAY_MS && entry.count >= 20) {
+    return 0.5; // chronic background noise — half weight
+  }
+  return 1.0;
+}
+
 function analyzeNews(articles) {
   if (!articles || !articles.length) return { modifier: 0, signal: "neutral", headlines: [] };
   const bullishWords = ["beat","beats","raised","upgrade","strong","surge","record","growth","positive","bullish","buy","outperform","exceeds"];
@@ -294,7 +372,7 @@ async function getNewsForTicker(ticker) {
   } catch(e) { return []; }
 }
 
-async function getMacroNews() {
+async function getMacroNews(stateRef = null) {
   // Cache for 60 seconds - news doesn't change faster than this
   // Prevents redundant fetches when both the 3-min interval and scan medium tier fire close together
   const cached = getCached("macronews:v1");
@@ -330,9 +408,19 @@ async function getMacroNews() {
 
     for (const article of allArticles) {
       const scored = scoreArticle(article);
-      totalBearish += scored.bearishScore;
-      totalBullish += scored.bullishScore;
-      scored.triggers.forEach(t => allTriggers.push(t));
+      // Apply keyword recency decay — reduce weight for chronic background noise
+      // keywords that have appeared in every scan for 48+ hours get 0.5x weight
+      const allTriggersBefore = scored.triggers;
+      let adjustedBearish = 0, adjustedBullish = 0;
+      for (const t of allTriggersBefore) {
+        const decay = getKeywordDecayMult(t.kw, stateRef);
+        const adjusted = parseFloat((t.pts * decay).toFixed(1));
+        if (t.direction === 'bearish') adjustedBearish += adjusted;
+        else adjustedBullish += adjusted;
+        allTriggers.push({ ...t, pts: adjusted, decayed: decay < 1.0 });
+      }
+      totalBearish += adjustedBearish || scored.bearishScore;
+      totalBullish += adjustedBullish || scored.bullishScore;
       scored.sectorImpact.bearish.forEach(s => sectorImpact.bearish.add(s));
       scored.sectorImpact.bullish.forEach(s => sectorImpact.bullish.add(s));
 
@@ -349,6 +437,9 @@ async function getMacroNews() {
         });
       }
     }
+
+    // Update keyword frequency tracker for recency decay
+    if (stateRef) updateKeywordFrequency(allTriggers, stateRef);
 
     // Sort top stories by score desc, keep top 5
     topStories.sort((a, b) => b.score - a.score);
