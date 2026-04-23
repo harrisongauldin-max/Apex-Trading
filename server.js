@@ -573,41 +573,67 @@ setInterval(() => {
 // - Alpaca cash sync interval - calls syncCashFromAlpaca every 30s -
 setInterval(syncCashFromAlpaca, 5 * 60 * 1000); // OPT4: 5min — post-trade syncs handle fills immediately
 
-// - Independent agent macro interval - runs every 3 minutes regardless of scan state -
-// Decoupled from scan so long mleg poll loops don't starve the agent
+// ── Headline-driven macro agent interval ──────────────────────────────────
+// Replaces keyword-based getMacroNews() with getAgentMacroAnalysis().
+// The agent call is gated internally by _shouldRunMacroAgent():
+//   - Skips if no new headlines since last call (holds current signal)
+//   - Runs immediately on emergency triggers (circuit breaker, margin calls, etc.)
+//   - Forces run if signal is stale beyond 90 minutes
+// On quiet days: agent may only run 10-15x instead of 80x. Active days: every cycle.
 let _lastAgentInterval = 0;
 
-// Run immediately on startup during market hours - don't wait 3 min for first signal
+async function _runMacroAgent(forceRun = false) {
+  try {
+    const headlines = await getMacroNews(state);
+    const headlineList = (headlines?.headlines || headlines?.topStories || []);
+    if (!headlineList.length) return;
+    const result = await getAgentMacroAnalysis(headlineList, forceRun);
+    if (result) {
+      const sc = getScannerState();
+      // Build authoritative macro context from agent result (no keyword scoring)
+      sc.marketContext.macro = {
+        signal:        result.signal,
+        scoreModifier: result.modifier || 0,
+        mode:          result.mode || 'normal',
+        macroAuthority:'agent',
+        confidence:    result.confidence,
+        agentLastUpdated: result.timestamp || new Date().toISOString(),
+        triggers:      result.catalysts || [],
+        // Preserve keyword triggers field for log compatibility (empty)
+      };
+      state._agentMacro = {
+        ...result,
+        updatedAt:  new Date().toISOString(),
+        timestamp:  new Date().toISOString(),
+      };
+      markDirty();
+    }
+  } catch(e) { logEvent("warn", `[AGENT] Macro interval failed: ${e.message}`); }
+}
+
+// Run on startup during market hours — 5s delay for Redis rehydration
 setTimeout(async () => {
-  const et = getETTime();
+  const et  = getETTime();
   const etH = et.getHours() + et.getMinutes() / 60;
   const day = et.getDay();
   if (day >= 1 && day <= 5 && etH >= 8.5 && etH <= 17.0) {
     logEvent("macro", "[AGENT] Running initial macro analysis on startup...");
-    try {
-      const macro = await getMacroNews();
-      if (macro) { getScannerState().marketContext.macro = macro; markDirty(); }
-    } catch(e) { logEvent("warn", `[AGENT] Startup macro failed: ${e.message}`); }
+    await _runMacroAgent(true); // force on startup — fresh boot always needs a signal
     _lastAgentInterval = Date.now();
   }
-}, 5000); // 5s after startup - let Redis rehydrate first
+}, 5000);
 
+// Poll every 3 minutes — agent internally decides whether to actually call Claude
 setInterval(async () => {
   const et  = getETTime();
   const day = et.getDay();
   if (day === 0 || day === 6) return;
   const etH = et.getHours() + et.getMinutes() / 60;
-  if (etH < 8.5 || etH > 17.0) return; // 8:30am-5pm ET only
+  if (etH < 8.5 || etH > 17.0) return; // 8:30am ET – 5pm ET only
   if (Date.now() - _lastAgentInterval < 2.5 * 60 * 1000) return; // 2.5 min debounce
   _lastAgentInterval = Date.now();
-  try {
-    const macro = await getMacroNews();
-    if (macro) {
-      getScannerState().marketContext.macro = macro;
-      markDirty();
-    }
-  } catch(e) { logEvent("warn", `[AGENT] Interval macro failed: ${e.message}`); }
-}, 3 * 60 * 1000); // every 3 minutes
+  await _runMacroAgent();
+}, 3 * 60 * 1000);
 
 // - F2: Pre-market carry-over assessment (9:00 AM ET) -
 // Checks overnight positions against pre-market conditions
@@ -937,6 +963,8 @@ app.get("/api/state", async (req, res) => {
     aaii:               state._aaii || null,
     lastScanScores:     state._lastScanScores || {},
     overnightScan:      state._overnightScan || null,
+    headlineCacheSize:  (state._headlineCache || []).length,
+    headlineCacheAge:   state._headlineCacheTs ? Math.round((Date.now() - state._headlineCacheTs) / 60000) : null,
     watchlist:          WATCHLIST.map(w => ({ ticker: w.ticker, sector: w.sector, beta: w.beta, isPrimary: w.isPrimary, catalyst: w.catalyst })),
   });
 });
