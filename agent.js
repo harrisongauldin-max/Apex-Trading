@@ -459,6 +459,15 @@ SCORING CONTEXT:
   // (falls through to regimeA=false, regimeB=false → defaults to A in classification)
   const prevRegimeClass = state._regimeClass;
   state._regimeClass = regimeC ? "C" : regimeB ? "B" : "A";
+  // Regime change B→A: reset signal anchor to neutral so the agent re-evaluates fresh
+  // Without this, the stability system keeps the old bearish signal locked in for 2+ tiers
+  // even though the market context has fundamentally changed
+  if (prevRegimeClass === "B" && state._regimeClass === "A") {
+    if (state._agentMacro) {
+      _log("warn", `[REGIME] B→A transition — resetting signal anchor from '${state._agentMacro.signal}' to neutral for fresh evaluation`);
+      state._agentMacro = { ...state._agentMacro, signal: "neutral", modifier: 0, _stabilityHeld: false };
+    }
+  }
 
   // ── V3.2: B1/B2 sub-regime split (panel approved) ───────────────────────
   // B1 = early/mild bear: duration < 5d OR VIX < 26. Higher min score, tighter reversal threshold.
@@ -694,9 +703,12 @@ Respond with ONLY the JSON object. No words before or after.`;
     // Emergency triggers (ceasefire, flash crash, circuit breaker, etc.) always bypass stability hold
     // These are genuinely market-moving events — holding a stale signal through them is wrong
     const wasEmergency = !!(deltaCheck && deltaCheck.isEmergency);
-    if (tierDelta < 2 && !structEvent && !wasEmergency && prevSignal !== "neutral" && recentCalls.length >= 2) {
+    // In Regime A (bull), use 1-tier threshold — signal should respond faster to improving conditions
+    // In Regime B/C (bear/crisis), keep 2-tier threshold — prevent noise flips in volatile downtrends
+    const stabilityThreshold = (state._regimeClass === "A") ? 1 : 2;
+    if (tierDelta < stabilityThreshold && !structEvent && !wasEmergency && prevSignal !== "neutral" && recentCalls.length >= 2) {
       // Hold previous signal — change is within noise band
-      _log("macro", `[AGENT STABILITY] Signal held at '${prevSignal}' — new '${parsed.signal}' is only ${tierDelta} tier(s) different, no structural event`);
+      _log("macro", `[AGENT STABILITY] Signal held at '${prevSignal}' — new '${parsed.signal}' is only ${tierDelta} tier(s) different (threshold: ${stabilityThreshold}, regime: ${state._regimeClass || 'A'})`);
       parsed.signal   = prevSignal;
       parsed.modifier = (state._agentMacro || {}).modifier || parsed.modifier;
       parsed._stabilityHeld = true;
