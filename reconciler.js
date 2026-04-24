@@ -240,6 +240,9 @@ async function runReconciliation() {
               contractSymbol: buyLeg.sym,
               // D-FIX1a: credit=netDebit is credit received; debit=netDebit is cost paid
               premium:   Math.max(0.01, netDebit),
+              // Individual leg entry prices from Alpaca avg_entry_price — used by dashboard leg breakdown
+              buyPremium:  parseFloat((buyLeg.avgEntry || 0).toFixed(2)),
+              sellPremium: parseFloat((sellLeg.avgEntry || 0).toFixed(2)),
               maxProfit: _isCredit3a
                 ? Math.max(0.01, netDebit)                                                  // credit: max profit = credit received
                 : parseFloat((spreadWidth - Math.max(0.01, netDebit)).toFixed(2)),          // debit: max profit = width - cost
