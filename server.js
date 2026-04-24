@@ -1630,8 +1630,18 @@ app.post("/api/reset-circuit", requireSecret, async (req, res) => {
     logEvent("scan", `[SOW] Week start set from Friday close: $${state.weekStartCash.toFixed(2)}`);
   } // reset daily baseline to current cash
   await saveStateNow();
+  state._vixSpikeAt = null; // also clear VIX spike cooldown — allows debit puts to resume
   logEvent("circuit", "Circuit breaker manually reset - resuming normal operations");
   res.json({ ok: true, cash: state.cash, positions: state.positions.length });
+});
+
+// Clear VIX spike cooldown separately (e.g. when spike was triggered by bad data)
+app.post("/api/clear-vix-cooldown", requireSecret, async (req, res) => {
+  state._vixSpikeAt = null;
+  markDirty();
+  await saveStateNow();
+  logEvent("circuit", "VIX spike cooldown manually cleared");
+  res.json({ ok: true, message: "VIX spike cooldown cleared — debit puts re-enabled" });
 });
 
 // Full reset - wipes everything back to fresh $10,000 state
