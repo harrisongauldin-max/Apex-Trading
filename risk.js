@@ -233,7 +233,16 @@ async function checkAllFilters(stock, price, prefetchedBars = null) { // OPT3: a
     if (lastAttempt) {
       const cooldownMs  = 60 * 60 * 1000; // 60 minutes — long enough to prevent repeat deadlock cycles
       const elapsed     = Date.now() - lastAttempt;
-      if (elapsed < cooldownMs) {
+      // Only apply cooldown within the same trading session (same calendar day ET).
+      // If the force-clear happened yesterday, it's irrelevant — don't block today's entries.
+      const cooldownET  = new Date(lastAttempt);
+      const nowET       = new Date();
+      const sameDay     = cooldownET.toLocaleDateString('en-US', { timeZone: 'America/New_York' }) ===
+                          nowET.toLocaleDateString('en-US', { timeZone: 'America/New_York' });
+      if (!sameDay) {
+        // Stale cooldown from a previous session — clear it silently
+        delete state._entryAttemptCooldown[stock.ticker];
+      } else if (elapsed < cooldownMs) {
         const remaining = Math.ceil((cooldownMs - elapsed) / 60000);
         return { pass: false, reason: `Entry cooldown: previous order for ${stock.ticker} force-cleared ${Math.floor(elapsed/60000)}min ago — waiting ${remaining}min (reconciler verifying state)` };
       } else {
