@@ -541,11 +541,11 @@ function evaluateEntry(candidate, rulebook, state, context = {}) {
       const spyDayChg = state._spyDayChange || 0;
       if (spyDayChg < -0.01)
         return { pass: false, reason: `debit call: SPY down ${(spyDayChg*100).toFixed(1)}% today — no calls into down day` };
-      // Entry window: 10:15am - 2:30pm ET only (needs opening direction confirmed)
+      // Entry window: 10:15am - 3:30pm ET only (needs opening direction confirmed)
       if (etHour < 10.25)
         return { pass: false, reason: "debit call: before 10:15am ET — wait for opening direction to confirm" };
-      if (etHour >= 14.5)
-        return { pass: false, reason: "debit call: after 2:30pm ET — insufficient time for move to develop" };
+      if (etHour >= 15.5)
+        return { pass: false, reason: "debit call: after 3:30pm ET — entry window closed" };
       // MACD bearish = momentum against bull thesis
       const macdSig = (context.signals || {}).macd || "neutral";
       if (macdSig.includes("bearish crossover"))
