@@ -467,6 +467,12 @@ SCORING CONTEXT:
       _log("warn", `[REGIME] B→A transition — resetting signal anchor from '${state._agentMacro.signal}' to neutral for fresh evaluation`);
       state._agentMacro = { ...state._agentMacro, signal: "neutral", modifier: 0, _stabilityHeld: false };
     }
+    // Also clear macro history — agent uses last 3 calls as context, stale bearish history
+    // would re-anchor it to bearish even after the baseline reset
+    if (state._agentMacroHistory && state._agentMacroHistory.length > 0) {
+      _log("warn", `[REGIME] B→A transition — clearing ${state._agentMacroHistory.length} stale macro history entries`);
+      state._agentMacroHistory = [];
+    }
   }
 
   // ── V3.2: B1/B2 sub-regime split (panel approved) ───────────────────────
@@ -540,6 +546,20 @@ SCORING CONTEXT:
   const heatPctNow = acctBaseline > 0 ? (openCost / acctBaseline * 100).toFixed(0) : 0;
   const heatCapNow = (effectiveHeatCap() * 100).toFixed(0);
 
+  // - AG-4b: Keyword macro pre-score — structural signal floor -
+  // Fetch the keyword-scored macro signal before agent call.
+  // Used as a floor: if keywords fire strongly bullish/bearish, agent can moderate
+  // but cannot zero it out entirely. Prevents agent from suppressing clear fundamental signals.
+  let keywordMacroScore = 0;
+  let keywordMacroSignal = "neutral";
+  try {
+    const kwResult = await _getMacro(state).catch(() => null);
+    if (kwResult && kwResult.scoreModifier !== undefined) {
+      keywordMacroScore  = kwResult.scoreModifier || 0;
+      keywordMacroSignal = kwResult.signal        || "neutral";
+    }
+  } catch(e) { /* non-critical — proceed without keyword floor */ }
+
   // - AG-5: Correlation alert -
   const openPutsCount  = (state.positions||[]).filter(p=>p.optionType==="put").length;
   const openCallsCount = (state.positions||[]).filter(p=>p.optionType==="call").length;
@@ -605,6 +625,10 @@ ACCOUNT:
 
 YOUR RECENT SIGNALS (last 3 calls):
 ${historyLines || '  no history yet'}
+
+KEYWORD PRE-SCORE (rule-based headline analysis before your assessment):
+- Signal: ${keywordMacroSignal} | Modifier: ${keywordMacroScore > 0 ? '+' : ''}${keywordMacroScore}
+- Your modifier should stay within 10 points of this unless you have strong justification.
 
 TOP HEADLINES (${headlines.length} total, newest first):
 ${headlines.slice(0, 20).map((h, i) => (i+1) + '. ' + h).join('\n')}
@@ -714,6 +738,17 @@ Respond with ONLY the JSON object. No words before or after.`;
       parsed._stabilityHeld = true;
     } else if (tierDelta >= 2 || structEvent) {
       _log("macro", `[AGENT STABILITY] Signal changed ${prevSignal} → ${parsed.signal} (${tierDelta} tiers${structEvent?' + structural event':''})`);
+    }
+
+    // ── Keyword floor: prevent agent from zeroing out strong fundamental signals ──
+    // If keyword pre-score is strongly directional (|modifier| >= 10) and agent
+    // output is neutral (modifier near 0), apply a floor of 1/3 of keyword signal.
+    // This prevents the agent from completely suppressing earnings beats, buybacks, etc.
+    // Agent reasoning still dominates — this just prevents full suppression.
+    if (Math.abs(keywordMacroScore) >= 10 && Math.abs(parsed.modifier || 0) < 5) {
+      const floor = Math.round(keywordMacroScore / 3);
+      _log("macro", `[AGENT] Keyword floor applied: agent modifier ${parsed.modifier||0} → ${floor} (keyword signal: ${keywordMacroScore})`);
+      parsed.modifier = floor;
     }
 
     // ── Agent macro history — last 10 calls for context injection ──────────
