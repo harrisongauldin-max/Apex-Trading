@@ -241,7 +241,7 @@ What is your strategic assessment for today's trading session?`;
 const EMERGENCY_TRIGGERS = [
   'fed emergency',    // emergency Fed action
   'emergency rate',   // out-of-cycle rate move
-  'circuit breaker',  // market-wide halt
+  'markets halted',   // market-wide halt (more specific than "circuit breaker")
   'market halted',    // exchange halt
   'trading halted',   // specific halt
   'flash crash',      // rapid market drop
