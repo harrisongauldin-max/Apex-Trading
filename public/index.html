@@ -2581,9 +2581,10 @@ async function renderJournal() {
         return '<span style="font-size:10px;color:' + (isNeg?'#ff7766':isPos?'#88dd88':'#666') + ';display:block;line-height:1.5">' + r + '</span>';
       }).join('') + '</div>') : ''}
       <div class="journal-meta">
-        <span>Opened: ${openDate}</span>
+        <span title="Entry timestamp">🕐 ${pos.openDate ? new Date(pos.openDate).toLocaleString('en-US',{month:'short',day:'numeric',hour:'2-digit',minute:'2-digit',timeZone:'America/Chicago',hour12:true}) + ' CT' : '--'}</span>
         <span>DTE: ${pos.expDays || '--'}</span>
         <span>VIX: ${pos.entryVIX || '--'}</span>
+        <span>Regime: ${pos.entryRegime || '--'}</span>
       </div>
     </div>`;
   }
@@ -2637,7 +2638,8 @@ async function renderJournal() {
         return '<span style="font-size:10px;color:' + (isNeg?'#ff7766':isPos?'#88dd88':'#666') + ';display:block;line-height:1.5">' + r + '</span>';
       }).join('') + '</div>') : ''}
       <div class="journal-meta">
-        <span>Closed: ${closeDate}</span>
+        ${trade.openDate ? `<span title="Entry timestamp">🕐 In: ${new Date(trade.openDate).toLocaleString('en-US',{month:'short',day:'numeric',hour:'2-digit',minute:'2-digit',timeZone:'America/Chicago',hour12:true})} CT</span>` : ''}
+        <span title="Close timestamp">🕐 Out: ${trade.closeTime ? new Date(trade.closeTime).toLocaleString('en-US',{month:'short',day:'numeric',hour:'2-digit',minute:'2-digit',timeZone:'America/Chicago',hour12:true}) + ' CT' : (trade.date || '--')}</span>
         ${trade.maxProfit ? `<span>Max P: $${(trade.maxProfit*100*(trade.contracts||1)).toFixed(0)}</span>` : ''}
         ${trade.maxLoss   ? `<span>Max L: $${(trade.maxLoss*100*(trade.contracts||1)).toFixed(0)}</span>`   : ''}
         <span>Regime: ${trade.regime || '--'}</span>
