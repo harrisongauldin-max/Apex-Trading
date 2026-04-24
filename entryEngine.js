@@ -38,8 +38,8 @@ const INSTRUMENT_CONSTRAINTS = {
          reason: "Commodity hedge — credit puts and calls appropriate. Debit calls only on confirmed equity selloff + DXY weakness." },
   SPY: { allowedTypes: ["credit_put","credit_call","debit_put","debit_call","iron_condor"] },
   QQQ: { allowedTypes: ["credit_put","credit_call","debit_put","debit_call","iron_condor"] },
-  XLE: { allowedTypes: ["debit_put"],
-         reason: "Energy ETF — oil-correlated, directional puts on downtrend only. Credits too risky in oil spike environments." },
+  XLE: { allowedTypes: ["debit_put","credit_put"],
+         reason: "Energy ETF — debit puts in Regime B (downtrend). Bull put spreads (credit_put) allowed in Regime A — defined risk, oil spike helps not hurts. Credit CALLS remain blocked (oil spike risk on short call leg)." },
 };
 
 // ── Correlated instrument groups ─────────────────────────────
@@ -358,7 +358,11 @@ function scoreCandidate(stock, rawPutScore, rawCallScore, putReasons, callReason
   // Instrument constraints checked first: XLE allows debit_put only,
   // so credit mode never applies to XLE regardless of rulebook state
   const instrConstraint = rb.instrumentConstraints[ticker];
-  const allowsCredit    = !instrConstraint || instrConstraint.allowedTypes.some(t => t.startsWith("credit"));
+  // allowsCredit: check regime-specific credit type, not just any credit
+  // In bear regime, credit = credit_call. In bull regime, credit = credit_put.
+  // XLE allows credit_put (bull put spread) but NOT credit_call — don't let bear redirect fire
+  const regimeCreditType = rb.isBearRegime ? "credit_call" : "credit_put";
+  const allowsCredit    = !instrConstraint || instrConstraint.allowedTypes.includes(regimeCreditType);
   let tradeType;
   // Iron condor: intentionally disabled — no scorer implemented yet.
   // scoreCandidate would use Math.max(putScore,callScore) which is a directional score,
