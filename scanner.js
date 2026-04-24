@@ -1028,11 +1028,15 @@ async function runScan() {
   // Prevents the avoid -> immediate re-entry pattern (agent flips to calls_on_dips next cycle)
   const agentBias = (state._agentMacro || {}).entryBias || (state._dayPlan || {}).entryBias || "neutral";
   if (agentBias === "avoid") {
-    const holdUntil = Date.now() + 30 * 60 * 1000;
-    if (!state._avoidUntil || holdUntil > state._avoidUntil) {
+    // Only stamp a new avoid hold if one isn't already active.
+    // Previous code re-stamped every scan while bias=avoid, extending the hold by 30min each time.
+    // That turned a 30min hold into a multi-hour block (3 stamps = hold until 10:36am).
+    // Now: stamp once when avoid session starts, let it expire naturally.
+    const alreadyHolding = !!(state._avoidUntil && Date.now() < state._avoidUntil);
+    if (!alreadyHolding) {
+      const holdUntil = Date.now() + 30 * 60 * 1000;
       state._avoidUntil = holdUntil;
       // V2.84: Track daily avoid stamp count -- panel flagged this as a hidden entry blocker
-      // If firing 5+ times per day it is blocking entries for hours cumulatively
       if (!state._avoidStampsToday) state._avoidStampsToday = { date: "", count: 0 };
       const todayStr = getETTime().toISOString().slice(0, 10);
       if (state._avoidStampsToday.date !== todayStr) {
