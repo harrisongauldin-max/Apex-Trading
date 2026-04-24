@@ -550,6 +550,8 @@ input[type=text]:focus{border-color:var(--blue)}
       <button class="btn btn-gold" onclick="setBudget()">SET</button>
     </div>
     <button class="btn" style="background:#0a2a1a;border:1px solid #00c4ff;color:#00c4ff" onclick="fetch('/api/test-email',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({type:'morning'})}).then(r=>r.json()).then(d=>alert(d.ok?'Email sent!':d.error||'Failed'))">📧 TEST EMAIL</button>
+    <button class="btn" style="background:#2a1a00;border:1px solid #ffaa00;color:#ffcc44" onclick="clearAvoidHold()" title="Clear the agent avoid hold — use when avoid was triggered by a false keyword match">🚫 CLEAR AVOID HOLD</button>
+    <button class="btn" style="background:#1a001a;border:1px solid #cc44ff;color:#dd88ff" onclick="clearVixCooldown()" title="Clear the 48h VIX spike cooldown — use when spike was triggered by bad data">⚡ CLEAR VIX COOLDOWN</button>
     <div style="display:flex;align-items:center;gap:6px">
       <span style="font-size:11px;color:var(--muted)">BLOCK TICKER:</span>
       <input type="text" id="blacklist-input" placeholder="TSLA" maxlength="6" style="background:var(--panel);border:1px solid var(--border);color:var(--text);padding:6px 10px;border-radius:6px;font-family:var(--font);font-size:11px;width:70px;outline:none;text-transform:uppercase"/>
@@ -2947,6 +2949,24 @@ async function resetPDT() {
   const data = await resp.json();
   alert(data.message || 'PDT counter reset. 3/3 day trades now available.');
   await fetchState();
+}
+
+async function clearAvoidHold() {
+  if (!confirm('Clear the agent avoid hold? Only do this if the hold was triggered by a false keyword match.')) return;
+  try {
+    const resp = await fetch('/api/clear-avoid', { method: 'POST' });
+    const data = await resp.json();
+    alert(data.ok ? '✅ Avoid hold cleared — entries re-enabled' : '❌ Failed: ' + (data.error || 'Unknown error'));
+  } catch(e) { alert('❌ Error: ' + e.message); }
+}
+
+async function clearVixCooldown() {
+  if (!confirm('Clear the VIX spike cooldown? Only do this if the spike was triggered by bad/corrupted data.')) return;
+  try {
+    const resp = await fetch('/api/clear-vix-cooldown', { method: 'POST' });
+    const data = await resp.json();
+    alert(data.ok ? '✅ VIX cooldown cleared — debit puts re-enabled' : '❌ Failed: ' + (data.error || 'Unknown error'));
+  } catch(e) { alert('❌ Error: ' + e.message); }
 }
 
 async function resetCircuit() {
