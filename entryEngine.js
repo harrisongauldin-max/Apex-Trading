@@ -123,8 +123,10 @@ function getRegimeRulebook(state) {
     const res = agentMacro.keyLevels?.spyResistance;
     return res && state._liveSPY ? Math.abs(state._liveSPY - res) / res < 0.015 : false;
   })();
-  const creditCallActive = ((agentChoppy && vixFloor && spyNearResistance) ||
-                            (isBearRegime && creditAllowedVIX));
+  // Credit CALL (bear call spread) requires confirmed bear regime — NEVER fires in Regime A.
+  // Removed: agentChoppy path could activate bear calls in bull regimes when agent said tradeType:none
+  // and SPY happened to be near a key level. Bear calls fight the trend in Regime A.
+  const creditCallActive = isBearRegime && creditAllowedVIX;
 
   // ── Minimum scores by regime ──────────────────────────────
   // Regime A: puts fight the uptrend — need RSI overbought signal, high bar
