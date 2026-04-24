@@ -246,7 +246,7 @@ const EMERGENCY_TRIGGERS = [
   'trading halted',   // specific halt
   'flash crash',      // rapid market drop
   'margin calls',     // forced deleveraging
-  'bank run',         // deposit flight
+  'bank run us',      // US deposit flight (not general international banking news)
   'yen carry',        // carry trade unwind (Aug 2024 style)
   'lehman',           // systemic bank failure reference
   'systemic risk',    // contagion language
