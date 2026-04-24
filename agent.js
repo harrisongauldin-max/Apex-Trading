@@ -366,9 +366,12 @@ When exitUrgency=trim: recommend closing the weakest position first (highest los
 
 REGIME CLASSIFICATION REFERENCE:
 - Regime A (Bull): SPY above 200MA + VIX sustained < 20. Strategy = bull put spreads, debit calls on dips. Puts fight the trend — higher entry bar required.
-- Regime B1 (Early Bear): SPY below 200MA < 5 days OR VIX 20-26. Bear call spreads active but less conviction. Puts-on-bounces with caution.
-- Regime B2 (Confirmed Bear): SPY below 200MA 5+ days AND VIX sustained >= 26. Full bear call spread mode. Puts-on-bounces high conviction. Best credit spread environment.
-- Regime C (Crisis): SPY drawdown > 20% AND VIX > 35 AND duration > 10 days. Debit puts blocked (violent whipsaws). Credit structures only. Post-crisis lock applies for 10 days after recovery.
+- Regime A (Bull): SPY above 200MA AND VIX < 20. Bull put spreads, debit calls on dips. No bear call spreads.
+- Regime A_elevated (Transitional): SPY above 200MA AND VIX 20-28. Market in uptrend but elevated fear. NO bear call spreads — rally risk too high. Neutral credit spreads or wait. VIX elevated during a bull rally means IV is elevated, NOT that market is bearish.
+- Regime B1 (Early Bear): SPY below 200MA < 5 days AND VIX 24-26. Bear call spreads with caution. Puts-on-bounces only on confirmed intraday bounces.
+- Regime B2 (Confirmed Bear): SPY below 200MA 5+ days AND VIX sustained >= 26. Full bear call spread mode. Best credit spread environment.
+- Regime C (Crisis): SPY drawdown > 20% AND VIX > 35 AND duration > 10 days. Credit structures only. Post-crisis lock 10 days after recovery.
+CRITICAL: If SPY is above its 200-day moving average, DO NOT recommend bear call spreads regardless of VIX level. High VIX during a bull rally = mean-reversion opportunity for CALLS, not puts.
 
 INSTRUMENT-SPECIFIC RULES:
 - SPY/QQQ: Primary instruments. Correlated — only one position per direction simultaneously unless score >= 80. Bear calls preferred in Regime B.
@@ -437,9 +440,23 @@ SCORING CONTEXT:
   const spy52wHigh = spyBarsForAgent.length > 0 ? Math.max(...spyBarsForAgent.map(b=>b.h)) : spyPrice;
   state._spyDrawdown = spy52wHigh > 0 ? parseFloat(((spyPrice - spy52wHigh) / spy52wHigh * 100).toFixed(1)) : 0;
   // Regime classification: A (bull), B (bear/trending), C (crisis)
+  // Regime A: SPY above 200MA AND VIX sustained < 20 (clear bull)
+  // Regime A_elevated: SPY above 200MA AND VIX 20-28 — elevated fear but uptrend intact
+  //   → This is NOT Regime B. Sell premium both directions, no directional bear bias.
+  //   → Credit spreads valid but must be strikes-based not directional.
+  // Regime B: SPY below 200MA (or recently, within 3 days) AND VIX sustained > 24
+  //   → True bear trend with elevated fear confirming.
+  // Regime C: Deep bear — SPY down 20%+ AND VIX > 35 AND duration > 10 days
   const regimeA = !spyBelowNow && state._vixSustained < 20;
   const regimeC = state._spyDrawdown < -20 && state._vixSustained > 35 && state._regimeDuration > 10;
-  const regimeB = !regimeA && !regimeC; // trending/transitional - the current environment
+  // Regime B requires BOTH price evidence (below 200MA or recently so) AND sustained fear
+  // NOT just "not A and not C" — that catch-all was classifying SPY-at-ATH as bear trend
+  const hasBearPriceEvidence = spyBelowNow || (state._regimeDuration || 0) > 0;
+  const hasSustainedFear     = (state._vixSustained || state.vix || 20) > 24;
+  const regimeB = !regimeA && !regimeC && hasBearPriceEvidence && hasSustainedFear;
+  // Regime A_elevated: above 200MA but VIX elevated (20-28) — transitional, not bear
+  // Treat as Regime A for strategy selection but with tighter sizing
+  // (falls through to regimeA=false, regimeB=false → defaults to A in classification)
   const prevRegimeClass = state._regimeClass;
   state._regimeClass = regimeC ? "C" : regimeB ? "B" : "A";
 
@@ -558,6 +575,7 @@ PRICE & REGIME:
 - SPY: $${spyPrice||'--'} (${mktStatus.spy?.dayChangePct||'--'}% today) | Gap: ${gapStatus}
 - SPY vs 50MA: ${spyVsMA50||'--'}% (slope: ${spyMA50Slope||'--'}%/50d) | vs 200MA: ${spyVsMA200||'--'}%
 - Regime: ${state._regimeClass||'A'}${state._regimeSubClass||''} | ${state._regimeDuration||0}d below 200MA | SPY drawdown: ${state._spyDrawdown||'--'}%
+- SPY vs 200MA: ${spyVsMA200 !== null ? (parseFloat(spyVsMA200) > 0 ? 'ABOVE by ' + spyVsMA200 + '% — bull uptrend, NOT a bear regime' : 'BELOW by ' + Math.abs(spyVsMA200) + '% — bear regime confirmed') : 'unknown'}
 
 VOLATILITY & FLOW:
 - VIX: ${mktStatus.vix||state.vix||20} (5d avg: ${state._vixSustained||'--'}) | IV Rank: ${state._ivRank||'--'} (${state._ivEnv||'--'})
