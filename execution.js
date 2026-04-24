@@ -1237,6 +1237,7 @@ async function executeTrade(stock, price, score, scoreReasons, vix, optionType =
     entryMomentum:   stock.momentum || "steady",
     entryMACD:       stock.macd || "neutral",
     entryMacro:      (state._agentMacro || {}).signal || "neutral",
+    entryRegime:     state._regimeClass || "A",   // regime at entry — for journal post-mortem
     entryRelStr:     stock._relStrength || 1.0,
     entryADX:        stock._adx || 0,
     entryThesisScore: 100, // starts at 100, degrades over time
