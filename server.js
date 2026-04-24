@@ -1644,6 +1644,15 @@ app.post("/api/clear-vix-cooldown", requireSecret, async (req, res) => {
   res.json({ ok: true, message: "VIX spike cooldown cleared — debit puts re-enabled" });
 });
 
+// Clear agent avoid hold (e.g. when triggered by a false emergency keyword match)
+app.post("/api/clear-avoid", requireSecret, async (req, res) => {
+  state._avoidUntil = null;
+  markDirty();
+  await saveStateNow();
+  logEvent("circuit", "Agent avoid hold manually cleared — entries re-enabled");
+  res.json({ ok: true, message: "Avoid hold cleared" });
+});
+
 // Full reset - wipes everything back to fresh $10,000 state
 app.post("/api/full-reset", requireSecret, async (req, res) => {
   // Cancel all open Alpaca positions first
