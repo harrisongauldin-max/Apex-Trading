@@ -138,6 +138,7 @@ async function closePosition(ticker, reason, exitPremium = null, contractSym = n
     // - Spread close - close both legs atomically via mleg -
     // CRITICAL: Must close both legs together - separate orders leave naked positions
     // if one fills and the other doesn't (or if code crashes between them)
+    var alpacaCloseOk = _dryRunMode; // var avoids TDZ — this is accessed across multiple async boundaries
     if (pos.isSpread && !_dryRunMode) {
       try {
         if (pos.buySymbol && pos.sellSymbol) {
@@ -263,7 +264,7 @@ async function closePosition(ticker, reason, exitPremium = null, contractSym = n
   const heldSeconds = (Date.now() - new Date(pos.openDate).getTime()) / 1000;
   const alpacaCloseAllowed = heldSeconds >= 60;
   if (!alpacaCloseAllowed) logEvent("warn", `${ticker} held only ${heldSeconds.toFixed(0)}s - skipping Alpaca close order to avoid wash trade`);
-  let alpacaCloseOk = _dryRunMode; // in dry run, always treat as success
+  // alpacaCloseOk declared above, near start of try block
   if (!pos.isSpread && closeQty > 0 && !_dryRunMode && alpacaCloseAllowed) {
     // Determine if this is a long or short leg
     // Long leg (bought): has buySymbol or positive qty → close with sell_to_close
