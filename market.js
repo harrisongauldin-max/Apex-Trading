@@ -1067,6 +1067,15 @@ async function getPreMarketData(ticker) {
 
 function checkVIXVelocity(currentVIX) {
   if (lastVIXReading === 0) { lastVIXReading = currentVIX; return false; }
+  // Sanity check: if previous reading was implausibly low (< 18) and current is normal,
+  // this is almost certainly a data artifact (API timeout returning stale/default data).
+  // Reset the baseline silently rather than firing a false black swan alert.
+  // Real VIX rarely drops below 12 in modern markets; sub-18 at a 28+ VIX regime = corrupted.
+  if (lastVIXReading < 18 && currentVIX > lastVIXReading) {
+    logEvent("warn", `[VIX] Suspicious low reading ${lastVIXReading} correcting to ${currentVIX} — data artifact, resetting baseline (no alert)`);
+    lastVIXReading = currentVIX;
+    return false;
+  }
   const delta   = currentVIX - lastVIXReading;
   const prevVIX = lastVIXReading; // save before updating
   lastVIXReading = currentVIX;
