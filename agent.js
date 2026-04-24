@@ -673,7 +673,10 @@ Respond with ONLY the JSON object. No words before or after.`;
     const breadthColl  = (state._breadthMomentum || 0) < -20;
     const gapBig       = gapStatus.includes("gap_up") || gapStatus.includes("gap_down");
     const structEvent  = vixSpike || breadthColl || gapBig;
-    if (tierDelta < 2 && !structEvent && prevSignal !== "neutral" && recentCalls.length >= 2) {
+    // Emergency triggers (ceasefire, flash crash, circuit breaker, etc.) always bypass stability hold
+    // These are genuinely market-moving events — holding a stale signal through them is wrong
+    const wasEmergency = !!(deltaCheck && deltaCheck.isEmergency);
+    if (tierDelta < 2 && !structEvent && !wasEmergency && prevSignal !== "neutral" && recentCalls.length >= 2) {
       // Hold previous signal — change is within noise band
       _log("macro", `[AGENT STABILITY] Signal held at '${prevSignal}' — new '${parsed.signal}' is only ${tierDelta} tier(s) different, no structural event`);
       parsed.signal   = prevSignal;
