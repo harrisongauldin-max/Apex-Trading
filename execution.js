@@ -784,24 +784,45 @@ async function executeCreditSpread(stock, price, score, scoreReasons, vix, optio
     // Bid-ask and R/R checks now inside optimal search — all done.
     // maxProfit already declared as `let maxProfit = netCredit` in optimal search output block
     logEvent("filter", `${stock.ticker} credit spread R/R: collect $${(netCredit*100).toFixed(0)} / risk $${(maxLoss*100).toFixed(0)} per contract (${(maxLoss > 0 ? netCredit/maxLoss*100 : 0).toFixed(0)}% ratio)`);
-    // C10: Sizing from entryEngine sizeMod parameter (replaces inline scoreBaseMult + ivSizeMultCredit)
-    // entryEngine.scoreCandidate already computed: base * ivBoostCredit * crisisAdj * oversoldMod
-    // Using internal computation here was overriding that work silently
-    // sizeMod arrives as 1.0 base (no boost) to 1.5x (IVR>=70 credit boost)
-    const scoreBaseMult      = score >= 90 ? 2.0 : score >= 85 ? 1.5 : score >= 80 ? 1.25 : 1.0;
-    const rawCreditContracts = Math.max(1, Math.floor(scoreBaseMult * sizeMod));
-    const preFillCapCredit   = (state.closedTrades||[]).length < 30 ? 3 : 99;
-    const contracts          = Math.min(preFillCapCredit, rawCreditContracts);
-    if (contracts > 1) logEvent("scan", `[SIZING] ${stock.ticker} credit spread: ${contracts}x (score ${score} sizeMod ${sizeMod.toFixed(2)})`);
 
-    // Credit received reduces capital requirement - margin = max loss
-    const profitableCount = (state.closedTrades || []).filter(t => t.pnl > 0).length;
-    const creditCapPct    = profitableCount >= 20 ? 0.25 : 0.20; // panel: raised from 0.15 (too tight pre-fills)
-    const marginRequired  = parseFloat((maxLoss * 100 * contracts).toFixed(2));
-    if (marginRequired > state.cash * creditCapPct) {
-      logEvent("filter", `${stock.ticker} credit spread margin $${marginRequired} exceeds ${(creditCapPct*100).toFixed(0)}% limit`);
+    // ── CONTRACT SIZING ────────────────────────────────────────────────────────
+    // Three-way sizing: take the largest of minimum-credit, score-based, or margin-target.
+    // Then cap at the margin hard ceiling (10% of cash per position).
+    //
+    // Minimum credit ($150): ensures position is worth executing after commissions.
+    // Score-based: high conviction setups (score 85+) get proportionally more size.
+    // Margin target (5% of cash): each position meaningful but not dominant.
+    // Margin ceiling (10% of cash): hard cap, prevents any single position from dominating.
+    //
+    // Directional heat cap (40%) and total heat cap (60%) in scanner are the portfolio-level
+    // governors — they stop entries before total exposure gets dangerous.
+    const MIN_CREDIT_DOLLARS  = 150;   // minimum $ premium per position (filters noise)
+    const TARGET_MARGIN_PCT   = 0.05;  // target 5% of cash as margin per position
+    const MAX_MARGIN_PCT      = 0.10;  // hard cap 10% of cash per position
+    const scoreBaseMult       = score >= 90 ? 2.0 : score >= 85 ? 1.5 : score >= 80 ? 1.25 : 1.0;
+
+    const cashNow = state.cash || state.alpacaCash || 30000; // consistent with downstream margin check
+    // Contracts to hit minimum credit target
+    const contractsForMinCredit  = netCredit > 0 ? Math.ceil(MIN_CREDIT_DOLLARS / (netCredit * 100)) : 1;
+    // Contracts to hit target margin allocation (5% of cash)
+    const contractsForTarget     = maxLoss > 0 ? Math.round((cashNow * TARGET_MARGIN_PCT) / (maxLoss * 100)) : 1;
+    // Score-based sizing
+    const contractsFromScore     = Math.max(1, Math.floor(scoreBaseMult * sizeMod));
+    // Take the largest — each floor represents a valid reason to size up
+    const rawCreditContracts     = Math.max(contractsForMinCredit, contractsForTarget, contractsFromScore);
+    // Hard cap: margin cannot exceed 10% of cash regardless of other signals
+    const contractsHardCap       = maxLoss > 0 ? Math.floor((cashNow * MAX_MARGIN_PCT) / (maxLoss * 100)) : rawCreditContracts;
+    // If hard cap is 0, the spread is too expensive for this account — block entirely
+    if (contractsHardCap < 1) {
+      logEvent("filter", `${stock.ticker} credit spread too expensive — 1 contract ($${(maxLoss*100).toFixed(0)} margin) exceeds ${(MAX_MARGIN_PCT*100).toFixed(0)}% cash cap ($${(cashNow*MAX_MARGIN_PCT).toFixed(0)})`);
       return null;
     }
+    const contracts              = Math.min(contractsHardCap, rawCreditContracts);
+    logEvent("scan", `[SIZING] ${stock.ticker} credit spread: ${contracts}x | credit $${(netCredit*100).toFixed(0)}/ct → $${(netCredit*100*contracts).toFixed(0)} total | margin $${(maxLoss*100*contracts).toFixed(0)} (${(maxLoss*100*contracts/cashNow*100).toFixed(1)}% of cash) | target:${contractsForTarget} min:${contractsForMinCredit} score:${contractsFromScore} cap:${contractsHardCap}`);
+
+    // Margin calculation — contractsHardCap (10% of cash) already limits contracts.
+    // Capital floor and Alpaca buying power checks still apply as safety nets.
+    const marginRequired  = parseFloat((maxLoss * 100 * contracts).toFixed(2));
     if (state.cash - marginRequired < CAPITAL_FLOOR) {
       logEvent("filter", `${stock.ticker} credit spread would breach capital floor`);
       return null;
