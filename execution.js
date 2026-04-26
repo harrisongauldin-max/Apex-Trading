@@ -558,15 +558,11 @@ async function executeCreditSpread(stock, price, score, scoreReasons, vix, optio
     const spreadWidth  = Math.max(2, Math.min(15, priceRelWidth));
     logEvent("filter", `${stock.ticker} credit width: $${spreadWidth} (${(widthPct*100).toFixed(1)}% of $${price.toFixed(0)} price)`);
 
-    // -- STEP 1: Target strike via B-S delta inversion ----------------------
-    // Use live IV from prefetch, fallback to VIX/100
+    // -- STEP 1: Reference strike via B-S delta inversion (used for chain centering only) --
+    // Now used only to center the chain fetch window — optimal spread selected in Step 3.
     const sigma = (stock._realIV && stock._realIV > 0.05) ? stock._realIV : vix / 100;
     const T     = Math.max(0.01, targetDTE / 365);
     const r     = 0.05;
-    // Delta inversion via A&S rational approximation — option-type aware
-    // PUT:  target strike BELOW price → invPhi(1 - delta)
-    // CALL: target strike ABOVE price → invPhi(delta)
-    // Using wrong formula for calls was targeting ITM strikes (below price)
     const _p = optionType === "put" ? (1 - targetDelta) : targetDelta;
     const _q = Math.min(_p, 1 - _p);
     const _t = Math.sqrt(-2 * Math.log(_q));
@@ -574,11 +570,9 @@ async function executeCreditSpread(stock, price, score, scoreReasons, vix, optio
     const _den = 1 + 1.432788*_t + 0.189269*_t*_t + 0.001308*_t*_t*_t;
     const _z   = (_p < 0.5 ? -1 : 1) * (_t - _num/_den);
     const shortStrikeRaw = price * Math.exp(-(_z * sigma * Math.sqrt(T) - (r + sigma*sigma/2) * T));
-    const inc = price < 200 ? 0.5 : 1;  // $0.50 increments for TLT/GLD, $1 for SPY/QQQ
+    const inc = price < 200 ? 0.5 : 1;
     const shortStrike = Math.round(shortStrikeRaw / inc) * inc;
-    const longStrike  = optionType === "put" ? shortStrike - spreadWidth : shortStrike + spreadWidth;
-    const actualOTM   = Math.abs((price - shortStrike) / price * 100);
-    logEvent("filter", `${stock.ticker} credit spread: $${spreadWidth} wide | target delta ${targetDelta} -> short $${shortStrike} (${actualOTM.toFixed(1)}% OTM) / long $${longStrike} | ?=${(sigma*100).toFixed(0)}% DTE~${targetDTE}`);
+    logEvent("filter", `${stock.ticker} credit spread: target delta ${targetDelta} -> reference short $${shortStrike} | ?=${(sigma*100).toFixed(0)}% DTE~${targetDTE} | searching optimal spread...`);
 
     // -- STEP 2: Fetch options chain for target expiry window only -----------
     // Fetch minDTE->(targetDTE+14) window so short-dated weeklies don't fill the 1000-cap.
@@ -606,19 +600,25 @@ async function executeCreditSpread(stock, price, score, scoreReasons, vix, optio
     }
     logEvent("filter", `${stock.ticker} credit spread: ${chainContracts.length} contracts in window (${fetchMin}->${fetchMax})`);
 
-    // -- STEP 3: Find short leg - closest contract to shortStrike, on best expiry -
-    // Sort by DTE closeness FIRST, then strike proximity within that expiry.
-    // Critical: wrong expiry at same strike = wrong delta = wrong premium.
-    // A near-dated (14DTE) contract at $649 has delta 0.09 vs a 21DTE having delta 0.21.
-    // Prior sort (strike first) was picking the wrong expiry causing delta mismatch.
+    // -- STEP 3: Optimal spread search across all viable (short, width) pairs ----
+    // Previously: target delta → find one short leg → fixed width → check R/R → retry narrower.
+    // Now: search all candidate short legs in delta range × all viable widths → score each pair
+    // → select highest-scoring pair meeting all minimums. No hardcoded delta or width.
+    //
+    // Scoring function for a (short, long) pair:
+    //   R/R quality  (0-40pts): how far above MIN_CREDIT_RR. 40pts at 2× minimum.
+    //   Delta quality (0-30pts): how close to targetDelta. 30pts at exact match.
+    //   Credit quality (0-20pts): absolute credit ÷ price. 20pts at 0.5% of price.
+    //   Width quality (0-10pts): prefer wider spreads (more max profit, same credit cost).
+    //
+    // Constraints: delta 0.15-0.35 (short leg), R/R >= MIN_CREDIT_RR, credit >= MIN_ABS_CREDIT,
+    //              bid-ask stable on both legs, same expiry.
     chainContracts.sort((a, b) => {
       const aExpDTE = Math.round((new Date(a.expiration_date) - today) / 86400000);
       const bExpDTE = Math.round((new Date(b.expiration_date) - today) / 86400000);
       const aDTEDist = Math.abs(aExpDTE - targetDTE);
       const bDTEDist = Math.abs(bExpDTE - targetDTE);
-      // Primary sort: prefer expiry closest to targetDTE (within 7 days = same group)
       if (Math.abs(aDTEDist - bDTEDist) > 7) return aDTEDist - bDTEDist;
-      // Secondary sort: within same expiry group, prefer strike closest to target
       const aDist = Math.abs(parseFloat(a.strike_price) - shortStrike);
       const bDist = Math.abs(parseFloat(b.strike_price) - shortStrike);
       return aDist - bDist;
@@ -635,12 +635,41 @@ async function executeCreditSpread(stock, price, score, scoreReasons, vix, optio
     ));
     const snapshots = snapResults.reduce((acc, r) => ({ ...acc, ...(r?.snapshots || {}) }), {});
 
-    // Find best short leg contract: has price, delta in range, closest to target strike
-    // Select short leg by closest delta to targetDelta — more accurate than BS target strike
-    let shortContract = null;
-    let _bestDeltaDist = Infinity;
+    // Build snapshot index bucketed by expiry date for O(1) expiry filter in long leg lookup
+    // snapByExp[expDate] = array of {strike, symbol, contract, bid, ask, mid, snap}
+    // Avoids scanning all expiries on every inner loop iteration
+    const snapByExp = {};
     for (const c of chainContracts.slice(0, 50)) {
-      const snap   = snapshots[c.symbol];
+      const snap = snapshots[c.symbol];
+      if (!snap) continue;
+      const quote = snap.latestQuote || {};
+      const bid   = parseFloat(quote.bp || 0);
+      const ask   = parseFloat(quote.ap || 0);
+      const mid   = bid > 0 && ask > 0 ? (bid + ask) / 2 : 0;
+      if (mid <= 0) continue;
+      const expDate = c.expiration_date;
+      if (!snapByExp[expDate]) snapByExp[expDate] = [];
+      snapByExp[expDate].push({ symbol: c.symbol, contract: c, bid, ask, mid, snap,
+                                strike: parseFloat(c.strike_price) });
+    }
+
+    // ── OPTIMAL SPREAD SEARCH ─────────────────────────────────────────────────
+    // Credit spread bid-ask maximum — tighter than the module constant (0.30) used for debit spreads.
+    // Credit spreads are sensitive to execution — wide bid-ask = can't hit mid, slippage eats the credit.
+    const CREDIT_MAX_SPREAD_PCT = 0.20;
+    // Candidate widths in $0.50 increments from $2 to $15 (clamped to instrument)
+    const maxDeltaShort = (spreadParamsOverride && spreadParamsOverride.shortDeltaMax) || 0.35;
+    const minDeltaShort = (spreadParamsOverride && spreadParamsOverride.shortDeltaMin) || 0.12;
+    const candidateWidths = [];
+    for (let w = 2; w <= Math.min(15, spreadWidth * 2); w += (price < 200 ? 0.5 : 1)) {
+      candidateWidths.push(Math.round(w * 2) / 2);
+    }
+
+    let bestSpread = null;
+    let bestSpreadScore = -Infinity;
+
+    for (const c of chainContracts.slice(0, 50)) {
+      const snap = snapshots[c.symbol];
       if (!snap) continue;
       const quote  = snap.latestQuote || {};
       const greeks = snap.greeks || {};
@@ -649,226 +678,111 @@ async function executeCreditSpread(stock, price, score, scoreReasons, vix, optio
       const mid    = bid > 0 && ask > 0 ? (bid + ask) / 2 : 0;
       if (mid <= 0) continue;
       const delta  = Math.abs(parseFloat(greeks.delta || 0));
-      if (delta < 0.10 || delta > 0.40) continue;
-      const deltaDist = Math.abs(delta - targetDelta);
-      if (deltaDist >= _bestDeltaDist) continue;
-      const strike = parseFloat(c.strike_price);
-      const expDTE = Math.round((new Date(c.expiration_date) - today) / 86400000);
-      _bestDeltaDist = deltaDist;
-      shortContract = {
-        symbol:  c.symbol,
-        strike,
-        expDate: c.expiration_date,
-        expDays: expDTE,
-        premium: parseFloat(mid.toFixed(2)),
-        bid, ask,
-        spread:  ask > 0 ? (ask - bid) / ask : 1,
-        greeks:  { delta: parseFloat(greeks.delta || 0).toFixed(3) },
-        oi:      parseInt(snap.openInterest || 0),
-        iv:      parseFloat(snap.impliedVolatility || sigma),
-      };
-    }
-    if (shortContract) {
-      const _d = Math.abs(parseFloat(shortContract.greeks.delta));
-      logEvent("filter", `${stock.ticker} short leg: $${shortContract.strike} | ${shortContract.expDays}DTE | delta${_d.toFixed(3)} | $${shortContract.premium} (closest to target delta ${targetDelta})`);
+      if (delta < minDeltaShort || delta > maxDeltaShort) continue;
+
+      // Short leg bid-ask stability
+      const shortMidChk = (bid + ask) / 2;
+      const shortSprdPct = shortMidChk > 0 ? (ask - bid) / shortMidChk : 1;
+      if (shortSprdPct > CREDIT_MAX_SPREAD_PCT || (bid <= 0 && ask <= 0)) continue;
+
+      const shortStrikeVal = parseFloat(c.strike_price);
+      const expDate = c.expiration_date;
+      const expDTE  = Math.round((new Date(expDate) - today) / 86400000);
+
+      // Try each candidate width to find the best (short, long) pair
+      for (const w of candidateWidths) {
+        const longStrikeTarget = optionType === "put"
+          ? shortStrikeVal - w
+          : shortStrikeVal + w;
+
+        // Find closest available long leg strike at same expiry — O(k) where k = contracts on that expiry
+        const sameExpContracts = snapByExp[expDate] || [];
+        let bestLong = null, bestLongDist = Infinity;
+        for (const snap2 of sameExpContracts) {
+          const dist = Math.abs(snap2.strike - longStrikeTarget);
+          if (dist < bestLongDist) {
+            bestLongDist = dist;
+            bestLong = snap2;
+          }
+        }
+        if (!bestLong || bestLong.mid <= 0) continue;
+
+        // Long leg bid-ask stability
+        const longSprdPct = bestLong.mid > 0 ? (bestLong.ask - bestLong.bid) / bestLong.mid : 1;
+        if (longSprdPct > CREDIT_MAX_SPREAD_PCT) continue;
+
+        const actualWidth = Math.abs(shortStrikeVal - bestLong.strike);
+        if (actualWidth < 1.5) continue; // too narrow to be meaningful
+
+        const credit  = parseFloat((mid - bestLong.mid).toFixed(2));
+        if (credit <= 0) continue;
+
+        const maxLossVal = parseFloat((actualWidth - credit).toFixed(2));
+        if (maxLossVal <= 0) continue;
+
+        const rr = credit / maxLossVal;
+        const absMin = Math.max(0.30, actualWidth * 0.12);
+
+        // Must meet both minimums
+        if (rr < minCreditRR || credit < absMin) continue;
+
+        // Score this pair
+        const rrScore     = Math.min(40, ((rr - minCreditRR) / minCreditRR) * 40);    // 0-40: R/R quality
+        const deltaScore  = Math.max(0, 30 - Math.abs(delta - targetDelta) * 200);         // 0-30: delta proximity
+        const creditScore = Math.min(20, (credit / price) * 4000);                         // 0-20: credit as % of price
+        const widthScore  = Math.min(10, actualWidth / 2);                                 // 0-10: wider = better
+        const totalScore  = rrScore + deltaScore + creditScore + widthScore;
+
+        if (totalScore > bestSpreadScore) {
+          bestSpreadScore = totalScore;
+          bestSpread = {
+            shortContract: {
+              symbol:  c.symbol,
+              strike:  shortStrikeVal,
+              expDate, expDays: expDTE,
+              premium: parseFloat(mid.toFixed(2)),
+              bid, ask,
+              greeks:  { delta: parseFloat(greeks.delta || 0).toFixed(3) },
+              iv:      parseFloat(snap.impliedVolatility || sigma),
+            },
+            longContract: {
+              symbol:  bestLong.contract.symbol,
+              strike:  bestLong.strike,
+              expDate, expDays: expDTE,
+              premium: parseFloat(bestLong.mid.toFixed(2)),
+              bid: bestLong.bid, ask: bestLong.ask,
+            },
+            credit, maxLoss: maxLossVal, rr, actualWidth, delta,
+            score: totalScore, rrScore, deltaScore, creditScore, widthScore,
+          };
+        }
+      }
     }
 
-    if (!shortContract) {
-      logEvent("filter", `${stock.ticker} credit spread: no valid short leg found in window`);
+    if (!bestSpread) {
+      logEvent("filter", `${stock.ticker} credit spread: no viable spread found (delta ${minDeltaShort}-${maxDeltaShort}, R/R>=${(minCreditRR*100).toFixed(0)}%, searched ${chainContracts.slice(0,50).length} candidates × ${candidateWidths.length} widths)`);
       return null;
     }
 
-    // -- STEP 4: Find long leg - same expiry, spreadWidth away --------------
-    const longStrikeActual = optionType === "put"
-      ? shortContract.strike - spreadWidth
-      : shortContract.strike + spreadWidth;
+    let shortContract = bestSpread.shortContract;
+    let longContract  = bestSpread.longContract;
+    let netCredit     = bestSpread.credit;
+    let maxProfit     = netCredit;
+    let maxLoss       = bestSpread.maxLoss;
+    const actualWidth = bestSpread.actualWidth;
 
-    // Filter chain to same expiry, find closest to longStrikeActual
-    const sameExpiry = chainContracts.filter(c => c.expiration_date === shortContract.expDate);
-    sameExpiry.sort((a, b) =>
-      Math.abs(parseFloat(a.strike_price) - longStrikeActual) -
-      Math.abs(parseFloat(b.strike_price) - longStrikeActual)
-    );
-
-    // Pre-fetch snapshots for long leg candidates in one batch (avoids serial Alpaca calls)
-    const longCandidates = sameExpiry.slice(0, 20);
-    const longSymbolsNeeded = longCandidates.map(c => c.symbol).filter(s => !snapshots[s]);
-    if (longSymbolsNeeded.length > 0) {
-      const longBatches = [];
-      for (let i = 0; i < longSymbolsNeeded.length; i += 25)
-        longBatches.push(longSymbolsNeeded.slice(i, i+25).join(","));
-      const longSnaps = await Promise.all(longBatches.map(b =>
-        alpacaGet(`/options/snapshots?symbols=${b}&feed=indicative`, ALPACA_OPT_SNAP).catch(() => null)
-      ));
-      longSnaps.forEach(r => { if (r?.snapshots) Object.assign(snapshots, r.snapshots); });
-    }
-
-    let longContract = null;
-    for (const c of longCandidates) {
-      const snap   = snapshots[c.symbol];
-      if (!snap) continue;
-      const quote  = snap.latestQuote || {};
-      const bid    = parseFloat(quote.bp || 0);
-      const ask    = parseFloat(quote.ap || 0);
-      const mid    = bid > 0 && ask > 0 ? (bid + ask) / 2 : 0;
-      if (mid <= 0) continue;
-      const strike = parseFloat(c.strike_price);
-      longContract = {
-        symbol:  c.symbol,
-        strike,
-        expDate: c.expiration_date,
-        expDays: shortContract.expDays,
-        premium: parseFloat(mid.toFixed(2)),
-        bid, ask,
-      };
-      break;
-    }
-
-    if (!longContract) {
-      logEvent("filter", `${stock.ticker} credit spread: no long leg found at $${longStrikeActual} on ${shortContract.expDate}`);
-      return null;
-    }
-
-    const actualWidth = Math.abs(shortContract.strike - longContract.strike);
-    if (actualWidth < spreadWidth * 0.5) {
-      logEvent("filter", `${stock.ticker} credit spread: width $${actualWidth} too narrow (need ? $${(spreadWidth * 0.5).toFixed(0)})`);
-      return null;
-    }
+    const _d = Math.abs(parseFloat(shortContract.greeks.delta));
+    logEvent("filter", `${stock.ticker} short leg: $${shortContract.strike} | ${shortContract.expDays}DTE | delta${_d.toFixed(3)} | $${shortContract.premium} (optimal: score ${bestSpread.score.toFixed(0)} R/R${(bestSpread.rr*100).toFixed(0)}%)`);
     logEvent("filter", `${stock.ticker} long leg: $${longContract.strike} | width $${actualWidth} | $${longContract.premium.toFixed(2)}`);
 
-    // Dinesh/Gilfoyle: bid-ask stability gate — Alpaca returns bid+ask on all option snapshots
-    // Wide bid-ask = market maker uncertainty = mispriced credit (gap days, illiquid strikes)
-    // Gate on both legs: unstable long leg means exit cost is uncertain
-    const MAX_SPREAD_PCT = 0.20; // 20% of mid — tighter than panel's 15% for safety
-    const shortMid = shortContract.bid > 0 ? (shortContract.ask + shortContract.bid) / 2 : shortContract.premium;
-    const longMid  = longContract.bid  > 0 ? (longContract.ask  + longContract.bid)  / 2 : longContract.premium;
-    // Dinesh: no-quote guard — bid=0 AND ask=0 means no market, not a stable spread
-    const shortNoQuote   = shortContract.bid <= 0 && shortContract.ask <= 0;
-    const longNoQuote    = longContract.bid  <= 0 && longContract.ask  <= 0;
-    const shortSpreadPct = shortNoQuote ? 1.0 : shortMid > 0 ? (shortContract.ask - shortContract.bid) / shortMid : 0;
-    const longSpreadPct  = longNoQuote  ? 1.0 : longMid  > 0 ? (longContract.ask  - longContract.bid)  / longMid  : 0;
-    if (shortSpreadPct > MAX_SPREAD_PCT) {
-      logEvent("filter", `${stock.ticker} credit spread skipped — short leg bid-ask ${(shortSpreadPct*100).toFixed(0)}% of mid (unstable market, retry next scan)`);
-      return null;
-    }
-    if (longSpreadPct > MAX_SPREAD_PCT) {
-      logEvent("filter", `${stock.ticker} credit spread skipped — long leg bid-ask ${(longSpreadPct*100).toFixed(0)}% of mid (unstable market, retry next scan)`);
-      return null;
-    }
+    if (!state._lastCreditRR) state._lastCreditRR = {};
+    state._lastCreditRR[stock.ticker] = {
+      ts: Date.now(), rr: bestSpread.rr, netCredit, maxLoss, width: actualWidth,
+      viable: true, reason: `optimal search: score ${bestSpread.score.toFixed(0)} (R/R ${(bestSpread.rr*100).toFixed(0)}%, delta ${_d.toFixed(2)}, width $${actualWidth})`
+    };
 
-    // let so retry block can reassign — all downstream code naturally uses correct values
-    let netCredit  = parseFloat((shortContract.premium - longContract.premium).toFixed(2));
-    if (netCredit <= 0) { logEvent("filter", `${stock.ticker} credit spread: no credit available (${netCredit})`); return null; }
-
-    let maxProfit  = netCredit;                              // keep all credit if expires worthless
-    let maxLoss    = parseFloat((actualWidth - netCredit).toFixed(2)); // width - credit = max risk
-
-    // V2.84: Risk/reward validation for credit spreads
-    // Maximum acceptable risk/reward ratio: 4:1 (risk $400 to make $100)
-    // This requires ~80% win rate to break even -- achievable with proper strike selection
-    // Worse than 4:1 (e.g. TLT $97 profit / $903 loss = 9.3:1) is not a viable strategy
-    const rrRatioCred = maxLoss > 0 ? maxProfit / maxLoss : 0;
-    const MIN_CREDIT_RR = (spreadParamsOverride && spreadParamsOverride.minCreditRatio) || 0.20; // PAPER: 0.20 floor — meaningful entries. Production: 0.26/0.28.
-
-    // Absolute minimum credit — scaled by spread width, not a flat dollar amount.
-    // A flat $0.75 minimum makes sense for SPY ($5 wide = 15% of width).
-    // For TLT ($2 wide = 37.5% of width), $0.75 requires collecting 37.5% of max profit
-    // upfront — an impossibly high bar for thin bond options. Scale instead:
-    //   minimum = max(0.30, actualWidth * 0.12)  [12% of spread width, floor at $0.30]
-    // This allows TLT $2 wide: min = max(0.30, 2*0.12) = max(0.30, 0.24) = $0.30
-    // And SPY $5 wide: min = max(0.30, 5*0.12) = max(0.30, 0.60) = $0.60
-    // Still blocks truly marginal entries while allowing thin-market instruments.
-    const _widthBasedMin = Math.max(0.30, actualWidth * 0.12);
-    const MIN_ABS_CREDIT = (spreadParamsOverride && spreadParamsOverride.minAbsCredit) || _widthBasedMin;
-    if (netCredit < MIN_ABS_CREDIT) {
-      logEvent("filter", `${stock.ticker} credit spread: net credit $${netCredit} below $${MIN_ABS_CREDIT.toFixed(2)} minimum (width $${actualWidth} × 12%) — skip`);
-      return null;
-    }
-
-    if (rrRatioCred < MIN_CREDIT_RR) {
-      // Cache actual market R/R in state so score debug shows real execution viability
-      if (!state._lastCreditRR) state._lastCreditRR = {};
-      state._lastCreditRR[stock.ticker] = {
-        ts: Date.now(), rr: rrRatioCred, netCredit, maxLoss, width: actualWidth,
-        viable: false, reason: `market R/R ${(rrRatioCred*100).toFixed(0)}% < ${(MIN_CREDIT_RR*100).toFixed(0)}% min ($${netCredit} credit on $${actualWidth} wide)`
-      };
-      // Richard/Gilfoyle/Dinesh: width retry — compute narrowest width achieving 25% R/R
-      // Algebraic inversion: credit/(width-credit) >= 0.25  →  maxWidth = 5 × netCredit
-      // sameExpiry + snapshots already in memory — zero extra Alpaca calls
-      // Dynamic retry width: solve credit/(width-credit) >= MIN_CREDIT_RR algebraically
-      // width <= credit * (1 + 1/MIN_CREDIT_RR). Was hardcoded to 5x (= 1 + 1/0.25 = 25% floor).
-      // Now uses actual MIN_CREDIT_RR so retry is consistent with the VIX-tiered floor.
-      const _retryMultiplier = 1 + (1 / MIN_CREDIT_RR); // e.g. at 26%: 1 + 3.846 = 4.846
-      const _retryWidth = Math.max(2, Math.round(netCredit * _retryMultiplier * 2) / 2); // round to $0.50
-      if (_retryWidth >= actualWidth) {
-        logEvent("filter", `${stock.ticker} credit spread R/R ${(rrRatioCred*100).toFixed(0)}% (credit $${netCredit} / risk $${maxLoss}) — below ${(MIN_CREDIT_RR*100).toFixed(0)}% minimum — skip`);
-        return null;
-      }
-      const _retryLongStrike = optionType === "put"
-        ? shortContract.strike - _retryWidth
-        : shortContract.strike + _retryWidth;
-      const _retryCandidate = sameExpiry
-        .filter(c => snapshots[c.symbol])
-        .map(c => ({ c, dist: Math.abs(parseFloat(c.strike_price) - _retryLongStrike) }))
-        .sort((a, b) => a.dist - b.dist)[0];
-      if (!_retryCandidate) {
-        logEvent("filter", `${stock.ticker} credit spread R/R ${(rrRatioCred*100).toFixed(0)}% — no cached strike near $${_retryLongStrike} for $${_retryWidth} retry — skip`);
-        return null;
-      }
-      const _rSnap = snapshots[_retryCandidate.c.symbol];
-      const _rQ    = _rSnap?.latestQuote || {};
-      const _rBid  = parseFloat(_rQ.bp || 0);
-      const _rAsk  = parseFloat(_rQ.ap || 0);
-      const _rMid  = _rBid > 0 && _rAsk > 0 ? (_rBid + _rAsk) / 2 : 0;
-      const _rSpreadPct = _rMid > 0 ? (_rAsk - _rBid) / _rMid : 1;
-      // Richard: retry long leg must also pass bid-ask stability gate
-      if (!(_rMid > 0 && _rSpreadPct <= MAX_SPREAD_PCT)) {
-        logEvent("filter", `${stock.ticker} credit spread R/R ${(rrRatioCred*100).toFixed(0)}% — retry long leg bid-ask ${(_rSpreadPct*100).toFixed(0)}% unstable — skip`);
-        return null;
-      }
-      const _retryCredit  = parseFloat((shortContract.premium - _rMid).toFixed(2));
-      const _retryMaxLoss = parseFloat((_retryWidth - _retryCredit).toFixed(2));
-      const _retryRR      = _retryMaxLoss > 0 ? _retryCredit / _retryMaxLoss : 0;
-      // Require retry to clear the floor by 3pp margin — prevents marginal entries that
-      // scrape over the minimum and produce tiny credits ($50-60) that rarely fill
-      const MIN_RETRY_RR  = MIN_CREDIT_RR + 0.03;
-      // Also re-check absolute minimum on retry credit — narrower spread may produce less credit
-      const _retryWidthMin = Math.max(0.30, _retryWidth * 0.12);
-      const _retryAbsMin   = (spreadParamsOverride && spreadParamsOverride.minAbsCredit) || _retryWidthMin;
-      if (_retryCredit < _retryAbsMin) {
-        logEvent("filter", `${stock.ticker} credit spread R/R retry: credit $${_retryCredit} below $${_retryAbsMin.toFixed(2)} minimum (width $${_retryWidth} × 12%) — skip`);
-        return null;
-      }
-      if (_retryRR < MIN_RETRY_RR || _retryCredit <= 0) {
-        if (!state._lastCreditRR) state._lastCreditRR = {};
-        state._lastCreditRR[stock.ticker] = {
-          ts: Date.now(), rr: rrRatioCred, retryRR: _retryRR, netCredit, maxLoss, width: actualWidth,
-          viable: false, reason: `market R/R ${(rrRatioCred*100).toFixed(0)}% — retry $${_retryWidth} wide also fails (${(_retryRR*100).toFixed(0)}% < ${(MIN_RETRY_RR*100).toFixed(0)}% required)`
-        };
-        logEvent("filter", `${stock.ticker} credit spread R/R ${(rrRatioCred*100).toFixed(0)}% — retry $${_retryWidth} wide also fails (${(_retryRR*100).toFixed(0)}% < ${(MIN_RETRY_RR*100).toFixed(0)}% required) — skip`);
-        return null;
-      }
-      // Retry succeeded — update longContract and reassign lets so all downstream uses correct values
-      if (!state._lastCreditRR) state._lastCreditRR = {};
-      state._lastCreditRR[stock.ticker] = {
-        ts: Date.now(), rr: _retryRR, netCredit: _retryCredit, width: _retryWidth,
-        viable: true, reason: `R/R ${(_retryRR*100).toFixed(0)}% via retry $${_retryWidth} wide`
-      };
-      logEvent("filter", `${stock.ticker} [R/R RETRY] $${actualWidth}→$${_retryWidth} wide | ${(rrRatioCred*100).toFixed(0)}%→${(_retryRR*100).toFixed(0)}% R/R | credit $${_retryCredit}`);
-      longContract = {
-        symbol:  _retryCandidate.c.symbol,
-        strike:  parseFloat(_retryCandidate.c.strike_price),
-        expDate: longContract.expDate,
-        expDays: longContract.expDays,
-        premium: parseFloat(_rMid.toFixed(2)),
-        bid: _rBid, ask: _rAsk,
-        spread: _rSpreadPct,
-      };
-      // Reassign lets — marginRequired and position object pick up correct narrower-spread values
-      netCredit = _retryCredit;
-      maxProfit = _retryCredit;
-      maxLoss   = _retryMaxLoss;
-    }
+    // Bid-ask and R/R checks now inside optimal search — all done.
+    // maxProfit already declared as `let maxProfit = netCredit` in optimal search output block
     logEvent("filter", `${stock.ticker} credit spread R/R: collect $${(netCredit*100).toFixed(0)} / risk $${(maxLoss*100).toFixed(0)} per contract (${(maxLoss > 0 ? netCredit/maxLoss*100 : 0).toFixed(0)}% ratio)`);
     // C10: Sizing from entryEngine sizeMod parameter (replaces inline scoreBaseMult + ivSizeMultCredit)
     // entryEngine.scoreCandidate already computed: base * ivBoostCredit * crisisAdj * oversoldMod
