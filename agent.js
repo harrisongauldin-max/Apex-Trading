@@ -462,15 +462,16 @@ SCORING CONTEXT:
   // Regime change B→A: reset signal anchor to neutral so the agent re-evaluates fresh
   // Without this, the stability system keeps the old bearish signal locked in for 2+ tiers
   // even though the market context has fundamentally changed
-  if (prevRegimeClass === "B" && state._regimeClass === "A") {
+  // Clear signal anchor and history on ANY regime transition — stale history from the
+  // previous regime anchors the agent to wrong framing (bullish history in a new bear regime,
+  // bearish history in a new bull regime). Both directions need a clean slate.
+  if (prevRegimeClass !== state._regimeClass && prevRegimeClass) {
     if (state._agentMacro) {
-      _log("warn", `[REGIME] B→A transition — resetting signal anchor from '${state._agentMacro.signal}' to neutral for fresh evaluation`);
+      _log("warn", `[REGIME] ${prevRegimeClass}→${state._regimeClass} transition — resetting signal anchor from '${state._agentMacro.signal}' to neutral`);
       state._agentMacro = { ...state._agentMacro, signal: "neutral", modifier: 0, _stabilityHeld: false };
     }
-    // Also clear macro history — agent uses last 3 calls as context, stale bearish history
-    // would re-anchor it to bearish even after the baseline reset
     if (state._agentMacroHistory && state._agentMacroHistory.length > 0) {
-      _log("warn", `[REGIME] B→A transition — clearing ${state._agentMacroHistory.length} stale macro history entries`);
+      _log("warn", `[REGIME] ${prevRegimeClass}→${state._regimeClass} transition — clearing ${state._agentMacroHistory.length} stale history entries`);
       state._agentMacroHistory = [];
     }
   }
@@ -753,6 +754,8 @@ Respond with ONLY the JSON object. No words before or after.`;
 
     // ── Agent macro history — last 10 calls for context injection ──────────
     if (!state._agentMacroHistory) state._agentMacroHistory = [];
+    // Cap at 10 entries — prevents unbounded Redis growth over a full trading day
+    if (state._agentMacroHistory.length >= 10) state._agentMacroHistory = state._agentMacroHistory.slice(-9);
     state._agentMacroHistory.push({
       ts:         new Date().toISOString(),
       signal:     parsed.signal,
