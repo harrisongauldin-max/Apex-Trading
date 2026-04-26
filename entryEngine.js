@@ -132,12 +132,15 @@ function getRegimeRulebook(state) {
   // Regime A: puts fight the uptrend — need RSI overbought signal, high bar
   // Regime B: puts align with trend — lower bar, but still need clear signal
   // Credits: defined-risk structure lowers bar — premium collection not directional
-  // Flat score table: regime + trade type only (B1/B2 removed, agentMinAdj removed)
+  // Low VIX mode: VIX < 25 means no credits available — debit calls are the only edge.
+  //   Lower debit call bar to 60 (from 65) when VIX < 25 in confirmed bull regime.
   // PAPER TRADING: Panel consensus thresholds — meaningful entries, not maximum noise.
   // Production targets (pre June 4): put=70/85, call=75/85, credit=65/75, debitCall=75.
+  // lowVixMode uses local vars (spreadParams not yet assembled at this point)
+  const lowVixMode     = isBullRegime && vix < 25 && vix >= 12 && !isCrisis;
   const minScorePut    = isBullRegime ? 70 : 55;
   const minScoreCall   = isBullRegime ? 60 : 70;
-  const minScoreDebitCall = 65;
+  const minScoreDebitCall = lowVixMode ? 60 : 65; // lower bar when debit calls are only structure
   const minScoreCredit = isBullRegime ? 65 : 55;
   const agentMinAdj    = 0;                        // removed — stale agent uses keyword fallback
 
@@ -303,6 +306,11 @@ function getRegimeRulebook(state) {
     debitCallTargetDTE:  vix >= 28 ? 28 : 21,  // shorter DTE in elevated vol
     debitCallMinDTE:     14,
     debitCallEnabled:    !isCrisis && vix <= 35, // disabled in crisis
+    // Low VIX debit call mode — Regime A + VIX < 20 = pure bull, debit calls are the primary edge
+    // When VIX < 25 (creditAllowedVIX = false), credits are unavailable. Debit calls are the only
+    // structure with edge in this environment. Lower the bar: require RSI > 55 (not 65+) and
+    // MACD bullish confirmation. Score minimum drops to 60 in this mode.
+    lowVixDebitCallMode: isBullRegime && vix < 25 && vix >= 12 && !isCrisis,
   };
 
   return {
@@ -333,6 +341,7 @@ function getRegimeRulebook(state) {
     minScoreCall,
     minScoreCredit,
     minScoreDebitCall,
+    lowVixDebitCallMode: spreadParams.lowVixDebitCallMode || false,
     baseMinScore: BASE_MIN_SCORE,
   };
 }
