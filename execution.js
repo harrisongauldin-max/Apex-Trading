@@ -770,12 +770,18 @@ async function executeCreditSpread(stock, price, score, scoreReasons, vix, optio
     const rrRatioCred = maxLoss > 0 ? maxProfit / maxLoss : 0;
     const MIN_CREDIT_RR = (spreadParamsOverride && spreadParamsOverride.minCreditRatio) || 0.20; // PAPER: 0.20 floor — meaningful entries. Production: 0.26/0.28.
 
-    // Absolute minimum credit — filters marginal positions that scrape the R/R floor
-    // but collect so little premium ($50-70) they're not worth the execution risk and commissions.
-    // GLD/TLT options often hit this gate due to wider bid-ask spreads vs SPY/QQQ.
-    const MIN_ABS_CREDIT = (spreadParamsOverride && spreadParamsOverride.minAbsCredit) || 0.75;
+    // Absolute minimum credit — scaled by spread width, not a flat dollar amount.
+    // A flat $0.75 minimum makes sense for SPY ($5 wide = 15% of width).
+    // For TLT ($2 wide = 37.5% of width), $0.75 requires collecting 37.5% of max profit
+    // upfront — an impossibly high bar for thin bond options. Scale instead:
+    //   minimum = max(0.30, actualWidth * 0.12)  [12% of spread width, floor at $0.30]
+    // This allows TLT $2 wide: min = max(0.30, 2*0.12) = max(0.30, 0.24) = $0.30
+    // And SPY $5 wide: min = max(0.30, 5*0.12) = max(0.30, 0.60) = $0.60
+    // Still blocks truly marginal entries while allowing thin-market instruments.
+    const _widthBasedMin = Math.max(0.30, actualWidth * 0.12);
+    const MIN_ABS_CREDIT = (spreadParamsOverride && spreadParamsOverride.minAbsCredit) || _widthBasedMin;
     if (netCredit < MIN_ABS_CREDIT) {
-      logEvent("filter", `${stock.ticker} credit spread: net credit $${netCredit} below $${MIN_ABS_CREDIT} absolute minimum — skip`);
+      logEvent("filter", `${stock.ticker} credit spread: net credit $${netCredit} below $${MIN_ABS_CREDIT.toFixed(2)} minimum (width $${actualWidth} × 12%) — skip`);
       return null;
     }
 
@@ -827,8 +833,10 @@ async function executeCreditSpread(stock, price, score, scoreReasons, vix, optio
       // scrape over the minimum and produce tiny credits ($50-60) that rarely fill
       const MIN_RETRY_RR  = MIN_CREDIT_RR + 0.03;
       // Also re-check absolute minimum on retry credit — narrower spread may produce less credit
-      if (_retryCredit < MIN_ABS_CREDIT) {
-        logEvent("filter", `${stock.ticker} credit spread R/R retry: credit $${_retryCredit} below $${MIN_ABS_CREDIT} absolute minimum — skip`);
+      const _retryWidthMin = Math.max(0.30, _retryWidth * 0.12);
+      const _retryAbsMin   = (spreadParamsOverride && spreadParamsOverride.minAbsCredit) || _retryWidthMin;
+      if (_retryCredit < _retryAbsMin) {
+        logEvent("filter", `${stock.ticker} credit spread R/R retry: credit $${_retryCredit} below $${_retryAbsMin.toFixed(2)} minimum (width $${_retryWidth} × 12%) — skip`);
         return null;
       }
       if (_retryRR < MIN_RETRY_RR || _retryCredit <= 0) {
