@@ -121,7 +121,30 @@ async function syncCashFromAlpaca() {
   } catch(e) {} // silent
 }
 
+// Module-level close semaphore — prevents concurrent closes from submitting duplicate orders
+// when VIX spike close-all fires simultaneously with a stop-loss from the scan loop.
+// _closingInProgress tracks tickers currently in-flight; per-position _closingSubmitted
+// handles within-position duplicate calls. Together they form a two-layer mutex.
+const _closingInProgress = new Set();
+
 async function closePosition(ticker, reason, exitPremium = null, contractSym = null, opts = {}) {
+  // Layer 1: module-level mutex — block concurrent closes on the same ticker
+  // (e.g. stop-loss + VIX spike firing simultaneously for the same instrument)
+  const mutexKey = contractSym || ticker;
+  if (_closingInProgress.has(mutexKey)) {
+    logEvent("warn", `${ticker} close already in-flight (mutex) — skipping concurrent close (${reason})`);
+    return;
+  }
+  _closingInProgress.add(mutexKey);
+  try {
+    // Layer 2: position-level guard (per-position _closingSubmitted handled below)
+    return await _doClosePosition(ticker, reason, exitPremium, contractSym, opts);
+  } finally {
+    _closingInProgress.delete(mutexKey);
+  }
+}
+
+async function _doClosePosition(ticker, reason, exitPremium = null, contractSym = null, opts = {}) {
   try {
     // If contractSym provided, find exact position - handles multiple same-ticker positions
     const idx = contractSym
@@ -842,9 +865,17 @@ async function confirmPendingOrder() {
         pending._cancelAttempts = (pending._cancelAttempts || 0) + 1;
         if (pending._cancelAttempts >= 5) {
           logEvent("warn", `[SPREAD] Cancel unconfirmed after ${pending._cancelAttempts} attempts (status: ${cancelCheck?.status}) — force-clearing pending. Reconciler will verify Alpaca state.`);
-          // Record ticker cooldown — prevents ARGO re-entering same position immediately
-          if (!state._entryAttemptCooldown) state._entryAttemptCooldown = {};
-          state._entryAttemptCooldown[pending.ticker] = Date.now();
+          // Record ticker cooldown — only for same-session failures, not stale overnight orders
+          // Pending orders older than 6.5h are from a prior session (day orders expire at close)
+          // Setting cooldown on stale orders blocks next-day entries incorrectly
+          const _orderAgeSec = (Date.now() - (pending.submittedAt || 0)) / 1000;
+          const _isStaleOrder = _orderAgeSec > 6.5 * 3600; // older than a full trading session
+          if (!_isStaleOrder) {
+            if (!state._entryAttemptCooldown) state._entryAttemptCooldown = {};
+            state._entryAttemptCooldown[pending.ticker] = Date.now();
+          } else {
+            logEvent("warn", `[SPREAD] Stale order (${Math.round(_orderAgeSec/3600)}h old) force-cleared — skipping cooldown`);
+          }
           state._pendingOrder = null;
           markDirty();
           return;
@@ -867,8 +898,14 @@ async function confirmPendingOrder() {
         markDirty();
       } else {
         logEvent("warn", `[SPREAD] Retry failed - clearing pending`);
-        if (!state._entryAttemptCooldown) state._entryAttemptCooldown = {};
-        state._entryAttemptCooldown[pending.ticker] = Date.now();
+        // Skip cooldown for stale orders from prior sessions
+        const _orderAgeSec2 = (Date.now() - (pending.submittedAt || 0)) / 1000;
+        if (_orderAgeSec2 <= 6.5 * 3600) {
+          if (!state._entryAttemptCooldown) state._entryAttemptCooldown = {};
+          state._entryAttemptCooldown[pending.ticker] = Date.now();
+        } else {
+          logEvent("warn", `[SPREAD] Stale order force-cleared — skipping cooldown`);
+        }
         state._pendingOrder = null;
         markDirty();
       }
@@ -884,8 +921,13 @@ async function confirmPendingOrder() {
         pending._retryCancelAttempts = (pending._retryCancelAttempts || 0) + 1;
         if (pending._retryCancelAttempts >= 5) {
           logEvent("warn", `[SPREAD] Retry cancel unconfirmed after ${pending._retryCancelAttempts} attempts (${finalCheck?.status}) — force-clearing. Reconciler will verify.`);
-          if (!state._entryAttemptCooldown) state._entryAttemptCooldown = {};
-          state._entryAttemptCooldown[pending.ticker] = Date.now();
+          const _rca_ageSec = (Date.now() - (pending.submittedAt || 0)) / 1000;
+          if (_rca_ageSec <= 6.5 * 3600) {
+            if (!state._entryAttemptCooldown) state._entryAttemptCooldown = {};
+            state._entryAttemptCooldown[pending.ticker] = Date.now();
+          } else {
+            logEvent("warn", `[SPREAD] Stale retry order force-cleared — skipping cooldown`);
+          }
           state._pendingOrder = null;
           markDirty();
           return;
@@ -894,8 +936,13 @@ async function confirmPendingOrder() {
         return;
       }
       logEvent("warn", `[SPREAD] Retry also unfilled - spread cancelled`);
-      if (!state._entryAttemptCooldown) state._entryAttemptCooldown = {};
-      state._entryAttemptCooldown[pending.ticker] = Date.now();
+      const _ru_ageSec = (Date.now() - (pending.submittedAt || 0)) / 1000;
+      if (_ru_ageSec <= 6.5 * 3600) {
+        if (!state._entryAttemptCooldown) state._entryAttemptCooldown = {};
+        state._entryAttemptCooldown[pending.ticker] = Date.now();
+      } else {
+        logEvent("warn", `[SPREAD] Stale retry order force-cleared — skipping cooldown`);
+      }
       state._pendingOrder = null;
       markDirty();
     }
