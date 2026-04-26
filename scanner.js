@@ -1306,14 +1306,8 @@ async function runScan() {
     }
   }
 
-  // - F8: High-beta correlation block -
-  // Max 2 simultaneous positions with beta > 1.5 - prevents HOOD+ROKU+DKNG all open
-  // These are effectively the same bet - all crash together in a market reversal
-  const highBetaPositions = state.positions.filter(p => (p.beta || 1) > 1.5).length;
-  if (highBetaPositions >= 2) {
-    logEvent("filter", `High-beta correlation block - ${highBetaPositions} positions with beta>1.5 already open`);
-    // Only block high-beta new entries - let lower beta through
-  }
+  // High-beta block removed — ARGO trades index ETFs (SPY, QQQ, GLD, TLT, XLE),
+  // none of which have beta > 1.5 relative to each other. Vestigial from individual stock mode.
 
   // Burst entry cooldown - max 3 new positions per 10 minutes
   // Prevents over-concentration at a single market moment (e.g. after reset)
@@ -1777,9 +1771,13 @@ async function runScan() {
         const spyPutOpen  = state.positions.some(p => p.ticker === "SPY" && p.optionType === "put");
         const spyCallOpen = state.positions.some(p => p.ticker === "SPY" && p.optionType === "call");
         // Only suppress if score is below 80 - high conviction entries allowed through
-        if (spyPutOpen  && putSetup.score  < 80) { putSetup.score  = Math.min(putSetup.score,  30); logEvent("filter", `QQQ corr-block: SPY put open, QQQ put score ${putSetup.score}<80 suppressed`); }
-        if (spyCallOpen && callSetup.score < 80) { callSetup.score = Math.min(callSetup.score, 30); logEvent("filter", `QQQ corr-block: SPY call open, QQQ call score ${callSetup.score}<80 suppressed`); }
-        // Also suppress opposite directions (SPY put + QQQ call = contradictory thesis)
+        // Same-direction suppression threshold lowered: 80 → MIN_SCORE_CREDIT (65).
+        // Old threshold (80) was correlation-cap thinking — raise the bar on the second position.
+        // Now heat cap governs concentration; QQQ just needs to clear the normal minimum independently.
+        // Opposite-direction suppression kept — SPY put + QQQ call is a contradictory thesis.
+        if (spyPutOpen  && putSetup.score  < MIN_SCORE_CREDIT) { putSetup.score  = Math.min(putSetup.score,  30); logEvent("filter", `QQQ corr-block: SPY put open, QQQ put score below minimum — suppressed`); }
+        if (spyCallOpen && callSetup.score < MIN_SCORE_CREDIT) { callSetup.score = Math.min(callSetup.score, 30); logEvent("filter", `QQQ corr-block: SPY call open, QQQ call score below minimum — suppressed`); }
+        // Opposite directions — contradictory thesis, keep blocking
         if (spyPutOpen  && callSetup.score > 0) { callSetup.score = Math.min(callSetup.score, 30); logEvent("filter", `QQQ corr-block: SPY put open, QQQ call contradicts direction`); }
         if (spyCallOpen && putSetup.score  > 0) { putSetup.score  = Math.min(putSetup.score,  30); logEvent("filter", `QQQ corr-block: SPY call open, QQQ put contradicts direction`); }
       }
@@ -1787,8 +1785,8 @@ async function runScan() {
       if (stock.ticker === "SPY") {
         const qqqPutOpen  = state.positions.some(p => p.ticker === "QQQ" && p.optionType === "put");
         const qqqCallOpen = state.positions.some(p => p.ticker === "QQQ" && p.optionType === "call");
-        if (qqqPutOpen  && putSetup.score  < 80) { putSetup.score  = Math.min(putSetup.score,  30); logEvent("filter", `SPY corr-block: QQQ put open, SPY put score <80 suppressed`); }
-        if (qqqCallOpen && callSetup.score < 80) { callSetup.score = Math.min(callSetup.score, 30); logEvent("filter", `SPY corr-block: QQQ call open, SPY call score <80 suppressed`); }
+        if (qqqPutOpen  && putSetup.score  < MIN_SCORE_CREDIT) { putSetup.score  = Math.min(putSetup.score,  30); logEvent("filter", `SPY corr-block: QQQ put open, SPY put score below minimum — suppressed`); }
+        if (qqqCallOpen && callSetup.score < MIN_SCORE_CREDIT) { callSetup.score = Math.min(callSetup.score, 30); logEvent("filter", `SPY corr-block: QQQ call open, SPY call score below minimum — suppressed`); }
         if (qqqPutOpen  && callSetup.score > 0) { callSetup.score = Math.min(callSetup.score, 30); }
         if (qqqCallOpen && putSetup.score  > 0) { putSetup.score  = Math.min(putSetup.score,  30); }
         // Update scoreDebug after correlation suppression so tab shows actual scores
@@ -2343,7 +2341,6 @@ async function runScan() {
     // Don't count GLD toward put heat cap (it's an uncorrelated asset)
     const MAX_DIR_HEAT = 0.40;
     const isGLDHedge = stock.ticker === "GLD" && optionType === "call";
-    const correlatedTickers = ["SPY","QQQ"]; // high correlation group (IWM removed - not in watchlist)
     const dirCost = state.positions
       .filter(p => {
         if (p.ticker === "GLD") return false; // GLD is a hedge, exclude from heat
@@ -2356,14 +2353,8 @@ async function runScan() {
       logEvent("filter", `${stock.ticker} ${optionType} directional heat ${(dirHeat*100).toFixed(0)}% at 40% cap - skip`);
       continue;
     }
-    // Prevent 3 correlated equity index positions simultaneously (too concentrated)
-    const correlatedPositions = state.positions.filter(p =>
-      correlatedTickers.includes(p.ticker) && p.optionType === optionType
-    );
-    if (correlatedPositions.length >= 2 && correlatedTickers.includes(stock.ticker) && !dryRunMode) {
-      logEvent("filter", `${stock.ticker} correlation cap - already have ${correlatedPositions.length} correlated ${optionType} positions`);
-      continue;
-    }
+    // Correlation cap removed — heat cap (60%) and directional cap (40%) govern concentration.
+    // With 5 instruments and defined-risk spreads, explicit correlation blocking is redundant.
 
     // Block opposite direction on same ticker - directional strategy only
     const sameTickerOpposite = state.positions.find(p =>
@@ -2438,20 +2429,12 @@ async function runScan() {
   // Sort by score descending
   scored.sort((a,b) => b.score - a.score);
 
-  // - Relative score ranking - only enter top 20% of today's candidates -
-  // Prevents entering 8 positions simultaneously on a broad selloff day
-  // where every stock scores 90+ just because the market is down
-  if (scored.length >= 5) {
-    // For small watchlists (<=7), keep top 40% with minimum 2 candidates
-    // For larger lists, keep top 20% — prevents flooding on broad selloffs
-    // With only 5 instruments, 20% = 1 candidate which is too restrictive
-    const pct  = scored.length <= 7 ? 0.40 : 0.20;
-    const topN = Math.max(2, Math.ceil(scored.length * pct));
-    const cutoffScore = scored[topN - 1]?.score || 0;
-    const aboveCutoff = scored.filter(s => s.score >= cutoffScore);
-    scored.length = 0;
-    aboveCutoff.forEach(s => scored.push(s));
-    logEvent("filter", `Score ranking: keeping top ${aboveCutoff.length} of ${scored.length + aboveCutoff.length} (cutoff: ${cutoffScore}, pct: ${Math.round(pct*100)}%)`);
+  // Score ranking cutoff removed — all instruments scoring above minimum are viable entries.
+  // With only 5 instruments, the heat cap (60%) and directional cap (40%) govern concentration
+  // far more precisely than a blunt percentage cutoff. Scored list is already sorted best-first
+  // so execution loop processes highest-conviction entries first and stops at heat cap.
+  if (scored.length > 0) {
+    logEvent("filter", `Score ranking: ${scored.length} candidate(s) above minimum — proceeding (heat cap governs concentration)`);
   }
 
   // - PARALLEL OPTIONS PREFETCH -
