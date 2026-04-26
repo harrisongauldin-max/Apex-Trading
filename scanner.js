@@ -2107,34 +2107,42 @@ async function runScan() {
     // macro.sectorBearish/sectorBullish existed on keyword macro — agent macro may not have them
     const _macroSectorBearish = macro.sectorBearish || [];
     const _macroSectorBullish = macro.sectorBullish || [];
-    let macroCallMod  = macro.scoreModifier || 0;
-    // Puts only benefit from genuinely bearish macro - neutral is not a put signal
-    // If macro is neutral (modifier = 0), puts get 0 boost not a bonus
-    // If macro is bullish (modifier > 0), puts get penalized
-    // EXCEPTION: puts_on_bounces in Regime B — mild bullish IS the fade setup, no penalty
-    const agentMacroForScoring = (state._agentMacro || {}).signal || "neutral";
-    const isBearishMacro = ["bearish", "strongly bearish", "mild bearish"].includes(agentMacroForScoring);
-    const entryBiasNow   = (state._agentMacro || {}).entryBias || "neutral";
-    // Belt-and-suspenders: check regime class directly in case entryBias is stale between agent runs
-    const putsOnBouncesFade = (entryBiasNow === "puts_on_bounces" || ["B","C"].includes(state._regimeClass))
-      && agentMacroForScoring === "mild bullish";
-    // puts_on_bounces + mild bullish = bounce fade thesis — treat macro as neutral (0), not penalty
-    let macroPutMod = isBearishMacro
-      ? Math.abs(macro.scoreModifier || 0)
-      : putsOnBouncesFade
-        ? 0
-        : -(macro.scoreModifier || 0);
 
-    // Extra sector-specific adjustment
+    // ── FIX: Agent modifier scoped to regime confirmation only ────────────────
+    // The agent's ±modifier was originally applied as a directional score adjustment
+    // (mild bearish → -5 on puts in Regime A, etc.). Panel audit (4/24/2026) showed
+    // this was suppressing bull put scores by 5-18 points based on a signal with
+    // 10.6% directional accuracy on 30-min horizons — worse than a coin flip.
+    //
+    // New logic: the modifier is ONLY applied when agent and regime AGREE on direction.
+    // - Regime B + bearish agent: bear call scores get boost, put redirect gets boost.
+    // - Regime A + bullish agent: call scores get small boost.
+    // - Disagreement or neutral: modifier = 0. The regime classifier (price-based,
+    //   computed every scan) is authoritative. Agent is a timing refinement, not a veto.
+    //
+    // Sector signals are kept — they're aggregate, not directional noise.
+    const agentMacroForScoring = (state._agentMacro || {}).signal || "neutral";
+    const regimeClass = state._regimeClass || "A";
+    const agentAlignsBear = ["bearish","strongly bearish","mild bearish"].includes(agentMacroForScoring) && ["B","C"].includes(regimeClass);
+    const agentAlignsBull = ["bullish","strongly bullish","mild bullish"].includes(agentMacroForScoring) && regimeClass === "A";
+    const putsOnBouncesFade = (state._agentMacro || {}).entryBias === "puts_on_bounces"
+      && agentMacroForScoring === "mild bullish" && ["B","C"].includes(regimeClass);
+
+    // Only apply modifier when agent confirms the regime direction
+    const alignedModifier = agentAlignsBear || agentAlignsBull ? Math.abs(macro.scoreModifier || 0) : 0;
+    let macroCallMod = agentAlignsBear ? alignedModifier : agentAlignsBull ? Math.round(alignedModifier * 0.5) : 0;
+    let macroPutMod  = agentAlignsBear ? alignedModifier : putsOnBouncesFade ? 0 : 0;
+
+    // Extra sector-specific adjustment (kept — aggregate signal, not directional noise)
     if (_macroSectorBearish.includes(stock.sector)) { macroCallMod -= 10; macroPutMod += 10; }
     if (_macroSectorBullish.includes(stock.sector)) { macroCallMod += 8;  macroPutMod -= 8; }
 
     callSetup.score = Math.min(100, Math.max(0, callSetup.score + macroCallMod));
     putSetup.score  = Math.min(100, Math.max(0, putSetup.score  + macroPutMod));
 
-    if (macroCallMod !== 0) {
-      callSetup.reasons.push(`Macro ${macro.signal}: ${macroCallMod > 0 ? "+" : ""}${macroCallMod}`);
-      putSetup.reasons.push(`Macro ${macro.signal}: ${macroPutMod > 0 ? "+" : ""}${macroPutMod}`);
+    if (macroCallMod !== 0 || macroPutMod !== 0) {
+      if (macroCallMod !== 0) callSetup.reasons.push(`Macro ${agentMacroForScoring} (regime-aligned): ${macroCallMod > 0 ? "+" : ""}${macroCallMod}`);
+      if (macroPutMod  !== 0) putSetup.reasons.push(`Macro ${agentMacroForScoring} (regime-aligned): ${macroPutMod > 0 ? "+" : ""}${macroPutMod}`);
     }
 
     // Apply gap direction constraint
