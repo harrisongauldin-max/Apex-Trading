@@ -537,10 +537,13 @@ function scoreCreditSpread(stock, tradeType, vix, ivRank, spyRSI, spyMACD, spyMo
     else if (spyRSI >= 45) { score += 3;  reasons.push(`${stock.ticker} RSI ${spyRSI} - bear call marginal OTM buffer (+3)`); }
     else if (spyRSI <= 35) { score -= 10; reasons.push(`${stock.ticker} RSI ${spyRSI} oversold - bear call short strike at risk of breach (-10)`); }
   } else { // isBullPut
-    if (spyRSI <= 35)      { score += 15; reasons.push(`${stock.ticker} RSI ${spyRSI} oversold - bull put short strike safely OTM (+15)`); }
-    else if (spyRSI <= 45) { score += 8;  reasons.push(`${stock.ticker} RSI ${spyRSI} below midpoint - bull put adequate buffer (+8)`); }
-    else if (spyRSI <= 55) { score += 3;  reasons.push(`${stock.ticker} RSI ${spyRSI} - bull put marginal OTM buffer (+3)`); }
-    else if (spyRSI >= 70) { score -= 10; reasons.push(`${stock.ticker} RSI ${spyRSI} overbought - bull put short strike at risk of breach (-10)`); }
+    // For bull puts, short strike is BELOW the market — RSI direction is inverted vs bear calls:
+    // Overbought RSI = market far above short put strike = GOOD (more buffer, not less)
+    // Oversold RSI = market near short put strike = BAD (put more likely to be breached)
+    if (spyRSI >= 70)      { score += 15; reasons.push(`${stock.ticker} RSI ${spyRSI} overbought - market far above bull put short strike, wide buffer (+15)`); }
+    else if (spyRSI >= 60) { score += 8;  reasons.push(`${stock.ticker} RSI ${spyRSI} elevated - solid buffer above bull put short strike (+8)`); }
+    else if (spyRSI >= 50) { score += 3;  reasons.push(`${stock.ticker} RSI ${spyRSI} - adequate buffer above bull put short strike (+3)`); }
+    else if (spyRSI <= 35) { score -= 10; reasons.push(`${stock.ticker} RSI ${spyRSI} oversold - market compressed, bull put short strike at risk (-10)`); }
   }
 
   // ── 6. BREADTH CONFIRMATION (0 to +10) ──────────────────────────────────────
