@@ -443,6 +443,27 @@ async function checkExits(positions, posSnapshots, posQuotes, posNewsCache, ctx)
     }
     // Theta accelerates dramatically inside 10 DTE - take profit sooner
     const dteLeft = Math.max(1, Math.round((new Date(pos.expDate) - new Date()) / MS_PER_DAY));
+
+    // ── 21 DTE gamma review ───────────────────────────────────────────────────
+    // Inside 21 DTE, gamma accelerates dramatically — a position that was safe at
+    // 35 DTE can move to max loss in a single session at 15 DTE. Flag once when
+    // a credit spread first crosses below 21 DTE to force a human/agent review.
+    // _gammaCrossedFlag prevents the log from firing on every subsequent scan.
+    if (pos.isCreditSpread && dteLeft <= 21 && dteLeft > 0 && !pos._gammaCrossedFlag) {
+      pos._gammaCrossedFlag = true;
+      // Credit spread entry premium is stored as pos.premium (not pos.netCredit)
+      const entryPremium = pos.premium || pos.netCredit || 0;
+      const pnlPct = pos.currentPrice && entryPremium
+        ? ((entryPremium - pos.currentPrice) / entryPremium * 100).toFixed(0)
+        : "--";
+      logEvent("warn", `[GAMMA] ${pos.ticker} crossed 21 DTE (${dteLeft}d remaining) — gamma risk accelerating. P&L: ${pnlPct}%. Consider closing if thesis weakened.`);
+      // If position is losing 30%+ at 21 DTE, tighten stop-loss — don't let gamma run it to max loss
+      if (pos.currentPrice && entryPremium && pos.currentPrice > entryPremium * 1.3) {
+        logEvent("warn", `[GAMMA] ${pos.ticker} is at ${((pos.currentPrice/entryPremium - 1)*100).toFixed(0)}% loss at 21 DTE — gamma stop engaged (35% stop tightened to 25%)`);
+        pos._gammaStopEngaged = true;
+      }
+    }
+
     // Natenberg: theta decay is exponential not linear
     // DEBIT spreads: tighten targets as DTE drops - theta eating premium fast
     // CREDIT spreads: theta works FOR you - EXPAND targets at low DTE (let it expire worthless)
@@ -450,10 +471,12 @@ async function checkExits(positions, posSnapshots, posQuotes, posNewsCache, ctx)
     let dteMult;
     if (pos.isCreditSpread) {
       // Credit: theta erosion = profit - relax targets inside 10 DTE
+      // Exception: if gamma stop engaged at 21 DTE crossing, use tighter params
       dteMult = dteLeft <= 3  ? 1.30  // <3 DTE: theta almost fully decayed, hold for max
               : dteLeft <= 7  ? 1.15  // <7 DTE: theta working hard, expand target
               : dteLeft <= 14 ? 1.05  // <14 DTE: mild expansion
               : 1.0;
+      if (pos._gammaStopEngaged) currentExitParams.stopLossPct = 0.25; // tighter stop for losing 21 DTE positions
     } else {
       // Debit: theta is the enemy - tighten targets as expiry approaches
       dteMult = dteLeft <= 3  ? 0.45  // <3 DTE: take what's there
