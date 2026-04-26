@@ -383,7 +383,8 @@ SCORING CONTEXT:
 - Entry scores 0-100. Minimum 55-65 (paper) / 65-75 (live) depending on trade type.
 - Credit spread scorer uses: IVR quality, trend alignment, VIX stability, OTM safety margin, theta decay quality.
 - Agent signal is a TIMING signal — bearish confirms direction, does not override hard gates (RSI, heat cap, PDT).
-- positionSizeMult from this response is applied to contract sizing. 1.0 = standard 1-2 contracts. 1.5 = max 2 contracts regardless.`;
+- positionSizeMult from this response is applied to contract sizing. 1.0 = standard 1-2 contracts. 1.5 = max 2 contracts regardless.
+- RECONCILIATION: You will be shown the overnight/pre-market assessment in the user prompt. Your signal should be directionally consistent with it unless intraday price action clearly contradicts it. Both you and the overnight digest read the same headlines — if you diverge, justify it explicitly in your reasoning field.`;
 
   // Pre-fetch market status so agent doesn't need to tool-call for it
   const mktStatus = await agentTool_getMarketStatus().catch(() => ({}));
@@ -588,6 +589,18 @@ SCORING CONTEXT:
     return `  ${ago}min ago: ${h.signal} (${h.confidence}) — ${h.reasoning?.slice(0,60) || ''}`;
   }).join('\n');
 
+  // Overnight/pre-market scan context — inject so macro agent sees the strategic assessment
+  // Without this, the macro agent and overnight digest operate independently on the same
+  // headlines and often reach contradictory conclusions (e.g. overnight=trending_bear,
+  // macro=neutral on the same ceasefire news). Injecting gives the macro agent a prior.
+  const overnightScan = state._overnightScan;
+  const overnightCtx = overnightScan && overnightScan.generatedAt
+    ? (() => {
+        const hoursAgo = ((Date.now() - new Date(overnightScan.generatedAt).getTime()) / 3600000).toFixed(1);
+        return `  ${overnightScan.scanType || 'overnight'} (${hoursAgo}h ago): ${overnightScan.signal} / ${overnightScan.regime} / bias:${overnightScan.entryBias} — ${(overnightScan.reasoning||'').slice(0,80)}`;
+      })()
+    : null;
+
   // Open positions with full context for position-aware reasoning
   const posLines = (state.positions||[]).map(p => {
     const daysOpen = ((Date.now() - new Date(p.openDate||0).getTime()) / MS_PER_DAY).toFixed(1);
@@ -626,6 +639,9 @@ ACCOUNT:
 
 YOUR RECENT SIGNALS (last 3 calls):
 ${historyLines || '  no history yet'}
+
+OVERNIGHT/PRE-MARKET ASSESSMENT (strategic prior — reconcile your signal with this):
+${overnightCtx || '  none — first scan of day or overnight scan unavailable'}
 
 KEYWORD PRE-SCORE (rule-based headline analysis before your assessment):
 - Signal: ${keywordMacroSignal} | Modifier: ${keywordMacroScore > 0 ? '+' : ''}${keywordMacroScore}
@@ -1352,7 +1368,8 @@ Rules:
 - earlyEntryWindow true = conditions look favorable for entry in first 30min after open (9:00am CT)
 - waitForOpen true = pre-market move suggests waiting 15-30min for volatility to settle
 - instrumentBias: "skip" means avoid this instrument today (e.g. XLE on OPEC day, TLT on Fed day)
-- openPositionRisk: risk to existing open positions from overnight/pre-market developments`;
+- openPositionRisk: risk to existing open positions from overnight/pre-market developments
+- RECONCILIATION RULE: You will be shown intraday macro agent signals from today. Your signal and regime should be consistent with those signals unless a major development has occurred overnight that changes the picture. If you diverge, explain why in your reasoning. The macro agent runs every 5 minutes during market hours — it has more current price data than you. Do not contradict it without cause.`;
 
   // ── User prompt ───────────────────────────────────────────────────────────
   const scanLabel = scanType === "premarket-compute" ? "Pre-market (7:30am CT)" : "Overnight digest (11pm CT)";
@@ -1374,6 +1391,14 @@ ESTIMATED STRIKE TARGETS (bear call spreads, ${premarketData.widthPct} wide, ~4%
 ${Object.entries(premarketData.instruments).map(([t, d]) =>
   d ? `  ${t}: short $${d.shortStrike} / long $${d.longStrike} (${d.otmPct} OTM, $${d.width} wide)` : `  ${t}: no data`
 ).join("\n")}` : ""}
+
+INTRADAY MACRO AGENT SIGNALS (last reading before this overnight scan):
+${(() => {
+  const last = (state._agentMacroHistory || []).slice(-1)[0];
+  if (!last) return "  No intraday macro signals recorded today.";
+  const ago = Math.round((Date.now() - new Date(last.ts).getTime()) / 60000);
+  return `  ${ago}min ago: ${last.signal} (${last.confidence}) — ${(last.reasoning||"").slice(0,100)}`;
+})()}
 
 TODAY'S HEADLINES (${headlineList.length} items):
 ${headlineList.slice(0, 15).map((h, i) => `${i+1}. ${h}`).join("\n") || "No headlines"}
