@@ -1250,17 +1250,21 @@ async function runScan() {
     logEvent("filter", `Directional concentration: ${totalOpen} calls, 0 puts - blocking new call entries`);
     if (!putsAllowed) return;
   }
-  // Beta-adjusted net delta - measures true correlated directional exposure
-  // Each put = -1 delta unit - beta; each call = +1 delta unit - beta
-  // Index instruments (beta ~1): SPY/QQQ/IWM/GLD each count as 1 unit
+  // Beta-adjusted net delta — tracks directional exposure across positions.
+  // MAX was 6 (calibrated for 1-2 contract individual stock positions).
+  // New contract sizing targets 9-10 contracts per position on index ETFs.
+  // At 9x per position: 1 position = -9, 2 = -18, 3 = -27, 4 = -37, 5 = -46.
+  // The directional heat cap (40% of cash) is the correct portfolio-level governor.
+  // Beta-delta is retained for logging/dashboard visibility but scaled to max 3 positions
+  // at full 10-contract sizing = 30. Beyond that the heat cap fires first anyway.
   const betaDelta = (state.positions || []).reduce((sum, p) => {
-    const beta = Math.min(p.beta || 1.0, 2.0); // cap beta at 2 for sizing purposes
+    const beta = Math.min(p.beta || 1.0, 2.0);
     const dir  = p.optionType === "put" ? -1 : 1;
     const contracts = p.contracts || 1;
     return sum + (dir * beta * contracts);
   }, 0);
   state._portfolioBetaDelta = parseFloat(betaDelta.toFixed(1));
-  const MAX_BETA_DELTA = 6; // max 6 beta-weighted contracts in any direction
+  const MAX_BETA_DELTA = 50; // scaled for 9-10 contract index ETF positions (5 max × 10 = 50)
   if (betaDelta < -MAX_BETA_DELTA) {
     logEvent("filter", `Beta-adjusted delta ${betaDelta.toFixed(1)} - too short, blocking puts (max: -${MAX_BETA_DELTA})`);
     if (!callsAllowed) return;
