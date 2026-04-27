@@ -2525,8 +2525,9 @@ async function runScan() {
                    macd: stock.macd || "neutral" },
         recentSameDir:          recentSameDirMins,
         existingProfitPct,
-        existingCreditProfitPct, // panel M3: % of max profit earned on credit spreads
-        drawdownMinScore:    ddProtocol.minScore || MIN_SCORE }
+        existingCreditProfitPct,
+        drawdownMinScore:    ddProtocol.minScore || MIN_SCORE,
+        agentSignal:         (state._agentMacro || {}).signal || "neutral" }
     );
     if (!eeResult.pass) {
       logEvent("filter", `${stock.ticker} entry blocked - ${eeResult.reason}`);
