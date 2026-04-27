@@ -2266,7 +2266,11 @@ async function runScan() {
         : 999;
       logEvent("filter", `Agent macro stale (${agentStaleMins.toFixed(0)}min) - using keyword fallback. Last signal: ${agentSig || "none"}`);
       if (agentStaleMins > 90 && isMarketHours()) {
-        logEvent("warn", `[AGENT] Macro analysis has not run in ${agentStaleMins.toFixed(0)} minutes - check API key and headlines`);
+        // Rate-limit to once per 15 minutes — fires per-instrument so can flood logs
+        if (!state._lastAgentStaleWarn || Date.now() - state._lastAgentStaleWarn > 15 * 60 * 1000) {
+          logEvent("warn", `[AGENT] Macro analysis has not run in ${agentStaleMins.toFixed(0)} minutes - using keyword fallback`);
+          state._lastAgentStaleWarn = Date.now();
+        }
       }
     }
 
