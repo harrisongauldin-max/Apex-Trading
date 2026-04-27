@@ -426,9 +426,19 @@ async function _doClosePosition(ticker, reason, exitPremium = null, contractSym 
   if (pnl <= 0) {
     state._spiralTracker[posType] = (state._spiralTracker[posType] || 0) + 1;
     const consecLosses = state._spiralTracker[posType];
+    // Bug-spiral FIX: spiral requires 20+ total trades to be meaningful.
+    // During paper trading validation, 5 consecutive losses in a new system is noise.
+    // March 25th: 9 puts closed via macro-reversal → spiral active → all puts blocked.
+    // At <20 trades, log the warning but do not activate the block.
+    const totalTrades = (state.closedTrades || []).length;
     if (consecLosses >= 5) {
-      logEvent("warn", `[SPIRAL] ${consecLosses} consecutive ${posType} losses - consider pausing ${posType} entries to review thesis`);
-      state._spiralActive = posType; // flag visible in /api/state
+      logEvent("warn", `[SPIRAL] ${consecLosses} consecutive ${posType} losses (total trades: ${totalTrades})`);
+      if (totalTrades >= 20) {
+        state._spiralActive = posType;
+        logEvent("warn", `[SPIRAL] ${posType} entries blocked — 20+ trade history confirms pattern`);
+      } else {
+        logEvent("warn", `[SPIRAL] Block NOT activated — only ${totalTrades} total trades (need 20+ to confirm spiral)`);
+      }
     }
   } else {
     // Win resets that type's spiral counter
