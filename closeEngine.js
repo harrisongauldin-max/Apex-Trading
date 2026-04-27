@@ -869,12 +869,19 @@ async function confirmPendingOrder() {
           // Pending orders older than 6.5h are from a prior session (day orders expire at close)
           // Setting cooldown on stale orders blocks next-day entries incorrectly
           const _orderAgeSec = (Date.now() - (pending.submittedAt || 0)) / 1000;
-          const _isStaleOrder = _orderAgeSec > 6.5 * 3600; // older than a full trading session
-          if (!_isStaleOrder) {
+          const _isStaleOrder = _orderAgeSec > 6.5 * 3600;
+          // Only set cooldown if there's genuine fill ambiguity.
+          // If order status was 'pending_new' or 'new' with 0 qty_filled, nothing filled — no cooldown.
+          // Cooldown is for cases where we genuinely don't know if Alpaca filled us (e.g. accepted→vanished).
+          const _cancelStatus  = cancelCheck?.status || "unknown";
+          const _qtyFilled     = parseFloat(cancelCheck?.filled_qty || cancelCheck?.qty_filled || 0);
+          const _nothingFilled = ["new","pending_new","held","accepted"].includes(_cancelStatus) && _qtyFilled === 0;
+          if (!_isStaleOrder && !_nothingFilled) {
             if (!state._entryAttemptCooldown) state._entryAttemptCooldown = {};
             state._entryAttemptCooldown[pending.ticker] = Date.now();
+            logEvent("warn", `[SPREAD] Force-clear with fill ambiguity (status:${_cancelStatus} filled:${_qtyFilled}) — cooldown set for ${pending.ticker}`);
           } else {
-            logEvent("warn", `[SPREAD] Stale order (${Math.round(_orderAgeSec/3600)}h old) force-cleared — skipping cooldown`);
+            logEvent("warn", `[SPREAD] Force-clear no fill confirmed (status:${_cancelStatus} filled:${_qtyFilled}) — skipping cooldown for ${pending.ticker}`);
           }
           state._pendingOrder = null;
           markDirty();
@@ -900,12 +907,8 @@ async function confirmPendingOrder() {
         logEvent("warn", `[SPREAD] Retry failed - clearing pending`);
         // Skip cooldown for stale orders from prior sessions
         const _orderAgeSec2 = (Date.now() - (pending.submittedAt || 0)) / 1000;
-        if (_orderAgeSec2 <= 6.5 * 3600) {
-          if (!state._entryAttemptCooldown) state._entryAttemptCooldown = {};
-          state._entryAttemptCooldown[pending.ticker] = Date.now();
-        } else {
-          logEvent("warn", `[SPREAD] Stale order force-cleared — skipping cooldown`);
-        }
+        // No retry response means order likely never reached Alpaca (network failure) — skip cooldown
+        logEvent("warn", `[SPREAD] Retry failed — order likely never reached Alpaca, skipping cooldown for ${pending.ticker}`);
         state._pendingOrder = null;
         markDirty();
       }
@@ -921,12 +924,16 @@ async function confirmPendingOrder() {
         pending._retryCancelAttempts = (pending._retryCancelAttempts || 0) + 1;
         if (pending._retryCancelAttempts >= 5) {
           logEvent("warn", `[SPREAD] Retry cancel unconfirmed after ${pending._retryCancelAttempts} attempts (${finalCheck?.status}) — force-clearing. Reconciler will verify.`);
-          const _rca_ageSec = (Date.now() - (pending.submittedAt || 0)) / 1000;
-          if (_rca_ageSec <= 6.5 * 3600) {
+          // Retry order stuck — check fill status before setting cooldown
+          const _rca_status   = finalCheck?.status || "unknown";
+          const _rca_filled   = parseFloat(finalCheck?.filled_qty || finalCheck?.qty_filled || 0);
+          const _rca_noFill   = ["new","pending_new","held","accepted"].includes(_rca_status) && _rca_filled === 0;
+          if (!_rca_noFill) {
             if (!state._entryAttemptCooldown) state._entryAttemptCooldown = {};
             state._entryAttemptCooldown[pending.ticker] = Date.now();
+            logEvent("warn", `[SPREAD] Retry force-clear with fill ambiguity — cooldown set for ${pending.ticker}`);
           } else {
-            logEvent("warn", `[SPREAD] Stale retry order force-cleared — skipping cooldown`);
+            logEvent("warn", `[SPREAD] Retry force-clear no fill (status:${_rca_status}) — skipping cooldown for ${pending.ticker}`);
           }
           state._pendingOrder = null;
           markDirty();
@@ -936,13 +943,9 @@ async function confirmPendingOrder() {
         return;
       }
       logEvent("warn", `[SPREAD] Retry also unfilled - spread cancelled`);
-      const _ru_ageSec = (Date.now() - (pending.submittedAt || 0)) / 1000;
-      if (_ru_ageSec <= 6.5 * 3600) {
-        if (!state._entryAttemptCooldown) state._entryAttemptCooldown = {};
-        state._entryAttemptCooldown[pending.ticker] = Date.now();
-      } else {
-        logEvent("warn", `[SPREAD] Stale retry order force-cleared — skipping cooldown`);
-      }
+      // Retry unfilled = definitively no position opened — no cooldown needed
+      // The original order and retry both expired/cancelled with 0 fills
+      logEvent("warn", `[SPREAD] Retry unfilled confirmed — skipping cooldown for ${pending.ticker} (no position opened)`);
       state._pendingOrder = null;
       markDirty();
     }
