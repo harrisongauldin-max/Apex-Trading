@@ -624,15 +624,31 @@ setTimeout(async () => {
 }, 5000);
 
 // Intraday 3-minute polling REMOVED — agent directional accuracy 10.1% at 30min (n=74).
-// A signal that's wrong 90% of the time doesn't justify 60 API calls per session.
-// Agent still runs on:
+// Replaced with staleness-driven check in the scan loop below.
+// Agent runs on:
 //   1. Startup (fresh signal for the session)
-//   2. Emergency triggers (fed emergency, flash crash, market halt — _shouldRunMacroAgent detects these)
-//   3. Overnight digest (11pm + 7:30am — separate scheduled functions below)
-//   4. Pre-market compute (9:00am ET)
-// The scanner still calls getAgentMacroAnalysis() on each scan — the internal
-// _shouldRunMacroAgent() gate returns shouldRun:false unless headlines changed or
-// an emergency keyword is detected. So emergencies still fire instantly.
+//   2. Staleness > 90min — fired from scan loop, not a fixed interval
+//   3. Emergency triggers (flash crash, market halt — detected by _shouldRunMacroAgent)
+//   4. Overnight digest + pre-market compute
+//
+// Staleness-driven scan trigger — runs _runMacroAgent when signal is old
+// but rate-limits to at most once per scan cycle (prevents concurrent calls)
+let _agentStalenessCheck = 0;
+setInterval(async () => {
+  const et  = getETTime();
+  const day = et.getDay();
+  if (day === 0 || day === 6) return;
+  const etH = et.getHours() + et.getMinutes() / 60;
+  if (etH < 8.5 || etH > 17.0) return;
+  // Only fire if signal is stale beyond 90 minutes
+  const agentAge = state._agentMacro?.fetchedAt ? Date.now() - state._agentMacro.fetchedAt : Infinity;
+  if (agentAge < 90 * 60 * 1000) return;
+  // Debounce — don't fire more than once per 20 minutes
+  if (Date.now() - _agentStalenessCheck < 20 * 60 * 1000) return;
+  _agentStalenessCheck = Date.now();
+  logEvent("macro", `[AGENT] Signal stale ${Math.round(agentAge/60000)}min — running refresh`);
+  await _runMacroAgent(true);
+}, 5 * 60 * 1000); // check every 5 minutes
 
 // - F2: Pre-market carry-over assessment (9:00 AM ET) -
 // Checks overnight positions against pre-market conditions
