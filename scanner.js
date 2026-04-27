@@ -1024,44 +1024,28 @@ async function runScan() {
   if (skewElevated && state.vix >= 22 && state.vix < 28) logEvent("filter", `SKEW ${(state._skew?.skew||0)} elevated - credit VIX threshold lowered to 22`);
 
 
-  // AVOID HOLD TIME: when agent says avoid, stamp _avoidUntil for 30 minutes
-  // Prevents the avoid -> immediate re-entry pattern (agent flips to calls_on_dips next cycle)
+  // AVOID HOLD: agent entryBias:avoid no longer auto-stamps a 30-minute block.
+  // Agent directional accuracy is 10.1% at 30min — automatic blocks based on this signal
+  // caused more harm than protection (today's startup chaos blocked entries for 23+ minutes).
+  //
+  // entryBias:avoid now logs a prominent warning only. Human can manually set avoid via
+  // dashboard if needed. _avoidUntil can still be set by /api/clear-avoid (inverse) or
+  // manually via dashboard. Emergency triggers (VIX spike, flash crash) still auto-block
+  // via separate mechanisms that don't depend on agent direction accuracy.
   const agentBias = (state._agentMacro || {}).entryBias || (state._dayPlan || {}).entryBias || "neutral";
   if (agentBias === "avoid") {
-    // Only stamp a new avoid hold if one isn't already active.
-    // Previous code re-stamped every scan while bias=avoid, extending the hold by 30min each time.
-    // That turned a 30min hold into a multi-hour block (3 stamps = hold until 10:36am).
-    // Now: stamp once when avoid session starts, let it expire naturally.
-    const alreadyHolding = !!(state._avoidUntil && Date.now() < state._avoidUntil);
-    if (!alreadyHolding) {
-      const holdUntil = Date.now() + 30 * 60 * 1000;
-      state._avoidUntil = holdUntil;
-      // V2.84: Track daily avoid stamp count -- panel flagged this as a hidden entry blocker
-      if (!state._avoidStampsToday) state._avoidStampsToday = { date: "", count: 0 };
-      const todayStr = getETTime().toISOString().slice(0, 10);
-      if (state._avoidStampsToday.date !== todayStr) {
-        state._avoidStampsToday = { date: todayStr, count: 0 };
-      }
-      state._avoidStampsToday.count++;
-      logEvent("filter", `[AVOID] Entry block stamped #${state._avoidStampsToday.count} today - 30min hold until ${new Date(holdUntil).toLocaleTimeString("en-US",{timeZone:"America/New_York"})}`);
-      if (state._avoidStampsToday.count >= 4) {
-        logEvent("warn", `[AVOID] Stamped ${state._avoidStampsToday.count} times today - agent is repeatedly returning avoid bias - may be suppressing entries excessively`);
-      }
+    // Log a warning every 15 minutes at most — don't spam every scan
+    const _lastAvoidWarn = state._lastAvoidWarnAt || 0;
+    if (Date.now() - _lastAvoidWarn > 15 * 60 * 1000) {
+      logEvent("warn", `[AVOID] Agent recommends avoid bias — entries NOT auto-blocked (10.1% accuracy). Use dashboard to manually set hold if needed.`);
+      state._lastAvoidWarnAt = Date.now();
     }
   }
-  // avoidHoldActive: timestamp is authoritative - agent can EXTEND but not CANCEL
-  // Removed: agentBias !== "avoid" escape hatch - it turned a 30min hold into a ~5min speedbump
-  // If early cancellation is ever needed, build an explicit /api/clear-avoid endpoint
+  // Manual avoid hold still respected — set via dashboard or /api endpoints
   const avoidHoldActive = !!(state._avoidUntil && Date.now() < state._avoidUntil);
   if (avoidHoldActive) {
     const minsLeft = ((state._avoidUntil - Date.now()) / 60000).toFixed(0);
-    logEvent("filter", `[AVOID] Entry hold active - ${minsLeft}min remaining (timestamp authoritative)`);
-  }
-  // Agent can extend hold if still saying avoid when timer expires
-  if (!avoidHoldActive && agentBias === "avoid" && state._avoidUntil) {
-    const extendUntil = Date.now() + 30 * 60 * 1000;
-    state._avoidUntil = extendUntil;
-    logEvent("filter", `[AVOID] Hold extended - agent still says avoid, 30min extension stamped`);
+    logEvent("filter", `[AVOID] Entry hold active - ${minsLeft}min remaining (manually set or legacy stamp)`);
   }
   // BF-W2: Enforce macro-defensive cooldown - 30min block on same ticker after defensive close
   if (state._macroDefensiveCooldown) {
