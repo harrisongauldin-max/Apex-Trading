@@ -858,7 +858,18 @@ async function executeCreditSpread(stock, price, score, scoreReasons, vix, optio
       const longMid = longContract.bid > 0 && longContract.ask > 0
         ? parseFloat(((longContract.bid + longContract.ask) / 2).toFixed(2))
         : parseFloat(longContract.ask.toFixed(2));
-      const netCreditLimit = parseFloat((longMid - shortMid).toFixed(2)); // negative = credit
+      // Fill concession: submit at mid minus a small concession to improve fill probability.
+      // Mid-price orders on options spreads rarely fill — market makers need a small edge.
+      // Concession = 10% of the bid-ask spread on the short leg (the wider/more liquid leg),
+      // floored at $0.01, capped at $0.05. This moves the limit price slightly toward the market
+      // without giving up meaningful credit. e.g. short spread $0.01 wide → concession $0.01,
+      // short spread $0.10 wide → concession $0.01, short spread $0.50 wide → concession $0.05.
+      const shortSpread   = shortContract.ask > shortContract.bid ? shortContract.ask - shortContract.bid : 0.02;
+      const concession    = parseFloat(Math.min(0.05, Math.max(0.01, shortSpread * 0.10)).toFixed(2));
+      const midCredit     = parseFloat((shortMid - longMid).toFixed(2));  // positive = credit
+      const limitCredit   = parseFloat(Math.max(0.01, midCredit - concession).toFixed(2)); // reduce credit target slightly
+      const netCreditLimit = parseFloat((-limitCredit).toFixed(2)); // negative = credit received (Alpaca convention)
+      logEvent("filter", `${stock.ticker} credit spread limit: mid $${midCredit.toFixed(2)} - concession $${concession.toFixed(2)} = $${limitCredit.toFixed(2)} (submitted as ${netCreditLimit.toFixed(2)})`);
 
       // C2: Idempotency key -- prevents duplicate orders on network timeout/retry
       // Deterministic: same ticker+direction+timestamp bucket will not double-submit
