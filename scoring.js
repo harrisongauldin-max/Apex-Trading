@@ -497,27 +497,18 @@ function scoreCreditSpread(stock, tradeType, vix, ivRank, spyRSI, spyMACD, spyMo
     else                 { score -= 20; reasons.push(`Bull put: regime ${regime} - bear trend fights bull put thesis (-20)`); }
   }
 
-  // ── 3. AGENT SIGNAL — timing confirmation (0 to +20) ────────────────────────
-  // Credit spreads are structure plays, not directional bets — agent is a TIMING signal
-  // Bear call: bearish/neutral agent = short strike will stay OTM. Bullish = headwind.
-  // Bull put:  bullish/neutral agent = short strike will stay OTM. Bearish = headwind.
-  if (isBearCall) {
-    if (["strongly bearish","bearish"].includes(signal) && confidence === "high") { score += 20; reasons.push(`Agent ${signal} high confidence - bear call thesis strong (+20)`); }
-    else if (["strongly bearish","bearish"].includes(signal))                     { score += 15; reasons.push(`Agent ${signal} - bear call thesis confirmed (+15)`); }
-    else if (signal === "mild bearish")  { score += 8;  reasons.push("Agent mild bearish - bear call thesis adequate (+8)"); }
-    else if (signal === "neutral")       { score += 5;  reasons.push("Agent neutral - bear call viable (+5)"); }
-    else if (signal === "mild bullish")  { score -= 5;  reasons.push("Agent mild bullish - mild headwind for bear call (-5)"); }
-    else if (signal === "bullish")       { score -= 12; reasons.push("Agent bullish - bear call thesis challenged (-12)"); }
-    else                                 { score -= 18; reasons.push("Agent strongly bullish - bear call high risk (-18)"); }
-  } else { // isBullPut
-    if (["strongly bullish","bullish"].includes(signal) && confidence === "high") { score += 20; reasons.push(`Agent ${signal} high confidence - bull put thesis strong (+20)`); }
-    else if (["strongly bullish","bullish"].includes(signal))                     { score += 15; reasons.push(`Agent ${signal} - bull put thesis confirmed (+15)`); }
-    else if (signal === "mild bullish")  { score += 8;  reasons.push("Agent mild bullish - bull put thesis adequate (+8)"); }
-    else if (signal === "neutral")       { score += 5;  reasons.push("Agent neutral - bull put viable (+5)"); }
-    else if (signal === "mild bearish")  { score -= 5;  reasons.push("Agent mild bearish - mild headwind for bull put (-5)"); }
-    else if (signal === "bearish")       { score -= 12; reasons.push("Agent bearish - bull put thesis challenged (-12)"); }
-    else                                 { score -= 18; reasons.push("Agent strongly bearish - bull put high risk (-18)"); }
-  }
+  // ── 3. AGENT SIGNAL — removed from scoring (threshold-only in evaluateEntry) ──
+  // Agent directional accuracy: 10.1% at 30min (n=74). A ±18 swing on a 10%-accurate
+  // signal creates more false blocks than true ones in both directions:
+  //   - bearish agent penalizing bull puts: wrong 90% of time → blocks valid entries
+  //   - bearish agent rewarding bear calls: wrong 90% of time → boosts entries incorrectly
+  // The same logic applies symmetrically to bullish signals on bull puts/bear calls.
+  // Agent signal is preserved as a THRESHOLD modifier in evaluateEntry:
+  //   strongly bearish in Regime A → credit min 65→72 (harder to enter, not impossible)
+  //   bearish in Regime A          → credit min 65→68
+  // Strong setups (75+) enter regardless. Marginal setups (65-72) face a higher bar.
+  // This is logged for visibility — agent signal still appears in score debug.
+  if (signal) reasons.push(`Agent signal: ${signal} (${confidence||"low"}) — scoring impact removed, threshold-only`);
 
   // ── 4. VIX STABILITY — gamma risk management (0 to +15) ─────────────────────
   // Spiking VIX = gamma explosion risk — short strikes can breach fast
@@ -638,8 +629,7 @@ function scoreCreditSpread(stock, tradeType, vix, ivRank, spyRSI, spyMACD, spyMo
     else if (skew >= 130) { suppScore += 3; reasons.push(`SKEW ${skew} elevated - put skew supports bull put (+3)`); }
   }
 
-  // Agent high confidence adds conviction to any credit entry
-  if (confidence === "high") { suppScore += 3; reasons.push("Agent high confidence (+3)"); }
+  // Agent confidence bonus removed — threshold-only approach in evaluateEntry.
 
   const cappedSupp = Math.min(15, suppScore);
   if (cappedSupp > 0) score += cappedSupp;
@@ -804,41 +794,9 @@ function scoreIndexSetup(stock, optionType, spyRSI, spyMACD, spyMomentum, breadt
     // entryBias "puts_on_bounces" means the bounce IS the put entry signal - treat as neutral.
     const bearRegimeForPuts = ["trending_bear","breakdown"].includes(regime);
     const putsBiasOk = entryBias === "puts_on_bounces";
-    if (["strongly bearish","bearish"].includes(signal) && confidence === "high") { score += 35; reasons.push(`Agent ${signal} high confidence (+35)`); }
-    else if (["strongly bearish","bearish"].includes(signal))                     { score += 25; reasons.push(`Agent ${signal} (+25)`); }
-    else if (signal === "mild bearish")                                            { score += 8;  reasons.push(`Agent mild bearish (+8)`); }
-    else if (signal === "neutral")                                                 { score += 0;  reasons.push("Agent neutral (+0)"); }
-    else if (signal === "mild bullish" && (bearRegimeForPuts || putsBiasOk)) {
-      score += 0;
-      reasons.push(`Agent mild bullish in ${bearRegimeForPuts ? "bear regime" : "puts_on_bounces bias"} - bounce entry, treating as neutral (+0)`);
-    }
-    else if (signal === "mild bullish") {
-      if (tradeType === "credit") {
-        reasons.push(`Agent mild bullish in bear regime - bounce entry, treating as neutral (+0)`);
-      } else {
-        const inBearPutsOnBounces = ["trending_bear","breakdown"].includes(regime) && entryBias === "puts_on_bounces";
-        const penalty = inBearPutsOnBounces ? -4 : -8;
-        score += penalty; reasons.push(`Agent mild bullish (${penalty})${inBearPutsOnBounces ? " - regime cap" : ""}`);
-      }
-    }
-    else if (signal === "bullish") {
-      if (tradeType === "credit") {
-        score -= 8; reasons.push("Agent bullish (-8) - regime cap");
-      } else {
-        const inBearPutsOnBounces2 = ["trending_bear","breakdown"].includes(regime) && entryBias === "puts_on_bounces";
-        const penalty = inBearPutsOnBounces2 ? -8 : -15;
-        score += penalty; reasons.push(`Agent bullish (${penalty})${inBearPutsOnBounces2 ? " - regime cap" : ""}`);
-      }
-    }
-    else { // strongly bullish
-      if (tradeType === "credit") {
-        score -= 12; reasons.push("Agent strongly bullish (-12) - regime cap");
-      } else {
-        const inBearPutsOnBounces3 = ["trending_bear","breakdown"].includes(regime) && entryBias === "puts_on_bounces";
-        const penalty = inBearPutsOnBounces3 ? -8 : -20;
-        score += penalty; reasons.push(`Agent ${signal} (${penalty})${inBearPutsOnBounces3 ? " - regime cap" : ""}`);
-      }
-    }
+    // Agent signal removed from debit put scoring — threshold-only in evaluateEntry.
+    // ±35/±25 swings on a 10.1% accurate signal boosted/blocked more than they helped.
+    if (signal) reasons.push(`Agent signal: ${signal} (${confidence}) — scoring impact removed, threshold-only`);
 
     // - Regime confirmation -
     if (["trending_bear","breakdown"].includes(regime))                           { score += 20; reasons.push(`Regime: ${regime} (+20)`); }
@@ -1067,15 +1025,9 @@ function scoreIndexSetup(stock, optionType, spyRSI, spyMACD, spyMomentum, breadt
       // Bypass bearish agent penalty in capitulation — extreme oversold IS the MR entry signal
       score += 5; reasons.push(`Agent ${signal} bypassed - RSI ${spyRSI} capitulation confirms MR call (+5)`);
     }
-    else if (signal === "mild bearish") {
-      score -= 8; reasons.push(`Agent mild bearish (-8)`);
-    }
-    else if (signal === "bearish") {
-      score -= 15; reasons.push(`Agent bearish (-15)`);
-    }
-    else { // strongly bearish
-      const callPenalty = signal === "mild bearish" ? -8 : signal === "bearish" ? -15 : -20;
-      score += callPenalty; reasons.push(`Agent ${signal} (${callPenalty})`);
+    else if (["mild bearish","bearish","strongly bearish"].includes(signal)) {
+      // Agent signal removed from call scoring — threshold-only in evaluateEntry.
+      reasons.push(`Agent signal: ${signal} — scoring impact removed, threshold-only`);
     }
 
     // - Regime confirmation -
@@ -1405,9 +1357,11 @@ function scoreDebitCallSpread(stock, vix, ivRank, rsi, macd, momentum, breadth, 
   const agentAggressive = signal === "aggressive" || signal === "strongly bullish";
   const vixSpiking    = vixOutlook === "spiking";
 
+  // Agent bearish hard block removed — threshold-only in evaluateEntry.
+  // A hard block on a 10.1%-accurate signal wipes legitimate setups 90% of the time.
+  // strongly bearish agent now raises debit call minimum in evaluateEntry (75→82).
   if (agentBearish) {
-    reasons.push(`Agent ${signal} — debit call hard block (bearish macro = calls fail) (BLOCK)`);
-    return { score: 0, reasons, tradeType: "debit_call" };
+    reasons.push(`Agent ${signal} — debit call caution (threshold raised in evaluateEntry, not blocked here)`);
   }
   if (vix > 35) {
     reasons.push(`VIX ${vix.toFixed(1)} > 35 — debit calls blocked in crisis (premium too expensive) (BLOCK)`);
@@ -1520,21 +1474,9 @@ function scoreDebitCallSpread(stock, vix, ivRank, rsi, macd, momentum, breadth, 
   }
 
   // ── 7. AGENT MACRO TIMING (0 to +15) ─────────────────────────────────────
-  // Agent as timing signal — directional confirmation for bull thesis.
-  if (agentAggressive) {
-    score += 15; reasons.push("Agent strongly bullish - debit call timing ideal (+15)");
-  } else if (signal === "bullish" && confidence === "high") {
-    score += 15; reasons.push("Agent bullish high confidence - debit call confirmed (+15)");
-  } else if (signal === "bullish") {
-    score += 12; reasons.push("Agent bullish - debit call thesis supported (+12)");
-  } else if (signal === "mild bullish") {
-    score += 8;  reasons.push("Agent mild bullish - debit call adequate (+8)");
-  } else if (signal === "neutral") {
-    score += 3;  reasons.push("Agent neutral - debit call marginal (+3)");
-  } else if (signal === "mild bearish") {
-    score -= 5;  reasons.push("Agent mild bearish - debit call headwind (-5)");
-  }
-  // strongly bearish already hard-blocked above
+  // Agent signal removed from debit call scoring — threshold-only in evaluateEntry.
+  // (strongly bearish hard block also removed — handled by +7 threshold raise in evaluateEntry)
+  if (signal) reasons.push(`Agent signal: ${signal} (${confidence}) — scoring impact removed, threshold-only`);
 
   // ── SUPPLEMENTARY — capped at +15 ────────────────────────────────────────
   let suppScore = 0;
