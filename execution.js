@@ -560,7 +560,13 @@ async function executeCreditSpread(stock, price, score, scoreReasons, vix, optio
     const targetDelta  = (spreadParamsOverride && spreadParamsOverride.shortDeltaTarget) || 0.20;
     const targetDTE    = (spreadParamsOverride && spreadParamsOverride.targetDTE)        || 35; // panel: 35 DTE lands on monthlies, matches TP/stop calibration
     const minDTE       = (spreadParamsOverride && spreadParamsOverride.minDTE)           || 21; // panel: raised from 14 to match 35 DTE target (avoid weeklies)
-    const minCreditRR  = (spreadParamsOverride && spreadParamsOverride.minCreditRatio)   || 0.25;  // panel CRITICAL #1: 0.20 is breakeven, 0.25 is true EV-positive floor
+    // Dynamic R/R minimum: scales with VIX. Lower IV = thinner premium = need wider spreads.
+    // At VIX 28+: 25% minimum (rich premium, tight spreads work). At VIX 22-27: 20% minimum.
+    // At VIX < 22: 15% minimum (wider spreads needed, still EV-positive at this win rate).
+    // The override from spreadParams always wins (allows regime-specific tuning).
+    const _vixNow      = vix || state.vix || 25;
+    const _vixRRFloor  = _vixNow >= 28 ? 0.25 : _vixNow >= 22 ? 0.20 : 0.15;
+    const minCreditRR  = (spreadParamsOverride && spreadParamsOverride.minCreditRatio) || _vixRRFloor;
     // Spread width: price-relative from entryEngine spreadParams (panel 4/22/2026)
     // creditWidthPct: VIX>35=1.5%, VIX28-35=1.0%, VIX20-28=0.8%, VIX<20=disabled
     // Clamp: min $2 (bid-ask eats smaller credits), max $15 (SPY cap)
@@ -669,11 +675,17 @@ async function executeCreditSpread(stock, price, score, scoreReasons, vix, optio
     // Credit spread bid-ask maximum — tighter than the module constant (0.30) used for debit spreads.
     // Credit spreads are sensitive to execution — wide bid-ask = can't hit mid, slippage eats the credit.
     const CREDIT_MAX_SPREAD_PCT = 0.20;
-    // Candidate widths in $0.50 increments from $2 to $15 (clamped to instrument)
     const maxDeltaShort = (spreadParamsOverride && spreadParamsOverride.shortDeltaMax) || 0.35;
     const minDeltaShort = (spreadParamsOverride && spreadParamsOverride.shortDeltaMin) || 0.12;
+    // Dynamic width range based on VIX: at low VIX, wider spreads needed to collect enough credit.
+    // At VIX 28+: - range (tight spreads work, premium is rich).
+    // At VIX 22-27: -2 range (need more width to collect 20%+ R/R).
+    // At VIX < 22: -5 range (very thin premium, only wide spreads viable).
+    const _vixForWidth = vix || state.vix || 25;
+    const minWidth = _vixForWidth >= 28 ? 2 : _vixForWidth >= 22 ? 3 : 5;
+    const maxWidth = Math.min(15, _vixForWidth >= 28 ? 8 : _vixForWidth >= 22 ? 12 : 15);
     const candidateWidths = [];
-    for (let w = 2; w <= Math.min(15, spreadWidth * 2); w += (price < 200 ? 0.5 : 1)) {
+    for (let w = minWidth; w <= maxWidth; w += (price < 200 ? 0.5 : 1)) {
       candidateWidths.push(Math.round(w * 2) / 2);
     }
 
@@ -1046,11 +1058,23 @@ async function executeTrade(stock, price, score, scoreReasons, vix, optionType =
   }
 
   // Duplicate guard — if a pending order exists for this ticker, skip.
-  // executeTrade (MR/naked) doesn't have full lifecycle management but needs
-  // at minimum to not fire twice in the same scan window.
   if (!_dryRunMode && state._pendingOrder && state._pendingOrder.ticker === stock.ticker) {
     logEvent("filter", `${stock.ticker} pending order exists - skipping naked/MR submission`);
     return false;
+  }
+  // Set lightweight _pendingOrder for the duration of the 10s poll
+  // Prevents a concurrent scan from submitting the same ticker during fill wait
+  if (!_dryRunMode) {
+    state._pendingOrder = {
+      orderId:     `argo-naked-${stock.ticker}-${Date.now()}`,
+      ticker:      stock.ticker,
+      optionType,
+      isCreditSpread: false,
+      isNaked:     true,
+      submittedAt: Date.now(),
+      _preSubmit:  true,
+    };
+    markDirty();
   }
   // Submit order to Alpaca - fill confirmation happens inside
   // Only submit if we have a real contract symbol (not an estimate)
@@ -1107,9 +1131,13 @@ async function executeTrade(stock, price, score, scoreReasons, vix, optionType =
           // Cancel unfilled order and abort trade
           try { await alpacaDelete(`/orders/${alpacaOrderId}`); } catch(e) {}
           logEvent("warn", `Order ${alpacaOrderId} not filled in ${FILL_TIMEOUT/1000}s - cancelled, skipping trade`);
+          state._pendingOrder = null; // Bug E3 FIX: clear pending so next scan can try
+          markDirty();
           alpacaOrderId = null; // signal to caller to abort
         } else if (fillPrice) {
           contract.premium = fillPrice; // use actual fill price not limit price
+          state._pendingOrder = null; // Bug E4 FIX: clear pending after confirmed fill
+          markDirty();
           // Confirmed live fill - now count as a real trade for Kelly calibration
           if (!state.dataQuality) state.dataQuality = { realTrades: 0, estimatedTrades: 0, totalTrades: 0 };
           state.dataQuality.realTrades++;
