@@ -623,17 +623,16 @@ setTimeout(async () => {
   }
 }, 5000);
 
-// Poll every 3 minutes — agent internally decides whether to actually call Claude
-setInterval(async () => {
-  const et  = getETTime();
-  const day = et.getDay();
-  if (day === 0 || day === 6) return;
-  const etH = et.getHours() + et.getMinutes() / 60;
-  if (etH < 8.5 || etH > 17.0) return; // 8:30am ET – 5pm ET only
-  if (Date.now() - _lastAgentInterval < 2.5 * 60 * 1000) return; // 2.5 min debounce
-  _lastAgentInterval = Date.now();
-  await _runMacroAgent();
-}, 3 * 60 * 1000);
+// Intraday 3-minute polling REMOVED — agent directional accuracy 10.1% at 30min (n=74).
+// A signal that's wrong 90% of the time doesn't justify 60 API calls per session.
+// Agent still runs on:
+//   1. Startup (fresh signal for the session)
+//   2. Emergency triggers (fed emergency, flash crash, market halt — _shouldRunMacroAgent detects these)
+//   3. Overnight digest (11pm + 7:30am — separate scheduled functions below)
+//   4. Pre-market compute (9:00am ET)
+// The scanner still calls getAgentMacroAnalysis() on each scan — the internal
+// _shouldRunMacroAgent() gate returns shouldRun:false unless headlines changed or
+// an emergency keyword is detected. So emergencies still fire instantly.
 
 // - F2: Pre-market carry-over assessment (9:00 AM ET) -
 // Checks overnight positions against pre-market conditions
@@ -1656,6 +1655,32 @@ app.post("/api/clear-avoid", requireSecret, async (req, res) => {
 // Clear entry attempt cooldowns — fires when orders are force-cleared due to connectivity
 // failures (ECONNRESET etc.) that set false cooldowns even though no position was opened.
 // Optional ?ticker=SPY to clear a single ticker, or clears all if not specified.
+// Nuclear blocker clear — clears all active holds simultaneously:
+// avoid hold, VIX cooldown, entry attempt cooldowns, pending order state.
+// Use when ARGO is stuck after a connectivity failure or bad agent signal.
+app.post("/api/clear-blocker", requireSecret, async (req, res) => {
+  const cleared = [];
+  if (state._avoidUntil) { state._avoidUntil = null; cleared.push("avoid hold"); }
+  if (state._vixSpikeAt)  { state._vixSpikeAt  = null; cleared.push("VIX cooldown"); }
+  if (state._entryAttemptCooldown && Object.keys(state._entryAttemptCooldown).length) {
+    const tickers = Object.keys(state._entryAttemptCooldown).join(", ");
+    state._entryAttemptCooldown = {};
+    cleared.push(`entry cooldowns (${tickers})`);
+  }
+  if (state._pendingOrder) {
+    const sym = state._pendingOrder.ticker || "unknown";
+    state._pendingOrder = null;
+    cleared.push(`pending order (${sym})`);
+  }
+  markDirty();
+  await saveStateNow();
+  const msg = cleared.length
+    ? `Cleared: ${cleared.join(" | ")}`
+    : "Nothing to clear — no active blockers";
+  logEvent("circuit", `[CLEAR-BLOCKER] ${msg}`);
+  res.json({ ok: true, message: msg, cleared });
+});
+
 app.post("/api/clear-entry-cooldown", requireSecret, async (req, res) => {
   const ticker = req.query.ticker || req.body?.ticker;
   if (ticker) {
