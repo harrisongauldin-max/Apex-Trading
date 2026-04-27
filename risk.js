@@ -360,7 +360,13 @@ async function checkAllFilters(stock, price, prefetchedBars = null) { // OPT3: a
     if (priceYest) {
       const premarketMove = (price - priceYest) / priceYest;
       if (premarketMove <= PREMARKET_NEGATIVE) {
-        return { pass:false, reason:`Pre-market negative (${(premarketMove*100).toFixed(1)}%) - bearish open` };
+        // Bug-premarket FIX: negative pre-market blocks debit puts (stock falling = put thesis weakened paradoxically
+        // since it already moved). But for credit puts, pre-market drop = short strike further away = safer.
+        // Check if this is a credit put context — if stock.tradeIntent or _creditMode is set, bypass.
+        const isCreditPutContext = stock._creditPutMode || stock._isCreditSpread;
+        if (!isCreditPutContext) {
+          return { pass:false, reason:`Pre-market negative (${(premarketMove*100).toFixed(1)}%) - bearish open` };
+        }
       }
       if (premarketMove >= PREMARKET_STRONG_MOVE) {
         logEvent("scan", `${stock.ticker} strong pre-market +${(premarketMove*100).toFixed(1)}% - boost signal`);
