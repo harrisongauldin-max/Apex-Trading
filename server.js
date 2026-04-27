@@ -1653,6 +1653,28 @@ app.post("/api/clear-avoid", requireSecret, async (req, res) => {
   res.json({ ok: true, message: "Avoid hold cleared" });
 });
 
+// Clear entry attempt cooldowns — fires when orders are force-cleared due to connectivity
+// failures (ECONNRESET etc.) that set false cooldowns even though no position was opened.
+// Optional ?ticker=SPY to clear a single ticker, or clears all if not specified.
+app.post("/api/clear-entry-cooldown", requireSecret, async (req, res) => {
+  const ticker = req.query.ticker || req.body?.ticker;
+  if (ticker) {
+    if (state._entryAttemptCooldown) {
+      delete state._entryAttemptCooldown[ticker.toUpperCase()];
+      logEvent("circuit", `Entry cooldown cleared for ${ticker.toUpperCase()} — re-entry enabled`);
+    }
+    markDirty();
+    await saveStateNow();
+    res.json({ ok: true, message: `Entry cooldown cleared for ${ticker.toUpperCase()}` });
+  } else {
+    state._entryAttemptCooldown = {};
+    markDirty();
+    await saveStateNow();
+    logEvent("circuit", "All entry cooldowns cleared — re-entry enabled for all tickers");
+    res.json({ ok: true, message: "All entry cooldowns cleared" });
+  }
+});
+
 // Full reset - wipes everything back to fresh $10,000 state
 app.post("/api/full-reset", requireSecret, async (req, res) => {
   // Cancel all open Alpaca positions first
