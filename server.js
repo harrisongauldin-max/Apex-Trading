@@ -1688,6 +1688,15 @@ app.post("/api/clear-blocker", requireSecret, async (req, res) => {
     state._pendingOrder = null;
     cleared.push(`pending order (${sym})`);
   }
+  // Bug-spiral FIX: clear spiral so March 25th losses don't block April+ entries
+  if (state._spiralActive) {
+    cleared.push(`spiral block (${state._spiralActive})`);
+    state._spiralActive = null;
+  }
+  if (state._spiralTracker && (state._spiralTracker.put >= 5 || state._spiralTracker.call >= 5)) {
+    state._spiralTracker = { put: 0, call: 0 };
+    cleared.push('spiral counters reset');
+  }
   markDirty();
   await saveStateNow();
   const msg = cleared.length
