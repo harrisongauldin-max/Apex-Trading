@@ -1399,7 +1399,11 @@ async function runScan() {
     const maxPerTicker = stock.isIndex ? 3 : 2;
     const existingForTicker = state.positions.filter(p => p.ticker === stock.ticker);
     const logicalExisting = new Set(existingForTicker.map(p => `${p.optionType}|${p.expDate}`)).size;
-    const maxCombined = stock.isIndex ? 2 : 1;
+    // Bug13 FIX: maxCombined was 2 for index (same as risk.js maxPerTicker=3 discrepancy).
+    // A ghost TLT position (logicalExisting=2) would skip TLT scoring entirely here.
+    // Align with risk.js: index instruments allow up to 3 logical positions.
+    // The heat cap and risk.js maxPerTicker are the real enforcers.
+    const maxCombined = stock.isIndex ? 3 : 2;
     if (logicalExisting >= maxCombined) continue;
 
     // - F14: Check ticker blacklist -
@@ -1790,7 +1794,9 @@ async function runScan() {
         // In bear trend, creditCallModeActive → check callSetup.score; in bull/choppy → putSetup.score
         const _gldBestScore   = isBearTrend ? callSetup.score : putSetup.score;
         const _gldCreditMode  = creditCallModeActive || creditModeActive;
-        const _gldIntentType  = (_gldCreditMode && _gldBestScore >= MIN_SCORE) ? _gldCreditType : "debit_put";
+        // Bug12 FIX: was using MIN_SCORE (70) — GLD credit puts at score 65-69 were misclassified as debit_put
+        // and blocked by DXY gate unnecessarily. Use MIN_SCORE_CREDIT (65) for correct classification.
+        const _gldIntentType  = (_gldCreditMode && _gldBestScore >= MIN_SCORE_CREDIT) ? _gldCreditType : "debit_put";
         const gldPutGate  = isGLDEntryAllowed("put",  dxy5d, spy5dReturn, state.vix, liveStock.rsi, liveStock.price || 0, gldMA20Live, _gldIntentType);
         if (!gldCallGate.allowed) { callSetup.score = 0; logEvent("filter", gldCallGate.reason); }
         if (!gldPutGate.allowed)  { putSetup.score  = 0; logEvent("filter", gldPutGate.reason);  }
@@ -2302,7 +2308,7 @@ async function runScan() {
     const mrWindowOpen = etHourNow < 15.5; // scan-level etHourNow
     if (entryWindowClosed && !dryRunMode) {
       if (!isMREntry) {
-        logEvent("filter", `${stock.ticker} entry window closed (after 3pm) - normal entries blocked`);
+        logEvent("filter", `${stock.ticker} entry window closed (after 3:30pm ET) - normal entries blocked`);
         continue;
       } else if (!mrWindowOpen) {
         logEvent("filter", `${stock.ticker} MR entry window closed (after 3:30pm) - all entries blocked`);
@@ -2317,7 +2323,9 @@ async function runScan() {
     // SPY/QQQ/IWM are highly correlated - count combined as single direction
     // GLD has negative beta - call spreads on GLD during equity selloff = hedge
     // Don't count GLD toward put heat cap (it's an uncorrelated asset)
-    const MAX_DIR_HEAT = 0.40;
+    // Directional heat cap matches overall heat cap — in Regime A (all puts), one direction fills all.
+    // The total heat cap (40% at VIX 25+) is the true concentration governor.
+    const MAX_DIR_HEAT = effectiveHeatCap();
     const isGLDHedge = stock.ticker === "GLD" && optionType === "call";
     const dirCost = state.positions
       .filter(p => {
@@ -2457,6 +2465,8 @@ async function runScan() {
     if (heatPct() >= effectiveHeatCap()) break;
     if (state.cash <= CAPITAL_FLOOR) break;
 
+    // Tag stock with credit mode so checkAllFilters can exempt credit puts from debit-era blocks
+    stock._creditPutMode = !!(tradeIntent && tradeIntent.type === "credit_put");
     // BUG5 FIX: was passing tradeIntent.type as prefetchedBars arg (wrong). Pass null.
     const { pass, reason } = await checkAllFilters(stock, price, null);
     if (!pass) {
