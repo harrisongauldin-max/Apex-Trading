@@ -240,9 +240,16 @@ function getRegimeRulebook(state) {
   //   Raised ceiling from 0.20 to 0.25 — the 0.20 ceiling rejected valid 5% OTM contracts.
   //   Black-Scholes verified: 5% OTM at 14 DTE = 0.17, at 21 DTE = 0.21, at 28 DTE = 0.24.
   //   All of these are in the professional range and should be accepted.
-  const shortDeltaTarget = isCrisis ? 0.17 : 0.20;  // center — 5% OTM at 21 DTE
-  const shortDeltaMax    = 0.25;                      // ceiling raised: covers 5% OTM at 28 DTE
-  const shortDeltaMin    = 0.12;                      // floor — below this too little premium
+  // Delta targets: regime-specific.
+  // Regime A (bull): 0.25 delta = ~4% OTM. Closer to ATM = more credit = R/R gate clears.
+  //   At VIX 28, SPY $714: 0.20 delta = short $678 = $0.84 credit = 14% R/R (fails 20% min).
+  //   At VIX 28, SPY $714: 0.25 delta = short $688 = $2.30 credit = 38% R/R (passes easily).
+  //   Buffer: $714 - $688 = $26. With 25 DTE and VIX 28, that's ~1.8 sigma of breathing room.
+  // Regime B (bear): 0.20 delta = ~5% OTM. More conservative — trend is against position.
+  // Regime C (crisis): 0.17 delta = ~6% OTM. Maximum safety margin in volatile conditions.
+  const shortDeltaTarget = isCrisis ? 0.17 : isBullRegime ? 0.25 : 0.20;
+  const shortDeltaMax    = isBullRegime ? 0.32 : 0.25;  // higher ceiling in bull regime
+  const shortDeltaMin    = 0.12;                         // floor — below this too little premium
 
   // Change 4 (GS/VS): portfolio vega cap
   //   $300 per VIX point total portfolio vega. At 3 positions each with $120 vega,
@@ -627,6 +634,42 @@ function evaluateEntry(candidate, rulebook, state, context = {}) {
   // When not in drawdown: default to minScore → no accidental override
   const ddMinScore = context.drawdownMinScore ?? minScore;
   minScore = Math.max(minScore, ddMinScore);
+
+  // ── Agent signal threshold adjustment ────────────────────────────────────────
+  // Agent no longer affects individual scores (10.1% directional accuracy).
+  // Instead, a contrary macro signal raises the MINIMUM required score for entry.
+  // Applied symmetrically across ALL trade types — same signal, same accuracy,
+  // same treatment regardless of whether it's credit or debit, puts or calls.
+  //
+  // Contrary = agent direction opposes the trade direction:
+  //   Bull puts / debit puts  → bearish agent is aligned, bullish is contrary
+  //   Bear calls / debit calls → bullish agent is aligned, bearish is contrary
+  //
+  // Threshold raises (contrary signal only):
+  //   strongly contrary → +7 above base minimum
+  //   contrary          → +3 above base minimum
+  //   mild contrary     → +0 (noise level, not worth raising bar)
+  //
+  // Strong setups (e.g. score 85) clear the raised bar and enter regardless.
+  // Marginal setups (e.g. score 68) face higher bar during uncertain macro.
+  const agentSignal   = (context.agentSignal || context.agentMacroSignal || "").toLowerCase();
+  const regimeClass   = rb.regimeClass || "A";
+  const isPutTrade    = optionType === "put"  || tradeType === "credit_put"  || tradeType === "debit_put";
+  const isCallTrade   = optionType === "call" || tradeType === "credit_call" || tradeType === "debit_call";
+  // Contrary signal threshold: adds to the BASE trade-type minimum, not the accumulated minScore.
+  // This prevents stacking with drawdown protocol (e.g. drawdown raises to 85, agent adds +7 → 92).
+  // Base minimums: credit=65, debit_put=70, debit_call=75. Agent adds +7 or +3 to those floors only.
+  const baseTradeMin  = tradeType.startsWith("credit") ? rb.minScoreCredit
+                      : tradeType === "debit_call"     ? (rb.minScoreDebitCall || 75)
+                      : rb.minScorePut;  // debit_put / naked put
+  if (isPutTrade) {
+    if      (agentSignal === "strongly bearish") { minScore = Math.max(minScore, baseTradeMin + 7); }
+    else if (agentSignal === "bearish")          { minScore = Math.max(minScore, baseTradeMin + 3); }
+  }
+  if (isCallTrade) {
+    if      (agentSignal === "strongly bullish") { minScore = Math.max(minScore, baseTradeMin + 7); }
+    else if (agentSignal === "bullish")          { minScore = Math.max(minScore, baseTradeMin + 3); }
+  }
 
   if (score < minScore)
     return { pass: false, reason: `score ${score} below min ${minScore}`, minScore };
