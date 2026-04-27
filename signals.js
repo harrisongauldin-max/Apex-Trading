@@ -460,7 +460,9 @@ const effectiveHeatCap = (strategyType) => {
   // Default: debit spreads and correlated credit spreads
   if (phase === "preservation") return state.vix >= 25 ? 0.30 : 0.40;
   if (phase === "transition")   return state.vix >= 30 ? 0.35 : state.vix >= 25 ? 0.45 : 0.50;
-  return state.vix >= 30 ? 0.40 : state.vix >= 25 ? 0.50 : MAX_HEAT;
+  // Heat cap reduced for paper trading validation: 4-5 positions max at $30k.
+  // At 5% margin/position: 40% cap = 8 positions max. With 5 instruments max = 5 positions.
+  return state.vix >= 30 ? 0.35 : state.vix >= 25 ? 0.40 : 0.50;
 }
 
 function getAccountPhase() {
