@@ -111,7 +111,11 @@ function getRegimeRulebook(state) {
   // Dinesh: bullPutActive — sell put spreads below market in Regime A
   // Same EV math as bear calls but trend-aligned. Gate: Regime A + IVR elevated + not macro aggressive
   // Risk Manager: higher minScore required — bull trend can reverse and put spreads lose on crashes
-  const bullPutActive   = isBullRegime && creditAllowedVIX && !isMacroBullish && !agentStale;
+  // BUG1 FIX: agentStale removed from bullPutActive gate.
+  // Stale agent uses keyword fallback — entries should not be blocked because the agent
+  // hasn't refreshed in 30min. Staleness is logged and the refresh mechanism handles it.
+  // Blocking ALL credit puts when agent is stale is a total entry kill (confirmed: 137min blackout today).
+  const bullPutActive   = isBullRegime && creditAllowedVIX && !isMacroBullish;
   const creditPutActive = (agentChoppy || agentSaysCredit ||
                            (isBearRegime && creditAllowedVIX) ||
                            bullPutActive) && vixFloor;
@@ -155,7 +159,7 @@ function getRegimeRulebook(state) {
     below200MACallBlock: !!(state._spyMA200 && state._liveSPY && state._liveSPY < state._spyMA200),
 
     // [Regime A only] — not applicable in bear/crisis
-    spyGapUpBlockPuts:   !!(state._spyGapUp && isBullRegime),
+    spyGapUpBlockPuts:   false, // BUG4 FIX: removed — gap-up is supportive for credit puts, not a block
     afternoonMinActive:  isBullRegime,   // late-day risk reduction in bull only
     macdContradictsGate: isBullRegime,   // MACD contradiction only meaningful in A
 
@@ -168,7 +172,7 @@ function getRegimeRulebook(state) {
     creditCallActive,
     avoidHoldActive:     !!(state._avoidUntil && Date.now() < state._avoidUntil),
     agentStale,
-    vixFallingPause:     !!(state._vixFallingPause),
+    vixFallingPause:     false, // BUG6 FIX: state._vixFallingPause is never written — gate was always dead. Removed.
     postReversalBlock:   !!(state._macroReversalAt &&
                            (Date.now() - state._macroReversalAt) < 30 * 60 * 1000),
     postCrisisLock:      !!(state._postCrisisLock),
@@ -537,10 +541,8 @@ function evaluateEntry(candidate, rulebook, state, context = {}) {
       return { pass: false, reason: "Regime C — debit puts blocked, credit structures only" };
     if (g.choppyDebitBlock && !tradeType.startsWith("credit"))
       return { pass: false, reason: "agent:none — debit puts blocked, credit mode only" };
-    if (g.spyGapUpBlockPuts)
-      return { pass: false, reason: "SPY gap-up — puts paused in Regime A (mean reversion thesis weakened)" };
-    if (g.vixFallingPause)
-      return { pass: false, reason: "VIX falling — IV crush risk, debit puts lose value as vol compresses" };
+    // BUG4 FIX: spyGapUpBlockPuts removed — gap-up is supportive for credit puts (further from short strike).
+    // BUG6 FIX: vixFallingPause removed — state._vixFallingPause was never written, gate was always dead.
     if (g.postReversalBlock)
       return { pass: false, reason: "post-reversal cooldown — 30min re-entry block (macro-reversal pattern)" };
   }
@@ -613,17 +615,11 @@ function evaluateEntry(candidate, rulebook, state, context = {}) {
 
   // agentMinAdj = 0 (removed) — no bar adjustment
 
-  // Afternoon minimum [Regime A only]
-  // Late-day entries in bull market have elevated overnight gap risk
-  // In Regime B, afternoon is when bounces run out of steam — best put timing
-  // Afternoon minimum: Regime A only, debit puts/calls only
-  // Credit spreads don't have overnight gap risk (defined risk structure)
-  // and don't need the afternoon bar raise
+  // BUG8 FIX: afternoonMinActive zombie removed.
+  // Raised debit minimums to 85-90 after 2:30pm with VIX>=25. Panel consensus: removed.
+  // ARGO trades 5 index ETFs with defined-risk spreads — afternoon gap risk is bounded.
+  // The 3pm entry window is the correct and only afternoon gate.
   const isCredit = tradeType && tradeType.startsWith("credit");
-  if (g.afternoonMinActive && isLateDay && !isCredit) {
-    const afternoonMin = rb.vix >= 30 ? 90 : rb.vix >= 25 ? 85 : minScore;
-    minScore = Math.max(minScore, afternoonMin);
-  }
 
   // MACD contradiction gate removed (panel: redundant with score system in Regime A)
 
@@ -632,7 +628,11 @@ function evaluateEntry(candidate, rulebook, state, context = {}) {
   // Using BASE_MIN_SCORE was silently overriding minScoreCredit=65 → 70 for all credits
   // When in drawdown: context.drawdownMinScore is elevated above normal → correctly raises bar
   // When not in drawdown: default to minScore → no accidental override
-  const ddMinScore = context.drawdownMinScore ?? minScore;
+  // BUG3 FIX: drawdownMinScore was always 70 (MIN_SCORE) even with no drawdown,
+  // silently elevating credit minimums from 65→70. Only apply drawdown override
+  // when actually in drawdown (level != normal) — pass flag from scanner.
+  const inDrawdown   = context.drawdownLevel && context.drawdownLevel !== "normal";
+  const ddMinScore   = inDrawdown ? (context.drawdownMinScore ?? minScore) : minScore;
   minScore = Math.max(minScore, ddMinScore);
 
   // ── Agent signal threshold adjustment ────────────────────────────────────────
