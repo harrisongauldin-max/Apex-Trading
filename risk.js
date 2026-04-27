@@ -225,13 +225,28 @@ async function checkScaleIns() {
 async function checkAllFilters(stock, price, prefetchedBars = null) { // OPT3: accept pre-fetched bars
   const fails = [];
 
-  // 0. Entry attempt cooldown — if a pending order for this ticker was recently force-cleared
-  // (cancel deadlock or retry failure), block new entries for 60 minutes to prevent repeat deadlock cycles
-  // accumulating on Alpaca while ARGO doesn't know the previous order's status
+  // 0a. Recent close cooldown — block re-entry on the same ticker for 15 minutes after any close.
+  // Prevents immediate re-entry into a just-exited position. Gives Alpaca time to settle,
+  // avoids chasing a just-stopped position, and reduces same-direction re-entry on volatile opens.
+  // 15 minutes is enough to confirm the close settled and price action has stabilized.
+  if (!state._dryRunMode) {
+    const fifteenMinsAgo = Date.now() - 15 * 60 * 1000;
+    const recentClose = (state.closedTrades || [])
+      .filter(t => t.ticker === stock.ticker && t.closeTime && t.closeTime > fifteenMinsAgo)
+      .sort((a, b) => b.closeTime - a.closeTime)[0];
+    if (recentClose) {
+      const minsAgo  = Math.floor((Date.now() - recentClose.closeTime) / 60000);
+      const minsLeft = 15 - minsAgo;
+      return { pass: false, reason: `Re-entry cooldown: ${stock.ticker} closed ${minsAgo}min ago (${recentClose.reason}) — waiting ${minsLeft}min` };
+    }
+  }
+
+  // 0b. Order deadlock cooldown — if a pending order was force-cleared (cancel deadlock
+  // or retry failure), block new entries for 60 minutes to prevent repeat ghost order cycles
   if (state._entryAttemptCooldown && !state._dryRunMode) {
     const lastAttempt = state._entryAttemptCooldown[stock.ticker];
     if (lastAttempt) {
-      const cooldownMs  = 60 * 60 * 1000; // 60 minutes — long enough to prevent repeat deadlock cycles
+      const cooldownMs  = 20 * 60 * 1000; // 20 minutes — breaks retry cycle; R/R gates prevent marginal re-entries
       const elapsed     = Date.now() - lastAttempt;
       // Only apply cooldown within the same trading session (same calendar day ET).
       // If the force-clear happened yesterday, it's irrelevant — don't block today's entries.
@@ -259,7 +274,7 @@ async function checkAllFilters(stock, price, prefetchedBars = null) { // OPT3: a
 
   // 2. Circuit breakers
   if (!state.circuitOpen)       return { pass:false, reason:"Daily circuit breaker tripped" };
-  if (!state.weeklyCircuitOpen) return { pass:false, reason:"Weekly circuit breaker tripped" };
+  // BUG2 FIX: Weekly circuit breaker removed from risk.js — penalizes new code for old losses.
 
   // 3. Capital floor — halt all operations, not just new entries
   if (state.cash <= CAPITAL_FLOOR) {
