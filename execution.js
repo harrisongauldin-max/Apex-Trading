@@ -361,10 +361,15 @@ async function executeIronCondor(stock, price, score, scoreReasons, vix) {
   }
 }
 
-async function executeSpreadTrade(stock, price, score, scoreReasons, vix, optionType, buyContract, sellContract, isChoppyEntry = false) {
+async function executeSpreadTrade(stock, price, score, scoreReasons, vix, optionType, buyContract, sellContract, isChoppyEntry = false, tradeTypeOverride = null) {
   if (!buyContract || !sellContract) return null;
-  // BUG-3: Duplicate order guard - same protection as credit spreads
-  // If Alpaca already has a short leg in this ticker+direction, don't add another long+short pair
+  // _pendingOrder guard — prevents duplicate submissions during fill poll window.
+  // Credit spreads have full lifecycle management; debit spreads use a simpler version.
+  if (!_dryRunMode && state._pendingOrder && state._pendingOrder.ticker === stock.ticker) {
+    logEvent("filter", `[SPREAD] Pending order exists for ${stock.ticker} - skipping debit spread submission`);
+    return null;
+  }
+  // Duplicate position guard - same protection as credit spreads
   if (!_dryRunMode) {
     const existingSameDir = state.positions.filter(p =>
       p.ticker === stock.ticker && p.optionType === optionType
@@ -456,15 +461,22 @@ async function executeSpreadTrade(stock, price, score, scoreReasons, vix, option
     try {
       // - MULTI-LEG ORDER - both legs submit and fill atomically -
       // Uses Alpaca mleg order class - no partial fill risk, no sequential timing
-      // limit_price = net debit (positive = we pay, negative = we receive)
-      // Use mid price for better fills than ask/bid separately
-      const buyMid  = buyContract.bid > 0 && buyContract.ask > 0
+      // limit_price = natural debit: buyAsk - sellBid (what you actually pay on immediate fill)
+      // Mid-price orders consistently fail to fill on Alpaca mleg — same lesson as credit spreads.
+      // Natural debit = buy at ask + sell at bid. If market is crossed, fall back to mid.
+      const buyAsk   = buyContract.ask  > 0 ? buyContract.ask  : buyContract.premium;
+      const sellBid  = sellContract.bid > 0 ? sellContract.bid : sellContract.premium;
+      const buyMid   = buyContract.bid > 0 && buyContract.ask > 0
         ? parseFloat(((buyContract.bid + buyContract.ask) / 2).toFixed(2))
         : parseFloat(buyContract.ask.toFixed(2));
-      const sellMid = sellContract.bid > 0 && sellContract.ask > 0
+      const sellMid  = sellContract.bid > 0 && sellContract.ask > 0
         ? parseFloat(((sellContract.bid + sellContract.ask) / 2).toFixed(2))
         : parseFloat(sellContract.bid.toFixed(2));
-      const netDebitLimit = parseFloat((buyMid - sellMid).toFixed(2));
+      const naturalDebit  = parseFloat((buyAsk - sellBid).toFixed(2));
+      const midDebit      = parseFloat((buyMid - sellMid).toFixed(2));
+      // Use natural debit if positive; fall back to mid if market is crossed
+      const netDebitLimit = naturalDebit > 0 ? naturalDebit : Math.max(0.05, midDebit);
+      logEvent("filter", `${stock.ticker} debit spread limit: mid $${midDebit.toFixed(2)} | natural (ask-bid) $${naturalDebit.toFixed(2)} → submitting $${netDebitLimit.toFixed(2)}`);
 
       // C2: Idempotency key -- prevents duplicate fills on network timeout
       const _clientOrderId = `argo-ds-${stock.ticker}-${optionType}-${Math.floor(Date.now()/10000)}`;
@@ -852,24 +864,30 @@ async function executeCreditSpread(stock, price, score, scoreReasons, vix, optio
     try {
       // - MULTI-LEG ORDER for credit spread -
       // limit_price is NEGATIVE for credit (we receive money)
-      const shortMid = shortContract.bid > 0 && shortContract.ask > 0
+      // Limit price: submit at the natural bid-side credit (short_bid - long_ask).
+      // Mid-price orders consistently fail to fill on Alpaca mleg — market makers require
+      // the natural price. Mid is typically $0.10-0.20 better than where fills actually happen
+      // on each leg, so net mid can be $0.20-0.40 away from fillable prices.
+      //
+      // Natural credit = short_bid - long_ask = what you collect on immediate fill.
+      // If natural credit <= 0 (crossed market), use 25% of mid as a floor.
+      // This trades some premium for actual fills — unfilled orders collect $0.
+      const shortBid      = shortContract.bid > 0 ? shortContract.bid : shortContract.premium;
+      const longAsk       = longContract.ask  > 0 ? longContract.ask  : longContract.premium;
+      const shortMid      = shortContract.bid > 0 && shortContract.ask > 0
         ? parseFloat(((shortContract.bid + shortContract.ask) / 2).toFixed(2))
         : parseFloat(shortContract.bid.toFixed(2));
-      const longMid = longContract.bid > 0 && longContract.ask > 0
+      const longMid       = longContract.bid > 0 && longContract.ask > 0
         ? parseFloat(((longContract.bid + longContract.ask) / 2).toFixed(2))
         : parseFloat(longContract.ask.toFixed(2));
-      // Fill concession: submit at mid minus a small concession to improve fill probability.
-      // Mid-price orders on options spreads rarely fill — market makers need a small edge.
-      // Concession = 10% of the bid-ask spread on the short leg (the wider/more liquid leg),
-      // floored at $0.01, capped at $0.05. This moves the limit price slightly toward the market
-      // without giving up meaningful credit. e.g. short spread $0.01 wide → concession $0.01,
-      // short spread $0.10 wide → concession $0.01, short spread $0.50 wide → concession $0.05.
-      const shortSpread   = shortContract.ask > shortContract.bid ? shortContract.ask - shortContract.bid : 0.02;
-      const concession    = parseFloat(Math.min(0.05, Math.max(0.01, shortSpread * 0.10)).toFixed(2));
-      const midCredit     = parseFloat((shortMid - longMid).toFixed(2));  // positive = credit
-      const limitCredit   = parseFloat(Math.max(0.01, midCredit - concession).toFixed(2)); // reduce credit target slightly
-      const netCreditLimit = parseFloat((-limitCredit).toFixed(2)); // negative = credit received (Alpaca convention)
-      logEvent("filter", `${stock.ticker} credit spread limit: mid $${midCredit.toFixed(2)} - concession $${concession.toFixed(2)} = $${limitCredit.toFixed(2)} (submitted as ${netCreditLimit.toFixed(2)})`);
+      const midCredit     = parseFloat((shortMid - longMid).toFixed(2));
+      const naturalCredit = parseFloat((shortBid - longAsk).toFixed(2));
+      // Use natural credit if positive; fall back to 25% of mid if market is crossed
+      const limitCredit   = naturalCredit > 0
+        ? naturalCredit
+        : parseFloat(Math.max(0.05, midCredit * 0.25).toFixed(2));
+      const netCreditLimit = parseFloat((-limitCredit).toFixed(2));
+      logEvent("filter", `${stock.ticker} credit spread limit: mid $${midCredit.toFixed(2)} | natural (bid-ask) $${naturalCredit.toFixed(2)} → submitting $${limitCredit.toFixed(2)} (${netCreditLimit.toFixed(2)})`);
 
       // C2: Idempotency key -- prevents duplicate orders on network timeout/retry
       // Deterministic: same ticker+direction+timestamp bucket will not double-submit
@@ -1027,6 +1045,13 @@ async function executeTrade(stock, price, score, scoreReasons, vix, optionType =
     return false;
   }
 
+  // Duplicate guard — if a pending order exists for this ticker, skip.
+  // executeTrade (MR/naked) doesn't have full lifecycle management but needs
+  // at minimum to not fire twice in the same scan window.
+  if (!_dryRunMode && state._pendingOrder && state._pendingOrder.ticker === stock.ticker) {
+    logEvent("filter", `${stock.ticker} pending order exists - skipping naked/MR submission`);
+    return false;
+  }
   // Submit order to Alpaca - fill confirmation happens inside
   // Only submit if we have a real contract symbol (not an estimate)
   let alpacaOrderId = null;
