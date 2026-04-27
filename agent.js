@@ -711,6 +711,20 @@ Respond with ONLY the JSON object. No words before or after.`;
       _log("warn", `[AGENT HEALTH] Parse error - missing required fields. Raw: ${raw?.slice(0,60)}`);
       return null;
     }
+    // Resolve signal/mode contradictions — agent occasionally returns internally inconsistent JSON
+    // (e.g. signal: "strongly bearish" but mode: "aggressive"). Signal is the primary field;
+    // mode must be consistent with it. This prevents puts from being blocked by a contradictory
+    // "aggressive" mode while signal correctly says bearish.
+    const _bearishSignals = ["strongly bearish","bearish","mild bearish"];
+    const _bullishSignals  = ["strongly bullish","bullish","mild bullish"];
+    if (_bearishSignals.includes(parsed.signal) && parsed.mode === "aggressive") {
+      _log("warn", `[AGENT] Signal/mode contradiction: signal='${parsed.signal}' but mode='aggressive' — correcting to mode='cautious'`);
+      parsed.mode = "cautious";
+    }
+    if (_bullishSignals.includes(parsed.signal) && parsed.mode === "defensive") {
+      _log("warn", `[AGENT] Signal/mode contradiction: signal='${parsed.signal}' but mode='defensive' — correcting to mode='cautious'`);
+      parsed.mode = "cautious";
+    }
     state._agentHealth.successes++;
     state._agentHealth.lastSuccess = new Date().toISOString();
     const successRate = (state._agentHealth.successes / state._agentHealth.calls * 100).toFixed(0);
