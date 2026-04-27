@@ -97,11 +97,15 @@ function getRegimeRulebook(state) {
   // IVR threshold lowered 50→45: at IVR 45-50 with VIX >= 25, options are expensive enough
   // for credit spreads. The hard 50 cutoff was too rigid — IVR 49 with VIX 28 is credit-favorable.
   // Belt: require VIX >= 27 when IVR is in the 45-50 borderline zone for extra confirmation.
-  const ivElevated        = ivRank >= 45;         // primary credit gate (was 50 — too rigid)
+  const ivElevated        = ivRank >= 35;         // lowered: IVR 35+ with VIX 22+ = viable credit
   const ivHigh            = ivRank >= 70;         // aggressive credit sizing
-  const vixFloor          = vix >= 25 || (skewElevated && vix >= 22); // structural floor
-  const vixEnhanced       = vix >= 27;            // extra confirmation when IVR borderline
-  const creditAllowedVIX  = (ivElevated && vixFloor) && (ivRank >= 50 || vixEnhanced); // IVR>=50 OR (IVR>=45 AND VIX>=27)
+  // vixFloor: lowered from 25→22. At VIX 22+ with wider spreads, credit puts are EV-positive.
+  // Below VIX 22 premium is structurally too thin for any width to clear R/R minimum.
+  const vixFloor          = vix >= 22 || (skewElevated && vix >= 20); // structural floor
+  const vixEnhanced       = vix >= 25;            // extra confirmation when IVR borderline
+  // creditAllowedVIX: IVR>=45 OR (IVR>=35 AND VIX>=25) — broadened for wider market conditions
+  // The R/R gate in execution.js enforces quality; this gate prevents obviously wrong conditions
+  const creditAllowedVIX  = ivElevated && vixFloor; // IVR>=35 + VIX>=22 = sufficient
 
   // ── Credit mode flags ─────────────────────────────────────
   // Credit PUT: direction is uncertain (choppy) OR bear regime with elevated premium
@@ -555,10 +559,11 @@ function evaluateEntry(candidate, rulebook, state, context = {}) {
       return { pass: false, reason: "Regime C — debit calls blocked" };
     // Debit call spread specific gates (panel 4/22/2026)
     if (tradeType === "debit_call") {
-      // SPY down >1% on the day — don't buy calls into a down day
+      // SPY down day block REMOVED: in Regime A bull trend, a small down day (-1% to -2%)
+      // is often the ideal call entry — pullback within uptrend. Block only extreme down days.
       const spyDayChg = state._spyDayChange || 0;
-      if (spyDayChg < -0.01)
-        return { pass: false, reason: `debit call: SPY down ${(spyDayChg*100).toFixed(1)}% today — no calls into down day` };
+      if (spyDayChg < -0.03)
+        return { pass: false, reason: `debit call: SPY down ${(spyDayChg*100).toFixed(1)}% today — extreme down day, no calls` };
       // Entry window: 10:15am - 3:30pm ET only (needs opening direction confirmed)
       if (etHour < 10.25)
         return { pass: false, reason: "debit call: before 10:15am ET — wait for opening direction to confirm" };
