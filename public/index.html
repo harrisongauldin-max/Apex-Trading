@@ -552,6 +552,7 @@ input[type=text]:focus{border-color:var(--blue)}
     <button class="btn" style="background:#0a2a1a;border:1px solid #00c4ff;color:#00c4ff" onclick="fetch('/api/test-email',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({type:'morning'})}).then(r=>r.json()).then(d=>alert(d.ok?'Email sent!':d.error||'Failed'))">📧 TEST EMAIL</button>
     <button class="btn" style="background:#2a1a00;border:1px solid #ffaa00;color:#ffcc44" onclick="clearAvoidHold()" title="Clear the agent avoid hold — use when avoid was triggered by a false keyword match">🚫 CLEAR AVOID HOLD</button>
     <button class="btn" style="background:#1a001a;border:1px solid #cc44ff;color:#dd88ff" onclick="clearVixCooldown()" title="Clear the 48h VIX spike cooldown — use when spike was triggered by bad data">⚡ CLEAR VIX COOLDOWN</button>
+    <button class="btn" style="background:#001a2a;border:1px solid #00aaff;color:#44ccff" onclick="clearEntryCooldown()" title="Clear entry attempt cooldowns — use when cooldowns were set by connectivity failures (ECONNRESET) with no actual position opened">⏱ CLEAR ENTRY COOLDOWNS</button>
     <div style="display:flex;align-items:center;gap:6px">
       <span style="font-size:11px;color:var(--muted)">BLOCK TICKER:</span>
       <input type="text" id="blacklist-input" placeholder="TSLA" maxlength="6" style="background:var(--panel);border:1px solid var(--border);color:var(--text);padding:6px 10px;border-radius:6px;font-family:var(--font);font-size:11px;width:70px;outline:none;text-transform:uppercase"/>
@@ -2971,6 +2972,22 @@ async function clearVixCooldown() {
   } catch(e) { alert('❌ Error: ' + e.message); }
 }
 
+async function clearEntryCooldown() {
+  const ticker = prompt('Clear cooldown for specific ticker?\nEnter ticker (e.g. SPY) or leave blank to clear ALL entry cooldowns.');
+  if (ticker === null) return;
+  const t = ticker.trim().toUpperCase();
+  const msg = t
+    ? 'Clear entry cooldown for ' + t + '? Use this when the cooldown was set by a connectivity failure with no actual position opened.'
+    : 'Clear ALL entry cooldowns? Use this when cooldowns were set by connectivity failures (ECONNRESET) with no actual positions opened.';
+  if (!confirm(msg)) return;
+  try {
+    const url = t ? '/api/clear-entry-cooldown?ticker=' + t : '/api/clear-entry-cooldown';
+    const resp = await fetch(url, { method: 'POST' });
+    const data = await resp.json();
+    alert(data.ok ? '\u2705 ' + data.message : '\u274c Failed: ' + (data.error || 'Unknown error'));
+  } catch(e) { alert('\u274c Error: ' + e.message); }
+}
+
 async function resetCircuit() {
   if (!confirm('Reset circuit breaker? ARGO V3.2 will resume scanning and entering new trades.')) return;
   const resp = await fetch('/api/reset-circuit', {method:'POST'});
@@ -3943,18 +3960,27 @@ function loadTheta() {
 }
 
 function switchTab(name) {
-  document.querySelectorAll('.tab').forEach(t=>t.classList.remove('active'));
-  document.querySelectorAll('.content').forEach(c=>c.classList.remove('active'));
-  document.querySelector(`[onclick="switchTab('${name}')"]`).classList.add('active');
-  document.getElementById(`tab-${name}`).classList.add('active');
-  if (name==='analytics')   renderCharts();
-  if (name==='report')      loadReport();
-  if (name==='log')         fetchLogs();
-  if (name==='scoredebug')  loadScoreDebug();
-  if (name==='theta')       loadTheta();
-  if (name==='attribution') loadAttribution();
-  if (name==='tax')         loadTaxLog();
-  if (name==='journal')     renderJournal();
+  try {
+    document.querySelectorAll('.tab').forEach(t=>t.classList.remove('active'));
+    document.querySelectorAll('.content').forEach(c=>c.classList.remove('active'));
+    // Null-safe: querySelector can return null if tab name doesn't match any onclick attribute
+    const tabEl = document.querySelector(`[onclick="switchTab('${name}')"]`);
+    const contentEl = document.getElementById(`tab-${name}`);
+    if (!tabEl)     { console.warn(`switchTab: no tab element found for '${name}'`); return; }
+    if (!contentEl) { console.warn(`switchTab: no content div found for 'tab-${name}'`); return; }
+    tabEl.classList.add('active');
+    contentEl.classList.add('active');
+    if (name==='analytics')   renderCharts();
+    if (name==='report')      loadReport();
+    if (name==='log')         fetchLogs();
+    if (name==='scoredebug')  loadScoreDebug();
+    if (name==='theta')       loadTheta();
+    if (name==='attribution') loadAttribution();
+    if (name==='tax')         loadTaxLog();
+    if (name==='journal')     renderJournal();
+  } catch(e) {
+    console.error('switchTab error for tab:', name, e);
+  }
 }
 
 // ── Init ──────────────────────────────────────────────────────────────────
