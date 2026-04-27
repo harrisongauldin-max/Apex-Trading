@@ -876,6 +876,15 @@ async function confirmPendingOrder() {
           const _cancelStatus  = cancelCheck?.status || "unknown";
           const _qtyFilled     = parseFloat(cancelCheck?.filled_qty || cancelCheck?.qty_filled || 0);
           const _nothingFilled = ["new","pending_new","held","accepted"].includes(_cancelStatus) && _qtyFilled === 0;
+          // Final cancel attempt before force-clearing — prevents Alpaca order staying live
+          // and consuming options buying power while ARGO thinks the order is gone.
+          // Use DELETE endpoint as final escalation (more forceful than POST /cancel).
+          try {
+            await alpacaDelete(`/orders/${pending.orderId}`);
+            logEvent("warn", `[SPREAD] Force-clear: final DELETE cancel sent to Alpaca for ${pending.orderId}`);
+          } catch(e) {
+            logEvent("warn", `[SPREAD] Force-clear: final DELETE failed (${e.message}) — order may remain on Alpaca`);
+          }
           if (!_isStaleOrder && !_nothingFilled) {
             if (!state._entryAttemptCooldown) state._entryAttemptCooldown = {};
             state._entryAttemptCooldown[pending.ticker] = Date.now();
