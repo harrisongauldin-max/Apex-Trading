@@ -830,10 +830,10 @@ async function runScan() {
     logEvent("filter", `[200MA] SPY $${state._liveSPY?.toFixed(2)} below 200MA $${state._spyMA200?.toFixed(2)} - bear regime: calls blocked, puts need 80+ score, 50% size`);
   }
 
-  // - FINAL HOUR BLOCK - no new entries after 3:45pm -
+  // finalHourBlock REMOVED — entry window already closes at 3pm (panel consensus).
+  // 3:45pm block was redundant secondary backup. One clear rule: entries close at 3pm.
   const etHourEntry    = scanET.getHours() + scanET.getMinutes() / 60;
-  const finalHourBlock = etHourEntry >= 15.75 && !dryRunMode; // 3:45pm
-  if (finalHourBlock) logEvent("filter", `Final hour block - no new entries after 3:45pm`);
+  const finalHourBlock = false; // removed — entry window governs
 
   // - DAY PLAN: suppressUntil gate -
   // Agent sets suppressUntil on high-impact event days (CPI, FOMC, NFP)
@@ -892,12 +892,10 @@ async function runScan() {
     }
     return false;
   })();
-  if (spyGapUp && !dryRunMode) {
-    const etMinSince = (scanET.getHours() - 9) * 60 + scanET.getMinutes() - 30;
-    const spyVWAP    = spyIntraday.length >= 5 ? calcVWAP(spyIntraday) : 0;
-    const gapFading  = spyVWAP > 0 && spyPrice < spyVWAP;
-    logEvent("filter", `SPY gap-up open >1.5% - delaying puts ${gapFading ? "10" : "15"}min${gapFading ? " (gap fading, below VWAP - shortened)" : " for price discovery"} (${etMinSince.toFixed(0)}min elapsed)`);
-  }
+  // SPY gap-up delay REMOVED — gap up is supportive for bull put spreads (further from short strike).
+  // Was designed for debit puts; wrong for current credit spread architecture (panel consensus).
+  // Agent handles macro context from 8:30am including gap events.
+  if (spyGapUp && !dryRunMode) logEvent("filter", `[INFO] SPY gap-up >1.5% — credit spreads not affected (debit delay removed)`);
 
   // - CONDITION-BASED POST-REVERSAL COOLDOWN -
   // FIX 2: Uses marketContext.macro (authoritative merged signal) not state._agentMacro (raw)
@@ -1104,7 +1102,7 @@ async function runScan() {
     }
   }
 
-  const putsAllowed       = (entryWindowOpen && !rb.gates.vixFallingPause && !rb.gates.spyGapUpBlockPuts
+  const putsAllowed       = (entryWindowOpen
                              && !rb.gates.postReversalBlock && !rb.gates.macroBullishBlock
                              && !rb.gates.choppyDebitBlock && !rb.gates.avoidHoldActive
                              && !rb.gates.crisisDebitBlock
@@ -1114,13 +1112,14 @@ async function runScan() {
   const callsAllowed      = (callWindowOpen && !rb.gates.below200MACallBlock
                              && (!rb.gates.choppyDebitBlock || isMRCondition)
                              && !rb.gates.avoidHoldActive) || dryRunMode;
-  const creditAllowed     = creditModeActive  && creditWindowOpen && !rb.gates.avoidHoldActive && !rb.gates.vixFallingPause;
+  const creditAllowed     = creditModeActive  && creditWindowOpen && !rb.gates.avoidHoldActive;
   const callCreditAllowed = creditCallModeActive && creditWindowOpen && !rb.gates.avoidHoldActive;
   if (isMRCondition && choppyDebitBlock) logEvent("filter", `MR call allowed in choppy - SPY RSI ${spyRSIForMR.toFixed(1)} extreme oversold + VIX ${state.vix}`);
   if (creditAllowed && !putsAllowed) logEvent("filter", "Debit puts blocked - credit put spread mode active");
   if (callCreditAllowed)             logEvent("filter", "Bear call credit mode active");
   if (macroBullish && !dryRunMode)  logEvent("filter", `Macro bullish (${marketContext.macro?.signal}) - puts blocked`);
-  if (rb.gates.vixFallingPause && !dryRunMode) logEvent("filter", "VIX falling - put entries paused");
+  // vixFallingPause removed — falling VIX is good for credit spreads (less downside risk).
+  // Was correct for debit puts (IV crush) but wrong for current credit spread architecture (panel consensus).
   if (rb.gates.postReversalBlock && !dryRunMode) logEvent("filter", "Post-reversal cooldown active - puts blocked 30min");
 
   // - VIX SPIKE EXIT - close call positions on sharp VIX spike -
@@ -1203,7 +1202,9 @@ async function runScan() {
   if (!callsAllowed && !putsAllowed && !creditAllowed && !callCreditAllowed) return;
 
   // [opening/final hour blocks moved above callsAllowed]
-  if (state.circuitOpen === false || state.weeklyCircuitOpen === false) return;
+  // Weekly circuit breaker REMOVED — penalizes new code for old code's losses (panel consensus).
+  // Daily circuit breaker retained for paper trading safety.
+  if (state.circuitOpen === false) return;
 
   // - ACT ON MORNING EXIT FLAGS -
   // Positions flagged by morning review get closed at open
@@ -1233,23 +1234,17 @@ async function runScan() {
   // Natenberg: VIX-scaled vega cap - high VIX = more volatile IV = tighter cap
   // At VIX 37, a $2000 vega position loses $2000 on a 1pt VIX move - too much
   const MAX_PORTFOLIO_VEGA  = state.vix >= 35 ? 500 : state.vix >= 25 ? 1000 : 2000;
-  if (pgr.delta < MAX_PORTFOLIO_DELTA) {
-    logEvent("filter", `Portfolio delta ${pgr.delta} too short - blocking new put entries`);
-    if (!callsAllowed) return;
-  }
+  // MAX_PORTFOLIO_DELTA block removed — heat cap fires first (redundant). Logged for visibility.
+  if (pgr.delta < MAX_PORTFOLIO_DELTA) logEvent("filter", `[INFO] Portfolio delta ${pgr.delta} below -500 (heat cap governs)`);
   // Directional concentration + Beta-adjusted portfolio delta check (DB-1/GL-3)
   // Simple directional count
   const openPuts  = (state.positions || []).filter(p => p.optionType === "put").length;
   const openCalls = (state.positions || []).filter(p => p.optionType === "call").length;
   const totalOpen = state.positions.length;
-  if (totalOpen >= 3 && openPuts === totalOpen) {
-    logEvent("filter", `Directional concentration: ${totalOpen} puts, 0 calls - blocking new put entries`);
-    if (!callsAllowed) return;
-  }
-  if (totalOpen >= 3 && openCalls === totalOpen) {
-    logEvent("filter", `Directional concentration: ${totalOpen} calls, 0 puts - blocking new call entries`);
-    if (!putsAllowed) return;
-  }
+  // Directional concentration blocks removed — correct behavior in trending market (panel consensus).
+  // Heat cap governs concentration. Log for visibility only.
+  if (totalOpen >= 3 && openPuts === totalOpen) logEvent("filter", `[INFO] All ${totalOpen} positions are puts (heat cap governs)`);
+  if (totalOpen >= 3 && openCalls === totalOpen) logEvent("filter", `[INFO] All ${totalOpen} positions are calls (heat cap governs)`);
   // Beta-adjusted net delta — tracks directional exposure across positions.
   // MAX was 6 (calibrated for 1-2 contract individual stock positions).
   // New contract sizing targets 9-10 contracts per position on index ETFs.
@@ -1265,18 +1260,11 @@ async function runScan() {
   }, 0);
   state._portfolioBetaDelta = parseFloat(betaDelta.toFixed(1));
   const MAX_BETA_DELTA = 50; // scaled for 9-10 contract index ETF positions (5 max × 10 = 50)
-  if (betaDelta < -MAX_BETA_DELTA) {
-    logEvent("filter", `Beta-adjusted delta ${betaDelta.toFixed(1)} - too short, blocking puts (max: -${MAX_BETA_DELTA})`);
-    if (!callsAllowed) return;
-  }
-  if (betaDelta > MAX_BETA_DELTA) {
-    logEvent("filter", `Beta-adjusted delta +${betaDelta.toFixed(1)} - too long, blocking calls (max: +${MAX_BETA_DELTA})`);
-    if (!putsAllowed) return;
-  }
-  if (Math.abs(pgr.vega) > MAX_PORTFOLIO_VEGA) {
-    logEvent("filter", `Portfolio vega $${pgr.vega.toFixed(0)} at VIX-scaled limit $${MAX_PORTFOLIO_VEGA} - blocking entries`);
-    return;
-  }
+  // MAX_BETA_DELTA blocks removed — heat cap fires first at 5 positions × 10 contracts (panel consensus).
+  if (betaDelta < -MAX_BETA_DELTA) logEvent("filter", `[INFO] Beta delta ${betaDelta.toFixed(1)} (heat cap governs)`);
+  if (betaDelta > MAX_BETA_DELTA) logEvent("filter", `[INFO] Beta delta +${betaDelta.toFixed(1)} (heat cap governs)`);
+  // MAX_PORTFOLIO_VEGA block removed — heat cap fires first across 5 ETF instruments (panel consensus).
+  if (Math.abs(pgr.vega) > MAX_PORTFOLIO_VEGA) logEvent("filter", `[INFO] Portfolio vega $${pgr.vega.toFixed(0)} (heat cap governs)`);
 
   // - DURATION DIVERSIFICATION CHECK -
   // PM-W1: Prevent all positions expiring in same cycle - one event hits everything
@@ -1299,12 +1287,10 @@ async function runScan() {
 
   // Burst entry cooldown - max 3 new positions per 10 minutes
   // Prevents over-concentration at a single market moment (e.g. after reset)
+  // Burst entry cooldown removed — startup burst is fixed by agent mutex. This was a workaround (panel consensus).
   const tenMinAgo = Date.now() - 10 * 60 * 1000;
   const recentEntries = state.positions.filter(p => new Date(p.openDate).getTime() > tenMinAgo).length;
-  if (recentEntries >= 3) {
-    logEvent("filter", `Burst entry cooldown - ${recentEntries} positions opened in last 10min - waiting`);
-    return;
-  }
+  if (recentEntries >= 3) logEvent("filter", `[INFO] ${recentEntries} entries in last 10min (heat cap governs)`);
 
   // [SPY fetch moved above callsAllowed]
 
@@ -2471,7 +2457,8 @@ async function runScan() {
     if (heatPct() >= effectiveHeatCap()) break;
     if (state.cash <= CAPITAL_FLOOR) break;
 
-    const { pass, reason } = await checkAllFilters(stock, price, tradeIntent?.type || null);
+    // BUG5 FIX: was passing tradeIntent.type as prefetchedBars arg (wrong). Pass null.
+    const { pass, reason } = await checkAllFilters(stock, price, null);
     if (!pass) {
       const putBypassReasons = ["sector ETF", "support", "VWAP", "breakdown"];
       const canBypassForPut  = optionType === "put" && putBypassReasons.some(r => reason?.includes(r));
@@ -2531,6 +2518,7 @@ async function runScan() {
         existingProfitPct,
         existingCreditProfitPct,
         drawdownMinScore:    ddProtocol.minScore || MIN_SCORE,
+        drawdownLevel:       ddProtocol.level || "normal",  // BUG3 FIX: pass level so entryEngine only applies when in actual drawdown
         agentSignal:         (state._agentMacro || {}).signal || "neutral" }
     );
     if (!eeResult.pass) {
