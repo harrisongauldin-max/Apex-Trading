@@ -12,6 +12,7 @@ const { getAccountPhase, effectiveHeatCap , isMarketHours } = require('./signals
 
 // ─── Module-level cache ──────────────────────────────────────────
 let _agentMacroCache = { result: null, fetchedAt: 0 };
+let _agentMacroRunning = false; // mutex — prevents concurrent API calls on startup burst
 
 // ─── Injected dependencies ───────────────────────────────────────
 let _log        = (type, msg) => console.log(`[agent][${type}] ${msg}`);
@@ -327,16 +328,34 @@ async function getAgentMacroAnalysis(headlines, forceRun = false) {
     return state._agentMacro || null; // return held signal
   }
 
+  // Return cached result if fresh enough and not emergency — check BEFORE logging
+  // (prevents "Running macro analysis" log spam when cache is valid)
+  if (!deltaCheck.isEmergency && _agentMacroCache.result && Date.now() - _agentMacroCache.fetchedAt < AGENT_MACRO_CACHE_MS) {
+    return _agentMacroCache.result;
+  }
+
+  // Mutex: if another call is already in-flight, return cache (even if stale) rather than
+  // firing a second concurrent API call. On startup burst, 50+ parallel scan init calls
+  // would all pass the cache check simultaneously before any call populates it.
+  // EXCEPTION: emergencies bypass the mutex — a VIX spike or ceasefire needs fresh analysis,
+  // not a stale "mild bullish" signal from 3 hours ago.
+  if (_agentMacroRunning && !deltaCheck.isEmergency) {
+    if (_agentMacroCache.result) {
+      _log("scan", `[AGENT] Macro analysis in-flight — returning cached result (age: ${Math.round((Date.now() - _agentMacroCache.fetchedAt)/60000)}min)`);
+      return _agentMacroCache.result;
+    }
+    // No cache yet and another call is running — wait briefly then return null
+    _log("scan", `[AGENT] Macro analysis in-flight on startup — skipping duplicate call`);
+    return null;
+  }
+
   if (deltaCheck.isEmergency) {
     _log("macro", `[AGENT] ⚠️ EMERGENCY TRIGGER: "${deltaCheck.reason}" — forcing immediate full analysis`);
   } else {
     _log("scan", `[AGENT] Running macro analysis — reason: ${deltaCheck.reason}`);
   }
-
-  // Return cached result if very fresh (< cache TTL) and not emergency
-  if (!deltaCheck.isEmergency && _agentMacroCache.result && Date.now() - _agentMacroCache.fetchedAt < AGENT_MACRO_CACHE_MS) {
-    return _agentMacroCache.result;
-  }
+  _agentMacroRunning = true;
+  try { // outer try/finally guarantees mutex release even if prompt construction throws
   const systemPrompt = `You are the head macro strategist for ARGO-V3.2, a systematic SPY/QQQ/GLD/TLT/XLE options spread trading system. Return ONLY valid JSON - no markdown, no preamble.
 
 RESPONSE SCHEMA:
@@ -696,6 +715,7 @@ Respond with ONLY the JSON object. No words before or after.`;
     state._agentHealth.lastSuccess = new Date().toISOString();
     const successRate = (state._agentHealth.successes / state._agentHealth.calls * 100).toFixed(0);
     _agentMacroCache = { result: parsed, fetchedAt: Date.now() };
+    _agentMacroRunning = false; // release mutex — allow next call after cache is populated
     _log("macro", `[AGENT] Macro: ${parsed.signal} (${parsed.confidence}) | ${parsed.reasoning?.slice(0,80)} | health:${successRate}%`);
 
     // - Agent accuracy tracking (panel requirement) -
@@ -786,8 +806,15 @@ Respond with ONLY the JSON object. No words before or after.`;
     _checkMacroShift(parsed.signal);
     return parsed;
   } catch(e) {
+    _agentMacroRunning = false; // release mutex on JSON parse error
     state._agentHealth.parseErrors++;
     _log("warn", `[AGENT HEALTH] JSON parse exception: ${e.message} | Raw: ${raw?.slice(0,60)}`);
+    return null;
+  }
+  } catch(outerErr) {
+    // Catches prompt construction errors or any throw before the inner try/catch
+    _agentMacroRunning = false;
+    _log("error", `[AGENT] Unexpected error in macro analysis: ${outerErr.message}`);
     return null;
   }
 }
