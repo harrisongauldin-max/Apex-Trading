@@ -219,7 +219,9 @@ function isGLDEntryAllowed(optionType, dxy, spyReturn5d, vix, gldRSI, gldPrice, 
     const dxyRising      = dxy && dxy.change > 0;
     const isGLDCreditPut = arguments[7] === "credit_put";
     if (!gldOverbought && !isGLDCreditPut) return { allowed: false, reason: `GLD put blocked - RSI ${gldRSI?.toFixed(0)||'?'} not overbought (need >68 for debit put thesis)` };
-    if (dxyRising) return { allowed: false, reason: `GLD put blocked - DXY rising (+${dxy?.change||0}%), dollar strength supports gold` };
+    // Bug11 FIX: DXY rising blocks debit puts (gold rises = put loses) but NOT credit puts.
+    // Credit puts: rising DXY = gold supported above short strike = safer, not a reason to block.
+    if (dxyRising && !isGLDCreditPut) return { allowed: false, reason: `GLD put blocked - DXY rising (+${dxy?.change||0}%), dollar strength supports gold` };
     return { allowed: true };
   }
 }
