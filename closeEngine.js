@@ -686,9 +686,29 @@ async function confirmPendingOrder() {
       logEvent("trade", `[${typeLabel}] Fill confirmed: ${pending.orderId} | age: ${age.toFixed(0)}s`);
 
       if (pending.isCreditSpread) {
-        // Credit spread: cash increases by net credit received
-        const netCredit = pending.netCredit || pending.netDebit;
-        const marginRequired = pending.finalCost;
+        // Credit spread: use ACTUAL fill price from Alpaca, not our pre-submission estimate.
+        // filled_avg_price for mleg market orders = net spread price (negative = credit received).
+        // Fall back to individual leg prices, then to our estimate as last resort.
+        let netCredit = pending.netCredit || pending.netDebit; // fallback estimate
+        if (fillResp.filled_avg_price) {
+          const avg = parseFloat(fillResp.filled_avg_price);
+          if (avg < 0) netCredit = parseFloat(Math.abs(avg).toFixed(2));       // negative = credit
+          else if (avg > 0) netCredit = parseFloat(avg.toFixed(2));            // positive = credit
+          logEvent("trade", `[CREDIT SPREAD] Actual fill: $${netCredit} (Alpaca filled_avg_price ${avg})`);
+        } else if (fillResp.legs && fillResp.legs.length === 2) {
+          const sellLeg = fillResp.legs.find(l => l.side === "sell");
+          const buyLeg  = fillResp.legs.find(l => l.side === "buy");
+          if (sellLeg?.filled_avg_price && buyLeg?.filled_avg_price) {
+            const legCredit = parseFloat((parseFloat(sellLeg.filled_avg_price) - parseFloat(buyLeg.filled_avg_price)).toFixed(2));
+            if (legCredit > 0) { netCredit = legCredit; logEvent("trade", `[CREDIT SPREAD] Actual fill from legs: $${netCredit}`); }
+          }
+        }
+        const est = pending.netCredit || pending.netDebit;
+        if (netCredit !== est) logEvent("trade", `[CREDIT SPREAD] Fill vs estimate: actual $${netCredit} | est $${est} | diff $${(netCredit - est).toFixed(2)}`);
+        // Recompute marginRequired from actual credit — pending.finalCost used the pre-submission estimate.
+        // Actual margin = (spreadWidth - actualCredit) * 100 * contracts.
+        const spreadWidth = Math.abs(pending.buyStrike - pending.sellStrike);
+        const marginRequired = parseFloat(((spreadWidth - netCredit) * 100 * pending.contracts).toFixed(2));
         state.cash += parseFloat((netCredit * 100 * pending.contracts).toFixed(2));
         const maxProfit = parseFloat((netCredit * 100 * pending.contracts).toFixed(2));
         const maxLoss   = parseFloat(((Math.abs(pending.buyStrike - pending.sellStrike) - netCredit) * 100 * pending.contracts).toFixed(2));
@@ -769,25 +789,34 @@ async function confirmPendingOrder() {
 
       let netDebit   = pending.netDebit;
       let finalCost  = pending.finalCost;
+      // Use ACTUAL fill price from Alpaca — not our pre-submission estimate.
+      // For mleg market orders filled_avg_price = net debit (positive = we paid).
+      // Fall back to leg-level data if top-level price absent.
+      let actualFill = null;
       if (fillResp.filled_avg_price) {
-        const actual = parseFloat(fillResp.filled_avg_price);
-        if (actual > 0 && actual !== netDebit) {
-          const slippage = parseFloat((actual - netDebit).toFixed(2));
-          logEvent("trade", `[SPREAD] Fill: limit $${netDebit} - actual $${actual} | slippage ${slippage >= 0 ? '+' : ''}$${slippage}`);
-          // Track fill quality for live deployment validation
-          if (!state._fillQuality) state._fillQuality = { count: 0, totalSlippage: 0, misses: 0 };
-          state._fillQuality.count++;
-          state._fillQuality.totalSlippage = parseFloat((state._fillQuality.totalSlippage + slippage).toFixed(2));
-          if (slippage > 0.05) state._fillQuality.misses++;
-          state._fillQuality.avgSlippage = parseFloat((state._fillQuality.totalSlippage / state._fillQuality.count).toFixed(3));
-          netDebit  = actual;
-          finalCost = parseFloat((netDebit * 100 * pending.contracts).toFixed(2));
-        } else {
-          // Perfect fill at limit price - track this too
-          if (!state._fillQuality) state._fillQuality = { count: 0, totalSlippage: 0, misses: 0 };
-          state._fillQuality.count++;
-          state._fillQuality.avgSlippage = parseFloat((state._fillQuality.totalSlippage / state._fillQuality.count).toFixed(3));
+        const avg = parseFloat(fillResp.filled_avg_price);
+        if (avg > 0) actualFill = avg;
+      }
+      if (!actualFill && fillResp.legs && fillResp.legs.length === 2) {
+        const buyLeg  = fillResp.legs.find(l => l.side === "buy");
+        const sellLeg = fillResp.legs.find(l => l.side === "sell");
+        if (buyLeg?.filled_avg_price && sellLeg?.filled_avg_price) {
+          const legDebit = parseFloat((parseFloat(buyLeg.filled_avg_price) - parseFloat(sellLeg.filled_avg_price)).toFixed(2));
+          if (legDebit > 0) actualFill = legDebit;
         }
+      }
+      if (actualFill && actualFill > 0) {
+        const slippage = parseFloat((actualFill - netDebit).toFixed(2));
+        logEvent("trade", `[SPREAD] Actual fill: $${actualFill} | est $${netDebit} | slippage ${slippage >= 0 ? '+' : ''}$${slippage}`);
+        if (!state._fillQuality) state._fillQuality = { count: 0, totalSlippage: 0, misses: 0 };
+        state._fillQuality.count++;
+        state._fillQuality.totalSlippage = parseFloat((state._fillQuality.totalSlippage + slippage).toFixed(2));
+        if (Math.abs(slippage) > 0.05) state._fillQuality.misses++;
+        state._fillQuality.avgSlippage = parseFloat((state._fillQuality.totalSlippage / state._fillQuality.count).toFixed(3));
+        netDebit  = actualFill;
+        finalCost = parseFloat((netDebit * 100 * pending.contracts).toFixed(2));
+      } else {
+        logEvent("warn", `[SPREAD] No filled_avg_price from Alpaca — using estimate $${netDebit}`);
       }
 
       const { contracts, score, scoreReasons, expDate, expDays,
@@ -914,18 +943,16 @@ async function confirmPendingOrder() {
         logEvent("warn", `[SPREAD] Cancel unconfirmed (status: ${cancelCheck?.status}) - attempt ${pending._cancelAttempts}/5 - will retry next scan`);
         return; // don't submit retry - original may still fill
       }
-      const spreadPct     = pending.spreadPct || 0.05; // bid-ask spread % at entry time
-      const rawConcession = Math.max(0.05, Math.min(0.20, parseFloat((pending.netDebitLimit * spreadPct * 0.5).toFixed(2))));
-      // B6: credit spreads accept less premium to improve fill (subtract); debits pay more (add)
-      const retryLimit    = pending.isCreditSpread
-        ? parseFloat((pending.netDebitLimit - rawConcession).toFixed(2))
-        : parseFloat((pending.netDebitLimit + rawConcession).toFixed(2));
-      logEvent("warn", `[SPREAD] Unfilled after ${age.toFixed(0)}s - retrying with $${rawConcession.toFixed(2)} concession (spread ${(spreadPct*100).toFixed(0)}%) @ $${retryLimit}`);
-      const retryBody  = { ...pending.mlegBody, limit_price: String(retryLimit) };
+      // Retry: credit spreads now use market orders — no concession needed.
+      // Market orders fill immediately or fail structurally (API error, rejected).
+      // If still pending after 60s it means the original may have partially routed —
+      // just resubmit the same market order body.
+      logEvent("warn", `[SPREAD] Market order pending ${age.toFixed(0)}s — resubmitting market order`);
+      const retryBody  = { ...pending.mlegBody }; // market order, no limit_price
       const retryResp  = await alpacaPost("/orders", retryBody).catch(() => null);
       if (retryResp && retryResp.id) {
-        state._pendingOrder = { ...pending, orderId: retryResp.id, submittedAt: Date.now(), _retried: true, netDebitLimit: retryLimit };
-        logEvent("trade", `[SPREAD] Retry submitted: ${retryResp.id} @ $${retryLimit}`);
+        state._pendingOrder = { ...pending, orderId: retryResp.id, submittedAt: Date.now(), _retried: true };
+        logEvent("trade", `[SPREAD] Market retry submitted: ${retryResp.id}`);
         markDirty();
       } else {
         logEvent("warn", `[SPREAD] Retry failed - clearing pending`);
