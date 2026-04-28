@@ -393,7 +393,10 @@ async function checkExits(positions, posSnapshots, posQuotes, posNewsCache, ctx)
         logEvent("scan", `${pos.ticker} delta ${buyLegDelta.toFixed(2)} - spread deep ITM, near max profit - closing`);
         decisions.push({ pi, ticker: pos.ticker, action: 'close', reason: "target", exitPremium: null, contractSym: pos.contractSymbol || pos.buySymbol }); continue;
       }
-      if (buyLegDelta <= 0.05 && chg <= -0.25) {
+      // Bug1 FIX: require 5min hold before delta-based exit to prevent same-scan stop-outs.
+      // Greeks on a freshly entered position come from a pre-entry stale snapshot.
+      const _holdMins = (Date.now() - new Date(pos.openDate).getTime()) / 60000;
+      if (buyLegDelta <= 0.05 && chg <= -0.25 && _holdMins >= 5) {
         logEvent("scan", `${pos.ticker} delta ${buyLegDelta.toFixed(2)} - spread far OTM, thesis failed - stopping out`);
         decisions.push({ pi, ticker: pos.ticker, action: 'close', reason: "stop", exitPremium: null, contractSym: pos.contractSymbol || pos.buySymbol }); continue;
       }
