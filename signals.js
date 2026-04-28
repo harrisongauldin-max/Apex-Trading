@@ -568,9 +568,10 @@ function getSupportResistance(bars) {
 }
 
 // ─── Portfolio analytics ─────────────────────────────────────────
-// totalCap: Alpaca equity is authoritative. Fall back to state.cash then accountBaseline.
-// Never use customBudget as a floor — Alpaca is the real account value.
-const totalCap    = () => state.alpacaEquity || state.alpacaCash || state.cash || state.accountBaseline || MONTHLY_BUDGET;
+// totalCap: use cash as the heat denominator — margin comes from cash, not equity.
+// alpacaEquity on paper accounts with options can be unreliable (excludes short option obligations).
+// alpacaCash is the actual deployable capital and correct denominator for heat/margin calculations.
+const totalCap    = () => state.alpacaCash || state.cash || state.accountBaseline || MONTHLY_BUDGET;
 // Mark-to-market: use current price not entry cost for real portfolio value
 // currentPrice is updated every reconciliation from Alpaca market values
 const openRisk    = () => state.positions.reduce((s,p) => {
