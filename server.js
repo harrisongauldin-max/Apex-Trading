@@ -893,8 +893,25 @@ function requireSecret(req, res, next) {
 }
 
 app.get("/api/state", async (req, res) => {
+  // Enrich positions with correct P&L display values using Alpaca data as source of truth
+  const enrichedPositions = (state.positions || []).map(pos => {
+    // Use unrealizedPnL from Alpaca if available (set by syncPositionPnLFromAlpaca)
+    // This is the authoritative value — bypasses any currentPrice/premium calculation errors
+    const alpacaPnL = typeof pos.unrealizedPnL === 'number' ? pos.unrealizedPnL : null;
+    const maxProfitVal = pos.maxProfit || (pos.premium * 100 * (pos.contracts || 1));
+    const displayPnL    = alpacaPnL !== null ? alpacaPnL
+      : pos.isCreditSpread
+        ? parseFloat(((pos.premium - pos.currentPrice) * 100 * (pos.contracts || 1)).toFixed(2))
+        : parseFloat(((pos.currentPrice - pos.premium) * 100 * (pos.contracts || 1)).toFixed(2));
+    const displayPnLPct = maxProfitVal > 0 ? parseFloat((displayPnL / maxProfitVal * 100).toFixed(1)) : 0;
+    const costToClose   = pos.isCreditSpread
+      ? parseFloat((pos.currentPrice * 100 * (pos.contracts || 1)).toFixed(2))
+      : parseFloat((pos.currentPrice * 100 * (pos.contracts || 1)).toFixed(2));
+    return { ...pos, displayPnL, displayPnLPct, costToClose };
+  });
   res.json({
     ...state,
+    positions: enrichedPositions,
     heatPct:       parseFloat((heatPct()*100).toFixed(1)),
     heatCap:       parseFloat((effectiveHeatCap()*100).toFixed(0)),
     fillQuality:   state._fillQuality || { count: 0, totalSlippage: 0, misses: 0, avgSlippage: 0 },
