@@ -217,7 +217,9 @@ async function runReconciliation() {
           const sameTickerExp = a.ticker === b.ticker && a.expDate === b.expDate && a.optType === b.optType;
           // Width cap raised to 25 - spread widths scale with VIX (up to $20 at VIX 35)
           // Previous cap of 12 caused $14+ wide spreads to be reconciled as individual legs
-          const widthOk = Math.abs(a.strike - b.strike) >= 5 && Math.abs(a.strike - b.strike) <= 100; // B11: match re-pairing block
+          // Width minimum lowered from 5→1: narrow $1-4 spreads must pair correctly.
+          // Previous $5 minimum caused $2 wide spreads (our standard) to reconstruct as 4 individual legs.
+          const widthOk = Math.abs(a.strike - b.strike) >= 1 && Math.abs(a.strike - b.strike) <= 100;
           const oppDir  = (a.qty > 0 && b.qty < 0) || (a.qty < 0 && b.qty > 0);
           if (sameTickerExp && widthOk && oppDir) {
             const longLeg  = a.qty > 0 ? a : b;
@@ -244,14 +246,16 @@ async function runReconciliation() {
               buyPremium:  parseFloat((buyLeg.avgEntry || 0).toFixed(2)),
               sellPremium: parseFloat((sellLeg.avgEntry || 0).toFixed(2)),
               maxProfit: _isCredit3a
-                ? Math.max(0.01, netDebit)                                                  // credit: max profit = credit received
-                : parseFloat((spreadWidth - Math.max(0.01, netDebit)).toFixed(2)),          // debit: max profit = width - cost
+                ? parseFloat((Math.max(0.01, netDebit) * 100 * Math.abs(buyLeg.qty)).toFixed(2))         // credit: maxProfit = credit * 100 * c
+                : parseFloat((spreadWidth - Math.max(0.01, netDebit)).toFixed(2)),                        // debit: maxProfit = width - cost
               maxLoss:   _isCredit3a
-                ? parseFloat((spreadWidth - Math.max(0.01, netDebit)).toFixed(2))           // credit: max loss = width - credit
-                : Math.max(0.01, netDebit),                                                 // debit: max loss = cost paid
+                ? parseFloat(((spreadWidth - Math.max(0.01, netDebit)) * 100 * Math.abs(buyLeg.qty)).toFixed(2))  // credit: maxLoss = (width-credit)*100*c
+                : Math.max(0.01, netDebit),                                                               // debit: maxLoss = cost paid
               contracts: Math.abs(buyLeg.qty),
               expDate: a.expDate, expDays: a.expDays,
-              cost: parseFloat((Math.max(0.01, netDebit) * 100 * Math.abs(buyLeg.qty)).toFixed(2)),
+              cost: _isCredit3a
+                ? parseFloat(((spreadWidth - Math.max(0.01, netDebit)) * 100 * Math.abs(buyLeg.qty)).toFixed(2))  // credit: cost = margin (maxLoss)
+                : parseFloat((Math.max(0.01, netDebit) * 100 * Math.abs(buyLeg.qty)).toFixed(2)),                 // debit: cost = premium paid
               score: 75, reasons: ['Reconstructed spread from Alpaca reconciliation'],
               openDate: buyLeg.alpPos.created_at || new Date(Date.now() - 86400000).toISOString(), // B10: fallback=yesterday
               currentPrice: Math.max(0.01, netDebit), peakPremium: Math.max(0.01, netDebit),
@@ -284,7 +288,11 @@ async function runReconciliation() {
               ? parseFloat((p.strike - p.avgEntry).toFixed(2))
               : parseFloat((p.strike + p.avgEntry).toFixed(2)),
             contracts: Math.abs(p.qty), expDate: p.expDate, expDays: p.expDays,
-            cost: Math.abs(p.mktVal) || parseFloat((p.avgEntry * 100 * Math.abs(p.qty)).toFixed(2)),
+            // Short legs (qty<0): received premium = cash inflow, cost = 0 for heat calc.
+            // Long legs (qty>0): paid premium = cost basis for heat calc.
+            cost: p.qty > 0
+              ? parseFloat((p.avgEntry * 100 * Math.abs(p.qty)).toFixed(2)) // long: cash paid
+              : 0, // short: received premium, no cash outflow (margin handled separately)
             score: 75, reasons: ['Reconstructed from Alpaca reconciliation'],
             openDate: p.alpPos.created_at || new Date().toISOString(), peakPremium: p.avgEntry,
             entryRSI: 50, entryMACD: 'neutral', entryMomentum: 'steady', entryMacro: 'neutral',
@@ -334,7 +342,9 @@ async function runReconciliation() {
         const strikeA = a.strike || 0;
         const strikeB = b.strike || 0;
         const width   = Math.abs(strikeA - strikeB);
-        const widthOk = width >= 5 && width <= 100;
+        // Width minimum lowered from 5→1: matches orphan reconstruction fix.
+        // $2 wide spreads (our standard) must re-pair correctly.
+        const widthOk = width >= 1 && width <= 100;
         // One should be long (no sellSymbol), one short (has sellSymbol or negative cost)
         const aIsShort = a.sellSymbol && !a.buySymbol;
         const bIsShort = b.sellSymbol && !b.buySymbol;
@@ -351,6 +361,11 @@ async function runReconciliation() {
           // B3b: detect credit vs debit — price-based (matches B3a fix)
           // sellLeg.premium > buyLeg.premium → net credit received → isCreditSpread = true
           const _isCredit3b = sellLeg.premium > buyLeg.premium;
+          // For credit spread: netDebit is NEGATIVE (we received money).
+          // Use absolute value as the credit amount for all calculations.
+          const _credit = _isCredit3b
+            ? parseFloat(Math.abs(netDebit).toFixed(2))   // credit received (positive)
+            : parseFloat(Math.max(0.01, netDebit).toFixed(2)); // debit paid (positive)
           const merged = {
             ticker:      a.ticker, optionType: a.optionType,
             isSpread:    true, isCreditSpread: _isCredit3b,
@@ -359,17 +374,18 @@ async function runReconciliation() {
             buySymbol:   buyLeg.contractSymbol,
             sellSymbol:  sellLeg.contractSymbol,
             contractSymbol: buyLeg.contractSymbol,
-            premium:     Math.max(0.01, netDebit),
-            // D-FIX1b: same correction as 1a
+            premium:     Math.max(0.01, _credit),
             maxProfit:   _isCredit3b
-              ? Math.max(0.01, netDebit)                                             // credit: max profit = credit received
-              : parseFloat((width - Math.max(0.01, netDebit)).toFixed(2)),           // debit: max profit = width - cost
+              ? parseFloat((_credit * 100 * Math.max(buyLeg.contracts||1, sellLeg.contracts||1)).toFixed(2))  // credit: max profit = credit * 100 * c
+              : parseFloat((width - _credit).toFixed(2)),                                                      // debit: max profit = width - cost
             maxLoss:     _isCredit3b
-              ? parseFloat((width - Math.max(0.01, netDebit)).toFixed(2))            // credit: max loss = width - credit
-              : Math.max(0.01, netDebit),                                            // debit: max loss = cost paid
+              ? parseFloat(((width - _credit) * 100 * Math.max(buyLeg.contracts||1, sellLeg.contracts||1)).toFixed(2))  // credit: max loss = (width-credit)*100*c
+              : _credit,                                                                                        // debit: max loss = cost paid
             contracts:   Math.max(buyLeg.contracts || 1, sellLeg.contracts || 1),
             expDate:     a.expDate, expDays: a.expDays,
-            cost:        parseFloat((Math.max(0.01, netDebit) * 100 * Math.max(buyLeg.contracts||1, sellLeg.contracts||1)).toFixed(2)),
+            cost:        _isCredit3b
+              ? parseFloat(((width - _credit) * 100 * Math.max(buyLeg.contracts||1, sellLeg.contracts||1)).toFixed(2))  // credit: cost = margin (maxLoss)
+              : parseFloat((_credit * 100 * Math.max(buyLeg.contracts||1, sellLeg.contracts||1)).toFixed(2)),           // debit: cost = premium paid
             score:       Math.max(buyLeg.score || 75, sellLeg.score || 75),
             reasons:     ['Re-paired from individual legs'],
             openDate:    buyLeg.openDate || new Date().toISOString(),
