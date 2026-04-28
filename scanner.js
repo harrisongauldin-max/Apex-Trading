@@ -1412,25 +1412,9 @@ async function runScan() {
       continue;
     }
 
-    // Ticker cooldown - differentiated by exit reason
-    // fast-stop: 15 min (fell fast, might keep falling, short buffer)
-    // stop/hard-stop: 60 min (real losing trade, need confirmation before re-entry)
-    // target/partial: 0 min (hit profit, conditions may still be valid)
-    // 50ma-break/thesis/manual: 0 min (thesis-based exit, re-entry needs fresh signal anyway)
-    // Bug1 FIX: stop cooldown 60→15min. A stop on a credit put = underlying dropped,
-    // making the short strike further OTM = better setup on re-entry. 60min misses the bounce.
-    const COOLDOWN_BY_REASON = { "fast-stop": 15, "stop": 15, "stop-loss": 15 };
-    const recentClose = (state.closedTrades || []).find(t =>
-      t.ticker === stock.ticker && t.closeTime &&
-      (Date.now() - t.closeTime) < ((COOLDOWN_BY_REASON[t.reason] || 0) * 60 * 1000)
-    );
-    if (recentClose) {
-      const cooldownMins = COOLDOWN_BY_REASON[recentClose.reason] || 0;
-      const minsAgo   = ((Date.now() - recentClose.closeTime) / 60000).toFixed(0);
-      const waitMins  = Math.ceil((cooldownMins * 60 * 1000 - (Date.now() - recentClose.closeTime)) / 60000);
-      logEvent("filter", `${stock.ticker} cooldown - closed ${minsAgo}min ago (${recentClose.reason}) - wait ${waitMins}min`);
-      continue;
-    }
+    // Cooldown removed: the scoring system, regime check, and R/R gate already prevent
+    // re-entering bad setups. An arbitrary timer adds no value and blocks valid credit put
+    // entries after stops (underlying dropped = short strike further OTM = better setup).
 
     // Wash sale detection - IRS disallows loss if same security re-entered within 30 days
     // Options on same underlying = "substantially identical" security under wash sale rules
