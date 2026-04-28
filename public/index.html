@@ -244,47 +244,6 @@ input[type=text]:focus{border-color:var(--blue)}
     </div>
   </div>
 
-  <!-- Overnight Scan Panel -->
-  <div class="card" id="overnight-panel" style="margin-bottom:12px;padding:12px 16px;display:none">
-    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
-      <div style="font-size:10px;color:var(--muted);letter-spacing:1px">🌙 OVERNIGHT SCAN — PRE-OPEN INTELLIGENCE</div>
-      <span style="font-size:9px;color:var(--muted)" id="overnight-updated"></span>
-    </div>
-    <div id="overnight-signal-row" style="display:flex;align-items:center;gap:16px;margin-bottom:8px;flex-wrap:wrap">
-      <div>
-        <div style="font-size:9px;color:var(--muted);margin-bottom:2px">SIGNAL</div>
-        <div id="overnight-signal" style="font-size:14px;font-weight:700;color:var(--blue)">--</div>
-      </div>
-      <div>
-        <div style="font-size:9px;color:var(--muted);margin-bottom:2px">REGIME</div>
-        <div id="overnight-regime" style="font-size:14px;font-weight:700;color:var(--text)">--</div>
-      </div>
-      <div>
-        <div style="font-size:9px;color:var(--muted);margin-bottom:2px">RISK</div>
-        <div id="overnight-risk" style="font-size:14px;font-weight:700;color:var(--text)">--</div>
-      </div>
-      <div>
-        <div style="font-size:9px;color:var(--muted);margin-bottom:2px">ENTRY BIAS</div>
-        <div id="overnight-bias" style="font-size:12px;font-weight:600;color:var(--muted)">--</div>
-      </div>
-    </div>
-    <div id="overnight-reasoning" style="font-size:11px;color:var(--muted);line-height:1.5;margin-bottom:8px"></div>
-    <!-- Strike pre-computation -->
-    <div id="overnight-strikes" style="display:none">
-      <div style="font-size:9px;color:var(--muted);letter-spacing:1px;margin-bottom:6px">PRE-MARKET STRIKE TARGETS</div>
-      <div id="overnight-strikes-grid" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(140px,1fr));gap:6px"></div>
-    </div>
-    <!-- Instrument biases -->
-    <div id="overnight-biases" style="display:none;margin-top:8px">
-      <div style="font-size:9px;color:var(--muted);letter-spacing:1px;margin-bottom:6px">INSTRUMENT BIAS</div>
-      <div id="overnight-biases-row" style="display:flex;gap:8px;flex-wrap:wrap"></div>
-    </div>
-    <!-- Wait flag -->
-    <div id="overnight-wait" style="display:none;margin-top:8px;padding:6px 10px;background:rgba(255,153,68,.1);border:1px solid rgba(255,153,68,.3);border-radius:6px;font-size:10px;color:#ffaa44"></div>
-    <!-- Suppress until -->
-    <div id="overnight-suppress" style="display:none;margin-top:8px;padding:6px 10px;background:rgba(255,80,80,.1);border:1px solid rgba(255,80,80,.3);border-radius:6px;font-size:10px;color:var(--red)"></div>
-  </div>
-
   <!-- Portfolio Value Chart -->
   <div class="card" style="margin-bottom:12px;padding:12px 16px">
     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
@@ -550,10 +509,6 @@ input[type=text]:focus{border-color:var(--blue)}
       <button class="btn btn-gold" onclick="setBudget()">SET</button>
     </div>
     <button class="btn" style="background:#0a2a1a;border:1px solid #00c4ff;color:#00c4ff" onclick="fetch('/api/test-email',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({type:'morning'})}).then(r=>r.json()).then(d=>alert(d.ok?'Email sent!':d.error||'Failed'))">📧 TEST EMAIL</button>
-    <button class="btn" style="background:#2a0000;border:2px solid #ff3333;color:#ff6666;font-weight:700" onclick="clearAllBlockers()" title="Nuclear clear — clears avoid hold, VIX cooldown, all entry cooldowns, and pending order state simultaneously">🔴 CLEAR ALL BLOCKERS</button>
-    <button class="btn" style="background:#2a1a00;border:1px solid #ffaa00;color:#ffcc44" onclick="clearAvoidHold()" title="Clear the agent avoid hold — use when avoid was triggered by a false keyword match">🚫 CLEAR AVOID HOLD</button>
-    <button class="btn" style="background:#1a001a;border:1px solid #cc44ff;color:#dd88ff" onclick="clearVixCooldown()" title="Clear the 48h VIX spike cooldown — use when spike was triggered by bad data">⚡ CLEAR VIX COOLDOWN</button>
-    <button class="btn" style="background:#001a2a;border:1px solid #00aaff;color:#44ccff" onclick="clearEntryCooldown()" title="Clear entry attempt cooldowns — use when cooldowns were set by connectivity failures (ECONNRESET) with no actual position opened">⏱ CLEAR ENTRY COOLDOWNS</button>
     <div style="display:flex;align-items:center;gap:6px">
       <span style="font-size:11px;color:var(--muted)">BLOCK TICKER:</span>
       <input type="text" id="blacklist-input" placeholder="TSLA" maxlength="6" style="background:var(--panel);border:1px solid var(--border);color:var(--text);padding:6px 10px;border-radius:6px;font-family:var(--font);font-size:11px;width:70px;outline:none;text-transform:uppercase"/>
@@ -1015,7 +970,7 @@ input[type=text]:focus{border-color:var(--blue)}
   </div>
   <!-- ── Controls ── -->
   <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px;flex-wrap:wrap">
-    <select id="log-filter" onchange="fetchLogs()" style="background:var(--panel);border:1px solid var(--border);color:var(--text);padding:4px 8px;border-radius:6px;font-family:var(--font);font-size:11px">
+    <select id="log-filter" onchange="renderServerLog()" style="background:var(--panel);border:1px solid var(--border);color:var(--text);padding:4px 8px;border-radius:6px;font-family:var(--font);font-size:11px">
       <option value="">all types</option>
       <option value="trade,close">trades only</option>
       <option value="warn,circuit,error">warnings only</option>
@@ -1024,7 +979,7 @@ input[type=text]:focus{border-color:var(--blue)}
       <option value="scan">scans</option>
       <option value="macro">macro</option>
     </select>
-    <input id="log-search" type="text" placeholder="search..." oninput="clearTimeout(window._logSearchTimer);window._logSearchTimer=setTimeout(fetchLogs,400)" style="background:var(--panel);border:1px solid var(--border);color:var(--text);padding:4px 8px;border-radius:6px;font-family:var(--font);font-size:11px;width:160px" />
+    <input id="log-search" type="text" placeholder="search..." oninput="renderServerLog()" style="background:var(--panel);border:1px solid var(--border);color:var(--text);padding:4px 8px;border-radius:6px;font-family:var(--font);font-size:11px;width:160px" />
     <button class="btn" id="log-live-btn" onclick="toggleLogLive()" style="font-size:11px">PAUSE</button>
     <button class="btn" onclick="fetchLogs()" style="font-size:11px">REFRESH</button>
     <button class="btn" onclick="clearLog()" style="font-size:11px">CLEAR</button>
@@ -1201,99 +1156,6 @@ function renderAgentPanel() {
   }
 }
 
-// ── Overnight scan panel renderer ─────────────────────────────────────────
-function renderOvernightPanel() {
-  const scan   = state.overnightScan;
-  const panel  = document.getElementById('overnight-panel');
-  if (!panel) return;
-
-  if (!scan) { panel.style.display = 'none'; return; }
-  panel.style.display = '';
-
-  const sigColor = scan.signal && scan.signal.includes('bearish') ? 'var(--red)'
-                 : scan.signal && scan.signal.includes('bullish') ? 'var(--green)' : 'var(--gold)';
-  const riskColor = scan.riskLevel === 'high' ? 'var(--red)'
-                  : scan.riskLevel === 'medium' ? '#ffaa44' : 'var(--green)';
-
-  const sigEl   = document.getElementById('overnight-signal');
-  const regEl   = document.getElementById('overnight-regime');
-  const riskEl  = document.getElementById('overnight-risk');
-  const biasEl  = document.getElementById('overnight-bias');
-  const rezEl   = document.getElementById('overnight-reasoning');
-  const updEl   = document.getElementById('overnight-updated');
-  const waitEl  = document.getElementById('overnight-wait');
-  const suppEl  = document.getElementById('overnight-suppress');
-
-  if (sigEl)  { sigEl.textContent  = (scan.signal  || '--').toUpperCase(); sigEl.style.color = sigColor; }
-  if (regEl)  { regEl.textContent  = (scan.regime  || '--').replace('_',' '); }
-  if (riskEl) { riskEl.textContent = (scan.riskLevel || '--').toUpperCase(); riskEl.style.color = riskColor; }
-  if (biasEl) { biasEl.textContent = (scan.entryBias || '--').replace(/_/g,' '); }
-  if (rezEl)  { rezEl.textContent  = scan.reasoning || '--'; }
-  if (updEl)  {
-    const ct = scan.generatedCT || (scan.generatedAt ? new Date(scan.generatedAt).toLocaleTimeString() : '');
-    updEl.textContent = scan.scanType ? scan.scanType + ' · ' + ct : ct;
-  }
-
-  // Wait for open flag
-  if (waitEl) {
-    if (scan.waitForOpen && scan.waitReason) {
-      waitEl.style.display = '';
-      waitEl.textContent = '⏳ WAIT FOR OPEN: ' + scan.waitReason;
-    } else { waitEl.style.display = 'none'; }
-  }
-
-  // Suppress until
-  if (suppEl) {
-    if (scan.suppressUntil) {
-      suppEl.style.display = '';
-      suppEl.textContent = '🚫 SUPPRESS ENTRIES UNTIL ' + scan.suppressUntil + ' CT — high-impact event';
-    } else { suppEl.style.display = 'none'; }
-  }
-
-  // Pre-market strike targets
-  const strikesWrap = document.getElementById('overnight-strikes');
-  const strikesGrid = document.getElementById('overnight-strikes-grid');
-  const pd = scan.premarketData;
-  if (strikesWrap && strikesGrid && pd && pd.instruments) {
-    strikesWrap.style.display = '';
-    strikesGrid.innerHTML = Object.entries(pd.instruments).map(([ticker, d]) => {
-      if (!d) return '';
-      const bias = (scan.instrumentBias || {})[ticker] || 'neutral';
-      const biasCol = bias === 'bearish' ? 'var(--red)' : bias === 'bullish' ? 'var(--green)' : bias === 'skip' ? '#555' : 'var(--muted)';
-      return `<div style="background:var(--panel);border:1px solid var(--border);border-radius:6px;padding:6px 8px">
-        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:3px">
-          <span style="font-size:11px;font-weight:700;color:#44aaff">${ticker}</span>
-          <span style="font-size:9px;color:${biasCol}">${bias.toUpperCase()}</span>
-        </div>
-        <div style="font-size:10px;color:var(--muted)">$${d.price?.toFixed(2) || '--'}</div>
-        <div style="font-size:10px;color:var(--text)">Short $${d.shortStrike} / Long $${d.longStrike}</div>
-        <div style="font-size:9px;color:var(--muted)">${d.width} wide · ${d.otmPct} OTM</div>
-      </div>`;
-    }).join('');
-    // Show gap estimate
-    if (pd.spyGapEst && pd.spyGapEst !== 'unknown') {
-      const gapNum = parseFloat(pd.spyGapEst);
-      const gapCol = gapNum > 1 ? 'var(--red)' : gapNum < -1 ? 'var(--green)' : 'var(--muted)';
-      strikesGrid.innerHTML += `<div style="grid-column:1/-1;font-size:10px;color:${gapCol};padding:4px 0">SPY pre-market gap: ${pd.spyGapEst}</div>`;
-    }
-  } else if (strikesWrap) { strikesWrap.style.display = 'none'; }
-
-  // Instrument biases (if no strike data, show as pills)
-  const biasesWrap = document.getElementById('overnight-biases');
-  const biasesRow  = document.getElementById('overnight-biases-row');
-  if (biasesWrap && biasesRow && scan.instrumentBias && !pd) {
-    const nonNeutral = Object.entries(scan.instrumentBias).filter(([,v]) => v !== 'neutral');
-    if (nonNeutral.length) {
-      biasesWrap.style.display = '';
-      biasesRow.innerHTML = Object.entries(scan.instrumentBias).map(([t,b]) => {
-        const col = b === 'bearish' ? 'var(--red)' : b === 'bullish' ? 'var(--green)' : b === 'skip' ? '#555' : 'var(--muted)';
-        const bg  = b === 'bearish' ? 'rgba(255,80,80,.1)' : b === 'bullish' ? 'rgba(0,255,136,.1)' : 'rgba(100,100,100,.1)';
-        return `<span style="font-size:10px;padding:3px 8px;border-radius:10px;background:${bg};color:${col}">${t}: ${b}</span>`;
-      }).join('');
-    } else { biasesWrap.style.display = 'none'; }
-  } else if (biasesWrap && pd) { biasesWrap.style.display = 'none'; } // strike grid shows bias inline
-}
-
 // ── Agent auto-exit toggle ─────────────────────────────────────────────────
 let agentAutoExit = false;
 function toggleAgentAutoExit() {
@@ -1421,7 +1283,6 @@ function renderAll() {
   renderJournal();
   renderPortfolioChart();
   renderAgentPanel();
-  renderOvernightPanel();
 }
 
 function renderMarketContext() { /* handled in renderMetrics */ }
@@ -1510,8 +1371,6 @@ function renderMetrics() {
   const pdtSource    = state.pdtSource || "internal";
   const pdtEl        = document.getElementById('pdt-remaining');
   const pdtCard      = document.getElementById('pdt-card');
-  // Hide PDT card entirely when rule is inactive (sunset April 21 2026)
-  if (pdtCard) pdtCard.style.display = state.pdtRuleActive === false ? 'none' : '';
   const pdtSub       = document.getElementById('pdt-sub');
   pdtEl.textContent  = pdtBlocked ? 'BLOCKED' : pdtRemaining;
   pdtSub.textContent = pdtUsed + ' of ' + pdtLimit + ' used · ' + (pdtSource === 'alpaca' ? '✓ Alpaca' : '⚠ internal');
@@ -1688,19 +1547,11 @@ function renderMetrics() {
   const mc = state.monteCarlo || {}; // mc = monteCarlo
   const mcMed = document.getElementById("mc-median");
   if (mcMed && mc.median !== undefined) {
-    if (mc.median != null) {
-      mcMed.textContent = (mc.median >= 0 ? "+" : "") + "$" + Math.abs(mc.median).toFixed(0);
-      mcMed.style.color = mc.median >= 0 ? "var(--green)" : "var(--red)";
-      document.getElementById("mc-prob").textContent = (mc.probProfit || 0) + "% chance of profit";
-      document.getElementById("mc-range").textContent = (mc.percentile5 != null ? "$"+mc.percentile5.toFixed(0) : "$0") + " / +$" + (mc.percentile95 != null ? mc.percentile95.toFixed(0) : "0");
-      document.getElementById("mc-range").style.color = "var(--muted)";
-    } else {
-      mcMed.textContent = "--";
-      mcMed.style.color = "var(--muted)";
-      document.getElementById("mc-prob").textContent = mc.message || "Need 10+ closed trades";
-      document.getElementById("mc-range").textContent = "-- / --";
-      document.getElementById("mc-range").style.color = "var(--muted)";
-    }
+    mcMed.textContent = (mc.median >= 0 ? "+" : "") + "$" + Math.abs(mc.median).toFixed(0);
+    mcMed.style.color = mc.median >= 0 ? "var(--green)" : "var(--red)";
+    document.getElementById("mc-prob").textContent = (mc.probProfit || 0) + "% chance of profit";
+    document.getElementById("mc-range").textContent = "$" + (mc.percentile5||0).toFixed(0) + " / +" + "$" + (mc.percentile95||0).toFixed(0);
+    document.getElementById("mc-range").style.color = "var(--muted)";
   }
 
   // Kelly
@@ -1708,15 +1559,11 @@ function renderMetrics() {
   const kellyEl = document.getElementById("kelly-contracts");
   if (kellyEl && kelly.contracts !== undefined) {
     kellyEl.textContent = kelly.contracts + "x contracts";
-    const hasKellyData = kelly.winRate != null && kelly.payoffRatio != null;
-    kellyEl.style.color = (kelly.winRate >= 55) ? "var(--green)" : "var(--gold)";
-    document.getElementById("kelly-detail").textContent = hasKellyData
-      ? (kelly.winRate.toFixed(0) + "% win rate · " + kelly.payoffRatio.toFixed(2) + "x payoff")
-      : (kelly.note || "Need 10+ trades");
-    document.getElementById("kelly-factor").textContent = kelly.kelly != null ? kelly.kelly.toFixed(3) : "--";
-    document.getElementById("kelly-factor").style.color = (kelly.kelly > 0) ? "var(--green)" : "var(--muted)";
-    document.getElementById("kelly-half").textContent = kelly.halfKelly != null
-      ? ("half-Kelly: " + kelly.halfKelly.toFixed(3)) : "half-Kelly: --";
+    kellyEl.style.color = kelly.winRate >= 55 ? "var(--green)" : "var(--gold)";
+    document.getElementById("kelly-detail").textContent = kelly.winRate + "% win rate · " + kelly.payoffRatio + "x payoff";
+    document.getElementById("kelly-factor").textContent = kelly.kelly || "--";
+    document.getElementById("kelly-factor").style.color = (kelly.kelly||0) > 0 ? "var(--green)" : "var(--red)";
+    document.getElementById("kelly-half").textContent = "half-Kelly: " + (kelly.halfKelly || "--");
   }
 
   // Beta-weighted delta
@@ -1894,7 +1741,7 @@ function renderPositions() {
 
 // ── Helper: fmt ────────────────────────────────────────────────────────────
 function pnlColor(v) { return v >= 0 ? 'var(--green)' : 'var(--red)'; }
-function pnlSign(v)  { return v >= 0 ? '+' : '-'; }
+function pnlSign(v)  { return v >= 0 ? '+' : ''; }
 
 function scoreCol(s) {
   return s >= 85 ? 'var(--green)' : s >= 70 ? 'var(--blue)' : 'var(--orange)';
@@ -1926,19 +1773,16 @@ function renderPairedSpread(s, l) {
     : (s.strike - netCredit).toFixed(2);  // put  credit: BE = higher strike - credit
   const breakeven = _beCredit;
 
-  // P&L: sum both legs. Short leg profits as cost falls, long leg profits as value rises.
-  const sP = s.unrealizedPnL !== undefined ? parseFloat(s.unrealizedPnL)
-    : (parseFloat(s.premium) - parseFloat(s.currentPrice||s.premium)) * 100 * c;
-  const lP = l.unrealizedPnL !== undefined ? parseFloat(l.unrealizedPnL)
-    : (parseFloat(l.currentPrice||l.premium) - parseFloat(l.premium)) * 100 * c;
-  const netPnL   = sP + lP;
-  const pct      = maxProfit > 0 ? (netPnL / maxProfit * 100) : 0;
-
-  // Estimated current position value = cost to close (what we'd pay to buy back spread)
+  // P&L: compute from prices directly (Alpaca unrealized_pl has wrong sign convention)
+  // credit_received = shortEntry - longEntry = netCredit (already computed above)
+  // cost_to_close   = shortCurrent - longCurrent
+  // P&L = credit_received - cost_to_close
   const sCur = parseFloat(s.currentPrice || s.premium);
   const lCur = parseFloat(l.currentPrice || l.premium);
-  const costToClose  = (sCur - lCur) * 100 * c;   // cost to close spread
-  const estPosValue  = maxProfit - netPnL;          // remaining value vs max profit
+  const costToClose  = (sCur - lCur) * 100 * c;
+  const netPnL   = maxProfit - costToClose;   // profit = max_profit - remaining_cost
+  const pct      = maxProfit > 0 ? (netPnL / maxProfit * 100) : 0;
+  const estPosValue  = Math.max(0, maxProfit - netPnL);
   const marginReq    = maxLoss;                      // margin = max loss
 
   const score    = s.score || l.score || 0;
@@ -2014,17 +1858,25 @@ function renderNativeSpread(p) {
   const maxLs     = parseFloat(p.maxLoss)   || 0;
   const width     = Math.abs((p.buyStrike||0) - (p.sellStrike||0));
   let chgDollar, chgPct;
-  if (p.isCreditSpread) {
-    chgDollar = p.unrealizedPnL !== undefined ? parseFloat(p.unrealizedPnL) : (prem - curPrice) * 100 * c;
+  // Use displayPnL from server if available (computed from Alpaca leg prices with correct sign).
+  // Fall back to local calculation using price-based formula.
+  if (p.displayPnL !== undefined) {
+    chgDollar = parseFloat(p.displayPnL);
+    chgPct    = maxPr > 0 ? (chgDollar / maxPr * 100) : 0;
+  } else if (p.isCreditSpread) {
+    chgDollar = typeof p.unrealizedPnL === 'number' ? p.unrealizedPnL : (prem - curPrice) * 100 * c;
     chgPct    = maxPr > 0 ? (chgDollar / maxPr * 100) : 0;
   } else {
-    chgDollar = p.unrealizedPnL !== undefined ? parseFloat(p.unrealizedPnL) : (curPrice - prem) * 100 * c;
+    chgDollar = typeof p.unrealizedPnL === 'number' ? p.unrealizedPnL : (curPrice - prem) * 100 * c;
     chgPct    = prem > 0 ? (chgDollar / (prem * 100 * c) * 100) : 0;
   }
   // Color always follows dollar P&L sign (positive = green regardless of % magnitude)
   const dollarColor = pnlColor(chgDollar);
   const pctColor    = pnlColor(chgDollar);
-  const estValue    = curPrice * 100 * c;
+  // EST POSITION VALUE = remaining profit potential (for credit: maxProfit - P&L already captured)
+  const estValue    = p.isCreditSpread
+    ? Math.max(0, maxPr - chgDollar)  // remaining value left to capture
+    : curPrice * 100 * c;             // debit: current market value
   const score  = p.score || 0;
   const dte    = Math.max(0, Math.round((new Date(p.expDate) - new Date()) / 86400000));
   const optType = (p.optionType||'put').toUpperCase();
@@ -2058,7 +1910,6 @@ function renderNativeSpread(p) {
     <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;margin-bottom:12px">
       <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
         <span style="font-size:16px;font-weight:700;color:var(--blue)">${p.ticker}</span>
-        ${p.price ? `<span style="font-size:14px;font-weight:700;color:var(--text)">$${parseFloat(p.price).toFixed(2)}</span>` : ''}
         <span style="font-size:11px;color:var(--muted)">${strikeDisplay} ${p.expDate}</span>
         <span style="font-size:9px;padding:2px 7px;border-radius:10px;background:${p.isCreditSpread?'rgba(0,255,136,.15)':'rgba(0,150,255,.15)'};color:${p.isCreditSpread?'var(--green)':'var(--blue)'}">${p.isCreditSpread?'CREDIT':'DEBIT'} SPREAD</span>
         <span style="font-size:9px;padding:2px 7px;border-radius:10px;background:rgba(255,80,80,.15);color:#ff5050">${optType}</span>
@@ -2085,29 +1936,6 @@ function renderNativeSpread(p) {
       <div><div style="font-size:9px;color:var(--muted)">CONTRACTS</div><div style="font-weight:700">${c}x</div></div>
       <div><div style="font-size:9px;color:var(--muted)">EXP DATE</div><div style="font-weight:700">${p.expDate}</div></div>
     </div>
-
-    <!-- Individual leg breakdown -->
-    ${(p.sellSymbol || p.buySymbol) ? `
-    <div style="margin-top:10px;border-top:1px solid rgba(255,255,255,.06);padding-top:10px">
-      <div style="font-size:9px;color:var(--muted);letter-spacing:1px;margin-bottom:6px">LEG BREAKDOWN</div>
-      <div style="display:grid;grid-template-columns:1fr 1fr;gap:6px">
-        <div style="background:rgba(255,80,80,.06);border:1px solid rgba(255,80,80,.2);border-radius:6px;padding:8px 10px">
-          <div style="font-size:9px;color:#ff5050;letter-spacing:1px;margin-bottom:4px">SHORT (SOLD)</div>
-          <div style="font-weight:700;color:var(--text)">$${p.sellStrike || p.shortStrike || '?'}${(p.optionType||'call').toUpperCase().slice(0,1)}</div>
-          <div style="font-size:10px;color:var(--muted)">${p.sellSymbol || '--'}</div>
-          <div style="font-size:10px;color:var(--muted)">Entry: $${parseFloat(p.sellPremium || p.entryShortPremium || p.premium || 0).toFixed(2)}</div>
-          ${p._legPrices && p._legPrices.sell ? '<div style="font-size:11px;font-weight:700;color:var(--text)">Now: $' + parseFloat(p._legPrices.sell).toFixed(2) + '</div>' : ''}
-        </div>
-        <div style="background:rgba(0,150,255,.06);border:1px solid rgba(0,150,255,.2);border-radius:6px;padding:8px 10px">
-          <div style="font-size:9px;color:var(--blue);letter-spacing:1px;margin-bottom:4px">LONG (BOUGHT)</div>
-          <div style="font-weight:700;color:var(--text)">$${p.buyStrike || p.longStrike || '?'}${(p.optionType||'call').toUpperCase().slice(0,1)}</div>
-          <div style="font-size:10px;color:var(--muted)">${p.buySymbol || '--'}</div>
-          <div style="font-size:10px;color:var(--muted)">Entry: $${parseFloat(p.buyPremium || p.entryLongPremium || 0).toFixed(2)}</div>
-          ${p._legPrices && p._legPrices.buy ? '<div style="font-size:11px;font-weight:700;color:var(--text)">Now: $' + parseFloat(p._legPrices.buy).toFixed(2) + '</div>' : ''}
-        </div>
-      </div>
-      ${p.price ? '<div style="margin-top:6px;font-size:10px;color:var(--muted)">Underlying: <strong style="color:var(--text)">$' + parseFloat(p.price).toFixed(2) + '</strong> · Breakeven: <strong style="color:var(--orange)">$' + breakeven + '</strong> · ' + (parseFloat(p.price) < parseFloat(breakeven) ? '<span style="color:var(--green)">✓ Below breakeven</span>' : '<span style="color:var(--red)">⚠ Above breakeven</span>') + '</div>' : ''}
-    </div>` : ''}
   </div>`;
 }
 
@@ -2183,7 +2011,7 @@ function renderSpreadCard(short, long) {
            + (parseFloat(long.currentPrice || long.premium)  - parseFloat(long.premium))  * 100 * c;
   }
   const pnlPct   = maxProfit > 0 ? (netPnL / maxProfit * 100) : 0;
-  const pnlSign  = netPnL >= 0 ? '+' : '-';
+  const pnlSign  = netPnL >= 0 ? '+' : '';
   const pnlColor = netPnL >= 0 ? 'var(--green)' : 'var(--red)';
 
   return `<div style="background:#050e1a;border:1px solid rgba(0,255,136,.25);border-radius:10px;padding:14px;margin-bottom:10px">
@@ -2279,7 +2107,7 @@ function renderSingleCard(p) {
       <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-bottom:10px">
         <div><div style="font-size:9px;color:var(--muted)">${p.isCreditSpread?'NET CREDIT':'NET DEBIT'}</div><div style="font-weight:700">$${p.premium}</div></div>
         <div><div style="font-size:9px;color:var(--muted)">CURRENT VALUE</div><div style="font-weight:700;color:${chgPct>=0?'var(--green)':'var(--red)'}">$${(p.currentPrice||p.premium).toFixed(2)}</div></div>
-        <div><div style="font-size:9px;color:var(--muted)">UNREALIZED P&L</div><div style="font-weight:700;color:${chgDollar>=0?'var(--green)':'var(--red)'}">${chgDollar>=0?'+':'-'}$${Math.abs(chgDollar).toFixed(2)}</div></div>
+        <div><div style="font-size:9px;color:var(--muted)">UNREALIZED P&L</div><div style="font-weight:700;color:${chgDollar>=0?'var(--green)':'var(--red)'}">${chgDollar>=0?'+':''}$${Math.abs(chgDollar).toFixed(2)}</div></div>
         <div><div style="font-size:9px;color:var(--muted)">P&L %</div><div style="font-weight:700;color:${chgPct>=0?'var(--green)':'var(--red)'}">${chgPct>=0?'+':''}${chgPct.toFixed(1)}%</div></div>
         <div><div style="font-size:9px;color:var(--muted)">${p.isCreditSpread?'SHORT STRIKE':'BUY STRIKE'}</div><div style="font-weight:700;color:${p.isCreditSpread?'var(--orange)':'var(--blue)'}">$${p.isCreditSpread?(p.shortStrike||p.sellStrike):p.buyStrike}</div></div>
         <div><div style="font-size:9px;color:var(--muted)">${p.isCreditSpread?'LONG STRIKE':'SELL STRIKE'}</div><div style="font-weight:700;color:var(--muted)">$${p.isCreditSpread?(p.longStrike||p.buyStrike):p.sellStrike}</div></div>
@@ -2297,7 +2125,7 @@ function renderSingleCard(p) {
       <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-bottom:10px">
         <div><div style="font-size:9px;color:var(--muted)">ENTRY PRICE</div><div style="font-weight:700">$${p.premium}</div></div>
         <div><div style="font-size:9px;color:var(--muted)">CURRENT PRICE</div><div style="font-weight:700;color:${chgPct>=0?'var(--green)':'var(--red)'}">$${(p.currentPrice||p.premium).toFixed(2)}</div></div>
-        <div><div style="font-size:9px;color:var(--muted)">UNREALIZED P&L</div><div style="font-weight:700;color:${chgDollar>=0?'var(--green)':'var(--red)'}">${chgDollar>=0?'+':'-'}$${Math.abs(chgDollar).toFixed(2)}</div></div>
+        <div><div style="font-size:9px;color:var(--muted)">UNREALIZED P&L</div><div style="font-weight:700;color:${chgDollar>=0?'var(--green)':'var(--red)'}">${chgDollar>=0?'+':''}$${chgDollar.toFixed(2)}</div></div>
         <div><div style="font-size:9px;color:var(--muted)">P&L %</div><div style="font-weight:700;color:${chgPct>=0?'var(--green)':'var(--red)'}">${chgPct>=0?'+':''}${chgPct.toFixed(1)}%</div></div>
         <div><div style="font-size:9px;color:var(--muted)">${p.ticker} STOCK</div><div style="font-weight:700;color:var(--blue)">$${p.price?p.price.toFixed(2):'--'}</div></div>
         <div><div style="font-size:9px;color:var(--muted)">CONTRACTS</div><div style="font-weight:700">${p.contracts}x</div></div>
@@ -2521,156 +2349,51 @@ function renderActivityLog() {
 
 async function renderJournal() {
   const wrap = document.getElementById('journal-wrap');
-
-  // Build unified trade history from closedTrades (authoritative P&L)
-  // matched with tradeJournal OPEN entries (for scoreReasons/entry context)
-  const closed  = (state.closedTrades || []).slice().reverse(); // newest first
-  const journal = state.tradeJournal  || [];
-
-  // Also get any open positions (show as OPEN at top)
-  const openPositions = state.positions || [];
-
-  if (!closed.length && !openPositions.length) {
-    wrap.innerHTML = '<div class="no-data">No trades yet. Journal populates after first entry and exit.</div>';
-    return;
-  }
-
-  // Match closed trade to its OPEN journal entry by ticker + optionType + approximate time
-  function findOpenEntry(trade) {
-    return journal.find(j => j.action === 'OPEN' &&
-      j.ticker === trade.ticker &&
-      j.optionType === trade.optionType
-    );
-  }
-
-  // Render an open position card
-  function renderOpenCard(pos) {
-    const tradeType = pos.isCreditSpread ? 'CREDIT' : pos.isSpread ? 'DEBIT' : 'NAKED';
-    const typeBg    = pos.isCreditSpread ? 'rgba(0,255,136,.15)' : pos.isSpread ? 'rgba(0,150,255,.15)' : 'rgba(100,100,100,.1)';
-    const typeCol   = pos.isCreditSpread ? 'var(--green)' : pos.isSpread ? 'var(--blue)' : 'var(--muted)';
-    const pnlStr    = pos.pnl != null ? ((pos.pnl >= 0 ? '+' : '') + parseFloat(pos.pnl).toFixed(2)) : '--';
-    const pnlCol    = (pos.pnl || 0) >= 0 ? 'var(--green)' : 'var(--red)';
-    const score     = pos.score || 0;
-    const scoreCol  = score >= 85 ? 'var(--green)' : score >= 70 ? 'var(--blue)' : 'var(--orange)';
-    const spreadLabel = pos.isCreditSpread
-      ? `$${pos.sellStrike}C/$${pos.buyStrike}C · ${pos.expDate||''}`
-      : pos.buyStrike && pos.sellStrike
-        ? `$${pos.buyStrike}/$${pos.sellStrike} · ${pos.expDate||''}`
-        : pos.strike ? `$${pos.strike}${pos.optionType==='put'?'P':'C'} · ${pos.expDate||''}` : pos.optionType;
-    const openDate  = pos.entryTime ? new Date(pos.entryTime).toLocaleString() : (pos.openDate || '--');
-    const scoreReasons = pos.scoreReasons || [];
-    return `<div class="journal-entry" style="border-left:3px solid var(--green)">
+  let journal = state.tradeJournal || [];
+  try { const r = await fetch('/api/journal'); if (r.ok) journal = await r.json(); } catch(e) {}
+  journal = journal || [];
+  if (!journal.length) { wrap.innerHTML = '<div class="no-data">No journal entries yet.</div>'; return; }
+  wrap.innerHTML = journal.slice(0, 30).map(e => {
+    const isOpen  = e.action === 'OPEN';
+    const color   = isOpen ? 'var(--green)' : (e.pnl >= 0 ? 'var(--blue)' : 'var(--red)');
+    const score   = e.score;
+    const scoreColor = score >= 85 ? 'var(--green)' : score >= 70 ? 'var(--blue)' : 'var(--orange)';
+    return `
+    <div class="journal-entry">
       <div class="journal-header">
-        <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
-          <span class="journal-ticker">${pos.ticker}</span>
-          <span style="font-size:10px;padding:2px 8px;border-radius:10px;background:rgba(0,255,136,.1);color:var(--green)">OPEN</span>
-          <span style="font-size:10px;color:var(--muted)">${spreadLabel}</span>
-          <span style="font-size:9px;padding:2px 6px;border-radius:10px;background:${typeBg};color:${typeCol}">${tradeType}</span>
+        <div style="display:flex;align-items:center;gap:10px">
+          <span class="journal-ticker">${e.ticker}</span>
+          <span style="font-size:10px;padding:2px 8px;border-radius:10px;background:${isOpen?'rgba(0,255,136,.1)':'rgba(0,196,255,.1)'};color:${color}">${e.action}</span>
+          ${isOpen ? `<span style="font-size:10px;color:var(--muted)">${
+            e.isSpread && e.buyStrike && e.sellStrike
+              ? '$'+e.buyStrike+'/'+'$'+e.sellStrike+((e.optionType==='call'?'C':'P')+'-SPRD')
+              : e.strike
+                ? '$'+e.strike+(e.optionType==='put'?'P':'C')+' · '+(e.expDate||'?')
+                : e.optionType
+                  ? e.optionType.toUpperCase()
+                  : '--'
+          }</span>` : ''}
+          ${e.isCreditSpread ? '<span style="font-size:9px;padding:2px 6px;border-radius:10px;background:rgba(0,255,136,.15);color:var(--green)">CREDIT</span>' : e.isSpread ? '<span style="font-size:9px;padding:2px 6px;border-radius:10px;background:rgba(0,150,255,.15);color:var(--blue)">DEBIT</span>' : ''}
         </div>
         <div style="display:flex;align-items:center;gap:8px">
-          ${score ? `<span class="journal-score" style="background:rgba(0,196,255,.1);color:${scoreCol}">${score}/100</span>` : ''}
-          <span style="font-weight:700;color:${pnlCol}">${pnlStr}</span>
+          ${score ? `<span class="journal-score" style="background:rgba(0,196,255,.1);color:${scoreColor}">${score}/100</span>` : ''}
+          ${!isOpen && e.pnl !== undefined ? `<span style="font-weight:700;color:${e.pnl>=0?'var(--green)':'var(--red)'}">${e.pnl>=0?'+':''}${(e.pnl||0).toFixed(2)}</span>` : ''}
         </div>
       </div>
-      <div class="journal-reasoning">
-        ${pos.isCreditSpread
-          ? `Bear call spread. Sold $${pos.sellStrike}C / Bought $${pos.buyStrike}C. Credit $${pos.premium}. Max profit $${pos.maxProfit ? (pos.maxProfit*100*(pos.contracts||1)).toFixed(0) : '--'}. Max loss $${pos.maxLoss ? (pos.maxLoss*100*(pos.contracts||1)).toFixed(0) : '--'}. ${pos.contracts||1} contract(s).`
-          : `Entry $${pos.premium}. ${pos.contracts||1} contract(s).`}
-      </div>
-      ${scoreReasons.length ? ('<div style="margin-top:4px;padding:4px 0;border-top:1px solid #1a2a3a">' + scoreReasons.slice(0,8).map(function(r) {
-        var isNeg = r.indexOf('(-') > -1;
+      <div class="journal-reasoning">${e.reasoning || '--'}</div>
+      ${(isOpen && e.scoreReasons && e.scoreReasons.length) ? ('<div style="margin-top:4px;padding:4px 0;border-top:1px solid #1a2a3a">' + e.scoreReasons.map(function(r) {
+        var isNeg = r.indexOf('(-') > -1 || r.indexOf('contradicts') > -1 || r.indexOf('bad for') > -1 || r.indexOf('capped') > -1 || r.indexOf('fighting') > -1 || r.indexOf('Neither') > -1;
         var isPos = !isNeg && r.indexOf('(+') > -1 && r.indexOf('+0)') === -1;
-        return '<span style="font-size:10px;color:' + (isNeg?'#ff7766':isPos?'#88dd88':'#666') + ';display:block;line-height:1.5">' + r + '</span>';
+        var col = isNeg ? '#ff7766' : isPos ? '#88dd88' : '#666';
+        return '<span style="font-size:10px;color:' + col + ';display:block;line-height:1.5">' + r + '</span>';
       }).join('') + '</div>') : ''}
       <div class="journal-meta">
-        <span title="Entry timestamp">🕐 ${pos.openDate ? new Date(pos.openDate).toLocaleString('en-US',{month:'short',day:'numeric',hour:'2-digit',minute:'2-digit',timeZone:'America/Chicago',hour12:true}) + ' CT' : '--'}</span>
-        <span>DTE: ${pos.expDays || '--'}</span>
-        <span>VIX: ${pos.entryVIX || '--'}</span>
-        <span>Regime: ${pos.entryRegime || '--'}</span>
+        <span>${new Date(e.time).toLocaleString()}</span>
+        ${isOpen ? `<span>δ ${e.delta}</span><span>IV ${e.iv}%</span><span>VIX ${e.vix}</span>` : `<span>Reason: ${e.reason}</span><span style="font-size:9px;padding:1px 5px;border-radius:8px;background:${e.tradeType==='credit_spread'?'rgba(0,255,136,.12)':e.tradeType==='debit_spread'?'rgba(0,150,255,.12)':'rgba(100,100,100,.1)'};color:${e.tradeType==='credit_spread'?'var(--green)':e.tradeType==='debit_spread'?'var(--blue)':'var(--muted)'}">${(e.tradeType||'naked').replace('_',' ').toUpperCase()}</span>`}
+        ${e.catalyst ? `<span>Catalyst: ${e.catalyst}</span>` : ''}
       </div>
     </div>`;
-  }
-
-  // Render a closed trade card
-  function renderClosedCard(trade) {
-    const openEntry = findOpenEntry(trade);
-    const won       = trade.pnl > 0;
-    const pnlCol    = won ? 'var(--green)' : 'var(--red)';
-    const pnlStr    = (trade.pnl >= 0 ? '+' : '') + parseFloat(trade.pnl || 0).toFixed(2);
-    const pctStr    = (trade.pct >= 0 ? '+' : '') + parseFloat(trade.pct || 0).toFixed(1) + '%';
-    const score     = trade.entryScore || 0;
-    const scoreCol  = score >= 85 ? 'var(--green)' : score >= 70 ? 'var(--blue)' : 'var(--orange)';
-    const typeLabel = trade.tradeType === 'credit_spread' ? 'CREDIT' : trade.tradeType === 'debit_spread' ? 'DEBIT' : 'NAKED';
-    const typeBg    = trade.tradeType === 'credit_spread' ? 'rgba(0,255,136,.15)' : trade.tradeType === 'debit_spread' ? 'rgba(0,150,255,.15)' : 'rgba(100,100,100,.1)';
-    const typeCol   = trade.tradeType === 'credit_spread' ? 'var(--green)' : trade.tradeType === 'debit_spread' ? 'var(--blue)' : 'var(--muted)';
-    const maxProfitPct = trade.pctOfMaxProfit != null ? trade.pctOfMaxProfit.toFixed(1) + '% of max' : '';
-    const spreadLabel = trade.sellStrike && trade.buyStrike
-      ? `$${trade.sellStrike}/$${trade.buyStrike} · ${trade.optionType?.toUpperCase()}`
-      : trade.buyStrike ? `$${trade.buyStrike} ${trade.optionType?.toUpperCase()}` : trade.optionType;
-    const scoreReasons = (openEntry && openEntry.scoreReasons) || [];
-    const closeDate = trade.closeTime ? new Date(trade.closeTime).toLocaleString() : (trade.date || '--');
-    return `<div class="journal-entry" style="border-left:3px solid ${pnlCol};opacity:0.9">
-      <div class="journal-header">
-        <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
-          <span class="journal-ticker">${trade.ticker}</span>
-          <span style="font-size:10px;padding:2px 8px;border-radius:10px;background:${won?'rgba(0,196,255,.1)':'rgba(255,80,80,.1)'};color:${pnlCol}">CLOSED</span>
-          <span style="font-size:10px;color:var(--muted)">${spreadLabel}</span>
-          <span style="font-size:9px;padding:2px 6px;border-radius:10px;background:${typeBg};color:${typeCol}">${typeLabel}</span>
-        </div>
-        <div style="display:flex;align-items:center;gap:8px">
-          ${score ? `<span class="journal-score" style="background:rgba(0,196,255,.1);color:${scoreCol}">${score}/100</span>` : ''}
-          <span style="font-weight:700;color:${pnlCol}">${pnlStr}</span>
-          <span style="font-size:10px;color:${pnlCol}">${pctStr}</span>
-        </div>
-      </div>
-      <div class="journal-reasoning">
-        <strong style="color:${pnlCol}">${won ? '✓ WIN' : '✗ LOSS'}</strong> — 
-        ${trade.tradeType === 'credit_spread'
-          ? `Sold $${trade.sellStrike}/$${trade.buyStrike} spread. ${maxProfitPct ? maxProfitPct + ' profit captured.' : ''}`
-          : ''
-        }
-        Closed: <em>${trade.reason || '--'}</em>. 
-        Held ${trade.daysHeld || 0}d. 
-        Entry VIX ${trade.entryVIX || '--'} → Exit VIX ${trade.exitVIX || '--'}.
-        Entry signal: ${trade.entryMacro || '--'}.
-      </div>
-      ${scoreReasons.length ? ('<div style="margin-top:4px;padding:4px 0;border-top:1px solid #1a2a3a">' + scoreReasons.slice(0,6).map(function(r) {
-        var isNeg = r.indexOf('(-') > -1;
-        var isPos = !isNeg && r.indexOf('(+') > -1 && r.indexOf('+0)') === -1;
-        return '<span style="font-size:10px;color:' + (isNeg?'#ff7766':isPos?'#88dd88':'#666') + ';display:block;line-height:1.5">' + r + '</span>';
-      }).join('') + '</div>') : ''}
-      <div class="journal-meta">
-        ${trade.openDate ? `<span title="Entry timestamp">🕐 In: ${new Date(trade.openDate).toLocaleString('en-US',{month:'short',day:'numeric',hour:'2-digit',minute:'2-digit',timeZone:'America/Chicago',hour12:true})} CT</span>` : ''}
-        <span title="Close timestamp">🕐 Out: ${trade.closeTime ? new Date(trade.closeTime).toLocaleString('en-US',{month:'short',day:'numeric',hour:'2-digit',minute:'2-digit',timeZone:'America/Chicago',hour12:true}) + ' CT' : (trade.date || '--')}</span>
-        ${trade.maxProfit ? `<span>Max P: $${(trade.maxProfit*100*(trade.contracts||1)).toFixed(0)}</span>` : ''}
-        ${trade.maxLoss   ? `<span>Max L: $${(trade.maxLoss*100*(trade.contracts||1)).toFixed(0)}</span>`   : ''}
-        <span>Regime: ${trade.regime || '--'}</span>
-      </div>
-    </div>`;
-  }
-
-  // Summary bar
-  const totalPnL  = closed.reduce((s, t) => s + (t.pnl || 0), 0);
-  const wins      = closed.filter(t => t.pnl > 0).length;
-  const winRate   = closed.length ? ((wins / closed.length) * 100).toFixed(0) : '--';
-  const pnlCol    = totalPnL >= 0 ? 'var(--green)' : 'var(--red)';
-
-  let html = '';
-  if (closed.length) {
-    html += `<div style="background:var(--panel);border:1px solid var(--border);border-radius:8px;padding:10px 14px;margin-bottom:12px;display:flex;gap:20px;flex-wrap:wrap;font-size:11px;color:var(--muted)">
-      <span>Closed trades: <strong style="color:var(--text)">${closed.length}</strong></span>
-      <span>Win rate: <strong style="color:var(--text)">${winRate}%</strong> (${wins}/${closed.length})</span>
-      <span>Total P&L: <strong style="color:${pnlCol}">${totalPnL >= 0 ? '+' : ''}${totalPnL.toFixed(2)}</strong></span>
-      ${openPositions.length ? `<span>Open: <strong style="color:var(--green)">${openPositions.length}</strong></span>` : ''}
-    </div>`;
-  }
-
-  // Open positions first
-  openPositions.forEach(pos => { html += renderOpenCard(pos); });
-  // Then closed trades newest first (already reversed)
-  closed.slice(0, 50).forEach(trade => { html += renderClosedCard(trade); });
-
-  wrap.innerHTML = html || '<div class="no-data">No trades yet.</div>';
+  }).join('');
 }
 
 function renderStocks() {
@@ -2955,53 +2678,6 @@ async function resetPDT() {
   await fetchState();
 }
 
-async function clearAvoidHold() {
-  if (!confirm('Clear the agent avoid hold? Only do this if the hold was triggered by a false keyword match.')) return;
-  try {
-    const resp = await fetch('/api/clear-avoid', { method: 'POST' });
-    const data = await resp.json();
-    alert(data.ok ? '✅ Avoid hold cleared — entries re-enabled' : '❌ Failed: ' + (data.error || 'Unknown error'));
-  } catch(e) { alert('❌ Error: ' + e.message); }
-}
-
-async function clearVixCooldown() {
-  if (!confirm('Clear the VIX spike cooldown? Only do this if the spike was triggered by bad/corrupted data.')) return;
-  try {
-    const resp = await fetch('/api/clear-vix-cooldown', { method: 'POST' });
-    const data = await resp.json();
-    alert(data.ok ? '✅ VIX cooldown cleared — debit puts re-enabled' : '❌ Failed: ' + (data.error || 'Unknown error'));
-  } catch(e) { alert('❌ Error: ' + e.message); }
-}
-
-async function clearEntryCooldown() {
-  const ticker = prompt('Clear cooldown for specific ticker?\nEnter ticker (e.g. SPY) or leave blank to clear ALL entry cooldowns.');
-  if (ticker === null) return;
-  const t = ticker.trim().toUpperCase();
-  const msg = t
-    ? 'Clear entry cooldown for ' + t + '? Use this when the cooldown was set by a connectivity failure with no actual position opened.'
-    : 'Clear ALL entry cooldowns? Use this when cooldowns were set by connectivity failures (ECONNRESET) with no actual positions opened.';
-  if (!confirm(msg)) return;
-  try {
-    const url = t ? '/api/clear-entry-cooldown?ticker=' + t : '/api/clear-entry-cooldown';
-    const resp = await fetch(url, { method: 'POST' });
-    const data = await resp.json();
-    alert(data.ok ? '\u2705 ' + data.message : '\u274c Failed: ' + (data.error || 'Unknown error'));
-  } catch(e) { alert('\u274c Error: ' + e.message); }
-}
-
-async function clearAllBlockers() {
-  if (!confirm('Clear ALL blockers?\n\nThis will clear:\n- Avoid hold\n- VIX cooldown\n- All entry cooldowns\n- Pending order state\n\nUse when ARGO is stuck after a connectivity failure or false agent signal.')) return;
-  try {
-    const resp = await fetch('/api/clear-blocker', { method: 'POST' });
-    const data = await resp.json();
-    if (data.ok) {
-      alert('\u2705 ' + (data.message || 'All blockers cleared'));
-    } else {
-      alert('\u274c Failed: ' + (data.error || 'Unknown error'));
-    }
-  } catch(e) { alert('\u274c Error: ' + e.message); }
-}
-
 async function resetCircuit() {
   if (!confirm('Reset circuit breaker? ARGO V3.2 will resume scanning and entering new trades.')) return;
   const resp = await fetch('/api/reset-circuit', {method:'POST'});
@@ -3145,12 +2821,7 @@ let _allLogs  = [];
 
 async function fetchLogs(silent=false) {
   try {
-    const filterVal = (document.getElementById('log-filter')?.value || '').trim();
-    const search    = (document.getElementById('log-search')?.value || '').trim();
-    let url = '/api/logs?limit=5000';
-    if (filterVal) url += '&filter=' + encodeURIComponent(filterVal);
-    if (search)    url += '&search=' + encodeURIComponent(search);
-    const r = await fetch(url);
+    const r = await fetch('/api/logs?limit=2000');
     if (!r.ok) throw new Error('HTTP ' + r.status);
     const data = await r.json();
     _allLogs = data.logs || [];
@@ -3974,27 +3645,17 @@ function loadTheta() {
 }
 
 function switchTab(name) {
-  try {
-    document.querySelectorAll('.tab').forEach(t=>t.classList.remove('active'));
-    document.querySelectorAll('.content').forEach(c=>c.classList.remove('active'));
-    // Null-safe: querySelector can return null if tab name doesn't match any onclick attribute
-    const tabEl = document.querySelector(`[onclick="switchTab('${name}')"]`);
-    const contentEl = document.getElementById(`tab-${name}`);
-    if (!tabEl)     { console.warn(`switchTab: no tab element found for '${name}'`); return; }
-    if (!contentEl) { console.warn(`switchTab: no content div found for 'tab-${name}'`); return; }
-    tabEl.classList.add('active');
-    contentEl.classList.add('active');
-    if (name==='analytics')   renderCharts();
-    if (name==='report')      loadReport();
-    if (name==='log')         fetchLogs();
-    if (name==='scoredebug')  loadScoreDebug();
-    if (name==='theta')       loadTheta();
-    if (name==='attribution') loadAttribution();
-    if (name==='tax')         loadTaxLog();
-    if (name==='journal')     renderJournal();
-  } catch(e) {
-    console.error('switchTab error for tab:', name, e);
-  }
+  document.querySelectorAll('.tab').forEach(t=>t.classList.remove('active'));
+  document.querySelectorAll('.content').forEach(c=>c.classList.remove('active'));
+  document.querySelector(`[onclick="switchTab('${name}')"]`).classList.add('active');
+  document.getElementById(`tab-${name}`).classList.add('active');
+  if (name==='analytics')   renderCharts();
+  if (name==='report')      loadReport();
+  if (name==='log')         fetchLogs();
+  if (name==='scoredebug')  loadScoreDebug();
+  if (name==='theta')       loadTheta();
+  if (name==='attribution') loadAttribution();
+  if (name==='tax')         loadTaxLog();
 }
 
 // ── Init ──────────────────────────────────────────────────────────────────
@@ -4271,11 +3932,8 @@ function renderScoreDebug(d, el) {
       var r2 = scores[ticker];
       var ps = r2.putScore || 0;
       var cs = r2.callScore || 0;
-      var creditScore = r2.creditScore != null ? r2.creditScore : null;
-      var creditType  = r2.creditType || null;
-      var effectiveMin = r2.effectiveMin || minScore;
-      var pc = scoreColor(ps, effectiveMin);
-      var cc = scoreColor(cs, effectiveMin);
+      var pc = scoreColor(ps, minScore);
+      var cc = scoreColor(cs, minScore);
       var blocked = (r2.blocked && r2.blocked.length) ? r2.blocked : null;
       var ageMs = r2.ts ? (Date.now()-r2.ts) : null;
       var ageStr = ageMs !== null ? (ageMs < 60000 ? Math.round(ageMs/1000)+'s ago' : Math.round(ageMs/60000)+'m ago') : '';
@@ -4290,77 +3948,16 @@ function renderScoreDebug(d, el) {
       if (ageStr) out += '<div style="font-size:10px;color:var(--muted)">'+ageStr+'</div>';
       out += '</div></div>';
 
-      // Debit call score banner — shown when in Regime A / recovery (not credit mode)
-      var debitCallScore  = r2.debitCallScore != null ? r2.debitCallScore : null;
-      var debitCallActive = r2.debitCallActive || false;
-      if (debitCallActive && debitCallScore !== null) {
-        var dcMin = 75;
-        var dcCol = scoreColor(debitCallScore, dcMin);
-        var dcWouldEnter = debitCallScore >= dcMin && !blocked;
-        var dcStatusLabel = dcWouldEnter ? '&#9654; WOULD ENTER' : ('score ' + debitCallScore + ' < min ' + dcMin);
-        var dcStatusColor = dcWouldEnter ? '#00ff88' : 'var(--muted)';
-        out += '<div style="background:rgba(0,255,136,.08);border:1px solid rgba(0,255,136,.3);border-radius:6px;padding:8px 12px;margin-bottom:10px;display:flex;justify-content:space-between;align-items:center">';
-        out += '<span style="font-size:9px;color:#00ff88;letter-spacing:1px">DEBIT CALL SPREAD</span>';
-        out += '<span style="font-size:22px;font-weight:700;color:'+dcCol+'">'+debitCallScore+'</span>';
-        out += '<span style="font-size:9px;color:'+dcStatusColor+'">'+dcStatusLabel+'</span>';
-        out += '</div>';
-      }
-
-      // Credit score banner — shown prominently when credit mode active
-      if (creditScore !== null) {
-        var creditCol = scoreColor(creditScore, effectiveMin);
-        var rrEst = r2.rrEstimate || null;
-        var rrViable = !rrEst || rrEst.viable;
-        var scoreOk = creditScore >= effectiveMin;
-        var creditWouldEnter = scoreOk && rrViable && !blocked;
-        var creditLabel = creditType === 'credit_call' ? 'BEAR CALL SPREAD' : 'BULL PUT SPREAD';
-        // Status label: show R/R failure explicitly so it's clear why entry is blocked
-        var statusLabel, statusColor;
-        if (!scoreOk) {
-          statusLabel = 'score ' + creditScore + ' < min ' + effectiveMin;
-          statusColor = 'var(--muted)';
-        } else if (!rrViable && rrEst) {
-          statusLabel = 'R/R FAIL: est. ' + (rrEst.estimatedRR*100).toFixed(0) + '% < ' + Math.round((r2.effectiveMin||65)) + '% min';
-          statusColor = '#ff9944';
-        } else if (blocked) {
-          statusLabel = 'blocked';
-          statusColor = '#ff5555';
-        } else {
-          statusLabel = '&#9654; WOULD ENTER';
-          statusColor = '#00ff88';
-        }
-        var rrAge = rrEst && rrEst.ts ? Math.round((Date.now()-rrEst.ts)/60000) : null;
-        var rrAgeStr = rrAge !== null ? (rrAge < 2 ? 'just now' : rrAge+'min ago') : '';
-        var rrLine = rrEst
-          ? '<div style="font-size:9px;color:var(--muted);margin-top:3px">' +
-            'market R/R: $' + (rrEst.netCredit||0).toFixed(2) + ' credit / $' + ((rrEst.netCredit||0)+(rrEst.maxLoss||0)).toFixed(0) + ' wide' +
-            ' → <strong style="color:'+(rrEst.viable?'#00ff88':'#ff9944')+'">' + ((rrEst.rr||rrEst.estimatedRR||0)*100).toFixed(0) + '%</strong>' +
-            (rrAgeStr ? ' <span style="color:#336688">('+rrAgeStr+')</span>' : '') +
-            '</div>'
-          : '<div style="font-size:9px;color:#336688;margin-top:3px">no execution data yet — R/R unknown until first scan attempt</div>';
-        out += '<div style="background:rgba(0,196,255,.08);border:1px solid rgba(0,196,255,.3);border-radius:6px;padding:8px 12px;margin-bottom:10px">';
-        out += '<div style="display:flex;justify-content:space-between;align-items:center">';
-        out += '<span style="font-size:9px;color:#00c4ff;letter-spacing:1px">'+creditLabel+'</span>';
-        out += '<span style="font-size:22px;font-weight:700;color:'+creditCol+'">'+creditScore+'</span>';
-        out += '<span style="font-size:9px;color:'+statusColor+'">'+statusLabel+'</span>';
-        out += '</div>';
-        out += rrLine;
-        out += '</div>';
-      }
-
-      // Score boxes — debit put and call scores for reference
+      // Score boxes
       out += '<div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:10px">';
       ['put','call'].forEach(function(type) {
         var score = type==='put' ? ps : cs;
         var col   = type==='put' ? pc : cc;
-        // Only show WOULD ENTER for debit scores when not in credit mode
-        var isActiveType = creditScore === null && score >= effectiveMin && !blocked;
-        var label = creditScore !== null ? 'debit ref' : (isActiveType ? '&#9654; WOULD ENTER' : 'below min');
-        var labelColor = isActiveType ? '#00ff88' : (creditScore !== null ? '#336688' : 'var(--muted)');
+        var wouldEnter = score >= minScore && !blocked;
         out += '<div style="background:rgba(0,0,0,.25);border-radius:6px;padding:8px;text-align:center">';
         out += '<div style="font-size:9px;color:var(--muted);letter-spacing:1px;margin-bottom:4px">'+type.toUpperCase()+'</div>';
         out += '<div style="font-size:26px;font-weight:700;color:'+col+'">'+score+'</div>';
-        out += '<div style="font-size:9px;margin-top:3px;color:'+labelColor+'">'+label+'</div>';
+        out += '<div style="font-size:9px;margin-top:3px;color:'+(wouldEnter?'#00ff88':'var(--muted)')+'">'+(wouldEnter?'&#9654; WOULD ENTER':'below min')+'</div>';
         out += '</div>';
       });
       out += '</div>';
@@ -4410,45 +4007,27 @@ async function loadReport() {
 
 async function loadAttribution() {
   const trades = state.closedTrades || [];
-  const openPos = state.positions   || [];
   const byTicker = {}, bySector = {}, byScore = {};
-
-  // Closed trades
   trades.forEach(t => {
     const k = t.ticker || '?';
-    if (!byTicker[k]) byTicker[k] = { pnl: 0, count: 0, open: 0 };
+    if (!byTicker[k]) byTicker[k] = { pnl: 0, count: 0 };
     byTicker[k].pnl += t.pnl || 0; byTicker[k].count++;
     const s = t.sector || 'Unknown';
-    if (!bySector[s]) bySector[s] = { pnl: 0, count: 0, open: 0 };
+    if (!bySector[s]) bySector[s] = { pnl: 0, count: 0 };
     bySector[s].pnl += t.pnl || 0; bySector[s].count++;
-    const entryScore = t.entryScore || t.score || 0;
-    const sc = entryScore >= 85 ? '85+' : entryScore >= 75 ? '75-84' : entryScore >= 65 ? '65-74' : 'below 65';
-    if (!byScore[sc]) byScore[sc] = { pnl: 0, count: 0, open: 0 };
+    const sc = t.score >= 85 ? '85+' : t.score >= 75 ? '75-84' : '70-74';
+    if (!byScore[sc]) byScore[sc] = { pnl: 0, count: 0 };
     byScore[sc].pnl += t.pnl || 0; byScore[sc].count++;
   });
-
-  // Open positions — show as pending (no realised P&L yet)
-  openPos.forEach(p => {
-    const k = p.ticker || '?';
-    if (!byTicker[k]) byTicker[k] = { pnl: 0, count: 0, open: 0 };
-    byTicker[k].open++;
-    const s = p.sector || 'Unknown';
-    if (!bySector[s]) bySector[s] = { pnl: 0, count: 0, open: 0 };
-    bySector[s].open++;
-    const sc = (p.score||0) >= 85 ? '85+' : (p.score||0) >= 75 ? '75-84' : (p.score||0) >= 65 ? '65-74' : 'below 65';
-    if (!byScore[sc]) byScore[sc] = { pnl: 0, count: 0, open: 0 };
-    byScore[sc].open++;
-  });
-
   const renderAttr = (data, wrap) => {
     const el = document.getElementById(wrap);
     if (!el) return;
-    if (!Object.keys(data).length) { el.innerHTML = '<div class="no-data">No trades yet — open positions will appear here once closed.</div>'; return; }
-    const rows = Object.entries(data).sort((a,b) => (b[1].count + b[1].open) - (a[1].count + a[1].open)).map(([k,v]) =>
-      '<div style="display:flex;justify-content:space-between;align-items:center;padding:6px 0;border-bottom:1px solid var(--border)">' +
+    if (!Object.keys(data).length) { el.innerHTML = '<div class="no-data">No closed trades yet.</div>'; return; }
+    const rows = Object.entries(data).sort((a,b) => b[1].pnl - a[1].pnl).map(([k,v]) =>
+      '<div style="display:flex;justify-content:space-between;padding:6px 0;border-bottom:1px solid var(--border)">' +
       '<span style="font-weight:700">' + k + '</span>' +
-      '<span style="font-size:10px;color:var(--muted)">' + v.count + ' closed' + (v.open ? ' · <span style="color:var(--green)">' + v.open + ' open</span>' : '') + '</span>' +
-      '<span style="color:' + (v.count === 0 ? 'var(--muted)' : v.pnl>=0?'var(--green)':'var(--red)') + ';font-weight:700">' + (v.count === 0 ? '--' : (v.pnl>=0?'+':'') + '$' + v.pnl.toFixed(2)) + '</span></div>'
+      '<span>' + v.count + ' trades</span>' +
+      '<span style="color:' + (v.pnl>=0?'var(--green)':'var(--red)') + ';font-weight:700">' + (v.pnl>=0?'+':'') + '$' + v.pnl.toFixed(2) + '</span></div>'
     ).join('');
     el.innerHTML = '<div class="card">' + rows + '</div>';
   };
@@ -4473,17 +4052,12 @@ async function loadTaxLog() {
   el.innerHTML = html + '</tbody></table>';
 }
 
-async function setBudget() {
-  const input = document.getElementById('budget-input');
-  const val   = parseFloat(input ? input.value : 0);
-  if (!val || isNaN(val) || val < 1000) { alert('Enter a valid budget (minimum $1,000)'); return; }
-  if (!confirm('Set budget and all baselines to $' + val.toLocaleString() + '?\nThis resets profit-lock and drawdown baseline.')) return;
-  try {
-    const r = await fetch('/api/set-budget', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ budget: val }) });
-    const d = await r.json();
-    if (d.ok) { alert(d.message); if (input) input.value = ''; fetchState(); }
-    else alert('Error: ' + (d.error || 'Unknown error'));
-  } catch(e) { alert('Request failed: ' + e.message); }
+function setBudget() {
+  const val = parseFloat(document.getElementById('budget-input')?.value);
+  if (!val || val < 100) { alert('Enter a valid budget amount (min $100)'); return; }
+  fetch('/api/set-budget', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ budget: val }) })
+    .then(r => r.json()).then(d => { alert('Budget set to $' + val.toFixed(2)); fetchState(); })
+    .catch(e => alert('Error: ' + e.message));
 }
 
 function blacklistTicker() {
@@ -4508,6 +4082,67 @@ function resetMonth() {
     .catch(e => alert('Error: ' + e.message));
 }
 
+
+// ── Auto-added: functions called by switchTab ────────────────────────────
+async function loadReport() {
+  const box = document.getElementById('report-box');
+  if (box) box.textContent = 'Loading...';
+  try {
+    const r = await fetch('/api/report');
+    const d = await r.json();
+    if (box) box.textContent = d.report || d.text || JSON.stringify(d, null, 2);
+  } catch(e) { if (box) box.textContent = 'Error: ' + e.message; }
+}
+async function loadTaxLog() {
+  const wrap = document.getElementById('tax-table-wrap');
+  try {
+    const r = await fetch('/api/tax-log');
+    const trades = await r.json();
+    if (!trades || !trades.length) { if(wrap) wrap.innerHTML = '<div class="no-data">No closed trades yet.</div>'; return; }
+    let h = '<table><thead><tr><th>DATE</th><th>TICKER</th><th>TYPE</th><th>P&L</th><th>EXIT</th></tr></thead><tbody>';
+    trades.forEach(function(t) { h += '<tr><td>'+(t.date||'--')+'</td><td>'+(t.ticker||'--')+'</td><td>'+(t.tradeType||'--')+'</td><td style="color:'+((t.pnl||0)>=0?'var(--green)':'var(--red)')+'">'+((t.pnl||0)>=0?'+':'')+(t.pnl||0).toFixed(2)+'</td><td>'+(t.reason||'--')+'</td></tr>'; });
+    h += '</tbody></table>';
+    if(wrap) wrap.innerHTML = h;
+  } catch(e) { if(wrap) wrap.innerHTML = '<div class="no-data">Error: ' + e.message + '</div>'; }
+}
+async function loadAttribution() {
+  const trades = state.closedTrades || [];
+  const wrap = document.getElementById('attr-ticker-wrap');
+  if (!trades.length) { if(wrap) wrap.innerHTML = '<div class="no-data">No closed trades yet.</div>'; return; }
+  const byTicker = {};
+  trades.forEach(function(t) { if(!byTicker[t.ticker]) byTicker[t.ticker]={trades:0,pnl:0}; byTicker[t.ticker].trades++; byTicker[t.ticker].pnl+=(t.pnl||0); });
+  let h = '<table><thead><tr><th>TICKER</th><th>TRADES</th><th>P&L</th></tr></thead><tbody>';
+  Object.entries(byTicker).sort(function(a,b){return b[1].pnl-a[1].pnl;}).forEach(function(e2) {
+    h += '<tr><td style="font-weight:700;color:var(--blue)">'+e2[0]+'</td><td>'+e2[1].trades+'</td><td style="color:'+(e2[1].pnl>=0?'var(--green)':'var(--red)')+'">'+((e2[1].pnl>=0?'+':'')+e2[1].pnl.toFixed(2))+'</td></tr>';
+  });
+  h += '</tbody></table>';
+  if(wrap) wrap.innerHTML = h;
+}
+function setBudget() {
+  const input = document.getElementById('budget-input');
+  const val = parseFloat(input ? input.value : 0);
+  if (!val || val < 100) { alert('Enter a valid budget (min $100)'); return; }
+  fetch('/api/set-budget',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({budget:val})})
+    .then(function(r){return r.json();}).then(function(){alert('Budget set to $'+val.toLocaleString());fetchState();}).catch(function(e){alert('Error: '+e.message);});
+}
+function blacklistTicker() {
+  const input = document.getElementById('blacklist-input');
+  const ticker = (input ? input.value : '').trim().toUpperCase();
+  if (!ticker) { alert('Enter a ticker to block'); return; }
+  fetch('/api/blacklist',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({ticker})})
+    .then(function(r){return r.json();}).then(function(){if(input)input.value='';fetchState();}).catch(function(e){alert('Error: '+e.message);});
+}
+function unblacklistTicker(ticker) {
+  fetch('/api/unblacklist',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({ticker})})
+    .then(function(r){return r.json();}).then(fetchState).catch(function(e){alert('Error: '+e.message);});
+}
+async function resetMonth() {
+  if (!confirm('Reset monthly P&L tracker?')) return;
+  const r = await fetch('/api/reset-month', {method:'POST'});
+  const d = await r.json();
+  alert(d.message || 'Monthly stats reset.');
+  fetchState();
+}
 
 </script>
 </body>
