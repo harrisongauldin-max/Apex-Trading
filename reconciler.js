@@ -483,9 +483,32 @@ async function syncPositionPnLFromAlpaca() {
         pos.realData     = true;
       }
 
-      // ── P&L: sum both legs (Alpaca handles sign correctly) ──────────────
-      const netPnL = parseFloat(buyLeg.unrealized_pl || 0) + parseFloat(sellLeg.unrealized_pl || 0);
-      pos.unrealizedPnL = parseFloat(netPnL.toFixed(2));
+      // ── P&L: compute from leg prices (authoritative) ──────────────────
+      // Alpaca unrealized_pl uses their sign convention (negative for our gains).
+      // Instead compute from avg_entry_price vs current_price directly.
+      // credit_received = sellEntry - buyEntry
+      // cost_to_close   = sellCurrent - buyCurrent
+      // P&L             = credit_received - cost_to_close (positive = profit)
+      const buyEntry  = parseFloat(buyLeg.avg_entry_price  || 0);
+      const sellEntry = parseFloat(sellLeg.avg_entry_price || 0);
+      if (buyEntry > 0 && sellEntry > 0 && buyPrice > 0 && sellPrice > 0) {
+        const creditReceived = pos.isCreditSpread
+          ? parseFloat((sellEntry - buyEntry).toFixed(4))
+          : parseFloat((buyEntry  - sellEntry).toFixed(4));
+        const costToClose = pos.isCreditSpread
+          ? parseFloat((sellPrice - buyPrice).toFixed(4))
+          : parseFloat((buyPrice  - sellPrice).toFixed(4));
+        const pnlPerShare = pos.isCreditSpread
+          ? (creditReceived - costToClose)  // credit: profit when spread narrows
+          : (costToClose - creditReceived); // debit:  profit when spread widens
+        pos.unrealizedPnL = parseFloat((pnlPerShare * 100 * pos.contracts).toFixed(2));
+        // Correct premium (entry credit/debit) from actual Alpaca avg_entry_price
+        if (creditReceived > 0) pos.premium = parseFloat(creditReceived.toFixed(2));
+      } else {
+        // Fallback: Alpaca unrealized_pl — negate for credit spreads (sign convention fix)
+        const rawPnL = parseFloat(buyLeg.unrealized_pl || 0) + parseFloat(sellLeg.unrealized_pl || 0);
+        pos.unrealizedPnL = pos.isCreditSpread ? parseFloat((-rawPnL).toFixed(2)) : parseFloat(rawPnL.toFixed(2));
+      }
 
       // ── Entry price / premium ───────────────────────────────────────────
       // Do NOT overwrite pos.premium from avg_entry_price — individual leg
