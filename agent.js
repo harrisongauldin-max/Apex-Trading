@@ -67,7 +67,7 @@ async function callClaudeAgent(systemPrompt, userPrompt, maxTokens = 800, useToo
     const body = {
       model:      ANTHROPIC_MODEL,
       max_tokens: maxTokens,
-      system:     systemBlock,
+      system:     systemPrompt,
       messages,
     };
     if (useTools) body.tools = AGENT_TOOLS;
@@ -77,7 +77,6 @@ async function callClaudeAgent(systemPrompt, userPrompt, maxTokens = 800, useToo
       "anthropic-version": "2023-06-01",
       "content-type":      "application/json",
     };
-    // prompt-caching beta header removed — see systemBlock comment above
 
     const res = await _withTimeout(fetch("https://api.anthropic.com/v1/messages", {
       method:  "POST",
@@ -117,11 +116,10 @@ async function callClaudeAgent(systemPrompt, userPrompt, maxTokens = 800, useToo
         "anthropic-version": "2023-06-01",
         "content-type":      "application/json",
       };
-      // prompt-caching beta header removed — see systemBlock comment above
       const followRes = await _withTimeout(fetch("https://api.anthropic.com/v1/messages", {
         method:  "POST",
         headers: followHeaders,
-        body: JSON.stringify({ model: ANTHROPIC_MODEL, max_tokens: maxTokens, system: systemBlock, messages: followMessages }),
+        body: JSON.stringify({ model: ANTHROPIC_MODEL, max_tokens: maxTokens, system: systemPrompt, messages: followMessages }),
       }), timeoutMs);
 
       if (!followRes.ok) {
