@@ -568,7 +568,9 @@ function getSupportResistance(bars) {
 }
 
 // ─── Portfolio analytics ─────────────────────────────────────────
-const totalCap    = () => Math.max(state.customBudget || 0, state.cash || 0, state.accountBaseline || 0, MONTHLY_BUDGET);
+// totalCap: Alpaca equity is authoritative. Fall back to state.cash then accountBaseline.
+// Never use customBudget as a floor — Alpaca is the real account value.
+const totalCap    = () => state.alpacaEquity || state.alpacaCash || state.cash || state.accountBaseline || MONTHLY_BUDGET;
 // Mark-to-market: use current price not entry cost for real portfolio value
 // currentPrice is updated every reconciliation from Alpaca market values
 const openRisk    = () => state.positions.reduce((s,p) => {
