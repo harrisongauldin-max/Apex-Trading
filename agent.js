@@ -57,18 +57,12 @@ const AGENT_TOOLS = [
   { name: "getRegimeStatus",  description: "Get current regime class (A/B/C), days below 200MA, sustained VIX, SPY drawdown",
     input_schema: { type: "object", properties: {} } },
 ];
-async function callClaudeAgent(systemPrompt, userPrompt, maxTokens = 800, useTools = false, enableCache = true, timeoutMs = 30000) {
+async function callClaudeAgent(systemPrompt, userPrompt, maxTokens = 800, useTools = false, timeoutMs = 30000) {
+  // Note: prompt caching was removed. Agent runs at 90+ min intervals; Anthropic ephemeral
+  // cache TTL is 5 min — every call was a write that expired before the next read. No benefit.
   if (!ANTHROPIC_API_KEY) return null;
   try {
     const messages = [{ role: "user", content: userPrompt }];
-
-    // Prompt caching - system prompt is identical per call type, cache it
-    // Cache writes: 125% of normal input price. Cache reads: 10% of normal input price.
-    // Break-even: ~2 reads. After that, ~90% savings on input tokens.
-    // getAgentMacroAnalysis runs ~80x/day - saves ~$1.50/day in input costs
-    const systemBlock = enableCache
-      ? [{ type: "text", text: systemPrompt, cache_control: { type: "ephemeral" } }]
-      : systemPrompt;
 
     const body = {
       model:      ANTHROPIC_MODEL,
@@ -83,7 +77,7 @@ async function callClaudeAgent(systemPrompt, userPrompt, maxTokens = 800, useToo
       "anthropic-version": "2023-06-01",
       "content-type":      "application/json",
     };
-    if (enableCache) headers["anthropic-beta"] = "prompt-caching-2024-07-31";
+    // prompt-caching beta header removed — see systemBlock comment above
 
     const res = await _withTimeout(fetch("https://api.anthropic.com/v1/messages", {
       method:  "POST",
@@ -123,7 +117,7 @@ async function callClaudeAgent(systemPrompt, userPrompt, maxTokens = 800, useToo
         "anthropic-version": "2023-06-01",
         "content-type":      "application/json",
       };
-      if (enableCache) followHeaders["anthropic-beta"] = "prompt-caching-2024-07-31";
+      // prompt-caching beta header removed — see systemBlock comment above
       const followRes = await _withTimeout(fetch("https://api.anthropic.com/v1/messages", {
         method:  "POST",
         headers: followHeaders,
@@ -140,16 +134,7 @@ async function callClaudeAgent(systemPrompt, userPrompt, maxTokens = 800, useToo
       return text.replace(/^```json\s*/i, "").replace(/\s*```$/i, "").trim();
     }
 
-    // Log cache performance when available
-    if (enableCache && data.usage) {
-      const u = data.usage;
-      const cacheRead  = u.cache_read_input_tokens  || 0;
-      const cacheWrite = u.cache_creation_input_tokens || 0;
-      const uncached   = u.input_tokens || 0;
-      if (cacheRead > 0 || cacheWrite > 0) {
-        _log("scan", `[CACHE] read:${cacheRead} write:${cacheWrite} uncached:${uncached} - saved ~$${(cacheRead*3/1000000).toFixed(4)}`);
-      }
-    }
+    // Cache logging removed — caching disabled (90min interval > 5min TTL)
     // Normal text response
     const text = data.content?.find(b => b.type === "text")?.text || "";
     return text.replace(/^```json\s*/i, "").replace(/\s*```$/i, "").trim();
@@ -680,7 +665,7 @@ Respond with ONLY the JSON object. No words before or after.`;
   // Pre-injected: VIX, SPY, MAs, breadth, regime, IV rank, headlines, positions.
   // Tools kept on rescore/briefing where live per-ticker data adds real value.
   _log("scan", `[AGENT] Macro call - useTools:false (pre-injected data sufficient)`);
-  const raw = await callClaudeAgent(systemPrompt, userPrompt, 1200, false, true, 30000); // useTools=false - single round-trip
+  const raw = await callClaudeAgent(systemPrompt, userPrompt, 1200, false, 30000); // useTools=false - single round-trip
   if (!raw) {
     state._agentHealth.timeouts++;
     _log("warn", `[AGENT HEALTH] Timeout/null - ${state._agentHealth.timeouts} timeouts of ${state._agentHealth.calls} calls`);
@@ -961,7 +946,7 @@ ${pdtLeft <= 1 && !pdtProtected ? '- PDT WARNING: only ' + pdtLeft + ' day trade
 
 Does the thesis still hold? Score and recommend.`;
 
-  const raw = await callClaudeAgent(systemPrompt, userPrompt, 600, true, true, 45000); // 45s - tool use needs headroom
+  const raw = await callClaudeAgent(systemPrompt, userPrompt, 600, true, 45000); // 45s - tool use needs headroom
   if (!raw) return null;
   try {
     const parsed = JSON.parse(stripThinking(raw));
@@ -1027,7 +1012,7 @@ ${headlines.slice(0,5).join('\n')}
 Use your tools to check current prices and signals for each position, then write the morning briefing.`;
 
   try {
-    const raw = await callClaudeAgent(systemPrompt, userPrompt, 600, true, true, 45000); // 45s - briefing tool use needs headroom
+    const raw = await callClaudeAgent(systemPrompt, userPrompt, 600, true, 45000); // 45s - briefing tool use needs headroom
     if (!raw) return null;
     // Return as plain text - not JSON
     return raw;
