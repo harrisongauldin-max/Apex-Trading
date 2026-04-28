@@ -42,7 +42,7 @@ const { calcCreditSpreadTP, realizedPnL ,
 }     = require('./signals');
 const { STOP_LOSS_PCT, TAKE_PROFIT_PCT, PDT_PROFIT_EXIT,
         PDT_STOP_LOSS, FAST_STOP_PCT, MONTHLY_BUDGET,
-  ALPACA_KEY, BONUS_AMOUNT, MS_PER_DAY, PDT_LIMIT, REVENUE_THRESHOLD, WATCHLIST,
+  ALPACA_KEY, BONUS_AMOUNT, MS_PER_DAY, PDT_LIMIT, PDT_RULE_ACTIVE, REVENUE_THRESHOLD, WATCHLIST,
   TRAIL_ACTIVATE_PCT
 }  = require('./constants');
 const { countRecentDayTrades } = require('./risk');
@@ -358,13 +358,12 @@ async function _doClosePosition(ticker, reason, exitPremium = null, contractSym 
   state.monthlyProfit = parseFloat((state.monthlyProfit + pnl).toFixed(2));
   const _spliceIdx = state.positions.indexOf(pos);
   if (_spliceIdx !== -1) state.positions.splice(_spliceIdx, 1);
-  // PDT tracking - record if this is a day trade (opened and closed same day)
-  // Emergency exits (macro-reversal, VIX spike) bypass PDT counting — protective closures
-  // are not strategic day trades and should not consume PDT bandwidth
+  // PDT tracking - only when PDT_RULE_ACTIVE=true (FINRA PDT rule sunset April 2026)
+  // PDT_RULE_ACTIVE=false: rule is off, Alpaca not enforcing. Do not count day trades.
   const bypassPDT = opts.bypassPDT === true;
-  if (isDayTrade(pos) && !bypassPDT) {
+  if (PDT_RULE_ACTIVE && isDayTrade(pos) && !bypassPDT) {
     recordDayTrade(pos, reason);
-  } else if (isDayTrade(pos) && bypassPDT) {
+  } else if (PDT_RULE_ACTIVE && isDayTrade(pos) && bypassPDT) {
     logEvent("scan", `[PDT] Emergency exit (${reason}) - day trade NOT counted (bypassPDT)`);
   }
   // - Trade Outcome Tracker - full data for post-30 analysis -
@@ -702,6 +701,21 @@ async function confirmPendingOrder() {
         }
         const est = pending.netCredit || pending.netDebit;
         if (netCredit !== est) logEvent("trade", `[CREDIT SPREAD] Fill vs estimate: actual $${netCredit} | est $${est} | diff $${(netCredit - est).toFixed(2)}`);
+        // Post-fill R/R gate: if actual credit is too thin, close immediately.
+        // Market orders mean we can't control fill price — this is the safety valve.
+        // Dynamic minimum: VIX>=28=15%, VIX>=22=12%, below=10%
+        const _vixNow = state.vix || 25;
+        const _minRR  = _vixNow >= 28 ? 0.15 : _vixNow >= 22 ? 0.12 : 0.10;
+        const _width  = Math.abs(pending.buyStrike - pending.sellStrike);
+        const _actualRR = _width > 0 ? netCredit / _width : 0;
+        if (_actualRR < _minRR && _width > 0) {
+          logEvent("warn", `[CREDIT SPREAD] R/R fail: actual credit $${netCredit} on $${_width} width = ${(_actualRR*100).toFixed(0)}% < ${(_minRR*100).toFixed(0)}% minimum — closing immediately`);
+          // Record as filled first (cash updated), then close on next scan via flag
+          state._pendingOrder = null;
+          markDirty();
+          // Schedule immediate close via flag — closePosition needs the position in state first
+          pending._rrFail = true;
+        }
         // Recompute marginRequired from actual credit — pending.finalCost used the pre-submission estimate.
         // Actual margin = (spreadWidth - actualCredit) * 100 * contracts.
         const spreadWidth = Math.abs(pending.buyStrike - pending.sellStrike);
@@ -752,6 +766,11 @@ async function confirmPendingOrder() {
         state.todayTrades++; // B2: increment for credit spread fills
         state._pendingOrder = null;
         logEvent("trade", `[CREDIT SPREAD] ENTERED ${pending.ticker} $${pending.sellStrike}/$${pending.buyStrike} exp ${pending.expDate} | credit $${netCredit} | margin $${marginRequired}`);
+        // R/R fail: close immediately if actual fill credit was too thin
+        if (pending._rrFail) {
+          logEvent("warn", `[CREDIT SPREAD] R/R fail close triggered — closing ${pending.ticker} immediately`);
+          await closePosition(pending.ticker, "r/r-fail", null, null, { bypassPDT: true });
+        }
 
         // Journal entry for credit spread OPEN
         state.tradeJournal.unshift({
