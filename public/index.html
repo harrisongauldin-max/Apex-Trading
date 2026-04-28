@@ -1862,7 +1862,9 @@ function renderNativeSpread(p) {
   // Fall back to local calculation using price-based formula.
   if (p.displayPnL !== undefined) {
     chgDollar = parseFloat(p.displayPnL);
-    chgPct    = maxPr > 0 ? (chgDollar / maxPr * 100) : 0;
+    // Use server-computed pct when available (avoids maxProfit denominator issues)
+    chgPct    = p.displayPnLPct !== undefined ? parseFloat(p.displayPnLPct)
+              : maxPr > 0 ? (chgDollar / maxPr * 100) : 0;
   } else if (p.isCreditSpread) {
     chgDollar = typeof p.unrealizedPnL === 'number' ? p.unrealizedPnL : (prem - curPrice) * 100 * c;
     chgPct    = maxPr > 0 ? (chgDollar / maxPr * 100) : 0;
@@ -3698,9 +3700,10 @@ function copyOpenPositions() {
       var nc=parseFloat(s.premium)-parseFloat(l.premium);
       var w=s.strike-l.strike;
       var mp=nc*100*c, ml=(w-nc)*100*c;
-      var sP=s.unrealizedPnL!==undefined?parseFloat(s.unrealizedPnL):(parseFloat(s.premium)-parseFloat(s.currentPrice||s.premium))*100*c;
-      var lP=l.unrealizedPnL!==undefined?parseFloat(l.unrealizedPnL):(parseFloat(l.currentPrice||l.premium)-parseFloat(l.premium))*100*c;
-      var net=sP+lP; totalPnL+=net;
+      // Paired: compute from prices (Alpaca unrealizedPnL has inverted sign convention)
+      var sCur=parseFloat(s.currentPrice||s.premium), lCur=parseFloat(l.currentPrice||l.premium);
+      var net=s.displayPnL!==undefined?parseFloat(s.displayPnL)+(l.displayPnL!==undefined?parseFloat(l.displayPnL):0):(nc-((sCur-lCur)))*100*c;
+      totalPnL+=net;
       var pct=mp>0?(net/mp*100):0;
       lines.push(s.ticker+' '+(s.optionType||'put').toUpperCase()+' $'+s.strike+'/$'+l.strike+' exp '+s.expDate+' [CREDIT SPREAD]');
       lines.push('  Net credit: $'+nc.toFixed(2)+' | Width: $'+w+' | '+c+'x | '+Math.max(0,Math.round((new Date(s.expDate)-new Date())/86400000))+'d DTE');
@@ -3713,12 +3716,24 @@ function copyOpenPositions() {
       var dte=p.expDate?Math.max(0,Math.round((new Date(p.expDate)-new Date())/86400000)):'?';
       var label=p.isCreditSpread?'CREDIT SPREAD':p.isSpread?'DEBIT SPREAD':(p.optionType||'put').toUpperCase();
       var strike=(p.isSpread||p.isCreditSpread)?'$'+(p.shortStrike||p.sellStrike||'?')+'/$'+(p.longStrike||p.buyStrike||'?'):'$'+(p.strike||'?');
-      var cd=p.unrealizedPnL!==undefined?parseFloat(p.unrealizedPnL):p.isCreditSpread?(parseFloat(p.premium)-parseFloat(p.currentPrice||p.premium))*100*c:(parseFloat(p.currentPrice||p.premium)-parseFloat(p.premium))*100*c;
-      var cp2=p.isCreditSpread&&p.maxProfit?(cd/parseFloat(p.maxProfit)*100):parseFloat(p.premium)>0?(cd/(parseFloat(p.premium)*100*c)*100):0;
+      // Use displayPnL from server (price-based, sign-corrected) when available
+      var cd=p.displayPnL!==undefined?parseFloat(p.displayPnL):p.isCreditSpread?(parseFloat(p.premium)-parseFloat(p.currentPrice||p.premium))*100*c:(parseFloat(p.currentPrice||p.premium)-parseFloat(p.premium))*100*c;
+      var maxPrVal=parseFloat(p.maxProfit)||Math.max(1,parseFloat(p.premium)*100*c);
+      var cp2=p.displayPnLPct!==undefined?parseFloat(p.displayPnLPct):maxPrVal>0?(cd/maxPrVal*100):0;
       totalPnL+=cd;
-      lines.push(p.ticker+' '+(p.optionType||'put').toUpperCase()+' '+strike+' exp '+p.expDate+' ['+label+']');
-      lines.push('  Entry: $'+parseFloat(p.premium).toFixed(2)+' | Current: $'+parseFloat(p.currentPrice||p.premium).toFixed(2)+' | '+c+'x | '+dte+'d DTE');
-      lines.push('  P&L: '+(cd>=0?'+':'-')+'$'+Math.abs(cd).toFixed(2)+' ('+(cd>=0?'+':'-')+Math.abs(cp2).toFixed(1)+'%)');
+      var nc=parseFloat(p.premium).toFixed(2);
+      var w=Math.abs((p.buyStrike||p.longStrike||0)-(p.sellStrike||p.shortStrike||0));
+      var be=p.breakeven||(p.isCreditSpread?((parseFloat(p.sellStrike||p.shortStrike||0)-parseFloat(p.premium)).toFixed(2)):'--');
+      if (p.isCreditSpread) {
+        lines.push(p.ticker+' '+(p.optionType||'put').toUpperCase()+' '+strike+' exp '+p.expDate+' [CREDIT SPREAD]');
+        lines.push('  Net credit: $'+nc+' | Width: $'+w+' | '+c+'x | '+dte+'d DTE');
+        lines.push('  P&L: '+(cd>=0?'+':'-')+'$'+Math.abs(cd).toFixed(2)+' ('+(cd>=0?'+':'-')+Math.abs(cp2).toFixed(1)+'% of max profit)');
+        lines.push('  Max profit: $'+(parseFloat(p.maxProfit)||0).toFixed(0)+' | Max loss: $'+(parseFloat(p.maxLoss)||0).toFixed(0)+' | Breakeven: $'+be);
+      } else {
+        lines.push(p.ticker+' '+(p.optionType||'put').toUpperCase()+' '+strike+' exp '+p.expDate+' ['+label+']');
+        lines.push('  Entry: $'+nc+' | Current: $'+parseFloat(p.currentPrice||p.premium).toFixed(2)+' | '+c+'x | '+dte+'d DTE');
+        lines.push('  P&L: '+(cd>=0?'+':'-')+'$'+Math.abs(cd).toFixed(2)+' ('+(cd>=0?'+':'-')+Math.abs(cp2).toFixed(1)+'%)');
+      }
       if (p.score) lines.push('  Entry score: '+p.score+'/100');
       lines.push('');
     }
