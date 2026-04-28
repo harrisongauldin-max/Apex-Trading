@@ -193,15 +193,20 @@ async function _doClosePosition(ticker, reason, exitPremium = null, contractSym 
               logEvent("warn", `[SPREAD CLOSE] mleg close unconfirmed - legs may still be open, check Alpaca`);
             }
           } else {
-            // mleg failed - fall back to individual market orders
-            logEvent("warn", `[SPREAD CLOSE] mleg failed, falling back to individual close orders`);
+            // mleg failed — fall back to DELETE /positions/{symbol} for each leg.
+            // This is the correct close method when Alpaca paper trading rejects sell_to_close
+            // orders due to "insufficient options buying power" (paper trading margin bug).
+            // DELETE /positions forces a close at market regardless of buying power.
+            logEvent("warn", `[SPREAD CLOSE] mleg rejected (likely paper margin bug) — using DELETE /positions to force-close each leg`);
             if (pos.buySymbol) {
-              await alpacaPost("/orders", { symbol: pos.buySymbol, qty: pos.contracts, side: "sell", type: "market", time_in_force: "day", position_intent: "sell_to_close" });
-              logEvent("trade", `[SPREAD CLOSE] Buy leg closed: ${pos.buySymbol}`);
+              const delResp = await alpacaDelete(`/positions/${encodeURIComponent(pos.buySymbol)}`).catch(e => ({ _err: e.message }));
+              if (delResp && delResp.id) logEvent("trade", `[SPREAD CLOSE] Buy leg force-closed via DELETE: ${pos.buySymbol}`);
+              else logEvent("warn", `[SPREAD CLOSE] Buy leg DELETE failed: ${JSON.stringify(delResp)?.slice(0,100)}`);
             }
             if (pos.sellSymbol) {
-              await alpacaPost("/orders", { symbol: pos.sellSymbol, qty: pos.contracts, side: "buy", type: "market", time_in_force: "day", position_intent: "buy_to_close" });
-              logEvent("trade", `[SPREAD CLOSE] Sell leg closed: ${pos.sellSymbol}`);
+              const delResp2 = await alpacaDelete(`/positions/${encodeURIComponent(pos.sellSymbol)}`).catch(e => ({ _err: e.message }));
+              if (delResp2 && delResp2.id) logEvent("trade", `[SPREAD CLOSE] Sell leg force-closed via DELETE: ${pos.sellSymbol}`);
+              else logEvent("warn", `[SPREAD CLOSE] Sell leg DELETE failed: ${JSON.stringify(delResp2)?.slice(0,100)}`);
             }
           }
         } else {
