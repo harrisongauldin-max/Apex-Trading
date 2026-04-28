@@ -459,33 +459,26 @@ async function executeSpreadTrade(stock, price, score, scoreReasons, vix, option
 
   if (buyContract.symbol && sellContract.symbol && !_dryRunMode) {
     try {
-      // - MULTI-LEG ORDER - both legs submit and fill atomically -
-      // Uses Alpaca mleg order class - no partial fill risk, no sequential timing
-      // limit_price = natural debit: buyAsk - sellBid (what you actually pay on immediate fill)
-      // Mid-price orders consistently fail to fill on Alpaca mleg — same lesson as credit spreads.
-      // Natural debit = buy at ask + sell at bid. If market is crossed, fall back to mid.
-      const buyAsk   = buyContract.ask  > 0 ? buyContract.ask  : buyContract.premium;
-      const sellBid  = sellContract.bid > 0 ? sellContract.bid : sellContract.premium;
+      // - MULTI-LEG ORDER — market order, Alpaca fills at best available price -
+      // All bid/ask estimation was stale by order arrival. confirmPendingOrder reads
+      // filled_avg_price from Alpaca and uses that as the actual entry price.
+      // Compute mid for logging/estimate only — not used for order pricing.
       const buyMid   = buyContract.bid > 0 && buyContract.ask > 0
         ? parseFloat(((buyContract.bid + buyContract.ask) / 2).toFixed(2))
         : parseFloat(buyContract.ask.toFixed(2));
       const sellMid  = sellContract.bid > 0 && sellContract.ask > 0
         ? parseFloat(((sellContract.bid + sellContract.ask) / 2).toFixed(2))
         : parseFloat(sellContract.bid.toFixed(2));
-      const naturalDebit  = parseFloat((buyAsk - sellBid).toFixed(2));
-      const midDebit      = parseFloat((buyMid - sellMid).toFixed(2));
-      // Use natural debit if positive; fall back to mid if market is crossed
-      const netDebitLimit = naturalDebit > 0 ? naturalDebit : Math.max(0.05, midDebit);
-      logEvent("filter", `${stock.ticker} debit spread limit: mid $${midDebit.toFixed(2)} | natural (ask-bid) $${naturalDebit.toFixed(2)} → submitting $${netDebitLimit.toFixed(2)}`);
+      const midDebitForLog = parseFloat((buyMid - sellMid).toFixed(2));
+      logEvent("filter", `${stock.ticker} debit spread: MARKET order | est. debit ~$${midDebitForLog.toFixed(2)} (Alpaca fills at best available price)`);
 
       // C2: Idempotency key -- prevents duplicate fills on network timeout
       const _clientOrderId = `argo-ds-${stock.ticker}-${optionType}-${Math.floor(Date.now()/10000)}`;
       const mlegBody = {
         order_class:    "mleg",
-        type:           "limit",
+        type:           "market",  // market = Alpaca fills at best price, actual fill from confirmPendingOrder
         time_in_force:  "day",
         qty:            String(contracts),
-        limit_price:    String(netDebitLimit), // positive = debit
         client_order_id: _clientOrderId,
         legs: [
           { symbol: buyContract.symbol,  side: "buy",  ratio_qty: "1", position_intent: "buy_to_open"  },
@@ -503,7 +496,7 @@ async function executeSpreadTrade(stock, price, score, scoreReasons, vix, option
         buyStrike:    buyContract.strike,
         sellStrike:   sellContract.strike,
         netDebit,
-        netDebitLimit,
+        netDebitLimit: midDebitForLog, // estimate — confirmPendingOrder replaces with Alpaca actual
         finalCost,
         contracts,
         score,
@@ -518,7 +511,7 @@ async function executeSpreadTrade(stock, price, score, scoreReasons, vix, option
       };
       markDirty();
 
-      logEvent("trade", `[SPREAD] Submitting mleg order: buy $${buyContract.strike} / sell $${sellContract.strike} | ${contracts}x | net debit $${netDebitLimit} | id: ${_clientOrderId}`);
+      logEvent("trade", `[SPREAD] Submitting mleg order: buy $${buyContract.strike} / sell $${sellContract.strike} | ${contracts}x | est. debit ~$${midDebitForLog} (market) | id: ${_clientOrderId}`);
       const mlegResp = await alpacaPost("/orders", mlegBody);
 
       if (!mlegResp || mlegResp.code || !mlegResp.id) {
@@ -877,39 +870,27 @@ async function executeCreditSpread(stock, price, score, scoreReasons, vix, optio
       // - MULTI-LEG ORDER for credit spread -
       // limit_price is NEGATIVE for credit (we receive money)
       // Limit price: submit at the natural bid-side credit (short_bid - long_ask).
-      // Mid-price orders consistently fail to fill on Alpaca mleg — market makers require
-      // the natural price. Mid is typically $0.10-0.20 better than where fills actually happen
-      // on each leg, so net mid can be $0.20-0.40 away from fillable prices.
-      //
-      // Natural credit = short_bid - long_ask = what you collect on immediate fill.
-      // If natural credit <= 0 (crossed market), use 25% of mid as a floor.
-      // This trades some premium for actual fills — unfilled orders collect $0.
-      const shortBid      = shortContract.bid > 0 ? shortContract.bid : shortContract.premium;
-      const longAsk       = longContract.ask  > 0 ? longContract.ask  : longContract.premium;
-      const shortMid      = shortContract.bid > 0 && shortContract.ask > 0
+      // MARKET ORDER — Alpaca fills at best available price.
+      // All bid/ask estimation (natural, mid, concession) was stale by order arrival.
+      // confirmPendingOrder reads filled_avg_price from Alpaca for the actual entry price.
+      // Compute mid for logging/estimate only.
+      const shortMid = shortContract.bid > 0 && shortContract.ask > 0
         ? parseFloat(((shortContract.bid + shortContract.ask) / 2).toFixed(2))
-        : parseFloat(shortContract.bid.toFixed(2));
-      const longMid       = longContract.bid > 0 && longContract.ask > 0
+        : parseFloat((shortContract.premium || 0).toFixed(2));
+      const longMid  = longContract.bid > 0 && longContract.ask > 0
         ? parseFloat(((longContract.bid + longContract.ask) / 2).toFixed(2))
-        : parseFloat(longContract.ask.toFixed(2));
-      const midCredit     = parseFloat((shortMid - longMid).toFixed(2));
-      const naturalCredit = parseFloat((shortBid - longAsk).toFixed(2));
-      // Use natural credit if positive; fall back to 25% of mid if market is crossed
-      const limitCredit   = naturalCredit > 0
-        ? naturalCredit
-        : parseFloat(Math.max(0.05, midCredit * 0.25).toFixed(2));
-      const netCreditLimit = parseFloat((-limitCredit).toFixed(2));
-      logEvent("filter", `${stock.ticker} credit spread limit: mid $${midCredit.toFixed(2)} | natural (bid-ask) $${naturalCredit.toFixed(2)} → submitting $${limitCredit.toFixed(2)} (${netCreditLimit.toFixed(2)})`);
+        : parseFloat((longContract.premium || 0).toFixed(2));
+      const midCredit = parseFloat((shortMid - longMid).toFixed(2));
+      const netCredit = Math.max(0.01, midCredit); // estimate for position record until Alpaca fill confirmed
+      logEvent("filter", `${stock.ticker} credit spread: MARKET order | est. credit ~$${midCredit.toFixed(2)} (Alpaca fills at best available price)`);
 
       // C2: Idempotency key -- prevents duplicate orders on network timeout/retry
-      // Deterministic: same ticker+direction+timestamp bucket will not double-submit
       const _clientOrderId = `argo-cs-${stock.ticker}-${optionType}-${Math.floor(Date.now()/10000)}`;
       const mlegBody = {
-        order_class:    "mleg",
-        type:           "limit",
-        time_in_force:  "day",
-        qty:            String(contracts),
-        limit_price:    String(netCreditLimit), // negative = credit received
+        order_class:     "mleg",
+        type:            "market",  // market = Alpaca fills at best price, actual fill from confirmPendingOrder
+        time_in_force:   "day",
+        qty:             String(contracts),
         client_order_id: _clientOrderId,
         legs: [
           { symbol: shortContract.symbol, side: "sell", ratio_qty: "1", position_intent: "sell_to_open" },
@@ -948,7 +929,7 @@ async function executeCreditSpread(stock, price, score, scoreReasons, vix, optio
       };
       markDirty();
 
-      logEvent("trade", `[CREDIT SPREAD] Submitting mleg: sell $${shortContract.strike} / buy $${longContract.strike} | ${contracts}x | net credit $${Math.abs(netCreditLimit)} | id: ${_clientOrderId}`);
+      logEvent("trade", `[CREDIT SPREAD] Submitting mleg: sell $${shortContract.strike} / buy $${longContract.strike} | ${contracts}x | est. credit ~$${midCredit.toFixed(2)} (market) | id: ${_clientOrderId}`);
       const mlegResp = await alpacaPost("/orders", mlegBody);
 
       if (!mlegResp || mlegResp.code || !mlegResp.id) {
