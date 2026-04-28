@@ -225,21 +225,8 @@ async function checkScaleIns() {
 async function checkAllFilters(stock, price, prefetchedBars = null) { // OPT3: accept pre-fetched bars
   const fails = [];
 
-  // 0a. Recent close cooldown — block re-entry on the same ticker for 15 minutes after any close.
-  // Prevents immediate re-entry into a just-exited position. Gives Alpaca time to settle,
-  // avoids chasing a just-stopped position, and reduces same-direction re-entry on volatile opens.
-  // 15 minutes is enough to confirm the close settled and price action has stabilized.
-  if (!state._dryRunMode) {
-    const fifteenMinsAgo = Date.now() - 15 * 60 * 1000;
-    const recentClose = (state.closedTrades || [])
-      .filter(t => t.ticker === stock.ticker && t.closeTime && t.closeTime > fifteenMinsAgo)
-      .sort((a, b) => b.closeTime - a.closeTime)[0];
-    if (recentClose) {
-      const minsAgo  = Math.floor((Date.now() - recentClose.closeTime) / 60000);
-      const minsLeft = 15 - minsAgo;
-      return { pass: false, reason: `Re-entry cooldown: ${stock.ticker} closed ${minsAgo}min ago (${recentClose.reason}) — waiting ${minsLeft}min` };
-    }
-  }
+  // Re-entry cooldown removed: scoring system and R/R gate prevent bad re-entries.
+  // After a stop, underlying dropped = short strike further OTM = valid setup if score clears.
 
   // 0b. Order deadlock cooldown — if a pending order was force-cleared (cancel deadlock
   // or retry failure), block new entries for 60 minutes to prevent repeat ghost order cycles
