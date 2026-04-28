@@ -1417,7 +1417,9 @@ async function runScan() {
     // stop/hard-stop: 60 min (real losing trade, need confirmation before re-entry)
     // target/partial: 0 min (hit profit, conditions may still be valid)
     // 50ma-break/thesis/manual: 0 min (thesis-based exit, re-entry needs fresh signal anyway)
-    const COOLDOWN_BY_REASON = { "fast-stop": 15, "stop": 60, "stop-loss": 60 };
+    // Bug1 FIX: stop cooldown 60→15min. A stop on a credit put = underlying dropped,
+    // making the short strike further OTM = better setup on re-entry. 60min misses the bounce.
+    const COOLDOWN_BY_REASON = { "fast-stop": 15, "stop": 15, "stop-loss": 15 };
     const recentClose = (state.closedTrades || []).find(t =>
       t.ticker === stock.ticker && t.closeTime &&
       (Date.now() - t.closeTime) < ((COOLDOWN_BY_REASON[t.reason] || 0) * 60 * 1000)
@@ -1459,7 +1461,13 @@ async function runScan() {
     // GLD-1: Gap check BEFORE passesFilter - prevents vol gap FAVORABLE logging on skipped tickers
     if (bars.length >= 2) {
       const overnightGap = Math.abs(bars[bars.length-1].o - bars[bars.length-2].c) / bars[bars.length-2].c;
-      if (overnightGap > MAX_GAP_PCT) {
+      // Bug2 FIX: gap skip exempts credit put mode.
+      // Gap UP: underlying moved away from short strike = credit put is safer, not a reason to skip.
+      // Gap DOWN: underlying moved toward short strike = genuinely dangerous, always skip.
+      const _gapDir = bars[bars.length-1].o - bars[bars.length-2].c;
+      const _isCreditPutMode = !!(stock._creditPutMode || creditModeActive);
+      const _skipForGap = overnightGap > MAX_GAP_PCT && (_gapDir < 0 || !_isCreditPutMode);
+      if (_skipForGap) {
         logEvent("filter", `${stock.ticker} gap ${(overnightGap*100).toFixed(1)}% overnight - skip`);
         continue;
       }
