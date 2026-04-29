@@ -39,6 +39,14 @@ const INSTRUMENT_CONSTRAINTS = {
   SPY: { allowedTypes: ["put","call"] },
   QQQ: { allowedTypes: ["put","call"] },
   XLE: { allowedTypes: ["put","call"] },
+  // FIX 12: New instruments — higher minScore, full put/call allowed
+  SMH: { allowedTypes: ["put","call"],
+         reason: "Semiconductor ETF — high beta AI/chip thesis. Score >= 75 required." },
+  IYR: { allowedTypes: ["put","call"],
+         reason: "Real estate ETF — rate-driven. Puts on rate spike, calls on cut expectations." },
+  HYG: { allowedTypes: ["put","call"],
+         minIVPct: 30, // HYG has very low IV — skip when IV rank < 30 (options too cheap to move)
+         reason: "High yield bond ETF — credit stress signal. Low IV requires IVR >= 30 for viable options." },
 };
 
 // ── Correlated instrument groups ─────────────────────────────
@@ -486,6 +494,11 @@ function evaluateEntry(candidate, rulebook, state, context = {}) {
   // ── Hard blocks — always apply regardless of score ────────
   if (!constraintPass)
     return { pass: false, reason: constraintReason };
+  // FIX 12: Per-instrument minimum score override (SMH/IYR/HYG require 75)
+  const _instrLookup  = INSTRUMENT_CONSTRAINTS[ticker];
+  const instrMinScore = _instrLookup?.minScore;
+  if (instrMinScore && score < instrMinScore)
+    return { pass: false, reason: `${ticker} score ${score} below instrument minimum ${instrMinScore}` };
   if (g.avoidHoldActive)
     return { pass: false, reason: "avoid hold active" };
   if (g.macroBullishBlock && optionType === "put")
@@ -555,7 +568,11 @@ function evaluateEntry(candidate, rulebook, state, context = {}) {
     && (rb.regimeClass === "B" || rb.regimeClass === "C")
     && rb.gates.putsOnBounceMode;
   // APEX: unified minScore — put or call, no spread tiers
-  let minScore = optionType === "put" ? rb.minScorePut : rb.minScoreCall;
+  // FIX 11: MR calls use higher minimum (65) — theta drag requires more conviction than 60
+  const isMRCall = candidate.isMeanReversion && optionType === "call";
+  let minScore = isMRCall ? 65
+               : optionType === "put" ? rb.minScorePut
+               : rb.minScoreCall;
 
   // agentMinAdj = 0 (removed) — no bar adjustment
 
