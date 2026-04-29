@@ -49,7 +49,8 @@ const MACRO_REVERSAL_PCT  = 0.025;
 
 // ─── Entry filters ───────────────────────────────────────────────
 const MIN_SCORE           = 70;
-const MIN_SCORE_CREDIT    = 65;
+const MIN_SCORE_CREDIT    = 65;  // credit/directional minimum
+const MIN_SCORE_MR        = 65;  // FIX 11: MR call minimum raised from 60→65 (theta drag requires higher conviction)
 const IVR_MAX             = 70;
 const EARNINGS_SKIP_DAYS  = 5;
 const MIN_OPEN_INTEREST   = 100;
@@ -170,6 +171,56 @@ const WATCHLIST = [
   },
 ];
 
+// FIX 12: Expanded watchlist — SMH (semiconductors), IYR (real estate), HYG (high yield credit)
+// All ETF-based: no earnings risk, liquid options markets, genuinely uncorrelated theses
+// SMH: pure-play semiconductors, high beta to AI narrative, independent of broad QQQ
+// IYR: rate-driven real estate, negative correlation with yields, independent macro driver
+// HYG: high yield bonds, credit stress leading indicator, already used as data signal — now tradeable
+WATCHLIST.push(
+  {
+    ticker:    "SMH",
+    sector:    "Technology",
+    momentum:  "steady",
+    rsi:       50,
+    macd:      "neutral",
+    catalyst:  "Semiconductor cycle — AI chip demand + geopolitics",
+    ivr:       45,
+    beta:      1.6,
+    earningsDate: null,
+    isIndex:   true,
+    isPrimary: false,
+    minScore:  75, // FIX 11: higher bar for thinner liquidity instruments
+  },
+  {
+    ticker:    "IYR",
+    sector:    "Real Estate",
+    momentum:  "steady",
+    rsi:       50,
+    macd:      "neutral",
+    catalyst:  "Rate cycle — REITs rally on rate cuts, sell on hikes",
+    ivr:       22,
+    beta:      0.7,
+    earningsDate: null,
+    isIndex:   true,
+    isPrimary: false,
+    minScore:  75,
+  },
+  {
+    ticker:    "HYG",
+    sector:    "Bonds",
+    momentum:  "steady",
+    rsi:       50,
+    macd:      "neutral",
+    catalyst:  "Credit stress leading indicator — HYG leads equity by 2-3 days",
+    ivr:       18,
+    beta:      0.5,
+    earningsDate: null,
+    isIndex:   true,
+    isPrimary: false,
+    minScore:  75,
+  }
+);
+
 const INDIVIDUAL_STOCK_WATCHLIST = [
   { ticker:"NVDA",  sector:"Technology",  momentum:"strong",     rsi:58, macd:"bullish crossover",  catalyst:"AI infrastructure demand",      ivr:52, beta:1.8, earningsDate:null },
   { ticker:"AAPL",  sector:"Technology",  momentum:"steady",     rsi:52, macd:"mild bullish",       catalyst:"Services revenue growth",       ivr:28, beta:1.1, earningsDate:null },
@@ -234,7 +285,7 @@ module.exports = {
   STOP_LOSS_PCT, FAST_STOP_PCT, FAST_STOP_HOURS, TAKE_PROFIT_PCT,
   PARTIAL_CLOSE_PCT, TRAIL_ACTIVATE_PCT, TRAIL_STOP_PCT, BREAKEVEN_LOCK_PCT,
   RIDE_TARGET_PCT, TIME_STOP_DAYS, TIME_STOP_MOVE, IV_COLLAPSE_PCT,
-  MA50_BUFFER, MACRO_REVERSAL_PCT, MIN_SCORE, MIN_SCORE_CREDIT, IVR_MAX,
+  MA50_BUFFER, MACRO_REVERSAL_PCT, MIN_SCORE, MIN_SCORE_CREDIT, MIN_SCORE_MR, IVR_MAX,
   EARNINGS_SKIP_DAYS, MIN_OPEN_INTEREST, MIN_STOCK_PRICE, MIN_OPTION_PREMIUM,
   MIN_OI, MAX_SPREAD_PCT, EARLY_SPREAD_PCT, MAX_GAP_PCT, TARGET_DELTA_MIN,
   TARGET_DELTA_MAX, MAX_BETA_POSITIONS, MAX_HIGH_BETA, PDT_RULE_ACTIVE, PDT_LIMIT,
