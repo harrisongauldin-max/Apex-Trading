@@ -286,6 +286,17 @@ async function executeDebitSpread(stock, price, optionType, vix, score, scoreRea
       return null;
     }
 
+    // Direction sanity: for put debit spreads buy must be ABOVE sell (buying closer to money)
+    // for call debit spreads buy must be BELOW sell. Implicit guards (netDebit, width) catch
+    // most inversions - this explicit check makes it visible if it ever fires.
+    if (optionType === "put"  && buyLeg.strike <= sellLeg.strike) {
+      logEvent("warn", `${stock.ticker} debit put spread ABORT: buy $${buyLeg.strike} <= sell $${sellLeg.strike} — inverted legs`);
+      return null;
+    }
+    if (optionType === "call" && buyLeg.strike >= sellLeg.strike) {
+      logEvent("warn", `${stock.ticker} debit call spread ABORT: buy $${buyLeg.strike} >= sell $${sellLeg.strike} — inverted legs`);
+      return null;
+    }
     logEvent("filter", `${stock.ticker} debit spread: buy $${buyLeg.strike} / sell $${sellLeg.strike} | width $${actualWidth} | net $${netDebit} | R/R ${(rrRatio*100).toFixed(0)}%`);
     return await executeSpreadTrade(stock, price, score, scoreReasons, vix, optionType, buyLeg, sellLeg, false);
   } catch(e) {
@@ -708,9 +719,12 @@ async function executeCreditSpread(stock, price, score, scoreReasons, vix, optio
 
       // Try each candidate width to find the best (short, long) pair
       for (const w of candidateWidths) {
+        // For put credit spreads: short strike MUST be ABOVE long strike
+        // (selling the put closer to money, buying protection further OTM)
+        // For call credit spreads: short strike MUST be BELOW long strike  
         const longStrikeTarget = optionType === "put"
-          ? shortStrikeVal - w
-          : shortStrikeVal + w;
+          ? shortStrikeVal - w   // long is BELOW short (further OTM for puts)
+          : shortStrikeVal + w;  // long is ABOVE short (further OTM for calls)
 
         // Find closest available long leg strike at same expiry — O(k) where k = contracts on that expiry
         const sameExpContracts = snapByExp[expDate] || [];
@@ -730,6 +744,10 @@ async function executeCreditSpread(stock, price, score, scoreReasons, vix, optio
 
         const actualWidth = Math.abs(shortStrikeVal - bestLong.strike);
         if (actualWidth < 1.5) continue; // too narrow to be meaningful
+        // Guard: for puts, short MUST be above long. For calls, short MUST be below long.
+        // This prevents inverted spreads where we buy the expensive leg and sell the cheap one.
+        if (optionType === "put"  && bestLong.strike >= shortStrikeVal) continue;
+        if (optionType === "call" && bestLong.strike <= shortStrikeVal) continue;
 
         const credit  = parseFloat((mid - bestLong.mid).toFixed(2));
         if (credit <= 0) continue;
@@ -787,6 +805,18 @@ async function executeCreditSpread(stock, price, score, scoreReasons, vix, optio
     let maxProfit     = netCredit;
     let maxLoss       = bestSpread.maxLoss;
     const actualWidth = bestSpread.actualWidth;
+
+    // FINAL SANITY CHECK: For put credit spreads, short strike MUST be > long strike.
+    // If inverted, the spread would pay a debit instead of collecting credit.
+    // This catches any edge case where the optimal search assigns legs incorrectly.
+    if (optionType === "put" && shortContract.strike <= longContract.strike) {
+      logEvent("warn", `${stock.ticker} SPREAD ABORT: short strike $${shortContract.strike} <= long strike $${longContract.strike} — inverted legs would pay debit. Skipping.`);
+      return null;
+    }
+    if (optionType === "call" && shortContract.strike >= longContract.strike) {
+      logEvent("warn", `${stock.ticker} SPREAD ABORT: short strike $${shortContract.strike} >= long strike $${longContract.strike} — inverted call spread. Skipping.`);
+      return null;
+    }
 
     const _d = Math.abs(parseFloat(shortContract.greeks.delta));
     logEvent("filter", `${stock.ticker} short leg: $${shortContract.strike} | ${shortContract.expDays}DTE | delta${_d.toFixed(3)} | $${shortContract.premium} (optimal: score ${bestSpread.score.toFixed(0)} R/R${(bestSpread.rr*100).toFixed(0)}%)`);
