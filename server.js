@@ -1,4 +1,4 @@
-// server.js — ARGO V3.2
+// server.js — APEX
 // Express API shell, schedulers, and boot sequence (~600 lines).
 'use strict';
 
@@ -893,20 +893,28 @@ function requireSecret(req, res, next) {
 }
 
 app.get("/api/state", async (req, res) => {
-  // Enrich positions with correct P&L display values using Alpaca data as source of truth
+  // Enrich positions with correct P&L display values.
+  // Source of truth priority:
+  // 1. pos.unrealizedPnL (set by reconciler from leg avg_entry_price vs current_price)
+  //    Note: Alpaca's raw unrealized_pl is from their perspective (inverted). The reconciler
+  //    corrects this and stores the trader's actual P&L.
+  // 2. Fall back to (prem - cur) * 100 * c for credit, (cur - prem) for debit.
   const enrichedPositions = (state.positions || []).map(pos => {
-    // Use unrealizedPnL from Alpaca if available (set by syncPositionPnLFromAlpaca)
-    // This is the authoritative value — bypasses any currentPrice/premium calculation errors
-    const alpacaPnL = typeof pos.unrealizedPnL === 'number' ? pos.unrealizedPnL : null;
-    const maxProfitVal = pos.maxProfit || (pos.premium * 100 * (pos.contracts || 1));
-    const displayPnL    = alpacaPnL !== null ? alpacaPnL
-      : pos.isCreditSpread
-        ? parseFloat(((pos.premium - pos.currentPrice) * 100 * (pos.contracts || 1)).toFixed(2))
-        : parseFloat(((pos.currentPrice - pos.premium) * 100 * (pos.contracts || 1)).toFixed(2));
+    const c   = pos.contracts || 1;
+    const prem = parseFloat(pos.premium) || 0;
+    const cur  = parseFloat(pos.currentPrice) || prem;
+    const maxProfitVal = parseFloat(pos.maxProfit) || Math.max(1, prem * 100 * c);
+    let displayPnL;
+    // Use reconciler-computed unrealizedPnL when available (price-based, sign-corrected)
+    if (typeof pos.unrealizedPnL === 'number' && pos.unrealizedPnL !== 0) {
+      displayPnL = pos.unrealizedPnL;
+    } else if (pos.isCreditSpread) {
+      displayPnL = parseFloat(((prem - cur) * 100 * c).toFixed(2));
+    } else {
+      displayPnL = parseFloat(((cur - prem) * 100 * c).toFixed(2));
+    }
     const displayPnLPct = maxProfitVal > 0 ? parseFloat((displayPnL / maxProfitVal * 100).toFixed(1)) : 0;
-    const costToClose   = pos.isCreditSpread
-      ? parseFloat((pos.currentPrice * 100 * (pos.contracts || 1)).toFixed(2))
-      : parseFloat((pos.currentPrice * 100 * (pos.contracts || 1)).toFixed(2));
+    const costToClose   = parseFloat((cur * 100 * c).toFixed(2));
     return { ...pos, displayPnL, displayPnLPct, costToClose };
   });
   res.json({
@@ -2193,7 +2201,7 @@ initState().then(() => {
   });
 
   app.listen(PORT, () => {
-    console.log(`ARGO V3.2 running on port ${PORT}`);
+    console.log(`APEX running on port ${PORT}`);
     console.log(`Alpaca key:  ${ALPACA_KEY?"SET":"NOT SET"}`);
     console.log(`Gmail:       ${GMAIL_USER||"NOT SET"}`);
     console.log(`Resend:      ${RESEND_API_KEY?"SET -":"NOT SET - email disabled"}`);
@@ -2215,7 +2223,7 @@ initState().then(() => {
 });;
 
 // -
-// ARGO V3.2 - BACKTESTING ENGINE
+// APEX - BACKTESTING ENGINE
 // Walk-forward simulation using Alpaca historical daily bars
 // Replays ARGO's scoring logic against historical data without real orders
 // QS-W2/GL-1: Addresses the out-of-sample validation gap identified by panel
