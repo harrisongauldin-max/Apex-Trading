@@ -86,7 +86,7 @@ async function alpacaGet(endpoint, base = ALPACA_BASE) {
       if (_alpacaConsecFails >= ALPACA_CIRCUIT_THRESHOLD && !_alpacaCircuitOpen) {
         _alpacaCircuitOpen = true;
         _log("warn", `[CIRCUIT] Alpaca API degraded (${_alpacaConsecFails} consecutive failures) - new entries paused`);
-        if (_alertFn) _alertFn("ARGO-V3.0 ALERT - Alpaca API degraded",
+        if (_alertFn) _alertFn("APEX ALERT - Alpaca API degraded",
           `<p>${_alpacaConsecFails} consecutive Alpaca failures. New entries paused. Check Railway logs.</p>`).catch(()=>{});
       }
       return null;
