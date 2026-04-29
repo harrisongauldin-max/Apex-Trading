@@ -31,15 +31,14 @@ const SCORE_CAP         = 100; // matches server.js scoreIndexSetup cap (was 95 
 // Hard enforcement at execution — survives any gate shift
 // Panel unanimous: structure must match instrument's volatility profile
 const INSTRUMENT_CONSTRAINTS = {
-  TLT: { allowedTypes: ["credit_put","credit_call"],
+  TLT: { allowedTypes: ["put","call"],
          minIVPct: 40, // skip TLT credits when IV rank < 40 (~IV < 18%) — R/R math fails at low bond IV
          reason: "Bond ETF — only trade credits when IV rank >= 40 (IV > ~18%)" },
-  GLD: { allowedTypes: ["credit_put","credit_call","debit_put"],
+  GLD: { allowedTypes: ["put","call"],
          reason: "Commodity hedge — credit puts and calls appropriate. Debit calls only on confirmed equity selloff + DXY weakness." },
-  SPY: { allowedTypes: ["credit_put","credit_call","debit_put","debit_call","iron_condor"] },
-  QQQ: { allowedTypes: ["credit_put","credit_call","debit_put","debit_call","iron_condor"] },
-  XLE: { allowedTypes: ["debit_put","credit_put"],
-         reason: "Energy ETF — debit puts in Regime B (downtrend). Bull put spreads (credit_put) allowed in Regime A — defined risk, oil spike helps not hurts. Credit CALLS remain blocked (oil spike risk on short call leg)." },
+  SPY: { allowedTypes: ["put","call"] },
+  QQQ: { allowedTypes: ["put","call"] },
+  XLE: { allowedTypes: ["put","call"] },
 };
 
 // ── Correlated instrument groups ─────────────────────────────
@@ -385,7 +384,8 @@ function scoreCandidate(stock, rawPutScore, rawCallScore, putReasons, callReason
   // allowsCredit: check regime-specific credit type, not just any credit
   // In bear regime, credit = credit_call. In bull regime, credit = credit_put.
   // XLE allows credit_put (bull put spread) but NOT credit_call — don't let bear redirect fire
-  const regimeCreditType = rb.isBearRegime ? "credit_call" : "credit_put";
+  // Naked options: use put/call instead of credit_put/credit_call for allowedTypes check
+  const regimeCreditType = rb.isBearRegime ? "call" : "put";
   const allowsCredit    = !instrConstraint || instrConstraint.allowedTypes.includes(regimeCreditType);
   let tradeType;
   // Iron condor: intentionally disabled — no scorer implemented yet.
@@ -419,9 +419,9 @@ function scoreCandidate(stock, rawPutScore, rawCallScore, putReasons, callReason
       && _momentum !== "steady" && _momentum !== "weak";   // momentum confirms move (not noise)
     if (rb.isBearRegime && rb.gates.creditCallActive && !_isBounceEntry) {
       // Normal path — credit redirect
-      tradeType  = "credit_call";
+      tradeType  = "call";
       optionType = "call"; // flip so executeCreditSpread builds call spread ABOVE market
-      const _redirectMsg = "[CREDIT REDIRECT] Bear regime: bearish signal → bear call spread (sell calls above market, not puts below)";
+      const _redirectMsg = "[REGIME REDIRECT] Bear regime: put signal → buy call (bearish directional alignment)";
       putReasons.push(_redirectMsg);   // putReasons: visible in score debug
       callReasons.push(_redirectMsg);  // callReasons: visible in position scoreReasons after redirect
     } else if (_isBounceEntry) {
@@ -429,11 +429,11 @@ function scoreCandidate(stock, rawPutScore, rawCallScore, putReasons, callReason
       tradeType = "debit_put";         // optionType stays "put" — no flip
       putReasons.push(`[BOUNCE BYPASS] puts_on_bounces + intraday RSI ${_intradayRsi} + momentum ${_momentum} → debit put spread`);
     } else {
-      tradeType = "credit_put"; // valid in choppy + bull regimes (Regime A bullPutActive)
+      tradeType = "put"; // valid in choppy + bull regimes (Regime A bullPutActive)
     }
   }
   else if (optionType === "call" && rb.gates.creditCallActive && isIndex && allowsCredit)
-    tradeType = "credit_call";
+    tradeType = "call";
   else
     tradeType = optionType === "put" ? "debit_put" : "debit_call";
 
@@ -442,7 +442,7 @@ function scoreCandidate(stock, rawPutScore, rawCallScore, putReasons, callReason
   //   Debit put:   -20 (recovery fights the directional thesis)
   //   Credit put:  +0  (recovery moves short put further OTM — beneficial)
   //   Puts_on_bounces: +0 (recovery IS the entry signal — fade the bounce)
-  const isCreditPutTrade = tradeType === "credit_put";
+  const isCreditPutTrade = false; // Naked options: no spread trades
   if (signals.spyRecovering) {
     if (!isCreditPutTrade && !rb.gates.putsOnBounceMode) {
       putScore = Math.max(0, putScore - 20);
