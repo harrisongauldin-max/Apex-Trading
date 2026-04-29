@@ -1,4 +1,4 @@
-// agent.js — ARGO V3.2
+// agent.js — APEX
 // Claude AI agent: macro analysis, position rescoring, morning briefing.
 'use strict';
 const fetch = require('node-fetch');
@@ -154,12 +154,12 @@ function stripThinking(raw) {
 async function getAgentDayPlan(scanType = "morning") {
   if (!ANTHROPIC_API_KEY) return null;
 
-  const systemPrompt = `You are the head macro strategist for ARGO-V3.0, a systematic SPY/QQQ options spread trading system. Return ONLY valid JSON - no markdown, no preamble.
+  const systemPrompt = `You are the head macro strategist for APEX, a systematic SPY/QQQ options spread trading system. Return ONLY valid JSON - no markdown, no preamble.
 
 {"regime":"trending_bear"|"trending_bull"|"choppy"|"breakdown"|"recovery"|"neutral","signal":"strongly bearish"|"bearish"|"mild bearish"|"neutral"|"mild bullish"|"bullish"|"strongly bullish","confidence":"high"|"medium"|"low","entryBias":"puts_on_bounces"|"calls_on_dips"|"neutral"|"avoid","tradeType":"spread"|"credit"|"naked"|"none","suppressUntil":null|"HH:MM","riskLevel":"low"|"medium"|"high","vixOutlook":"spiking"|"elevated_stable"|"mean_reverting"|"falling","keyLevels":{"spySupport":null,"spyResistance":null},"catalysts":[],"reasoning":"2 sentences max","weeklyBias":"bullish"|"bearish"|"neutral","overnightMove":"string describing futures direction"}
 
 Rules:
-- suppressUntil: set to "HH:MM" ET if high-impact event today (CPI 08:30, FOMC 14:00, NFP 08:30) - ARGO-V3.0 will not enter before this time
+- suppressUntil: set to "HH:MM" ET if high-impact event today (CPI 08:30, FOMC 14:00, NFP 08:30) - APEX will not enter before this time
 - riskLevel high = FOMC day, CPI day, major geopolitical event - reduce position size
 - entryBias puts_on_bounces = bearish trend, wait for intraday relief before entering puts
 - entryBias calls_on_dips = bullish trend, wait for intraday weakness before entering calls
@@ -339,10 +339,10 @@ async function getAgentMacroAnalysis(headlines, forceRun = false) {
   }
   _agentMacroRunning = true;
   try { // outer try/finally guarantees mutex release even if prompt construction throws
-  const systemPrompt = `You are the head macro strategist for ARGO-V3.2, a systematic SPY/QQQ/GLD/TLT/XLE options spread trading system. Return ONLY valid JSON - no markdown, no preamble.
+  const systemPrompt = `You are the head macro strategist for APEX, a systematic SPY/QQQ/GLD/TLT/XLE options spread trading system. Return ONLY valid JSON - no markdown, no preamble.
 
 RESPONSE SCHEMA:
-{"signal":"strongly bearish"|"bearish"|"mild bearish"|"neutral"|"mild bullish"|"bullish"|"strongly bullish","modifier":-20to20,"confidence":"high"|"medium"|"low","mode":"defensive"|"cautious"|"normal"|"aggressive","reasoning":"3 sentences: (1) current regime assessment, (2) key risk or catalyst, (3) implication for ARGO entries","regime":"trending_bear"|"trending_bull"|"choppy"|"breakdown"|"recovery"|"neutral","regimeDuration":"intraday"|"1-3 days"|"3-7 days"|"1-2 weeks"|"multi-week","entryBias":"puts_on_bounces"|"calls_on_dips"|"neutral"|"avoid","tradeType":"spread"|"credit"|"naked"|"none","vixOutlook":"spiking"|"elevated_stable"|"mean_reverting"|"falling"|"unknown","keyLevels":{"spySupport":null,"spyResistance":null},"catalysts":[],"bearishTickers":[],"bullishTickers":[],"themes":[],"exitUrgency":"hold"|"monitor"|"trim"|"exit","positionSizeMult":0.25|0.5|0.75|1.0|1.25|1.5,"schemaVersion":2}
+{"signal":"strongly bearish"|"bearish"|"mild bearish"|"neutral"|"mild bullish"|"bullish"|"strongly bullish","modifier":-20to20,"confidence":"high"|"medium"|"low","mode":"defensive"|"cautious"|"normal"|"aggressive","reasoning":"3 sentences: (1) current regime assessment, (2) key risk or catalyst, (3) implication for APEX entries","regime":"trending_bear"|"trending_bull"|"choppy"|"breakdown"|"recovery"|"neutral","regimeDuration":"intraday"|"1-3 days"|"3-7 days"|"1-2 weeks"|"multi-week","entryBias":"puts_on_bounces"|"calls_on_dips"|"neutral"|"avoid","tradeType":"spread"|"credit"|"naked"|"none","vixOutlook":"spiking"|"elevated_stable"|"mean_reverting"|"falling"|"unknown","keyLevels":{"spySupport":null,"spyResistance":null},"catalysts":[],"bearishTickers":[],"bullishTickers":[],"themes":[],"exitUrgency":"hold"|"monitor"|"trim"|"exit","positionSizeMult":0.25|0.5|0.75|1.0|1.25|1.5,"schemaVersion":2}
 
 FIELD RULES:
 - regime: what SPY does next 3-10 days (not just today)
@@ -354,7 +354,7 @@ FIELD RULES:
 - modifier: -20=maximum bearish boost to scoring, 0=neutral, +20=maximum bullish boost. Applies to entry scoring.
 - schemaVersion: always 2
 
-ARGO SYSTEM CONTEXT (static — use for position sizing and exit decisions):
+APEX SYSTEM CONTEXT (static — use for position sizing and exit decisions):
 Instruments: SPY, QQQ (primary — correlated 0.90+), GLD (safe haven / inflation hedge), TLT (rates / flight to quality), XLE (energy — oil-correlated)
 Strategy: Regime B (bear trend, VIX>25) = bear call credit spreads as primary + debit puts on intraday bounces. Regime A (bull, VIX<20) = bull put credit spreads + debit calls on dips.
 Credit spreads: sell OTM call (0.20-0.35 delta), buy further OTM call (protection). Collect premium. Profit when underlying stays BELOW short strike at expiration. Max profit = net credit. Max loss = spread width minus credit.
@@ -1173,7 +1173,7 @@ async function triggerRescore(pos, triggerReason) {
 // ─── Post-market overnight assessment ────────────────────────────────────────
 async function getAgentPostMarketAssessment(scanType = "post-market") {
   if (!ANTHROPIC_API_KEY) return null;
-  const systemPrompt = `Post-market analyst for ARGO-V3.0. Return ONLY valid JSON - no markdown.
+  const systemPrompt = `Post-market analyst for APEX. Return ONLY valid JSON - no markdown.
 {"overnightRisk":"low"|"medium"|"high","holdRecommendations":{},"tomorrowBias":"bullish"|"bearish"|"neutral","catalystsTomorrow":[],"reasoning":"1-2 sentences"}
 holdRecommendations: {ticker: "HOLD"|"MONITOR"|"EXIT_AT_OPEN"} for each open position.`;
 
@@ -1263,7 +1263,7 @@ RSI: ${stock.rsi} | MACD: ${stock.macd} | Momentum: ${stock.momentum}
 Score: ${score}/100 | Top reasons: ${reasons.slice(0,4).join('; ')}
 Macro: ${(state._agentMacro||{}).signal||'neutral'} (${(state._agentMacro||{}).confidence||'unknown'})
 VIX: ${state.vix}
-Should ARGO-V3.0 enter this ${optionType} position?`;
+Should APEX enter this ${optionType} position?`;
 
   const raw = await callClaudeAgent(systemPrompt, userPrompt, 200, false);
   if (!raw) return { approved: true, reason: "agent unavailable - allowing" };
@@ -1355,8 +1355,8 @@ async function getAgentOvernightScan(scanType = "midnight-digest") {
   }
 
   // ── System prompt ─────────────────────────────────────────────────────────
-  const systemPrompt = `You are ARGO's pre-market strategist. ARGO is a systematic options spread trading system.
-ARGO trades bear call spreads (Regime B), debit put spreads (bounces), and debit call spreads (Regime A recovery).
+  const systemPrompt = `You are APEX's pre-market strategist. APEX is a systematic naked options trading system.
+APEX trades directional long calls and puts (Regime B), debit put spreads (bounces), and debit call spreads (Regime A recovery).
 All times are CENTRAL TIME (CT). Market opens 8:30am CT.
 
 Return ONLY valid JSON — no markdown, no preamble:
