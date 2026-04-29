@@ -972,12 +972,9 @@ function scoreIndexSetup(stock, optionType, spyRSI, spyMACD, spyMomentum, breadt
       // IVP 90%+: extreme IV. For debit puts: move may already be priced in (-5).
       // For credit spreads: ideal — collect extremely rich premium (+12).
       // tradeType === "credit" is passed in via scoringMacro when creditModeActive
-      const isInCreditMode90 = tradeType === "credit";
-      if (isInCreditMode90) {
-        supplementScore += 12; reasons.push(`IVP ${ivpPut}% - extreme IV, ideal credit premium collection (+12)`);
-      } else {
-        score -= 5; reasons.push(`IVP ${ivpPut}% - extreme IV, debit put risk: move priced in (-5)`);
-      }
+      // APEX: naked long options — high IVP means expensive premium but valid if thesis strong.
+      // No deduction. Credit spread penalty removed (not selling premium in APEX).
+      reasons.push(`IVP ${ivpPut}% - elevated IV, premium cost factored into sizing (+0)`);
     }
     else if (ivpPut >= 70)  {
       // Credit spreads: high IVP = selling overpriced premium = MORE favorable
@@ -1043,20 +1040,22 @@ function scoreIndexSetup(stock, optionType, spyRSI, spyMACD, spyMomentum, breadt
         // Bear call spread: structural alignment bonus — selling calls above a falling market
         score += 5; reasons.push(`Regime: ${regime} - bear call spread aligned with downtrend (+5)`);
       } else if (mrCapitulationActive) {
-        // MR call in breakdown: RSI <= 30 = genuine capitulation — bypass regime penalty entirely
-        // The breakdown regime is the REASON this is a MR entry, not a reason to block it
+        // APEX: RSI <= 30 = genuine capitulation — bypass regime penalty entirely regardless of oversoldDays.
+        // Fast intraday crashes (day 1) are valid MR entries — requiring 2-day history misses the best entry.
         const oversoldDays = state._oversoldCount?.[stock.ticker] || 0;
         score += 10; reasons.push(`Regime: ${regime} - MR call capitulation bypass (RSI ${spyRSI}, ${oversoldDays}d oversold) - regime is the entry signal (+10 vs normal -25)`);
-      } else {
-        // Capitulation bypass for mean reversion debit calls (RSI 31-35, multi-day)
+      } else if (spyRSI <= 35) {
+        // RSI 31-35, not extreme enough for full mrCapitulationActive but still oversold
         const oversoldDays = state._oversoldCount?.[stock.ticker] || 0;
         const vixNotSpiking = (state._agentMacro?.vixOutlook || "") !== "spiking";
-        const capitulationConfirmed = spyRSI <= 35 && oversoldDays >= 2 && vixNotSpiking;
+        const capitulationConfirmed = oversoldDays >= 1 && vixNotSpiking; // 1 day threshold (was 2)
         if (capitulationConfirmed) {
-          score -= 10; reasons.push(`Regime: ${regime} - capitulation bypass active (RSI ${spyRSI} for ${oversoldDays}d + VIX stabilizing) (-10 vs normal -25)`);
+          score -= 10; reasons.push(`Regime: ${regime} - oversold bypass (RSI ${spyRSI} for ${oversoldDays}d + VIX stable) (-10 vs normal -25)`);
         } else {
           score -= 25; reasons.push(`Regime: ${regime} - wrong for debit calls (-25)`);
         }
+      } else {
+        score -= 25; reasons.push(`Regime: ${regime} - wrong for debit calls (-25)`);
       }
     }
 
