@@ -385,57 +385,9 @@ function scoreCandidate(stock, rawPutScore, rawCallScore, putReasons, callReason
   // In bear regime, credit = credit_call. In bull regime, credit = credit_put.
   // XLE allows credit_put (bull put spread) but NOT credit_call — don't let bear redirect fire
   // Naked options: use put/call instead of credit_put/credit_call for allowedTypes check
-  const regimeCreditType = rb.isBearRegime ? "call" : "put";
-  const allowsCredit    = !instrConstraint || instrConstraint.allowedTypes.includes(regimeCreditType);
-  let tradeType;
-  // Iron condor: intentionally disabled — no scorer implemented yet.
-  // scoreCandidate would use Math.max(putScore,callScore) which is a directional score,
-  // not appropriate for a delta-neutral premium collection structure.
-  // Re-enable when scoreIronCondor() is built and tested.
-  // Conditions when valid: choppy regime + IVR >= 60 + SPY/QQQ only
-  // const ironCondorOk = isIndex && isChoppy && rb.ivRank >= 60 && allowsCredit && !stock.isMeanReversion;
-  const ironCondorOk = false; // disabled — no scorer
-  if (stock.isMeanReversion)
-    tradeType = "debit_naked";
-  else if (ironCondorOk && instrConstraint?.allowedTypes?.includes("iron_condor"))
-    tradeType = "iron_condor";
-  // Use rb.creditAllowedVIX which respects the lowered 45 threshold with VIX belt (Fix #13)
-  else if (optionType === "put" && rb.gates.creditPutActive && isIndex && rb.creditAllowedVIX && allowsCredit) {
-    // Bear regime: high put score = bearish DIRECTION signal → credit structure is the complement
-    // credit_put (bull put spread) sells puts BELOW market — loses if bear trend continues
-    // credit_call (bear call spread) sells calls ABOVE market — wins if bear trend continues
-    // Panel unanimous: redirect to credit_call in Regime B so structure aligns with thesis
-    //
-    // BOUNCE BYPASS (Gilfoyle panel 4/23/2026):
-    // When puts_on_bounces mode is active AND intraday conditions confirm an extended bounce,
-    // skip the credit redirect and enter a debit put spread instead.
-    // Logic: intraday RSI overbought (65+) + momentum not steady = bounce is extended, not just noise.
-    // This is ADDITIVE — the credit redirect path is unchanged for all other conditions.
-    const _intradayRsi  = signals.rsi || 50;
-    const _momentum     = signals.momentum || "steady";
-    const _isBounceEntry = rb.gates.putsOnBounceMode       // agent says puts_on_bounces
-      && rb.isBearRegime                                    // structural bear trend confirmed
-      && _intradayRsi >= 65                                 // intraday bounce is extended
-      && _momentum !== "steady" && _momentum !== "weak";   // momentum confirms move (not noise)
-    if (rb.isBearRegime && rb.gates.creditCallActive && !_isBounceEntry) {
-      // Normal path — credit redirect
-      tradeType  = "call";
-      optionType = "call"; // flip so executeCreditSpread builds call spread ABOVE market
-      const _redirectMsg = "[REGIME REDIRECT] Bear regime: put signal → buy call (bearish directional alignment)";
-      putReasons.push(_redirectMsg);   // putReasons: visible in score debug
-      callReasons.push(_redirectMsg);  // callReasons: visible in position scoreReasons after redirect
-    } else if (_isBounceEntry) {
-      // Bounce bypass — debit put spread on intraday bounce in bear trend
-      tradeType = "debit_put";         // optionType stays "put" — no flip
-      putReasons.push(`[BOUNCE BYPASS] puts_on_bounces + intraday RSI ${_intradayRsi} + momentum ${_momentum} → debit put spread`);
-    } else {
-      tradeType = "put"; // valid in choppy + bull regimes (Regime A bullPutActive)
-    }
-  }
-  else if (optionType === "call" && rb.gates.creditCallActive && isIndex && allowsCredit)
-    tradeType = "call";
-  else
-    tradeType = optionType === "put" ? "debit_put" : "debit_call";
+  // APEX: tradeType is always the option type — no credit/debit spread routing
+  const ironCondorOk = false; // disabled
+  let tradeType = optionType; // "put" or "call" — period
 
   // ── Regime score modifiers (applied after tradeType known) ──
   // SPY recovering penalty:
@@ -470,7 +422,7 @@ function scoreCandidate(stock, rawPutScore, rawCallScore, putReasons, callReason
   // credit_call (sell calls above market): an oversold bounce can breach the short strike
   // Apply 0.75x sizing reduction for both debit puts AND credit calls when RSI<=40
   const oversoldInBear = rb.gates.oversoldSizeReduce && dailyRsi <= 40 &&
-                         (optionType === "put" || tradeType === "credit_call");
+                         (optionType === "put");
   const isCrisis      = rb.isCrisis;
   const isCredit      = tradeType.startsWith("credit");
   const ivBoost       = isCredit ? rb.sizeMult.ivBoostCredit : rb.sizeMult.ivBoostDebit;
@@ -552,11 +504,11 @@ function evaluateEntry(candidate, rulebook, state, context = {}) {
 
   // ── Call-specific blocks ──────────────────────────────────
   if (optionType === "call") {
-    if (g.below200MACallBlock && !tradeType.startsWith("credit"))
-      return { pass: false, reason: "SPY below 200MA — debit calls fight the trend in Regime B" };
+    if (g.below200MACallBlock)
+      return { pass: false, reason: "SPY below 200MA — calls fight the trend in Regime B" };
     // NAKED OPTIONS: crisisDebitBlock removed for calls too.
     // Debit call spread specific gates (panel 4/22/2026)
-    if (tradeType === "debit_call") {
+    if (false) { // debit_call removed in APEX
       // SPY down day block REMOVED: in Regime A bull trend, a small down day (-1% to -2%)
       // is often the ideal call entry — pullback within uptrend. Block only extreme down days.
       const spyDayChg = state._spyDayChange || 0;
@@ -589,18 +541,10 @@ function evaluateEntry(candidate, rulebook, state, context = {}) {
   const recentSameDir = context.recentSameDir ?? null;
   const hasOpenPositions = (state.positions || []).length > 0;
   if (hasOpenPositions && recentSameDir !== null && recentSameDir < 30) {
-    const isCredit = tradeType && tradeType.startsWith("credit");
-    if (isCredit) {
-      // Credit: use % of max profit earned (positive when profitable)
-      const creditProfitPct = context.existingCreditProfitPct ?? 0;
-      if (creditProfitPct < 0.15)
-        return { pass: false, reason: `stagger — ${recentSameDir.toFixed(0)}min since last credit ${optionType} on ${ticker} (need 30min gap or >15% of max profit to add)` };
-    } else {
-      // Debit: standard pnlPct (positive when profitable)
-      const existingProfit = context.existingProfitPct ?? 0;
-      if (existingProfit < 0.05)
-        return { pass: false, reason: `stagger — ${recentSameDir.toFixed(0)}min since last ${optionType} on ${ticker} (need 30min gap or >5% profit to add)` };
-    }
+    // APEX stagger: naked options only — use pnlPct directly
+    const existingProfit = context.existingProfitPct ?? 0;
+    if (existingProfit < 0.05)
+      return { pass: false, reason: `stagger — ${recentSameDir.toFixed(0)}min since last ${optionType} on ${ticker} (need 30min gap or >5% profit to add)` };
   }
 
   // ── Effective minimum score ───────────────────────────────
@@ -610,11 +554,8 @@ function evaluateEntry(candidate, rulebook, state, context = {}) {
   const isPutsOnBouncesDebit = tradeType === "debit_put"
     && (rb.regimeClass === "B" || rb.regimeClass === "C")
     && rb.gates.putsOnBounceMode;
-  let minScore = tradeType.startsWith("credit")   ? rb.minScoreCredit
-               : isPutsOnBouncesDebit             ? rb.minScoreCredit  // 65 in Regime B fade mode
-               : tradeType === "debit_call"        ? (rb.minScoreDebitCall || 75) // panel: 75 min for debit calls
-               : optionType === "put"             ? rb.minScorePut
-               : rb.minScoreCall;
+  // APEX: unified minScore — put or call, no spread tiers
+  let minScore = optionType === "put" ? rb.minScorePut : rb.minScoreCall;
 
   // agentMinAdj = 0 (removed) — no bar adjustment
 
@@ -657,14 +598,13 @@ function evaluateEntry(candidate, rulebook, state, context = {}) {
   // Marginal setups (e.g. score 68) face higher bar during uncertain macro.
   const agentSignal   = (context.agentSignal || context.agentMacroSignal || "").toLowerCase();
   const regimeClass   = rb.regimeClass || "A";
-  const isPutTrade    = optionType === "put"  || tradeType === "credit_put"  || tradeType === "debit_put";
-  const isCallTrade   = optionType === "call" || tradeType === "credit_call" || tradeType === "debit_call";
+  const isPutTrade    = optionType === "put";
+  const isCallTrade   = optionType === "call";
   // Contrary signal threshold: adds to the BASE trade-type minimum, not the accumulated minScore.
   // This prevents stacking with drawdown protocol (e.g. drawdown raises to 85, agent adds +7 → 92).
   // Base minimums: credit=65, debit_put=70, debit_call=75. Agent adds +7 or +3 to those floors only.
-  const baseTradeMin  = tradeType.startsWith("credit") ? rb.minScoreCredit
-                      : tradeType === "debit_call"     ? (rb.minScoreDebitCall || 75)
-                      : rb.minScorePut;  // debit_put / naked put
+  // APEX: agent threshold base is simply put or call minimum
+  const baseTradeMin  = optionType === "put" ? rb.minScorePut : rb.minScoreCall;
   if (isPutTrade) {
     if      (agentSignal === "strongly bearish") { minScore = Math.max(minScore, baseTradeMin + 7); }
     else if (agentSignal === "bearish")          { minScore = Math.max(minScore, baseTradeMin + 3); }
