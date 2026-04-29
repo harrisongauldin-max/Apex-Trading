@@ -794,7 +794,7 @@ async function confirmPendingOrder() {
           iv:           null,
           vix:          state.vix,
           tradeType:    "credit_spread",
-          reasoning:    `[BEAR CALL SPREAD] Score ${pending.score}/100. Sell $${pending.sellStrike} / Buy $${pending.buyStrike} ${pending.expDate}. Net credit $${netCredit.toFixed(2)}. Max profit $${maxProfit.toFixed(0)}. Max loss $${maxLoss.toFixed(0)}.`,
+          reasoning:    `[${pending.optionType === "call" ? "BEAR CALL" : "BULL PUT"} SPREAD] Score ${pending.score}/100. Sell ${pending.sellStrike} / Buy ${pending.buyStrike} ${pending.expDate}. Net credit ${netCredit.toFixed(2)}. Max profit ${maxProfit.toFixed(0)}. Max loss ${maxLoss.toFixed(0)}.`,
         });
         if (state.tradeJournal.length > 100) state.tradeJournal = state.tradeJournal.slice(0, 100);
 
