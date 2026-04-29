@@ -1016,7 +1016,7 @@ async function runScan() {
     : regimeClass === "B" ? "BEAR TREND - bear call credits + debit puts on bounces"
     : "BULL - mean reversion, both directions";
   logEvent("scan", `[STRATEGY] Regime ${regimeClass}: ${strategyMode} | IVR:${ivRankNow} (${state._ivEnv})`);
-  if (rb.gates.choppyDebitBlock) logEvent("filter", `Choppy regime - debit entries blocked${creditModeActive ? ", credit PUT mode active" : creditCallModeActive ? ", credit CALL mode active" : ", VIX too low for credits"}`);
+  // NAKED OPTIONS: choppyDebitBlock removed from logs — no credit mode in APEX
   if (creditCallModeActive && isBearTrend) logEvent("filter", `[CREDIT CALL] Trending bear + VIX ${state.vix} + IVR ${ivRankNow} - bear call spread mode active`);
   if (crisisDebitBlock && !dryRunMode) logEvent("filter", `[REGIME C] Crisis mode - debit put entries blocked, mean reversion unreliable`);
   if (skewElevated && state.vix >= 22 && state.vix < 28) logEvent("filter", `SKEW ${(state._skew?.skew||0)} elevated - credit VIX threshold lowered to 22`);
@@ -1115,7 +1115,7 @@ async function runScan() {
   const creditAllowed     = creditModeActive  && creditWindowOpen && !rb.gates.avoidHoldActive;
   const callCreditAllowed = creditCallModeActive && creditWindowOpen && !rb.gates.avoidHoldActive;
   if (isMRCondition && choppyDebitBlock) logEvent("filter", `MR call allowed in choppy - SPY RSI ${spyRSIForMR.toFixed(1)} extreme oversold + VIX ${state.vix}`);
-  if (creditAllowed && !putsAllowed) logEvent("filter", "Debit puts blocked - credit put spread mode active");
+  // NAKED OPTIONS: no "debit puts blocked" message — all puts/calls evaluated normally
   if (callCreditAllowed)             logEvent("filter", "Bear call credit mode active");
   if (macroBullish && !dryRunMode)  logEvent("filter", `Macro bullish (${marketContext.macro?.signal}) - puts blocked`);
   // vixFallingPause removed — falling VIX is good for credit spreads (less downside risk).
@@ -1701,33 +1701,10 @@ async function runScan() {
       const putResult  = scoreIndexSetup(liveStock, "put",  spyRSI, spyMACD, spyMomentum, breadthVal, state.vix, scoringMacro);
       const callResult = scoreIndexSetup(liveStock, "call", spyRSI, spyMACD, spyMomentum, breadthVal, state.vix, scoringMacro);
 
-      // Credit spread scoring: use purpose-built scorer instead of patched scoreIndexSetup
-      // scoreIndexSetup is calibrated for debit directional entries — credit spreads have
-      // a different thesis (IV premium collection, trend alignment, theta decay).
-      // scoreCreditSpread scores IVR quality, trend alignment, VIX stability, OTM safety.
-      let putSetupRaw  = { score: putResult.score,  reasons: putResult.reasons,  tradeType: putResult.tradeType  || "spread" };
-      let callSetupRaw = { score: callResult.score, reasons: callResult.reasons, tradeType: callResult.tradeType || "spread" };
-
-      if (creditCallModeActive && isBearTrend) {
-        // Bear call spread: replace call score with dedicated credit scorer
-        const creditCallResult = scoreCreditSpread(liveStock, "credit_call", state.vix, state._ivRank || 50, spyRSI, spyMACD, spyMomentum, breadthVal, scoringMacroBase);
-        callSetupRaw = { score: creditCallResult.score, reasons: creditCallResult.reasons, tradeType: "credit_call" };
-        logEvent("filter", `${liveStock.ticker} credit spread score: ${creditCallResult.score}/100 (dedicated scorer)`);
-      } else if (creditModeActive && !isBearTrend) {
-        // Bull put spread (Regime A / choppy): replace put score with dedicated credit scorer
-        const creditPutResult = scoreCreditSpread(liveStock, "credit_put", state.vix, state._ivRank || 50, spyRSI, spyMACD, spyMomentum, breadthVal, scoringMacroBase);
-        putSetupRaw = { score: creditPutResult.score, reasons: creditPutResult.reasons, tradeType: "credit_put" };
-        logEvent("filter", `${liveStock.ticker} bull put spread score: ${creditPutResult.score}/100 (dedicated scorer)`);
-      } else if (!isBearTrend && !creditCallModeActive) {
-        // Regime A / recovery: score debit call spreads with dedicated scorer
-        // Only runs when not in credit mode — debit calls and credit spreads don't co-exist
-        const debitCallResult = scoreDebitCallSpread(liveStock, state.vix, state._ivRank || 50, spyRSI, spyMACD, spyMomentum, breadthVal, scoringMacroBase, state);
-        callSetupRaw = { score: debitCallResult.score, reasons: debitCallResult.reasons, tradeType: "debit_call" };
-        logEvent("filter", `${liveStock.ticker} debit call spread score: ${debitCallResult.score}/100 (dedicated scorer)`);
-      }
-
-      putSetup  = { score: putSetupRaw.score,  reasons: putSetupRaw.reasons,  tradeType: putSetupRaw.tradeType,  isMeanReversion: false };
-      callSetup = { score: callSetupRaw.score, reasons: callSetupRaw.reasons, tradeType: callSetupRaw.tradeType, isMeanReversion: false };
+      // NAKED OPTIONS: use scoreIndexSetup directly for put and call.
+      // No spread-specific scoring — tradeType is always 'put' or 'call'.
+      putSetup  = { score: putResult.score,  reasons: putResult.reasons,  tradeType: "put",  isMeanReversion: false };
+      callSetup = { score: callResult.score, reasons: callResult.reasons, tradeType: "call", isMeanReversion: false };
       // Correlation suppression: QQQ correlated to SPY (0.90+)
       // Panel decision (7/8): allow both simultaneously at score -80 same direction
       // High conviction overrides correlation block - both signals are independently strong
