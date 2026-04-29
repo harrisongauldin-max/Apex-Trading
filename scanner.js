@@ -45,7 +45,7 @@ const {
 const { INSTRUMENT_CONSTRAINTS } = require('./entryEngine');
 
 const {
-  executeCreditSpread, executeDebitSpread, executeDebitCallSpread, executeTrade, executeIronCondor,
+  executeTrade,
   findContract, calcPositionSize,
 } = require('./execution');
 
@@ -2528,75 +2528,14 @@ async function runScan() {
     // Derive execution path from locked intentType
     // Richard/Gilfoyle: log intentType immediately after pass — makes the dark gap visible
     logEvent("filter", `${stock.ticker} entry approved — intent:${intentType} score:${score} regime:${rb.regimeName}`);
-    const useCreditSpread     = intentType === "credit_put"  && stock.isIndex && !isMeanReversion;
-    const useCreditCallSpread = intentType === "credit_call" && stock.isIndex && !isMeanReversion;
-    const useIronCondor       = intentType === "iron_condor" && stock.isIndex && !isMeanReversion && !dryRunMode
-      && !state.positions.some(p => p.ticker === stock.ticker);
-    const useDebitCallSpread  = intentType === "debit_call"  && stock.isIndex && !isMeanReversion
-      && rb.spreadParams?.debitCallEnabled !== false; // disabled in crisis (VIX>35)
-    const useSpread           = !useCreditSpread && !useCreditCallSpread && !useIronCondor && !useDebitCallSpread
-      && stock.isIndex && !isMeanReversion && intentType !== "debit_naked";
-    const ivSizeMult          = rb.sizeMult.ivBoostCredit && intentType.startsWith("credit")
-      ? rb.sizeMult.ivBoostCredit : 1.0;
-    if ((useCreditSpread || useCreditCallSpread) && ivSizeMult > 1.0) {
-      logEvent("scan", `[IV] ${stock.ticker} credit spread - IVR ${rb.ivRank} HIGH, size mult ${ivSizeMult}x`);
-    }
-
+    // NAKED OPTIONS MODE: single-leg long calls and puts only.
+    // Spreads, iron condors, and multi-leg strategies removed.
+    // All instruments route to executeTrade (limit order, long only).
     let entered = false;
-    state._lastEntryType = null; // reset before each entry attempt
-    // Gilfoyle: log which execution branch fires — critical for diagnosing silent non-entries
-    const _branch = useIronCondor ? "iron_condor"
-      : (useCreditSpread || useCreditCallSpread) ? `credit_${optionType}`
-      : useDebitCallSpread ? "debit_call"
-      : (useSpread || isMeanReversion) ? `debit_${optionType}`
-      : "none";
-    logEvent("filter", `${stock.ticker} execution branch: ${_branch} (creditSpread:${useCreditSpread} creditCall:${useCreditCallSpread} debitCall:${useDebitCallSpread} debit:${useSpread} MR:${isMeanReversion})`);
-    if (useIronCondor) {
-      state._lastEntryType = "iron_condor";
-      logEvent("scan", `[IRON CONDOR] ${stock.ticker} choppy + IVR ${ivRankNow} - attempting iron condor`);
-      const icPos = await executeIronCondor(stock, price, score, reasons, state.vix);
-      entered = !!icPos;
-    } else if (useCreditSpread || useCreditCallSpread) {
-      state._lastEntryType = "credit";
-      const _sizeMod = sizeMod || 1.0;
-      // Panel/Gilfoyle: minIVPct gate — skip credit spreads when IV too low to reach 25% R/R
-      // Uses ivPercentile (0-100 rank) rather than raw IV% — reliable across all instruments
-      const _instrConstraint = INSTRUMENT_CONSTRAINTS[stock.ticker];
-      const _ivPct = stock.ivPercentile || 50;
-      if (_instrConstraint && _instrConstraint.minIVPct && _ivPct < _instrConstraint.minIVPct) {
-        logEvent("filter", `${stock.ticker} credit spread skipped — IV rank ${_ivPct} below min ${_instrConstraint.minIVPct} (R/R math fails at low IV)`);
-        entered = false;
-      } else {
-      const creditPos = await executeCreditSpread(stock, price, score, reasons, state.vix, optionType, _sizeMod, rb.spreadParams);
-      entered = !!creditPos;
-      } // end minIVPct gate
-      // No debit fallback here — credit and debit are mutually exclusive strategies.
-      // If credit R/R fails, the market is saying premium isn't rich enough to sell.
-      // The correct response is to wait, not switch to buying puts into a crashed market.
-    } else if (useDebitCallSpread) {
-      // Debit call spread — Regime A / recovery — buy OTM call, sell further OTM call
-      state._lastEntryType = "debit_call";
-      const _dcSizeMod = sizeMod || 1.0;
-      logEvent("scan", `[DEBIT CALL] ${stock.ticker} ${rb.regimeName} regime - attempting debit call spread`);
-      const dcPos = await executeDebitCallSpread(stock, price, score, reasons, state.vix, _dcSizeMod, rb.spreadParams);
-      entered = !!dcPos;
-    } else if (useSpread || isMeanReversion) {
-      // Debit spread (directional) or MR call spread - both handled by executeDebitSpread
-      const debitPos = await executeDebitSpread(stock, price, optionType, state.vix, score, reasons, sizeMod || 1.0, isMeanReversion);
-      entered = !!debitPos;
-      if (!debitPos) {
-        continue;
-      }
-    } else {
-      // useSpread=false, not credit, not MR - agent said naked or non-index
-      // For index instruments this shouldn't happen - log and skip
-      if (stock.isIndex) {
-        logEvent("filter", `${stock.ticker} index trade type unclear (agent: ${agentTradeType}) - skipping`);
-        continue;
-      }
-      const _sizeModDebit = sizeMod || 1.0;
-      entered = await executeTrade(stock, price, score, reasons, state.vix, optionType, isMeanReversion, _sizeModDebit);
-    }
+    state._lastEntryType = isMeanReversion ? `mr_${optionType}` : `naked_${optionType}`;
+    logEvent("filter", `${stock.ticker} execution branch: naked_${optionType} (MR:${isMeanReversion})`);
+    const _sizeModNaked = sizeMod || 1.0;
+    entered = await executeTrade(stock, price, score, reasons, state.vix, optionType, isMeanReversion, _sizeModNaked);
     if (entered) await new Promise(r=>setTimeout(r,500));
   }
 
@@ -2711,13 +2650,13 @@ async function runScan() {
     const shouldEmail = (n <= 3) || (n % 30 === 0);
     if (shouldEmail && RESEND_API_KEY && GMAIL_USER && isMarketHours()) {
       const subject = n <= 3
-        ? `ARGO ALERT - Scanner crash #${n} (${e.message.slice(0,50)})`
-        : `ARGO ALERT - Scanner still failing (${n} consecutive errors)`;
+        ? `APEX ALERT - Scanner crash #${n} (${e.message.slice(0,50)})`
+        : `APEX ALERT - Scanner still failing (${n} consecutive errors)`;
       Promise.race([
         sendResendEmail(
           subject,
           `<div style="font-family:monospace;background:#07101f;color:#ff5555;padding:20px">
-          <h2>!! ARGO Scanner Error</h2>
+          <h2>!! APEX Scanner Error</h2>
           <p>Consecutive scan failures: <strong>${n}</strong></p>
           <p>Last error: ${e.message}</p>
           <p>Stack: ${e.stack?.split("\n")[1]?.trim() || "unknown"}</p>
