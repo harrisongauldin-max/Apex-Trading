@@ -541,10 +541,9 @@ function evaluateEntry(candidate, rulebook, state, context = {}) {
 
   // ── Put-specific blocks ───────────────────────────────────
   if (optionType === "put") {
-    if (g.crisisDebitBlock && !tradeType.startsWith("credit"))
-      return { pass: false, reason: "Regime C — debit puts blocked, credit structures only" };
-    if (g.choppyDebitBlock && !tradeType.startsWith("credit"))
-      return { pass: false, reason: "agent:none — debit puts blocked, credit mode only" };
+    // NAKED OPTIONS: crisisDebitBlock removed. Crisis sizing handled by VIX gates, not type constraint.
+    // NAKED OPTIONS: choppyDebitBlock removed. In APEX, puts and calls are always valid
+    // regardless of agent "choppy/none" signal — no credit-only mode exists.
     // BUG4 FIX: spyGapUpBlockPuts removed — gap-up is supportive for credit puts (further from short strike).
     // BUG6 FIX: vixFallingPause removed — state._vixFallingPause was never written, gate was always dead.
     if (g.postReversalBlock)
@@ -555,8 +554,7 @@ function evaluateEntry(candidate, rulebook, state, context = {}) {
   if (optionType === "call") {
     if (g.below200MACallBlock && !tradeType.startsWith("credit"))
       return { pass: false, reason: "SPY below 200MA — debit calls fight the trend in Regime B" };
-    if (g.crisisDebitBlock && !tradeType.startsWith("credit"))
-      return { pass: false, reason: "Regime C — debit calls blocked" };
+    // NAKED OPTIONS: crisisDebitBlock removed for calls too.
     // Debit call spread specific gates (panel 4/22/2026)
     if (tradeType === "debit_call") {
       // SPY down day block REMOVED: in Regime A bull trend, a small down day (-1% to -2%)
