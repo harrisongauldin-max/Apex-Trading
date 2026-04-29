@@ -1226,11 +1226,7 @@ async function runScan() {
   const MAX_PORTFOLIO_DELTA = -500; // max short delta (puts) = -$500 per 1% SPY move
   // RM-C1 fix: heat cap does not prevent adding OPPOSITE-direction positions when PDT-locked
   // If all positions are PDT-locked and losing, allowing a hedge is risk-reducing not risk-adding
-  const allPDTLocked = state.positions.length > 0 &&
-    state.positions.every(p => {
-      const alpacaBal = state.alpacaCash || state.cash || 0;
-      return alpacaBal < 25000 && ((Date.now() - new Date(p.openDate).getTime()) < MS_PER_DAY);
-    });
+  // allPDTLocked removed — PDT_RULE_ACTIVE=false, rule sunset April 2026
   // Natenberg: VIX-scaled vega cap - high VIX = more volatile IV = tighter cap
   // At VIX 37, a $2000 vega position loses $2000 on a 1pt VIX move - too much
   const MAX_PORTFOLIO_VEGA  = state.vix >= 35 ? 500 : state.vix >= 25 ? 1000 : 2000;
