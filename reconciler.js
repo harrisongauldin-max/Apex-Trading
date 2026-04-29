@@ -7,13 +7,13 @@ const { alpacaGet } = require('./broker');
 const { WATCHLIST ,
   ALPACA_KEY, INDIVIDUAL_STOCKS_ENABLED, MS_PER_DAY, STOP_LOSS_PCT, TAKE_PROFIT_PCT
 }  = require('./constants');
-const { executeIronCondor, findContract } = require('./execution');
+const { findContract } = require('./execution'); // Naked options: no spread functions
 
 // ─── Injected dependencies (set by server.js at boot) ────────────
 let _state         = null;
 let _log           = (type, msg) => console.log(`[reconciler][${type}] ${msg}`);
 let _redisSave     = async () => {};
-let _calcTP        = (vix) => 0.35;   // calcCreditSpreadTP
+// _calcTP removed: naked options mode, no credit spread take-profit calculation
 let _indStockList  = [];
 let _markDirty     = () => {};    // injected by initReconciler
 
@@ -21,7 +21,7 @@ function initReconciler({ state, logFn, redisSaveFn, calcCreditSpreadTP, indStoc
   _state        = state;
   if (logFn)           _log       = logFn;
   if (redisSaveFn)     _redisSave = redisSaveFn;
-  if (calcCreditSpreadTP) _calcTP = calcCreditSpreadTP;
+  // calcCreditSpreadTP removed: naked options mode
   if (indStockList)    _indStockList = indStockList;
 }
 
@@ -430,160 +430,52 @@ async function runReconciliation() {
 }
 
 async function syncPositionPnLFromAlpaca() {
+  // NAKED OPTIONS: simple single-leg P&L sync from Alpaca current_price
   if (!ALPACA_KEY) return;
   try {
-    const alpacaPositions = await alpacaGet("/positions");
+    const alpacaPositions = await alpacaGet('/positions');
     if (!alpacaPositions || !Array.isArray(alpacaPositions)) return;
-
-    // Alpaca is the single source of truth for all financial data
-    // Build lookup by symbol
     const alpacaBySymbol = {};
-    for (const ap of alpacaPositions) {
-      alpacaBySymbol[ap.symbol] = ap;
-    }
+    for (const ap of alpacaPositions) alpacaBySymbol[ap.symbol] = ap;
 
-    // ── Drift detection: if any ARGO position has symbols Alpaca doesn't know about,
-    // OR if Alpaca has option positions ARGO doesn't track, trigger full reconciliation.
-    // This ensures ARGO never silently tracks stale state for more than one scan cycle.
-    const argoSymbols = new Set();
     for (const pos of _state.positions) {
-      [pos.contractSymbol, pos.buySymbol, pos.sellSymbol].filter(Boolean).forEach(s => argoSymbols.add(s));
+      const ap = alpacaBySymbol[pos.contractSymbol];
+      if (!ap) continue;
+
+      // Current price from Alpaca — authoritative
+      const qty = Math.abs(parseInt(ap.qty || 1));
+      const mktVal = parseFloat(ap.market_value || 0);
+      if (qty > 0 && mktVal > 0) {
+        pos.currentPrice = parseFloat((mktVal / (qty * 100)).toFixed(2));
+        pos.realData = true;
+      }
+
+      // Contracts sync
+      const alpacaQty = Math.abs(parseInt(ap.qty || 1));
+      if (alpacaQty !== pos.contracts) {
+        _log('scan', `[ALPACA SYNC] ${pos.ticker} contracts: ${pos.contracts} → ${alpacaQty}`);
+        pos.contracts = alpacaQty;
+      }
+
+      // P&L from Alpaca leg prices: (currentPrice - entryPremium) * 100 * contracts
+      // For long options: profit when price rises
+      if (pos.currentPrice > 0 && pos.premium > 0) {
+        pos.unrealizedPnL = parseFloat(((pos.currentPrice - pos.premium) * 100 * pos.contracts).toFixed(2));
+      }
+
+      // Peak premium for trailing stop
+      if (pos.currentPrice > (pos.peakPremium || 0)) {
+        pos.peakPremium = pos.currentPrice;
+      }
     }
-    const alpacaOptionSymbols = new Set(
-      alpacaPositions.filter(p => /^[A-Z]+\d{6}[CP]\d{8}$/.test(p.symbol)).map(p => p.symbol)
-    );
-    // Check if any ARGO symbol is missing from Alpaca (ghost) or any Alpaca symbol is missing from ARGO (orphan)
-    const hasGhost  = [...argoSymbols].some(s => !alpacaOptionSymbols.has(s));
-    const hasOrphan = [...alpacaOptionSymbols].some(s => !argoSymbols.has(s));
-    if (hasGhost || hasOrphan) {
-      const reason = hasGhost && hasOrphan ? 'ghost+orphan' : hasGhost ? 'ghost' : 'orphan';
-      _log('warn', `[ALPACA SYNC] Drift detected (${reason}) - triggering full reconciliation`);
-      await runReconciliation();
-      return; // runReconciliation already updated everything
-    }
-
-    let updated = 0;
-    for (const pos of _state.positions) {
-      if (!pos.isSpread) {
-        const sym = pos.contractSymbol || pos.buySymbol || pos.sellSymbol;
-        if (!sym) continue;
-        const ap = alpacaBySymbol[sym];
-        if (!ap) continue;
-        const curPrice = parseFloat(ap.current_price || 0);
-        if (curPrice > 0) { pos.currentPrice = curPrice; pos.realData = true; }
-        pos.unrealizedPnL = parseFloat(parseFloat(ap.unrealized_pl || 0).toFixed(2));
-        updated++; continue;
-      }
-      if (!pos.buySymbol || !pos.sellSymbol) continue;
-      const buyLeg  = alpacaBySymbol[pos.buySymbol];
-      const sellLeg = alpacaBySymbol[pos.sellSymbol];
-      if (!buyLeg || !sellLeg) continue;
-
-      // ── Contracts: Alpaca is authoritative ─────────────────────────────
-      // Use abs(qty) from the buy leg (long leg always positive qty)
-      const alpacaContracts = Math.abs(parseInt(buyLeg.qty || 1));
-      if (alpacaContracts !== pos.contracts) {
-        _log("scan", `[ALPACA SYNC] ${pos.ticker} contracts: ${pos.contracts} → ${alpacaContracts} (Alpaca authoritative)`);
-        pos.contracts = alpacaContracts;
-      }
-
-      // ── Current prices ──────────────────────────────────────────────────
-      const buyPrice  = parseFloat(buyLeg.current_price  || 0);
-      const sellPrice = parseFloat(sellLeg.current_price || 0);
-
-      if (buyPrice > 0 && sellPrice > 0) {
-        const netPrice = pos.isCreditSpread
-          ? parseFloat((sellPrice - buyPrice).toFixed(2))   // cost to close
-          : parseFloat((buyPrice  - sellPrice).toFixed(2)); // current value
-        pos.currentPrice = netPrice;
-        pos.realData     = true;
-      }
-
-      // ── P&L: compute from leg prices (authoritative) ──────────────────
-      // Alpaca unrealized_pl uses their sign convention (negative for our gains).
-      // Instead compute from avg_entry_price vs current_price directly.
-      // credit_received = sellEntry - buyEntry
-      // cost_to_close   = sellCurrent - buyCurrent
-      // P&L             = credit_received - cost_to_close (positive = profit)
-      const buyEntry  = parseFloat(buyLeg.avg_entry_price  || 0);
-      const sellEntry = parseFloat(sellLeg.avg_entry_price || 0);
-      if (buyEntry > 0 && sellEntry > 0 && buyPrice > 0 && sellPrice > 0) {
-        const creditReceived = pos.isCreditSpread
-          ? parseFloat((sellEntry - buyEntry).toFixed(4))
-          : parseFloat((buyEntry  - sellEntry).toFixed(4));
-        const costToClose = pos.isCreditSpread
-          ? parseFloat((sellPrice - buyPrice).toFixed(4))
-          : parseFloat((buyPrice  - sellPrice).toFixed(4));
-        const pnlPerShare = pos.isCreditSpread
-          ? (creditReceived - costToClose)  // credit: profit when spread narrows
-          : (costToClose - creditReceived); // debit:  profit when spread widens
-        pos.unrealizedPnL = parseFloat((pnlPerShare * 100 * pos.contracts).toFixed(2));
-        // Correct premium (entry credit/debit) from actual Alpaca avg_entry_price
-        if (creditReceived > 0) pos.premium = parseFloat(creditReceived.toFixed(2));
-      } else {
-        // Fallback: Alpaca unrealized_pl — negate for credit spreads (sign convention fix)
-        const rawPnL = parseFloat(buyLeg.unrealized_pl || 0) + parseFloat(sellLeg.unrealized_pl || 0);
-        pos.unrealizedPnL = pos.isCreditSpread ? parseFloat((-rawPnL).toFixed(2)) : parseFloat(rawPnL.toFixed(2));
-      }
-
-      // ── Entry price / premium ───────────────────────────────────────────
-      // Do NOT overwrite pos.premium from avg_entry_price — individual leg
-      // avg_entry_price doesn't reflect the net credit/debit received at entry.
-      // pos.premium is set correctly at fill confirmation and must be preserved.
-
-      // ── Cost basis ──────────────────────────────────────────────────────
-      // Credit spread cost = margin reserved = maxLoss (max risk)
-      // Debit spread cost  = net debit paid  = premium × 100 × contracts
-      if (pos.maxLoss > 0) {
-        pos.cost = pos.isCreditSpread
-          ? pos.maxLoss // credit: margin reserved
-          : parseFloat((pos.premium * 100 * pos.contracts).toFixed(2)); // B5: debit = cash paid
-      }
-
-      // ── Max profit / max loss (always recalculate from Alpaca data) ─────
-      const width = Math.abs((pos.buyStrike || 0) - (pos.sellStrike || 0));
-      if (width > 0 && pos.premium > 0) {
-        if (pos.isCreditSpread) {
-          pos.maxProfit = parseFloat((pos.premium          * 100 * pos.contracts).toFixed(2));
-          pos.maxLoss   = parseFloat(((width - pos.premium)* 100 * pos.contracts).toFixed(2));
-        } else {
-          pos.maxProfit = parseFloat(((width - pos.premium)* 100 * pos.contracts).toFixed(2));
-          pos.maxLoss   = parseFloat((pos.premium          * 100 * pos.contracts).toFixed(2));
-        }
-      }
-
-      // ── Breakeven ───────────────────────────────────────────────────────
-      if (!pos.breakeven && pos.premium > 0) {
-        if (pos.isCreditSpread) {
-          pos.breakeven = pos.optionType === "put"
-            ? parseFloat((pos.sellStrike - pos.premium).toFixed(2))
-            : parseFloat((pos.sellStrike + pos.premium).toFixed(2));
-        } else {
-          pos.breakeven = pos.optionType === "put"
-            ? parseFloat((pos.buyStrike  - pos.premium).toFixed(2))
-            : parseFloat((pos.buyStrike  + pos.premium).toFixed(2));
-        }
-      }
-
-      // ── dteLabel cleanup ────────────────────────────────────────────────
-      if (pos.dteLabel === "RECONCILED-SPREAD") pos.dteLabel = "SPREAD-MONTHLY";
-
-      updated++;
-    }
-    if (updated > 0) _markDirty();
-  } catch(e) { _log("warn", `[ALPACA SYNC] syncPositionPnLFromAlpaca error: ${e.message}`); }
+  } catch(e) {
+    _log('warn', `[SYNC] syncPositionPnLFromAlpaca error: ${e.message}`);
+  }
 }
 
-// =======================================================================
-// ARGO CONTRACT SELECTION - v3.0
-// One shared primitive: findContract()
-// Replaces: getRealOptionsContract, getSpreadSellLeg, selectExpiry
-// Used by: executeDebitSpread, executeIronCondor (executeCreditSpread has its own)
-// =======================================================================
 
-// -- B-S delta inversion -----------------------------------------------
-// Returns the strike where a put (or call) has the given delta.
-// Uses Abramowitz & Stegun rational approximation for invPhi.
-
-
-module.exports = { runReconciliation, syncPositionPnLFromAlpaca, initReconciler };
+module.exports = {
+  initReconciler,
+  runReconciliation,
+  syncPositionPnLFromAlpaca,
+};
