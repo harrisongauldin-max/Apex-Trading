@@ -24,7 +24,7 @@ const REDIS_SAVE_INTERVAL = 30 * 1000;
 const MARKETAUX_KEY     = process.env.MARKETAUX_API_KEY || '';
 
 // ─── Capital / risk ──────────────────────────────────────────────
-const MONTHLY_BUDGET      = 10000;
+const MONTHLY_BUDGET      = 30000; // Updated: new Alpaca paper account starting balance
 const CAPITAL_FLOOR       = 7500;
 const REVENUE_THRESHOLD   = 2000;
 const BONUS_AMOUNT        = 1000;
