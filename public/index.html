@@ -306,11 +306,6 @@ input[type=text]:focus{border-color:var(--blue)}
       <div class="metric-sm" id="today-trades">0</div>
       <div class="sub">heat controlled</div>
     </div>
-    <div class="card" id="pdt-card">
-      <div class="card-title">Day Trades Left</div>
-      <div class="metric-sm" id="pdt-remaining" style="color:var(--green)">3</div>
-      <div class="sub" id="pdt-sub">of 3 this week</div>
-    </div>
     <div class="card">
       <div class="card-title">Consec. Losses</div>
       <div class="metric-sm" id="consec-loss">0</div>
@@ -499,7 +494,6 @@ input[type=text]:focus{border-color:var(--blue)}
     <button class="btn" onclick="triggerTestScan()" style="background:#1a1a2a;border-color:#6644aa;color:#aa88ff" title="Forces a dry run scan regardless of market hours — safe for after-hours testing">🧪 TEST SCAN</button>
     <button class="btn btn-red" onclick="resetMonth()">↺ RESET MONTH</button>
     <button class="btn" style="background:#1a1a40;border:1px solid #4444ff;color:#8888ff" onclick="resetCircuit()">⟳ RESET CIRCUIT</button>
-    <button class="btn" style="background:#1a2a1a;border:1px solid #44ff44;color:#88ff88" onclick="resetPDT()">🔄 RESET PDT</button>
     <button class="btn" style="background:#401010;border:1px solid #ff4444;color:#ff8888" onclick="fullReset()">🗑 FULL RESET</button>
     <button class="btn" style="background:#7b0000;border:1px solid #ff0000" onclick="emergencyClose()">⚠ EMERGENCY CLOSE ALL</button>
     <button class="btn" style="background:#0a1f3a;border:1px solid #00c4ff;color:#00c4ff" onclick="downloadDayReport()">📊 DAY REPORT</button>
@@ -1363,30 +1357,6 @@ function renderMetrics() {
       : '<span style="color:#555">none</span>';
   }
 
-  // PDT remaining day trades — sourced from Alpaca when available
-  const pdtUsed      = state.pdtCount || 0;
-  const pdtLimit     = state.pdtLimit || 3;
-  const pdtRemaining = state.pdtRemaining !== undefined ? state.pdtRemaining : Math.max(0, pdtLimit - pdtUsed);
-  const pdtBlocked   = state.pdtBlocked || false;
-  const pdtSource    = state.pdtSource || "internal";
-  const pdtEl        = document.getElementById('pdt-remaining');
-  const pdtCard      = document.getElementById('pdt-card');
-  const pdtSub       = document.getElementById('pdt-sub');
-  pdtEl.textContent  = pdtBlocked ? 'BLOCKED' : pdtRemaining;
-  pdtSub.textContent = pdtUsed + ' of ' + pdtLimit + ' used · ' + (pdtSource === 'alpaca' ? '✓ Alpaca' : '⚠ internal');
-  if (pdtBlocked || pdtRemaining === 0) {
-    pdtEl.style.color  = 'var(--red)';
-    pdtCard.style.borderColor = '#ff4444';
-    pdtCard.style.background  = '#1a0505';
-  } else if (pdtRemaining === 1) {
-    pdtEl.style.color  = '#ffaa00';
-    pdtCard.style.borderColor = '#ffaa00';
-    pdtCard.style.background  = '';
-  } else {
-    pdtEl.style.color  = 'var(--green)';
-    pdtCard.style.borderColor = '';
-    pdtCard.style.background  = '';
-  }
   document.getElementById('consec-loss').textContent = state.consecutiveLosses || 0;
   document.getElementById('consec-loss').style.color = (state.consecutiveLosses||0) >= 2 ? 'var(--red)' : 'var(--text)';
   document.getElementById('last-scan').textContent = fmtTime(state.lastScan);
@@ -2672,13 +2642,6 @@ async function closePos(ticker, contractSym) {
   await fetchState();
 }
 
-async function resetPDT() {
-  if (!confirm('Reset PDT day trade counter? Only use if trades were miscounted.')) return;
-  const resp = await fetch('/api/reset-pdt', {method:'POST'});
-  const data = await resp.json();
-  alert(data.message || 'PDT counter reset. 3/3 day trades now available.');
-  await fetchState();
-}
 
 async function resetCircuit() {
   if (!confirm('Reset circuit breaker? ARGO V3.2 will resume scanning and entering new trades.')) return;
