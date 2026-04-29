@@ -68,9 +68,11 @@ function getTimeAdjustedStop(pos) {
 
 function getDTEExitParams(dte, daysOpen = 0) {
   const { countRecentDayTrades } = require('./risk'); // lazy to break circular dep
-  const pdtRemaining = Math.max(0, PDT_LIMIT - countRecentDayTrades());
-  const pdtTight     = pdtRemaining <= 1;
-  const pdtLocked    = pdtRemaining === 0;
+  // PDT_RULE_ACTIVE=false (FINRA PDT rule sunset April 2026) — day trades not enforced.
+  // Force pdtLocked/pdtTight to false so exit params use standard values.
+  const pdtRemaining = PDT_RULE_ACTIVE ? Math.max(0, PDT_LIMIT - countRecentDayTrades()) : 3;
+  const pdtTight     = PDT_RULE_ACTIVE && pdtRemaining <= 1;
+  const pdtLocked    = PDT_RULE_ACTIVE && pdtRemaining === 0;
   let overnightMult  = 1.0;
   let overnightLabel = "";
   if (dte <= 21) {
