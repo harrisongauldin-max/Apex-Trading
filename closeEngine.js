@@ -110,7 +110,7 @@ async function syncCashFromAlpaca() {
         markDirty();
       } else {
         // Small drift — routine fill/credit/premium change
-        logEvent("scan", `[CASH SYNC] Alpaca: $${alpacaCash.toFixed(2)} | ARGO: $${state.cash.toFixed(2)} | drift: $${drift.toFixed(2)} — syncing`);
+        logEvent("scan", `[CASH SYNC] Alpaca: $${alpacaCash.toFixed(2)} | APEX: $${state.cash.toFixed(2)} | drift: $${drift.toFixed(2)} — syncing`);
         state.cash = alpacaCash;
         markDirty();
       }
@@ -155,74 +155,8 @@ async function _doClosePosition(ticker, reason, exitPremium = null, contractSym 
     }
     pos._closingSubmitted = true;
 
-    // - Spread close - close both legs atomically via mleg -
-    // CRITICAL: Must close both legs together - separate orders leave naked positions
-    // if one fills and the other doesn't (or if code crashes between them)
-    var alpacaCloseOk = _dryRunMode; // var avoids TDZ — this is accessed across multiple async boundaries
-    if (pos.isSpread && !_dryRunMode) {
-      try {
-        if (pos.buySymbol && pos.sellSymbol) {
-          // Use mleg to close both legs atomically
-          const closeResp = await alpacaPost("/orders", {
-            order_class:   "mleg",
-            type:          "market",
-            time_in_force: "day",
-            qty:           String(pos.contracts || 1),
-            legs: [
-              { symbol: pos.buySymbol,  side: "sell", ratio_qty: "1", position_intent: "sell_to_close" },
-              { symbol: pos.sellSymbol, side: "buy",  ratio_qty: "1", position_intent: "buy_to_close"  },
-            ],
-          });
-          if (closeResp && closeResp.id) {
-            logEvent("trade", `[SPREAD CLOSE] mleg close submitted: ${closeResp.id} | ${pos.buySymbol} + ${pos.sellSymbol}`);
-            // Wait for fill confirmation (up to 10s - market orders fill fast)
-            let filled = false;
-            const closeStart = Date.now();
-            while (!filled && Date.now() - closeStart < 10000) {
-              await new Promise(r => setTimeout(r, 1000));
-              const poll = await alpacaGet(`/orders/${closeResp.id}`);
-              if (poll?.status === "filled") { filled = true; }
-              else if (poll && ["canceled","expired","rejected"].includes(poll.status)) break;
-            }
-            if (filled) {
-              logEvent("trade", `[SPREAD CLOSE] Both legs closed: ${pos.buySymbol} + ${pos.sellSymbol}`);
-            } else {
-              logEvent("warn", `[SPREAD CLOSE] mleg close unconfirmed - legs may still be open, check Alpaca`);
-            }
-          } else {
-            // mleg failed — fall back to DELETE /positions/{symbol} for each leg.
-            // This is the correct close method when Alpaca paper trading rejects sell_to_close
-            // orders due to "insufficient options buying power" (paper trading margin bug).
-            // DELETE /positions forces a close at market regardless of buying power.
-            logEvent("warn", `[SPREAD CLOSE] mleg rejected (likely paper margin bug) — using DELETE /positions to force-close each leg`);
-            if (pos.buySymbol) {
-              const delResp = await alpacaDelete(`/positions/${encodeURIComponent(pos.buySymbol)}`).catch(e => ({ _err: e.message }));
-              if (delResp && delResp.id) logEvent("trade", `[SPREAD CLOSE] Buy leg force-closed via DELETE: ${pos.buySymbol}`);
-              else logEvent("warn", `[SPREAD CLOSE] Buy leg DELETE failed: ${JSON.stringify(delResp)?.slice(0,100)}`);
-            }
-            if (pos.sellSymbol) {
-              const delResp2 = await alpacaDelete(`/positions/${encodeURIComponent(pos.sellSymbol)}`).catch(e => ({ _err: e.message }));
-              if (delResp2 && delResp2.id) logEvent("trade", `[SPREAD CLOSE] Sell leg force-closed via DELETE: ${pos.sellSymbol}`);
-              else logEvent("warn", `[SPREAD CLOSE] Sell leg DELETE failed: ${JSON.stringify(delResp2)?.slice(0,100)}`);
-            }
-          }
-        } else {
-          // Only one leg symbol - close whichever we have
-          if (pos.buySymbol) {
-            await alpacaPost("/orders", { symbol: pos.buySymbol, qty: pos.contracts, side: "sell", type: "market", time_in_force: "day", position_intent: "sell_to_close" });
-            logEvent("trade", `[SPREAD CLOSE] Buy leg closed: ${pos.buySymbol}`);
-          }
-          if (pos.sellSymbol) {
-            await alpacaPost("/orders", { symbol: pos.sellSymbol, qty: pos.contracts, side: "buy", type: "market", time_in_force: "day", position_intent: "buy_to_close" });
-            logEvent("trade", `[SPREAD CLOSE] Sell leg closed: ${pos.sellSymbol}`);
-          }
-        }
-      } catch(e) {
-        logEvent("error", `[SPREAD CLOSE] Error closing legs: ${e.message}`);
-      }
-      alpacaCloseOk = true; // spread close attempted — update state regardless of fill confirmation
-      // Reconcile loop will detect ghost if Alpaca didn't actually fill
-    }
+    // NAKED OPTIONS: no spread close logic — single leg close handled below via sell order
+    var alpacaCloseOk = _dryRunMode;
   const mult = pos.partialClosed ? 0.5 : 1.0;
 
   // Use real exit price in order of priority:
@@ -236,7 +170,7 @@ async function _doClosePosition(ticker, reason, exitPremium = null, contractSym 
   } else {
     // Try real-time price first
     // Spreads: use currentPrice (net spread value), not individual leg price
-    if (!pos.isSpread && pos.contractSymbol) {
+    if (pos.contractSymbol) {
       const realP = await _getOptionsPrice(pos.contractSymbol);
       if (realP) ep = realP;
     }
@@ -658,367 +592,89 @@ async function partialClose(ticker) {
 }
 
 async function confirmPendingOrder() {
+  // NAKED OPTIONS: confirm single-leg long option fill
   const pending = state._pendingOrder;
-  if (!pending || !pending.orderId) return;
+  if (!pending) return;
+
+  // Skip if pre-submit placeholder not yet sent to Alpaca
+  if (pending._preSubmit) return;
 
   const age = (Date.now() - pending.submittedAt) / 1000;
+  if (!pending.orderId) { state._pendingOrder = null; markDirty(); return; }
+
   try {
     const fillResp = await alpacaGet(`/orders/${pending.orderId}`);
     if (!fillResp) return;
 
-    if (fillResp.status === "filled") {
-      // Order filled - verify legs before recording to catch double-fill anomalies
-      const typeLabel = pending.isCreditSpread ? "CREDIT SPREAD" : "SPREAD";
-      // Sanity check: if mleg, verify filled legs don't show unexpected qty
-      if (fillResp.legs && fillResp.legs.length > 0) {
-        for (const leg of fillResp.legs) {
-          const legQty = Math.abs(parseFloat(leg.filled_qty || leg.qty || pending.contracts));
-          if (legQty > pending.contracts * 2) {
-            logEvent("warn", `[${typeLabel}] ANOMALY: leg ${leg.symbol} filled qty ${legQty} > expected ${pending.contracts} - possible double-fill, recording position but flagging`);
-            logEvent("warn", `[SPREAD ANOMALY] Check Alpaca manually - ${pending.ticker} may have duplicate legs`);
-          }
-        }
-      }
-      logEvent("trade", `[${typeLabel}] Fill confirmed: ${pending.orderId} | age: ${age.toFixed(0)}s`);
+    if (fillResp.status === 'filled') {
+      const fillPrice = parseFloat(fillResp.filled_avg_price || pending.premium || 0);
+      const contracts = pending.contracts || 1;
+      const cost      = parseFloat((fillPrice * 100 * contracts).toFixed(2));
 
-      if (pending.isCreditSpread) {
-        // Credit spread: use ACTUAL fill price from Alpaca, not our pre-submission estimate.
-        // filled_avg_price for mleg market orders = net spread price (negative = credit received).
-        // Fall back to individual leg prices, then to our estimate as last resort.
-        let netCredit = pending.netCredit || pending.netDebit; // fallback estimate
-        if (fillResp.filled_avg_price) {
-          const avg = parseFloat(fillResp.filled_avg_price);
-          if (avg < 0) netCredit = parseFloat(Math.abs(avg).toFixed(2));       // negative = credit
-          else if (avg > 0) netCredit = parseFloat(avg.toFixed(2));            // positive = credit
-          logEvent("trade", `[CREDIT SPREAD] Actual fill: $${netCredit} (Alpaca filled_avg_price ${avg})`);
-        } else if (fillResp.legs && fillResp.legs.length === 2) {
-          const sellLeg = fillResp.legs.find(l => l.side === "sell");
-          const buyLeg  = fillResp.legs.find(l => l.side === "buy");
-          if (sellLeg?.filled_avg_price && buyLeg?.filled_avg_price) {
-            const legCredit = parseFloat((parseFloat(sellLeg.filled_avg_price) - parseFloat(buyLeg.filled_avg_price)).toFixed(2));
-            if (legCredit > 0) { netCredit = legCredit; logEvent("trade", `[CREDIT SPREAD] Actual fill from legs: $${netCredit}`); }
-          }
-        }
-        const est = pending.netCredit || pending.netDebit;
-        if (netCredit !== est) logEvent("trade", `[CREDIT SPREAD] Fill vs estimate: actual $${netCredit} | est $${est} | diff $${(netCredit - est).toFixed(2)}`);
-        // Post-fill R/R gate: if actual credit is too thin, close immediately.
-        // Market orders mean we can't control fill price — this is the safety valve.
-        // Dynamic minimum: VIX>=28=15%, VIX>=22=12%, below=10%
-        const _vixNow = state.vix || 25;
-        const _minRR  = _vixNow >= 28 ? 0.15 : _vixNow >= 22 ? 0.12 : 0.10;
-        const _width  = Math.abs(pending.buyStrike - pending.sellStrike);
-        const _actualRR = _width > 0 ? netCredit / _width : 0;
-        if (_actualRR < _minRR && _width > 0) {
-          logEvent("warn", `[CREDIT SPREAD] R/R fail: actual credit $${netCredit} on $${_width} width = ${(_actualRR*100).toFixed(0)}% < ${(_minRR*100).toFixed(0)}% minimum — closing immediately`);
-          // Record as filled first (cash updated), then close on next scan via flag
-          state._pendingOrder = null;
-          markDirty();
-          // Schedule immediate close via flag — closePosition needs the position in state first
-          pending._rrFail = true;
-        }
-        // Recompute marginRequired from actual credit — pending.finalCost used the pre-submission estimate.
-        // Actual margin = (spreadWidth - actualCredit) * 100 * contracts.
-        const spreadWidth = Math.abs(pending.buyStrike - pending.sellStrike);
-        const marginRequired = parseFloat(((spreadWidth - netCredit) * 100 * pending.contracts).toFixed(2));
-        state.cash += parseFloat((netCredit * 100 * pending.contracts).toFixed(2));
-        const maxProfit = parseFloat((netCredit * 100 * pending.contracts).toFixed(2));
-        const maxLoss   = parseFloat(((Math.abs(pending.buyStrike - pending.sellStrike) - netCredit) * 100 * pending.contracts).toFixed(2));
-        const position = {
-          ticker: pending.ticker, optionType: pending.optionType,
-          sector: (WATCHLIST.find(w => w.ticker === pending.ticker) || {}).sector || "Unknown",
-          isSpread: true, isCreditSpread: true,
-          shortStrike: pending.sellStrike, longStrike: pending.buyStrike,
-          buyStrike: pending.buyStrike, sellStrike: pending.sellStrike,
-          spreadWidth: Math.abs(pending.buyStrike - pending.sellStrike),
-          buySymbol: pending.buySymbol, sellSymbol: pending.sellSymbol,
-          buyPremium:  pending.buyPremium  || 0,   // long leg entry price (protection leg)
-          sellPremium: pending.sellPremium || 0,   // short leg entry price (premium collected)
-          contractSymbol: pending.sellSymbol,
-          premium: netCredit, maxProfit, maxLoss, contracts: pending.contracts,
-          expDate: pending.expDate, expDays: pending.expDays,
-          cost: marginRequired, score: pending.score,
-          reasons: pending.scoreReasons,
-          openDate: new Date().toISOString(),
-          currentPrice: netCredit, peakPremium: netCredit,
-          // Credit put spread breakeven: short strike - net credit received
-          breakeven: pending.optionType === "put"
-            ? parseFloat((pending.sellStrike - netCredit).toFixed(2))
-            : parseFloat((pending.sellStrike + netCredit).toFixed(2)),
-          entryRSI: 50, entryMACD: "neutral", entryMomentum: "steady",
-          entryMacro: (state._agentMacro || {}).signal || "neutral",
-          entryThesisScore: pending.score || 100, thesisHistory: [], agentHistory: [],
-          realData: true, vix: state.vix, entryVIX: state.vix,
-          expiryType: "monthly", dteLabel: "CREDIT-SPREAD-MONTHLY",
-          partialClosed: false, isMeanReversion: false, trailStop: null,
-          breakevenLocked: false, halfPosition: false,
-          // Panel unanimous (8/8): credit spread stop at 50% of max loss OR 2x credit
-          // Use MIN to take whichever is stricter
-          // Stop expressed as fraction of credit received for consistency with chg calculation
-          // chg = -(currentValue - credit) / credit, stop when chg <= -stopFraction
-          // 50% max loss: stopFraction = 0.50 * maxLoss / netCredit
-          // 2x credit:    stopFraction = 1.0 (spread value = 2x credit)
-          // Take minimum (stricter)
-          takeProfitPct: calcCreditSpreadTP(state.vix), fastStopPct: Math.min(1.0, parseFloat((0.50 * maxLoss / netCredit).toFixed(3))),
-          _originalEntryScore: pending.score || 100, // baseline for dynamic TP scaling
-          _creditHarvestExpiry: new Date(Date.now() + 7 * MS_PER_DAY).toISOString(),
-        };
-        state.positions.push(position);
-        state.todayTrades++; // B2: increment for credit spread fills
-        state._pendingOrder = null;
-        logEvent("trade", `[CREDIT SPREAD] ENTERED ${pending.ticker} $${pending.sellStrike}/$${pending.buyStrike} exp ${pending.expDate} | credit $${netCredit} | margin $${marginRequired}`);
-        // R/R fail: close immediately if actual fill credit was too thin
-        if (pending._rrFail) {
-          logEvent("warn", `[CREDIT SPREAD] R/R fail close triggered — closing ${pending.ticker} immediately`);
-          await closePosition(pending.ticker, "r/r-fail", null, null, { bypassPDT: true });
-        }
-
-        // Journal entry for credit spread OPEN
-        state.tradeJournal.unshift({
-          time:         new Date().toISOString(),
-          ticker:       pending.ticker,
-          action:       "OPEN",
-          optionType:   pending.optionType,
-          isSpread:     true,
-          isCreditSpread: true,
-          strike:       pending.sellStrike,
-          expDate:      pending.expDate,
-          buyStrike:    pending.buyStrike,
-          sellStrike:   pending.sellStrike,
-          spreadLabel:  `$${pending.sellStrike}/$${pending.buyStrike}`,
-          premium:      netCredit,
-          cost:         marginRequired,
-          contracts:    pending.contracts,
-          score:        pending.score,
-          scoreReasons: pending.scoreReasons || [],
-          delta:        null,
-          iv:           null,
-          vix:          state.vix,
-          tradeType:    "credit_spread",
-          reasoning:    `[${pending.optionType === "call" ? "BEAR CALL" : "BULL PUT"} SPREAD] Score ${pending.score}/100. Sell ${pending.sellStrike} / Buy ${pending.buyStrike} ${pending.expDate}. Net credit ${netCredit.toFixed(2)}. Max profit ${maxProfit.toFixed(0)}. Max loss ${maxLoss.toFixed(0)}.`,
-        });
-        if (state.tradeJournal.length > 100) state.tradeJournal = state.tradeJournal.slice(0, 100);
-
-        await syncCashFromAlpaca();
-        await saveStateNow();
-        return;
-      }
-
-      let netDebit   = pending.netDebit;
-      let finalCost  = pending.finalCost;
-      // Use ACTUAL fill price from Alpaca — not our pre-submission estimate.
-      // For mleg market orders filled_avg_price = net debit (positive = we paid).
-      // Fall back to leg-level data if top-level price absent.
-      let actualFill = null;
-      if (fillResp.filled_avg_price) {
-        const avg = parseFloat(fillResp.filled_avg_price);
-        if (avg > 0) actualFill = avg;
-      }
-      if (!actualFill && fillResp.legs && fillResp.legs.length === 2) {
-        const buyLeg  = fillResp.legs.find(l => l.side === "buy");
-        const sellLeg = fillResp.legs.find(l => l.side === "sell");
-        if (buyLeg?.filled_avg_price && sellLeg?.filled_avg_price) {
-          const legDebit = parseFloat((parseFloat(buyLeg.filled_avg_price) - parseFloat(sellLeg.filled_avg_price)).toFixed(2));
-          if (legDebit > 0) actualFill = legDebit;
-        }
-      }
-      if (actualFill && actualFill > 0) {
-        const slippage = parseFloat((actualFill - netDebit).toFixed(2));
-        logEvent("trade", `[SPREAD] Actual fill: $${actualFill} | est $${netDebit} | slippage ${slippage >= 0 ? '+' : ''}$${slippage}`);
-        if (!state._fillQuality) state._fillQuality = { count: 0, totalSlippage: 0, misses: 0 };
-        state._fillQuality.count++;
-        state._fillQuality.totalSlippage = parseFloat((state._fillQuality.totalSlippage + slippage).toFixed(2));
-        if (Math.abs(slippage) > 0.05) state._fillQuality.misses++;
-        state._fillQuality.avgSlippage = parseFloat((state._fillQuality.totalSlippage / state._fillQuality.count).toFixed(3));
-        netDebit  = actualFill;
-        finalCost = parseFloat((netDebit * 100 * pending.contracts).toFixed(2));
-      } else {
-        logEvent("warn", `[SPREAD] No filled_avg_price from Alpaca — using estimate $${netDebit}`);
-      }
-
-      const { contracts, score, scoreReasons, expDate, expDays,
-              buyStrike, sellStrike, buySymbol, sellSymbol, optionType,
-              isChoppyEntry, isSpread } = pending;
-      const maxProfit = parseFloat(((Math.abs(buyStrike - sellStrike) - netDebit) * 100 * contracts).toFixed(2));
-      const maxLoss   = parseFloat((netDebit * 100 * contracts).toFixed(2));
-
-      state.cash -= finalCost;
+      state.cash = parseFloat((state.cash - cost).toFixed(2));
       const position = {
-        ticker:        pending.ticker, optionType, isSpread: true,
-        sector:        (WATCHLIST.find(w => w.ticker === pending.ticker) || {}).sector || "Unknown",
-        buyStrike, sellStrike,
-        spreadWidth:   Math.abs(buyStrike - sellStrike),
-        buySymbol, sellSymbol,
-        contractSymbol: buySymbol,
-        premium:       netDebit, maxProfit, maxLoss, contracts,
-        expDate, expDays, cost: finalCost, score,
-        reasons:       scoreReasons,
+        ticker:        pending.ticker,
+        optionType:    pending.optionType,
+        sector:        (WATCHLIST.find(w => w.ticker === pending.ticker) || {}).sector || 'Unknown',
+        contractSymbol: pending.contractSymbol,
+        strike:        pending.strike,
+        expDate:       pending.expDate,
+        expDays:       pending.expDays,
+        premium:       fillPrice,
+        currentPrice:  fillPrice,
+        peakPremium:   fillPrice,
+        contracts,
+        cost,
+        score:         pending.score,
+        reasons:       pending.scoreReasons,
         openDate:      new Date().toISOString(),
-        currentPrice:  netDebit, peakPremium: netDebit,
-        entryRSI:      50, entryMACD: "neutral", entryMomentum: "steady",
-        entryMacro:    (state._agentMacro || {}).signal || "neutral",
-        entryThesisScore: score || 100, thesisHistory: [], agentHistory: [],
-        realData:      true, vix: state.vix, entryVIX: state.vix,
-        expiryType:    "monthly", dteLabel: "SPREAD-MONTHLY",
-        partialClosed: false, isMeanReversion: false, trailStop: null,
-        breakevenLocked: false, halfPosition: false,
-        target:        parseFloat((netDebit * 1.50).toFixed(2)),
-        stop:          parseFloat((netDebit * (isChoppyEntry ? 0.20 : 0.50)).toFixed(2)),
-        takeProfitPct: calcCreditSpreadTP(state.vix), fastStopPct: isChoppyEntry ? 0.20 : 0.50,
-        _originalEntryScore: score || 100, // baseline for dynamic TP scaling
-        breakeven:     optionType === "put"
-          ? parseFloat((buyStrike - netDebit).toFixed(2))
-          : parseFloat((buyStrike + netDebit).toFixed(2)),
+        isSpread:      false,
+        isCreditSpread: false,
+        realData:      true,
+        vix:           state.vix,
+        entryVIX:      state.vix,
+        partialClosed: false,
+        target:        parseFloat((fillPrice * (1 + TAKE_PROFIT_PCT)).toFixed(2)),
+        stop:          parseFloat((fillPrice * (1 - STOP_LOSS_PCT)).toFixed(2)),
+        breakeven:     pending.optionType === 'put'
+          ? parseFloat((pending.strike - fillPrice).toFixed(2))
+          : parseFloat((pending.strike + fillPrice).toFixed(2)),
       };
 
       state.positions.push(position);
+      state.todayTrades = (state.todayTrades || 0) + 1;
       state._pendingOrder = null;
-
-      // - Paper slippage estimate (panel fix #10) -
-      // In paper trading, fills execute at mid-price. In live trading, 2-leg
-      // spreads typically fill $0.05-0.15/leg above mid on buy, below on sell.
-      // Accumulate an estimate so live deployment can calibrate expectations.
-      // Estimate: $0.08/leg - 2 legs = $0.16/contract - contracts
-      const _paperSlipEst = parseFloat((0.16 * (pending.contracts || 1)).toFixed(2));
-      if (!state._paperSlippage) state._paperSlippage = { trades: 0, totalEst: 0 };
-      state._paperSlippage.trades++;
-      state._paperSlippage.totalEst = parseFloat((state._paperSlippage.totalEst + _paperSlipEst).toFixed(2));
-      state._paperSlippage.avgEst   = parseFloat((state._paperSlippage.totalEst / state._paperSlippage.trades).toFixed(2));
-      logEvent("trade", `[SLIPPAGE EST] $${_paperSlipEst} this trade | $${state._paperSlippage.totalEst} cumulative across ${state._paperSlippage.trades} trades (paper mid-fill assumption)`);
-      logEvent("trade", `Live fill count: ${(state.closedTrades||[]).length + state.positions.length}/30`);
+      logEvent('trade', `[NAKED] ENTERED ${pending.ticker} ${pending.optionType} $${pending.strike} exp ${pending.expDate} | premium $${fillPrice} | ${contracts}x | cost $${cost}`);
 
       state.tradeJournal.unshift({
-        time: new Date().toISOString(), ticker: pending.ticker,
-        action: "OPEN", optionType, isSpread: true, isCreditSpread: true,
-        strike: pending.sellStrike, expDate,
-        buyStrike: pending.buyStrike, sellStrike: pending.sellStrike,
-        spreadLabel: `$${pending.buyStrike}/$${pending.sellStrike}`,
-        premium: netCredit, cost: marginRequired, score,
-        contracts: pending.contracts,
-        scoreReasons: pending.scoreReasons || [],
-        delta: null, iv: null, vix: state.vix,
-        reasoning: `[CREDIT SPREAD] Score ${score}/100. Net credit $${netCredit}. Max profit $${maxProfit}. Max loss $${maxLoss}.`,
+        time:       new Date().toISOString(),
+        ticker:     pending.ticker,
+        action:     'OPEN',
+        optionType: pending.optionType,
+        strike:     pending.strike,
+        expDate:    pending.expDate,
+        premium:    fillPrice,
+        cost,
+        score:      pending.score,
+        reasoning:  `[${pending.optionType.toUpperCase()} OPTION] Score ${pending.score}/100. Strike $${pending.strike} exp ${pending.expDate}. Premium $${fillPrice}. Cost $${cost}.`,
       });
       if (state.tradeJournal.length > 100) state.tradeJournal = state.tradeJournal.slice(0, 100);
 
       await syncCashFromAlpaca();
       await saveStateNow();
-
-    } else if (["canceled","expired","rejected","done_for_day"].includes(fillResp.status)) {
-      logEvent("warn", `[SPREAD] Order ${fillResp.status} after ${age.toFixed(0)}s - clearing pending`);
+    } else if (['canceled','expired','rejected'].includes(fillResp.status)) {
+      logEvent('warn', `[NAKED] Order ${pending.orderId} ${fillResp.status} — no position opened`);
       state._pendingOrder = null;
       markDirty();
-
-    } else if (age > 30 && !pending._retried) {
-      // Unfilled after 30s - cancel original and retry with concession
-      // CRITICAL: verify cancel succeeded before submitting retry
-      // If cancel fails silently, both orders remain live → multiple fills / ghost orders
-      const cancelResp = await alpacaPost(`/orders/${pending.orderId}/cancel`, {}).catch(e => ({ _err: e.message }));
-      // Wait 1s for cancel to propagate on Alpaca's side
-      await new Promise(r => setTimeout(r, 1000));
-      // Verify original is actually cancelled before proceeding
-      const cancelCheck = await alpacaGet(`/orders/${pending.orderId}`).catch(() => null);
-      const cancelConfirmed = !cancelCheck || ["canceled","expired","rejected","done_for_day"].includes(cancelCheck.status);
-      if (!cancelConfirmed) {
-        // Track cancel attempts — if Alpaca keeps returning 'new', force-clear after 5 attempts (~2.5min)
-        // This handles the case where an order is stuck in pre-submission limbo on Alpaca's side
-        // and will never transition out of 'new'. Reconciler will clean up any ghost positions.
-        pending._cancelAttempts = (pending._cancelAttempts || 0) + 1;
-        if (pending._cancelAttempts >= 5) {
-          logEvent("warn", `[SPREAD] Cancel unconfirmed after ${pending._cancelAttempts} attempts (status: ${cancelCheck?.status}) — force-clearing pending. Reconciler will verify Alpaca state.`);
-          // Record ticker cooldown — only for same-session failures, not stale overnight orders
-          // Pending orders older than 6.5h are from a prior session (day orders expire at close)
-          // Setting cooldown on stale orders blocks next-day entries incorrectly
-          const _orderAgeSec = (Date.now() - (pending.submittedAt || 0)) / 1000;
-          const _isStaleOrder = _orderAgeSec > 6.5 * 3600;
-          // Only set cooldown if there's genuine fill ambiguity.
-          // If order status was 'pending_new' or 'new' with 0 qty_filled, nothing filled — no cooldown.
-          // Cooldown is for cases where we genuinely don't know if Alpaca filled us (e.g. accepted→vanished).
-          const _cancelStatus  = cancelCheck?.status || "unknown";
-          const _qtyFilled     = parseFloat(cancelCheck?.filled_qty || cancelCheck?.qty_filled || 0);
-          const _nothingFilled = ["new","pending_new","held","accepted"].includes(_cancelStatus) && _qtyFilled === 0;
-          // Final cancel attempt before force-clearing — prevents Alpaca order staying live
-          // and consuming options buying power while ARGO thinks the order is gone.
-          // Use DELETE endpoint as final escalation (more forceful than POST /cancel).
-          try {
-            await alpacaDelete(`/orders/${pending.orderId}`);
-            logEvent("warn", `[SPREAD] Force-clear: final DELETE cancel sent to Alpaca for ${pending.orderId}`);
-          } catch(e) {
-            logEvent("warn", `[SPREAD] Force-clear: final DELETE failed (${e.message}) — order may remain on Alpaca`);
-          }
-          if (!_isStaleOrder && !_nothingFilled) {
-            if (!state._entryAttemptCooldown) state._entryAttemptCooldown = {};
-            state._entryAttemptCooldown[pending.ticker] = Date.now();
-            logEvent("warn", `[SPREAD] Force-clear with fill ambiguity (status:${_cancelStatus} filled:${_qtyFilled}) — cooldown set for ${pending.ticker}`);
-          } else {
-            logEvent("warn", `[SPREAD] Force-clear no fill confirmed (status:${_cancelStatus} filled:${_qtyFilled}) — skipping cooldown for ${pending.ticker}`);
-          }
-          state._pendingOrder = null;
-          markDirty();
-          return;
-        }
-        logEvent("warn", `[SPREAD] Cancel unconfirmed (status: ${cancelCheck?.status}) - attempt ${pending._cancelAttempts}/5 - will retry next scan`);
-        return; // don't submit retry - original may still fill
-      }
-      // Retry: credit spreads now use market orders — no concession needed.
-      // Market orders fill immediately or fail structurally (API error, rejected).
-      // If still pending after 60s it means the original may have partially routed —
-      // just resubmit the same market order body.
-      logEvent("warn", `[SPREAD] Market order pending ${age.toFixed(0)}s — resubmitting market order`);
-      const retryBody  = { ...pending.mlegBody }; // market order, no limit_price
-      const retryResp  = await alpacaPost("/orders", retryBody).catch(() => null);
-      if (retryResp && retryResp.id) {
-        state._pendingOrder = { ...pending, orderId: retryResp.id, submittedAt: Date.now(), _retried: true };
-        logEvent("trade", `[SPREAD] Market retry submitted: ${retryResp.id}`);
-        markDirty();
-      } else {
-        logEvent("warn", `[SPREAD] Retry failed - clearing pending`);
-        // Skip cooldown for stale orders from prior sessions
-        const _orderAgeSec2 = (Date.now() - (pending.submittedAt || 0)) / 1000;
-        // No retry response means order likely never reached Alpaca (network failure) — skip cooldown
-        logEvent("warn", `[SPREAD] Retry failed — order likely never reached Alpaca, skipping cooldown for ${pending.ticker}`);
-        state._pendingOrder = null;
-        markDirty();
-      }
-
-    } else if (pending._retried && age > 60) {
-      // Retry also unfilled after 60s total - cancel and give up
-      await alpacaPost(`/orders/${pending.orderId}/cancel`, {}).catch(() => {});
-      // Wait for cancel to propagate
-      await new Promise(r => setTimeout(r, 1000));
-      const finalCheck = await alpacaGet(`/orders/${pending.orderId}`).catch(() => null);
-      const finalCancelled = !finalCheck || ["canceled","expired","rejected","done_for_day","filled"].includes(finalCheck?.status);
-      if (!finalCancelled) {
-        pending._retryCancelAttempts = (pending._retryCancelAttempts || 0) + 1;
-        if (pending._retryCancelAttempts >= 5) {
-          logEvent("warn", `[SPREAD] Retry cancel unconfirmed after ${pending._retryCancelAttempts} attempts (${finalCheck?.status}) — force-clearing. Reconciler will verify.`);
-          // Retry order stuck — check fill status before setting cooldown
-          const _rca_status   = finalCheck?.status || "unknown";
-          const _rca_filled   = parseFloat(finalCheck?.filled_qty || finalCheck?.qty_filled || 0);
-          const _rca_noFill   = ["new","pending_new","held","accepted"].includes(_rca_status) && _rca_filled === 0;
-          if (!_rca_noFill) {
-            if (!state._entryAttemptCooldown) state._entryAttemptCooldown = {};
-            state._entryAttemptCooldown[pending.ticker] = Date.now();
-            logEvent("warn", `[SPREAD] Retry force-clear with fill ambiguity — cooldown set for ${pending.ticker}`);
-          } else {
-            logEvent("warn", `[SPREAD] Retry force-clear no fill (status:${_rca_status}) — skipping cooldown for ${pending.ticker}`);
-          }
-          state._pendingOrder = null;
-          markDirty();
-          return;
-        }
-        logEvent("warn", `[SPREAD] Retry cancel unconfirmed (${finalCheck?.status}) - attempt ${pending._retryCancelAttempts}/5 - will check again next scan`);
-        return;
-      }
-      logEvent("warn", `[SPREAD] Retry also unfilled - spread cancelled`);
-      // Retry unfilled = definitively no position opened — no cooldown needed
-      // The original order and retry both expired/cancelled with 0 fills
-      logEvent("warn", `[SPREAD] Retry unfilled confirmed — skipping cooldown for ${pending.ticker} (no position opened)`);
+    } else if (age > 30) {
+      // Unfilled after 30s — cancel
+      logEvent('warn', `[NAKED] Order ${pending.orderId} unfilled after ${age.toFixed(0)}s — cancelling`);
+      await alpacaDelete(`/orders/${pending.orderId}`).catch(() => {});
       state._pendingOrder = null;
       markDirty();
     }
-    // else: still pending within timeout - check again next scan
   } catch(e) {
-    logEvent("error", `[SPREAD] confirmPendingOrder error: ${e.message}`);
+    logEvent('error', `[NAKED] confirmPendingOrder error: ${e.message}`);
   }
 }
 
