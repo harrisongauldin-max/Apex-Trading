@@ -136,6 +136,17 @@ async function runScan() {
   const now    = Date.now();
   const scanET = getETTime(); // single ET time reference for entire scan
 
+  // FIX 10: Reset daily circuit and P&L tracker at start of each new trading day
+  const todayScanDate = scanET.toLocaleDateString("en-US", { timeZone: "America/New_York" });
+  if (todayScanDate !== (state._lastScanDate || "")) {
+    state._lastScanDate    = todayScanDate;
+    state._dailyCircuitOpen = true;
+    state._dailyPnL        = 0;
+    state.todayRealizedPnL = state.todayRealizedPnL || 0; // reset in server.new.js at midnight
+    logEvent("scan", `[DAILY RESET] New trading day ${todayScanDate} — daily circuit reset`);
+    markDirty();
+  }
+
   // Scan-level time and volume vars -- declared here so execution loop can access them
   // Per-stock loop also uses these; declaring at scan scope eliminates TDZ crashes
   const etHourNow  = scanET.getHours() + scanET.getMinutes() / 60;
@@ -1216,6 +1227,27 @@ async function runScan() {
   // consecutive loss gate removed - agent macro and score quality gates entries
   if (state.cash <= CAPITAL_FLOOR) return;
 
+  // FIX 10: Max daily loss circuit breaker
+  // Tracks intraday unrealized + realized P&L against daily limit.
+  // If daily loss exceeds 3% of account, halt all new entries for the session.
+  {
+    const todayPnL = (state.todayRealizedPnL || 0) +
+      (state.positions || []).reduce((s, p) => {
+        const chg = p.currentPrice && p.premium ? (p.currentPrice - p.premium) / p.premium : 0;
+        return s + chg * (p.premium || 0) * 100 * (p.contracts || 1);
+      }, 0);
+    const dailyLossLimit = (state.alpacaCash || state.cash || 30000) * -0.03; // -3% daily loss limit
+    state._dailyPnL = parseFloat(todayPnL.toFixed(2));
+    if (todayPnL < dailyLossLimit && !dryRunMode) {
+      logEvent("warn", `[DAILY CIRCUIT] Daily P&L $${todayPnL.toFixed(0)} below -3% limit ($${dailyLossLimit.toFixed(0)}) — halting new entries`);
+      state._dailyCircuitOpen = false;
+    } else if (state._dailyCircuitOpen === false && todayPnL >= 0) {
+      // Auto-reset if account recovers to flat (rare intraday, mainly for testing)
+      state._dailyCircuitOpen = true;
+    }
+    if (state._dailyCircuitOpen === false) return; // halt entries
+  }
+
   // - PORTFOLIO GREEKS LIMITS -
   // Prevent extreme one-sided exposure
   const pgr = marketContext.portfolioGreeks || { delta: 0, vega: 0 };
@@ -1226,8 +1258,17 @@ async function runScan() {
   // Natenberg: VIX-scaled vega cap - high VIX = more volatile IV = tighter cap
   // At VIX 37, a $2000 vega position loses $2000 on a 1pt VIX move - too much
   const MAX_PORTFOLIO_VEGA  = state.vix >= 35 ? 500 : state.vix >= 25 ? 1000 : 2000;
-  // MAX_PORTFOLIO_DELTA block removed — heat cap fires first (redundant). Logged for visibility.
-  if (pgr.delta < MAX_PORTFOLIO_DELTA) logEvent("filter", `[INFO] Portfolio delta ${pgr.delta} below -500 (heat cap governs)`);
+  // FIX 7: Portfolio delta hard gate — block new same-direction entries when delta is extreme.
+  // Heat cap tracks cost, not directional exposure. Five SPY puts + two QQQ puts all move together.
+  // MAX_PORTFOLIO_DELTA = -500 means net -$500 per 1% SPY move. Beyond this, concentrate risk further only on very high conviction (score 85+).
+  // This runs BEFORE per-instrument scoring — if portfolio is already max short, skip low-conviction adds.
+  const portfolioDeltaBreached = pgr.delta < MAX_PORTFOLIO_DELTA;
+  if (portfolioDeltaBreached) {
+    logEvent("filter", `[DELTA CAP] Portfolio delta ${pgr.delta.toFixed(0)} below -500 limit — only score >= 85 can add more puts`);
+    state._portfolioDeltaCapped = true;
+  } else {
+    state._portfolioDeltaCapped = false;
+  }
   // Directional concentration + Beta-adjusted portfolio delta check (DB-1/GL-3)
   // Simple directional count
   const openPuts  = (state.positions || []).filter(p => p.optionType === "put").length;
@@ -2274,6 +2315,37 @@ async function runScan() {
     // finalMinScore gate removed -- evaluateEntry (entryEngine.js) is the single authority
     // scoreDebug effectiveMin updated by entryEngine result below
     // macdMinScore / timeOfDayMinScore passed to evaluateEntry via context
+
+    // FIX 8: VWAP timing gate for PUT entries
+    // Don't enter a put while price is above VWAP and making intraday higher lows — wait for rejection.
+    // This improves entry timing: the overbought DAILY signal is valid, but intraday
+    // strength means the move hasn't stalled yet. Wait for VWAP rejection.
+    // Gate applies only in Regime A (bull market) where mean reversion is the put thesis.
+    // In Regime B (confirmed bear), below-VWAP is common and not a timing signal.
+    // MR calls are exempt — you want to enter AT the low, not wait for rejection.
+    if (optionType === "put" && rb.isBullRegime && !isMREntry && !dryRunMode) {
+      const putVWAP  = liveStock.intradayVWAP || signals.intradayVWAP || 0;
+      const putPrice = liveStock.price || price;
+      if (putVWAP > 0 && putPrice > 0) {
+        const aboveVWAP = putPrice > putVWAP;
+        const pctAbove  = ((putPrice - putVWAP) / putVWAP) * 100;
+        // Block put entries when price is >1.5% above VWAP with strong intraday momentum
+        // <1.5% above VWAP is within normal noise — don't over-filter
+        if (aboveVWAP && pctAbove > 1.5 && liveStock.momentum === "recovering") {
+          logEvent("filter", `${stock.ticker} VWAP timing: ${pctAbove.toFixed(1)}% above VWAP ($${putVWAP.toFixed(2)}) with recovering momentum — wait for rejection`);
+          continue;
+        }
+      }
+    }
+
+    // FIX 7 cont: Portfolio delta cap — block low-conviction puts when delta is maxed
+    if (optionType === "put" && state._portfolioDeltaCapped && optionType === "put") {
+      const effectiveScore = Math.max(putSetup.score, callSetup.score);
+      if (effectiveScore < 85) {
+        logEvent("filter", `${stock.ticker} portfolio delta capped — score ${effectiveScore} below 85 required when delta maxed`);
+        continue;
+      }
+    }
 
     // - Correlation-aware directional heat cap -
     // SPY/QQQ/IWM are highly correlated - count combined as single direction
