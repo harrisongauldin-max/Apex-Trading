@@ -494,6 +494,7 @@ input[type=text]:focus{border-color:var(--blue)}
     <button class="btn" onclick="triggerTestScan()" style="background:#1a1a2a;border-color:#6644aa;color:#aa88ff" title="Forces a dry run scan regardless of market hours — safe for after-hours testing">🧪 TEST SCAN</button>
     <button class="btn btn-red" onclick="resetMonth()">↺ RESET MONTH</button>
     <button class="btn" style="background:#1a1a40;border:1px solid #4444ff;color:#8888ff" onclick="resetCircuit()">⟳ RESET CIRCUIT</button>
+    <button class="btn" style="background:#1a1a40;border:1px solid #ff9900;color:#ffbb44" onclick="clearBlockers()">🔓 CLEAR BLOCKERS</button>
     <button class="btn" style="background:#401010;border:1px solid #ff4444;color:#ff8888" onclick="fullReset()">🗑 FULL RESET</button>
     <button class="btn" style="background:#7b0000;border:1px solid #ff0000" onclick="emergencyClose()">⚠ EMERGENCY CLOSE ALL</button>
     <button class="btn" style="background:#0a1f3a;border:1px solid #00c4ff;color:#00c4ff" onclick="downloadDayReport()">📊 DAY REPORT</button>
@@ -2655,6 +2656,13 @@ async function resetCircuit() {
   const resp = await fetch('/api/reset-circuit', {method:'POST'});
   const data = await resp.json();
   alert('Circuit breaker reset. ARGO V3.2 is scanning again.');
+  await fetchState();
+}
+
+async function clearBlockers() {
+  const resp = await fetch('/api/clear-blocker', {method:'POST'});
+  const data = await resp.json();
+  alert(data.message || 'Blockers cleared.');
   await fetchState();
 }
 
