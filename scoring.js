@@ -1002,6 +1002,19 @@ function scoreIndexSetup(stock, optionType, spyRSI, spyMACD, spyMomentum, breadt
       }
     }
 
+    // FIX 9: Weekly trend confirmation for puts — mirrors call scoring section
+    // confirmed_bear weekly trend = higher conviction puts (trend is on your side)
+    // aligned_bull weekly trend = fighting the trend with puts (penalty)
+    {
+      const weeklyTrend = stock._weeklyTrend || {};
+      const trendCtx    = weeklyTrend.trendContext;
+      if (trendCtx === 'confirmed_bear') { score += 12; reasons.push(`10-wk MA confirmed bear (${weeklyTrend.maSlopeDir}) - puts aligned with weekly trend (+12)`); }
+      else if (trendCtx === 'pullback_bull' && weeklyTrend.above10wk === false) { score += 6; reasons.push(`10-wk MA rising but price below - tentative bear (+6)`); }
+      else if (trendCtx === 'aligned_bull') { score -= 10; reasons.push(`10-wk MA aligned bull - puts fighting weekly trend (-10)`); }
+      else if (weeklyTrend.above10wk === false) { score += 5;  reasons.push("Below 10-wk MA - weekly downtrend (+5)"); }
+      else if (weeklyTrend.above10wk === true)  { score -= 5;  reasons.push("Above 10-wk MA - weekly uptrend, puts against grain (-5)"); }
+    }
+
   } else {
     // - CALL SCORING - two distinct theses handled separately -
     // Thesis A: Mean Reversion Call - RSI crash + high VIX + capitulation
