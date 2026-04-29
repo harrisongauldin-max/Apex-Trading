@@ -261,6 +261,8 @@ async function checkAllFilters(stock, price, prefetchedBars = null) { // OPT3: a
 
   // 2. Circuit breakers
   if (!state.circuitOpen)       return { pass:false, reason:"Daily circuit breaker tripped" };
+  // FIX 10: Daily loss circuit — halt entries if intraday P&L < -3% of account
+  if (state._dailyCircuitOpen === false) return { pass:false, reason:`Daily loss circuit tripped (P&L $${(state._dailyPnL||0).toFixed(0)})` };
   // BUG2 FIX: Weekly circuit breaker removed from risk.js — penalizes new code for old losses.
 
   // 3. Capital floor — halt all operations, not just new entries
