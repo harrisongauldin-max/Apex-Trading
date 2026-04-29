@@ -693,35 +693,39 @@ input[type=text]:focus{border-color:var(--blue)}
 
 <!-- ═══════════════ ATTRIBUTION TAB ═══════════════ -->
 <div id="tab-attribution" class="content">
-  <div class="section-title" style="margin-top:0">P&L by Stock</div>
-  <div id="attr-ticker-wrap"><div class="no-data">No closed trades yet. Attribution will appear after trades close.</div></div>
+  <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;flex-wrap:wrap;gap:8px">
+    <div class="section-title" style="margin:0">Trade Attribution & Analytics</div>
+    <button class="btn btn-green" onclick="copyAttribution()" id="copy-attr-btn">📋 COPY ATTRIBUTION</button>
+  </div>
 
-  <div class="section-title">P&L by Sector</div>
-  <div id="attr-sector-wrap"><div class="no-data">No closed trades yet.</div></div>
+  <!-- Summary Stats Row -->
+  <div id="attr-summary-wrap" style="margin-bottom:16px"></div>
 
-  <div class="section-title">P&L by Score Range</div>
-  <div id="attr-score-wrap"><div class="no-data">No closed trades yet.</div></div>
-
-  <div class="section-title">Pre-market & Sector ETF Filters</div>
-  <div class="card" style="margin-top:0;font-size:13px;line-height:1.7">
-    <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px">
-      <div>
-        <div style="font-weight:700;margin-bottom:6px;color:var(--blue)">Pre-Market Checks</div>
-        <div>✅ Strong pre-market (+1.5%+) = signal boost</div>
-        <div>🚫 Negative pre-market (-1%+) = skip entry</div>
-        <div>Applies during first 2 hours of trading session</div>
-      </div>
-      <div>
-        <div style="font-weight:700;margin-bottom:6px;color:var(--blue)">Sector ETF Confirmation</div>
-        <div>📈 XLK — Technology sector filter</div>
-        <div>📈 XLF — Financial sector filter</div>
-        <div>📈 SMH — Semiconductor stocks filter</div>
-      </div>
+  <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:16px">
+    <div>
+      <div class="section-title" style="margin-top:0">P&L by Stock</div>
+      <div id="attr-ticker-wrap"><div class="no-data">No closed trades yet.</div></div>
     </div>
-    <div style="margin-top:12px;padding-top:12px;border-top:1px solid var(--border)">
-      <div style="font-weight:700;margin-bottom:6px;color:var(--blue)">Support & Resistance</div>
-      <div>Checks 20-day high/low before entry. Skips if price is within 2% of resistance or 3% of support. Prevents buying into walls and breakdowns.</div>
+    <div>
+      <div class="section-title" style="margin-top:0">P&L by Exit Reason</div>
+      <div id="attr-exit-wrap"><div class="no-data">No closed trades yet.</div></div>
     </div>
+  </div>
+
+  <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:16px">
+    <div>
+      <div class="section-title" style="margin-top:0">P&L by Score Range</div>
+      <div id="attr-score-wrap"><div class="no-data">No closed trades yet.</div></div>
+    </div>
+    <div>
+      <div class="section-title" style="margin-top:0">P&L by Trade Type</div>
+      <div id="attr-type-wrap"><div class="no-data">No closed trades yet.</div></div>
+    </div>
+  </div>
+
+  <div>
+    <div class="section-title" style="margin-top:0">Best & Worst Trades</div>
+    <div id="attr-extremes-wrap"><div class="no-data">No closed trades yet.</div></div>
   </div>
 </div>
 
@@ -744,7 +748,10 @@ input[type=text]:focus{border-color:var(--blue)}
 
 <!-- ═══════════════ JOURNAL TAB ═══════════════ -->
 <div id="tab-journal" class="content">
-  <div class="section-title" style="margin-top:0">Trade Journal — Entry Reasoning</div>
+  <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;flex-wrap:wrap;gap:8px">
+    <div class="section-title" style="margin:0">Trade Journal — Entry Reasoning</div>
+    <button class="btn btn-green" onclick="copyJournal()" id="copy-journal-btn">📋 COPY JOURNAL</button>
+  </div>
   <div id="journal-wrap">
     <div class="no-data">No journal entries yet. ARGO V3.2 logs detailed reasoning for every trade.</div>
   </div>
@@ -3985,33 +3992,191 @@ async function loadReport() {
 
 async function loadAttribution() {
   const trades = state.closedTrades || [];
-  const byTicker = {}, bySector = {}, byScore = {};
-  trades.forEach(t => {
-    const k = t.ticker || '?';
-    if (!byTicker[k]) byTicker[k] = { pnl: 0, count: 0 };
-    byTicker[k].pnl += t.pnl || 0; byTicker[k].count++;
-    const s = t.sector || 'Unknown';
-    if (!bySector[s]) bySector[s] = { pnl: 0, count: 0 };
-    bySector[s].pnl += t.pnl || 0; bySector[s].count++;
-    const sc = t.score >= 85 ? '85+' : t.score >= 75 ? '75-84' : '70-74';
-    if (!byScore[sc]) byScore[sc] = { pnl: 0, count: 0 };
-    byScore[sc].pnl += t.pnl || 0; byScore[sc].count++;
-  });
-  const renderAttr = (data, wrap) => {
+
+  // Helper: render attribution table
+  const renderAttr = (data, wrap, valueKey='pnl') => {
     const el = document.getElementById(wrap);
     if (!el) return;
-    if (!Object.keys(data).length) { el.innerHTML = '<div class="no-data">No closed trades yet.</div>'; return; }
-    const rows = Object.entries(data).sort((a,b) => b[1].pnl - a[1].pnl).map(([k,v]) =>
-      '<div style="display:flex;justify-content:space-between;padding:6px 0;border-bottom:1px solid var(--border)">' +
-      '<span style="font-weight:700">' + k + '</span>' +
-      '<span>' + v.count + ' trades</span>' +
-      '<span style="color:' + (v.pnl>=0?'var(--green)':'var(--red)') + ';font-weight:700">' + (v.pnl>=0?'+':'') + '$' + v.pnl.toFixed(2) + '</span></div>'
-    ).join('');
-    el.innerHTML = '<div class="card">' + rows + '</div>';
+    const entries = Object.entries(data).filter(([,v]) => v.count > 0);
+    if (!entries.length) { el.innerHTML = '<div class="no-data">No closed trades yet.</div>'; return; }
+    const rows = entries.sort((a,b) => b[1].pnl - a[1].pnl).map(([k,v]) => {
+      const wr = v.count > 0 ? ((v.wins||0)/v.count*100).toFixed(0) : 0;
+      const avgPnl = v.count > 0 ? v.pnl / v.count : 0;
+      return '<div style="display:grid;grid-template-columns:1fr 60px 60px 80px;align-items:center;padding:6px 0;border-bottom:1px solid var(--border);font-size:12px">' +
+        '<span style="font-weight:700;color:var(--blue)">' + k + '</span>' +
+        '<span style="color:var(--muted)">' + v.count + ' trades</span>' +
+        '<span style="color:var(--muted)">' + wr + '% win</span>' +
+        '<span style="color:' + (v.pnl>=0?'var(--green)':'var(--red)') + ';font-weight:700;text-align:right">' + (v.pnl>=0?'+':'') + '$' + v.pnl.toFixed(0) + '</span>' +
+      '</div>';
+    }).join('');
+    el.innerHTML = '<div class="card" style="font-size:12px"><div style="display:grid;grid-template-columns:1fr 60px 60px 80px;padding:0 0 6px;border-bottom:1px solid var(--border);color:var(--muted);font-size:10px"><span>NAME</span><span>TRADES</span><span>WIN%</span><span style=\"text-align:right\">P&L</span></div>' + rows + '</div>';
   };
+
+  // Aggregate by ticker
+  const byTicker = {};
+  trades.forEach(t => {
+    const k = t.ticker || '?';
+    if (!byTicker[k]) byTicker[k] = { pnl:0, count:0, wins:0 };
+    byTicker[k].pnl += t.pnl||0; byTicker[k].count++;
+    if ((t.pnl||0) > 0) byTicker[k].wins++;
+  });
   renderAttr(byTicker, 'attr-ticker-wrap');
-  renderAttr(bySector, 'attr-sector-wrap');
-  renderAttr(byScore,  'attr-score-wrap');
+
+  // Aggregate by exit reason
+  const byExit = {};
+  trades.forEach(t => {
+    const k = (t.reason||'unknown').replace(/-/g,' ').toUpperCase();
+    if (!byExit[k]) byExit[k] = { pnl:0, count:0, wins:0 };
+    byExit[k].pnl += t.pnl||0; byExit[k].count++;
+    if ((t.pnl||0) > 0) byExit[k].wins++;
+  });
+  renderAttr(byExit, 'attr-exit-wrap');
+
+  // Aggregate by score range
+  const byScore = {'95-100':{pnl:0,count:0,wins:0},'90-94':{pnl:0,count:0,wins:0},'85-89':{pnl:0,count:0,wins:0},'80-84':{pnl:0,count:0,wins:0},'75-79':{pnl:0,count:0,wins:0},'70-74':{pnl:0,count:0,wins:0},'<70':{pnl:0,count:0,wins:0}};
+  trades.forEach(t => {
+    const s = t.score||0;
+    const k = s>=95?'95-100':s>=90?'90-94':s>=85?'85-89':s>=80?'80-84':s>=75?'75-79':s>=70?'70-74':'<70';
+    byScore[k].pnl += t.pnl||0; byScore[k].count++;
+    if ((t.pnl||0) > 0) byScore[k].wins++;
+  });
+  renderAttr(byScore, 'attr-score-wrap');
+
+  // Aggregate by trade type
+  const byType = {};
+  trades.forEach(t => {
+    const k = (t.tradeType||t.type||'unknown').replace(/_/g,' ').toUpperCase();
+    if (!byType[k]) byType[k] = { pnl:0, count:0, wins:0 };
+    byType[k].pnl += t.pnl||0; byType[k].count++;
+    if ((t.pnl||0) > 0) byType[k].wins++;
+  });
+  renderAttr(byType, 'attr-type-wrap');
+
+  // Summary stats
+  if (trades.length) {
+    const winners = trades.filter(t => (t.pnl||0) > 0);
+    const losers  = trades.filter(t => (t.pnl||0) < 0);
+    const winRate = (winners.length / trades.length * 100).toFixed(1);
+    const avgWin  = winners.length ? (winners.reduce((s,t)=>s+(t.pnl||0),0)/winners.length).toFixed(0) : 0;
+    const avgLoss = losers.length  ? (losers.reduce((s,t)=>s+(t.pnl||0),0)/losers.length).toFixed(0) : 0;
+    const totalPnl = trades.reduce((s,t) => s+(t.pnl||0), 0);
+    const grossWin = winners.reduce((s,t) => s+(t.pnl||0), 0);
+    const grossLoss= Math.abs(losers.reduce((s,t) => s+(t.pnl||0), 0));
+    const profitFactor = grossLoss > 0 ? (grossWin/grossLoss).toFixed(2) : '∞';
+    const avgHold = trades.filter(t=>t.openDate&&t.closeDate).length ? (() => {
+      const held = trades.filter(t=>t.openDate&&t.closeDate).map(t=>(new Date(t.closeDate)-new Date(t.openDate))/3600000);
+      return (held.reduce((s,v)=>s+v,0)/held.length).toFixed(1);
+    })() : '--';
+    const streak = (() => {
+      let cur=0, maxW=0, maxL=0;
+      trades.slice().reverse().forEach(t => {
+        if ((t.pnl||0)>0) { cur=cur>0?cur+1:1; maxW=Math.max(maxW,cur); }
+        else { cur=cur<0?cur-1:-1; maxL=Math.max(maxL,Math.abs(cur)); }
+      });
+      return {maxW,maxL};
+    })();
+    const summaryEl = document.getElementById('attr-summary-wrap');
+    if (summaryEl) summaryEl.innerHTML = `
+      <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:8px">
+        ${[
+          ['WIN RATE', winRate+'%', parseFloat(winRate)>=50?'var(--green)':'var(--red)'],
+          ['TOTAL P&L', (totalPnl>=0?'+':'')+'$'+totalPnl.toFixed(0), totalPnl>=0?'var(--green)':'var(--red)'],
+          ['AVG WIN', '+$'+avgWin, 'var(--green)'],
+          ['AVG LOSS', '$'+avgLoss, 'var(--red)'],
+          ['PROFIT FACTOR', profitFactor, parseFloat(profitFactor)>=1?'var(--green)':'var(--red)'],
+          ['TOTAL TRADES', trades.length, 'var(--blue)'],
+          ['AVG HOLD', avgHold+'h', 'var(--muted)'],
+          ['MAX WIN STREAK', streak.maxW+'x', 'var(--green)'],
+        ].map(([label,val,col]) =>
+          '<div class="card" style="text-align:center;padding:10px">' +
+          '<div style="font-size:10px;color:var(--muted);margin-bottom:4px">' + label + '</div>' +
+          '<div style="font-size:16px;font-weight:700;color:' + col + '">' + val + '</div></div>'
+        ).join('')}
+      </div>`;
+  }
+
+  // Best & worst trades
+  const extremesEl = document.getElementById('attr-extremes-wrap');
+  if (extremesEl && trades.length) {
+    const sorted = [...trades].sort((a,b)=>(b.pnl||0)-(a.pnl||0));
+    const best3 = sorted.slice(0,3);
+    const worst3 = sorted.slice(-3).reverse();
+    const row = t => '<div style="display:grid;grid-template-columns:60px 1fr 60px 80px 80px;align-items:center;padding:6px 0;border-bottom:1px solid var(--border);font-size:12px">' +
+      '<span style="font-weight:700;color:var(--blue)">' + (t.ticker||'?') + '</span>' +
+      '<span style="color:var(--muted);font-size:10px">' + (t.reason||'?') + ' · ' + ((t.closeDate||t.date||'').slice(0,10)||'?') + '</span>' +
+      '<span style="color:var(--muted)">' + (t.score||'?') + '/100</span>' +
+      '<span style="color:var(--muted);font-size:10px">' + (t.expDate||'?') + '</span>' +
+      '<span style="color:' + ((t.pnl||0)>=0?'var(--green)':'var(--red)') + ';font-weight:700;text-align:right">' + ((t.pnl||0)>=0?'+':'') + '$' + (t.pnl||0).toFixed(0) + '</span></div>';
+    extremesEl.innerHTML = '<div class="card" style="font-size:12px">' +
+      '<div style="color:var(--green);font-weight:700;margin-bottom:4px;font-size:11px">▲ TOP WINNERS</div>' + best3.map(row).join('') +
+      '<div style="color:var(--red);font-weight:700;margin:12px 0 4px;font-size:11px">▼ TOP LOSERS</div>' + worst3.map(row).join('') +
+    '</div>';
+  }
+}
+
+// ── Copy Journal to clipboard ─────────────────────────────────────────────
+async function copyJournal() {
+  let journal = state.tradeJournal || [];
+  try { const r = await fetch('/api/journal'); if (r.ok) journal = await r.json(); } catch(e) {}
+  if (!journal || !journal.length) { alert('No journal entries to copy.'); return; }
+  const lines = ['ARGO V3.2 — Trade Journal — ' + new Date().toLocaleString(), '═'.repeat(60)];
+  journal.slice(0, 50).forEach(e => {
+    lines.push('');
+    const header = [e.ticker, e.action, e.isSpread ? (e.isCreditSpread?'CREDIT SPREAD':'DEBIT SPREAD') : 'NAKED', e.optionType?.toUpperCase()].filter(Boolean).join(' · ');
+    lines.push(header);
+    if (e.action === 'OPEN') {
+      if (e.buyStrike && e.sellStrike) lines.push('  Strike: $'+e.sellStrike+'/$'+e.buyStrike+' '+e.expDate);
+      if (e.score) lines.push('  Score: '+e.score+'/100');
+    } else {
+      if (e.pnl !== undefined) lines.push('  P&L: '+(e.pnl>=0?'+':'')+e.pnl.toFixed(2)+' | Reason: '+(e.reason||'?'));
+    }
+    if (e.reasoning) lines.push('  '+e.reasoning);
+    if (e.scoreReasons && e.scoreReasons.length) {
+      e.scoreReasons.forEach(r => lines.push('    '+r));
+    }
+    lines.push('  '+new Date(e.time).toLocaleString());
+  });
+  navigator.clipboard.writeText(lines.join('\n')).then(() => {
+    const btn = document.getElementById('copy-journal-btn');
+    if (btn) { btn.textContent='✅ COPIED'; setTimeout(()=>btn.textContent='📋 COPY JOURNAL',2000); }
+  }).catch(() => alert('Copy failed — try manually selecting the text.'));
+}
+
+// ── Copy Attribution to clipboard ─────────────────────────────────────────
+function copyAttribution() {
+  const trades = state.closedTrades || [];
+  if (!trades.length) { alert('No closed trades to copy.'); return; }
+  const lines = ['ARGO V3.2 — Trade Attribution — ' + new Date().toLocaleString(), '═'.repeat(60)];
+  // Summary
+  const winners = trades.filter(t=>(t.pnl||0)>0);
+  const totalPnl = trades.reduce((s,t)=>s+(t.pnl||0),0);
+  lines.push('', 'SUMMARY');
+  lines.push('  Total Trades: '+trades.length+' | Wins: '+winners.length+' | Win Rate: '+(winners.length/trades.length*100).toFixed(1)+'%');
+  lines.push('  Total P&L: '+(totalPnl>=0?'+':'')+'$'+totalPnl.toFixed(2));
+  // By ticker
+  const byTicker = {};
+  trades.forEach(t => { const k=t.ticker||'?'; if(!byTicker[k]) byTicker[k]={pnl:0,count:0,wins:0}; byTicker[k].pnl+=t.pnl||0; byTicker[k].count++; if((t.pnl||0)>0) byTicker[k].wins++; });
+  lines.push('', 'BY STOCK');
+  Object.entries(byTicker).sort((a,b)=>b[1].pnl-a[1].pnl).forEach(([k,v]) => {
+    lines.push('  '+k+': '+v.count+' trades | '+(v.wins/v.count*100).toFixed(0)+'% win | '+(v.pnl>=0?'+':'')+'$'+v.pnl.toFixed(2));
+  });
+  // By exit reason
+  const byExit = {};
+  trades.forEach(t => { const k=(t.reason||'?'); if(!byExit[k]) byExit[k]={pnl:0,count:0,wins:0}; byExit[k].pnl+=t.pnl||0; byExit[k].count++; if((t.pnl||0)>0) byExit[k].wins++; });
+  lines.push('', 'BY EXIT REASON');
+  Object.entries(byExit).sort((a,b)=>b[1].count-a[1].count).forEach(([k,v]) => {
+    lines.push('  '+k+': '+v.count+' trades | '+(v.pnl>=0?'+':'')+'$'+v.pnl.toFixed(2));
+  });
+  // Best/worst
+  const sorted = [...trades].sort((a,b)=>(b.pnl||0)-(a.pnl||0));
+  lines.push('', 'BEST TRADES');
+  sorted.slice(0,3).forEach(t => lines.push('  '+t.ticker+' '+t.reason+' '+new Date(t.closeDate||t.date||'').toLocaleDateString()+': +'+'$'+((t.pnl||0).toFixed(2))));
+  lines.push('', 'WORST TRADES');
+  sorted.slice(-3).reverse().forEach(t => lines.push('  '+t.ticker+' '+t.reason+' '+new Date(t.closeDate||t.date||'').toLocaleDateString()+': $'+((t.pnl||0).toFixed(2))));
+  navigator.clipboard.writeText(lines.join('\n')).then(() => {
+    const btn = document.getElementById('copy-attr-btn');
+    if (btn) { btn.textContent='✅ COPIED'; setTimeout(()=>btn.textContent='📋 COPY ATTRIBUTION',2000); }
+  }).catch(() => alert('Copy failed.'));
 }
 
 async function loadTaxLog() {
