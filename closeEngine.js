@@ -343,6 +343,10 @@ async function _doClosePosition(ticker, reason, exitPremium = null, contractSym 
     agentSignal:   (state._agentMacro || {}).signal || "neutral",
   };
   state.closedTrades.push(tradeOutcome);
+  // FIX 10: Track daily realized P&L for circuit breaker
+  if (typeof tradeOutcome.pnl === 'number') {
+    state.todayRealizedPnL = (state.todayRealizedPnL || 0) + tradeOutcome.pnl;
+  }
 
   // - Score bracket win rate - updated on every close -
   if (!state.scoreBrackets) state.scoreBrackets = {};
@@ -633,6 +637,7 @@ async function confirmPendingOrder() {
         realData:      true,
         vix:           state.vix,
         entryVIX:      state.vix,
+        entryIV:       pending.iv || null, // FIX 4: store entry IV for collapse detection
         partialClosed: false,
         target:        parseFloat((fillPrice * (1 + TAKE_PROFIT_PCT)).toFixed(2)),
         stop:          parseFloat((fillPrice * (1 - STOP_LOSS_PCT)).toFixed(2)),
