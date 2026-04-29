@@ -33,7 +33,7 @@ const {
   getCached, setCache } = require('./market');
 
 const {
-  scoreIndexSetup, scorePutSetup, scoreMeanReversionCall, scoreCreditSpread, scoreDebitCallSpread,
+  scoreIndexSetup, scorePutSetup, scoreMeanReversionCall, // APEX: scoreCreditSpread and scoreDebitCallSpread removed — no spread scoring
   detectMarketRegime, getRegimeModifier, applyIntradayRegimeOverride,
   updateOversoldTracker, recordGateBlock, checkMacroShift,
   checkSectorETF, isGLDEntryAllowed, isXLEEntryAllowed, isTLTEntryAllowed,
