@@ -1012,9 +1012,9 @@ async function runScan() {
   }
 
   // Strategy log
-  const strategyMode = regimeClass === "C" ? "CRISIS - bear call credits only"
-    : regimeClass === "B" ? "BEAR TREND - bear call credits + debit puts on bounces"
-    : "BULL - mean reversion, both directions";
+  const strategyMode = regimeClass === "C" ? "CRISIS - long puts, careful sizing"
+    : regimeClass === "B" ? "BEAR TREND - long puts + MR calls on oversold"
+    : "BULL - long puts on overbought, MR calls on oversold";
   logEvent("scan", `[STRATEGY] Regime ${regimeClass}: ${strategyMode} | IVR:${ivRankNow} (${state._ivEnv})`);
   // NAKED OPTIONS: choppyDebitBlock removed from logs — no credit mode in APEX
   if (creditCallModeActive && isBearTrend) logEvent("filter", `[CREDIT CALL] Trending bear + VIX ${state.vix} + IVR ${ivRankNow} - bear call spread mode active`);
@@ -1102,21 +1102,17 @@ async function runScan() {
     }
   }
 
+  // APEX: puts allowed whenever entry window is open. choppyDebitBlock/crisisDebitBlock removed.
+  // Directional filters (RSI, MACD, regime) live in scoring and evaluateEntry — not here.
   const putsAllowed       = (entryWindowOpen
                              && !rb.gates.postReversalBlock && !rb.gates.macroBullishBlock
-                             && !rb.gates.choppyDebitBlock && !rb.gates.avoidHoldActive
-                             && !rb.gates.crisisDebitBlock
-                             && !postCrisisLockActive       // V3.2: no puts in post-crisis window
-                             && !vixSpikeCooldownActive     // V3.2: no puts for 48h after VIX spike
+                             && !rb.gates.avoidHoldActive
                              ) || dryRunMode;
-  const callsAllowed      = (callWindowOpen && !rb.gates.below200MACallBlock
-                             && (!rb.gates.choppyDebitBlock || isMRCondition)
-                             && !rb.gates.avoidHoldActive) || dryRunMode;
-  const creditAllowed     = creditModeActive  && creditWindowOpen && !rb.gates.avoidHoldActive;
-  const callCreditAllowed = creditCallModeActive && creditWindowOpen && !rb.gates.avoidHoldActive;
-  if (isMRCondition && choppyDebitBlock) logEvent("filter", `MR call allowed in choppy - SPY RSI ${spyRSIForMR.toFixed(1)} extreme oversold + VIX ${state.vix}`);
-  // NAKED OPTIONS: no "debit puts blocked" message — all puts/calls evaluated normally
-  if (callCreditAllowed)             logEvent("filter", "Bear call credit mode active");
+  // APEX: calls allowed when entry window open. No choppyDebitBlock restriction.
+  const callsAllowed      = (callWindowOpen && !rb.gates.avoidHoldActive) || dryRunMode;
+  // APEX: no credit modes — all entries are naked puts or calls
+  const creditAllowed     = false;
+  const callCreditAllowed = false;
   if (macroBullish && !dryRunMode)  logEvent("filter", `Macro bullish (${marketContext.macro?.signal}) - puts blocked`);
   // vixFallingPause removed — falling VIX is good for credit spreads (less downside risk).
   // Was correct for debit puts (IV crush) but wrong for current credit spread architecture (panel consensus).
@@ -1199,7 +1195,7 @@ async function runScan() {
       }
     }
   }
-  if (!callsAllowed && !putsAllowed && !creditAllowed && !callCreditAllowed) return;
+  if (!callsAllowed && !putsAllowed) return; // APEX: only need puts and calls
 
   // [opening/final hour blocks moved above callsAllowed]
   // Weekly circuit breaker REMOVED — penalizes new code for old code's losses (panel consensus).
@@ -1445,7 +1441,7 @@ async function runScan() {
       // Gap UP: underlying moved away from short strike = credit put is safer, not a reason to skip.
       // Gap DOWN: underlying moved toward short strike = genuinely dangerous, always skip.
       const _gapDir = bars[bars.length-1].o - bars[bars.length-2].c;
-      const _isCreditPutMode = !!(stock._creditPutMode || creditModeActive);
+      const _isCreditPutMode = false; // APEX: no credit mode
       const _skipForGap = overnightGap > MAX_GAP_PCT && (_gapDir < 0 || !_isCreditPutMode);
       if (_skipForGap) {
         logEvent("filter", `${stock.ticker} gap ${(overnightGap*100).toFixed(1)}% overnight - skip`);
@@ -1544,7 +1540,7 @@ async function runScan() {
       // Bear call credit: strongly prefer below VWAP (market already weak intraday)
       // putSetup/callSetup not yet initialized here -- creditCallModeActive already implies call direction
       const _putsOnBounceActive = rb.gates.putsOnBounceMode && rb.isBearRegime;
-      if (creditCallModeActive && price > vwap * 1.03 && !_putsOnBounceActive) {
+      if (false && price > vwap * 1.03 && !_putsOnBounceActive) { // APEX: credit call mode removed
         // Block credit calls when price is extended above VWAP — UNLESS puts_on_bounces is active
         // (in that case, the above-VWAP condition is exactly what we want for a put fade entry)
         logEvent("filter", `[VWAP] ${stock.ticker} bear call skipped - price ABOVE VWAP by ${vwapPct}% (wait for intraday weakness)`);
@@ -1695,9 +1691,8 @@ async function runScan() {
       // Scoring uses authRegimeName (price-based, computed once at scan top)
       // Agent signal/confidence/entryBias used for magnitude -- regime overridden by price classifier
       const scoringMacroBase  = { ...(agentMacro || {}), regime: authRegimeName, spyGapUp: !!spyGapUp };
-      const scoringMacro = creditModeActive
-        ? { ...scoringMacroBase, tradeType: "credit" }
-        : scoringMacroBase;
+      // APEX: no credit mode injection — scoring uses optionType directly
+      const scoringMacro = scoringMacroBase;
       const putResult  = scoreIndexSetup(liveStock, "put",  spyRSI, spyMACD, spyMomentum, breadthVal, state.vix, scoringMacro);
       const callResult = scoreIndexSetup(liveStock, "call", spyRSI, spyMACD, spyMomentum, breadthVal, state.vix, scoringMacro);
 
@@ -1754,7 +1749,7 @@ async function runScan() {
         // Pass tradeIntent type so GLD gate can bypass RSI check for credit puts
         // In bear regime, credit mode routes to credit_call (sell calls above market)
         // In choppy/bull, credit mode routes to credit_put (sell puts below market)
-        const _gldCreditType  = isBearTrend ? "credit_call" : "credit_put";
+        // APEX: GLD uses put/call directly
         // Fix: use best available score to determine GLD credit intent
         // In bear trend, creditCallModeActive → check callSetup.score; in bull/choppy → putSetup.score
         const _gldBestScore   = isBearTrend ? callSetup.score : putSetup.score;
@@ -2099,12 +2094,8 @@ async function runScan() {
     if (marketGapDirection === "up"   && !inBearRegimeForGap && !agentWantsPutsOnBounce) { putScore = 0; recordGateBlock(stock.ticker, "gap_direction_up", authRegimeName, putScore); }
     // Apply entry window constraint
     if (!callsAllowed) { callScore = 0; recordGateBlock(stock.ticker, "calls_not_allowed", authRegimeName, callScore); }
-    // Credit mode: allow put scoring even when debit puts blocked
-    if (!putsAllowed && !creditAllowed) { putScore = 0; recordGateBlock(stock.ticker, "puts_not_allowed", authRegimeName, putScore); }
-    else if (!putsAllowed && creditAllowed) {
-      // Only credit spread entries allowed - still score for credit
-      putSetup.tradeType = "credit";
-    }
+    // APEX: simple — puts blocked only when putsAllowed is false
+    if (!putsAllowed) { putScore = 0; recordGateBlock(stock.ticker, "puts_not_allowed", authRegimeName, putScore); }
 
     // - Persist scores for dashboard watchlist ticker display -
     if (!state._lastScanScores) state._lastScanScores = {};
