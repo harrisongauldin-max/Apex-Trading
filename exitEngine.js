@@ -610,6 +610,20 @@ async function checkExits(positions, posSnapshots, posQuotes, posNewsCache, ctx)
       }
     }
 
+    // FIX 4: IV COLLAPSE EXIT — close when IV drops 30%+ from entry
+    // Long options lose value from IV crush even when direction is correct.
+    // Classic scenario: buy put before event, event passes, IV collapses, put loses value.
+    // Entry IV stored at position creation; current IV updated from live snapshot.
+    // Only fires when: position has entry IV data, current IV drops 30%+ from entry, position profitable or neutral
+    // Don't fire if already down 20%+ (stop will handle it) — this is for IV-specific exits
+    if (!pos.isSpread && pos.entryIV && pos.iv && pos.iv > 0) {
+      const ivDrop = (pos.entryIV - pos.iv) / pos.entryIV;
+      if (ivDrop >= IV_COLLAPSE_PCT && chg > -0.20) {
+        logEvent("warn", `${pos.ticker} IV collapse: entry ${(pos.entryIV*100).toFixed(0)}% → current ${(pos.iv*100).toFixed(0)}% (${(ivDrop*100).toFixed(0)}% drop) — exiting to prevent further vega bleed`);
+        decisions.push({ pi, ticker: pos.ticker, action: 'close', reason: "iv-collapse", exitPremium: null, contractSym: null }); continue;
+      }
+    }
+
     // 2. HARD STOP - -35% at any time
     if (chg <= -STOP_LOSS_PCT) {
       logEvent("scan", `${pos.ticker} stop-loss ${(chg*100).toFixed(0)}%`);
