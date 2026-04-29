@@ -180,8 +180,14 @@ function calcPositionSize(premium, score, vix) {
   const recentTrades = (state.closedTrades || []).slice(0, 30);
   let kellyBase;
 
+  // FIX 2: Kelly bootstrap — paper fills count toward calibration threshold.
+  // realTrades increments on every confirmed fill (paper or live).
+  // Pre-calibration: conviction-based sizing (1-3 contracts) instead of hard 1-contract cap.
+  // Unlocks full Kelly after 30 fills.
+  const totalFills = (state.dataQuality || {}).realTrades || 0;
+  const preCalibration = totalFills < 30;
+
   if (recentTrades.length >= 10) {
-    // Use real historical Kelly when we have enough data
     const wins    = recentTrades.filter(t => t.pnl > 0);
     const losses  = recentTrades.filter(t => t.pnl <= 0);
     const winRate = wins.length / recentTrades.length;
@@ -189,19 +195,16 @@ function calcPositionSize(premium, score, vix) {
     const avgLoss = losses.length ? Math.abs(losses.reduce((s,t) => s+t.pnl,0) / losses.length) : STOP_LOSS_PCT * premium * 100;
     const payoff  = avgLoss > 0 ? avgWin / avgLoss : 1;
     const kelly   = winRate - (1 - winRate) / payoff;
-    kellyBase     = Math.max(0.05, Math.min(0.25, kelly * 0.5)); // half-Kelly, capped 5-25% of capital
+    kellyBase     = Math.max(0.05, Math.min(preCalibration ? 0.12 : 0.25, kelly * 0.5));
   } else {
-    // Bootstrap: hard cap at 1 contract until 30 live trades give real edge data
-    // Paper trade Kelly is inflated — don't let it size up until live fills calibrate it
-    kellyBase = 0.05; // conservative 5% of capital = typically 1 contract
+    // Pre-calibration bootstrap: score-tiered sizing (not hard 1 contract)
+    // High conviction setups (score >= 85) get 2-3 contracts even before 30 fills
+    kellyBase = preCalibration ? 0.07 : 0.08; // slightly larger than before to allow 2 contracts on high conviction
   }
 
-  // Live trading protection — never exceed 1 contract until 30 real trades recorded
-  const liveTrades = (state.dataQuality || {}).realTrades || 0;
-  if (liveTrades < 30) {
-    // Force single contract sizing until system is calibrated on live fills
-    return 1;
-  }
+  // Pre-calibration cap: max 3 contracts until 30 fills recorded
+  // Replaces the hard 1-contract cap — lets conviction drive sizing within tight bounds
+  const preCalibCap = preCalibration ? 3 : 99;
 
   // Step 2: Score conviction multiplier
   // Higher score = more conviction = size up within Kelly bounds
@@ -213,17 +216,14 @@ function calcPositionSize(premium, score, vix) {
   const minsSinceOpen = (etNow.getHours() - 9) * 60 + etNow.getMinutes() - 30;
   const openingMult   = minsSinceOpen < 30 ? 0.75 : 1.0; // 25% smaller in first 30 mins
 
-  // Step 3: VIX adjustment — Guo & Whitelaw (2006): DEBIT put returns asymmetric to VIX
-  // G&W finding applies to BUYING puts (debit) — premium too high at VIX > 40
-  // SELLING puts (credit) is OPPOSITE — VIX > 40 = maximum premium collection
-  // isCreditEntry is set from useCreditSpread flag passed through
-  const isCreditEntry = (state._lastEntryType === "credit");
-  const vixMult = isCreditEntry
-    ? (vix >= 40 ? 1.25 : vix >= 35 ? 1.10 : 1.0)  // credit: INCREASE size at high VIX
-    : (vix >= 40  ? 0.35                              // debit: G&W — VIX>40 puts overpriced
-    : vix >= VIX_REDUCE50 ? 0.50                      // VIX 35-40: moderate reduction
-    : vix >= VIX_REDUCE25 ? 0.75                      // VIX 25-35: slight reduction
-    : 1.0);
+  // FIX 1: VIX sizing — G&W penalty only applies at extreme VIX (>40).
+  // APEX buys naked options (long premium). At VIX 25-35 premium is elevated but
+  // not absurd — the directional move thesis can still overcome theta.
+  // Removed: 0.75x penalty at VIX 25-35 (was permanently choking sizing at current VIX 28).
+  // Kept: 0.50x at VIX 35-40 (premium getting expensive), 0.35x at VIX 40+ (G&W threshold).
+  const vixMult = vix >= 40  ? 0.35   // G&W: VIX>40 options genuinely overpriced for debit
+                : vix >= 35  ? 0.60   // elevated but still directional — modest reduction
+                : 1.0;                 // VIX <35: no sizing penalty on naked longs
 
   // Step 4: Drawdown protocol from marketContext
   const ddMult = (marketContext?.drawdownProtocol?.sizeMultiplier) || 1.0;
@@ -236,7 +236,7 @@ function calcPositionSize(premium, score, vix) {
     MAX_LOSS_PER_TRADE / STOP_LOSS_PCT     // risk-based cap
   );
 
-  const contracts = Math.max(1, Math.min(5, Math.floor(maxCost / (premium * 100))));
+  const contracts = Math.max(1, Math.min(Math.min(5, preCalibCap), Math.floor(maxCost / (premium * 100))));
 
   // If even 1 contract exceeds the risk-based cap, return 0 to signal skip
   // Caller checks contracts < 1 and skips the trade
@@ -261,7 +261,11 @@ async function executeTrade(stock, price, score, scoreReasons, vix, optionType =
   }
 
   // Use cached contract from parallel prefetch if available, else fetch now
-  let contract = stock._cachedContract || await findContract(stock.ticker, optionType, isMeanReversion ? 0.40 : 0.35, isMeanReversion ? 21 : 28, vix, stock);
+  // FIX 5: DTE by trade type. MR calls need speed (14-21 DTE, higher gamma).
+  // Directional puts/calls need time for the thesis to play out (35-45 DTE).
+  const targetDelta = isMeanReversion ? 0.42 : 0.35; // MR: slightly more ATM for faster move
+  const targetDTE   = isMeanReversion ? 14   : 38;   // MR: 14 DTE (fast), Directional: 38 DTE
+  let contract = stock._cachedContract || await findContract(stock.ticker, optionType, targetDelta, targetDTE, vix, stock);
   delete stock._cachedContract; // clean up cache after use
 
   // Fallback to estimated contract if real data unavailable
@@ -354,36 +358,47 @@ async function executeTrade(stock, price, score, scoreReasons, vix, optionType =
   let alpacaOrderId = null;
   if (contract.symbol && contract.ask > 0 && !_dryRunMode) {
     try {
-      const limitPrice = parseFloat(contract.ask.toFixed(2)); // number not string
-      const orderBody = {
-        symbol:        contract.symbol,
-        qty:           contracts,              // number not string
-        side:          "buy",
-        type:          "limit",
-        time_in_force: "day",
-        limit_price:   limitPrice,
-      };
-      const orderResp = await alpacaPost("/orders", orderBody);
-      if (orderResp && orderResp.id) {
+      // FIX 6: Limit price concession — try ask, then mid if unfilled, then bid+spread
+      // MR entries need fills urgently — don't miss the bounce waiting for a perfect price
+      const askPrice = parseFloat(contract.ask.toFixed(2));
+      const midPrice = contract.bid > 0 ? parseFloat(((contract.bid + contract.ask) / 2).toFixed(2)) : askPrice;
+      const concessionPrices = [askPrice, midPrice]; // ask first, mid as fallback
+      let limitPrice = askPrice;
+      let fillConfirmed = false;
+      let fillPrice = null;
+      alpacaOrderId = null;
+
+      for (let attempt = 0; attempt < concessionPrices.length && !fillConfirmed; attempt++) {
+        limitPrice = concessionPrices[attempt];
+        if (attempt > 0) {
+          logEvent("trade", `Order concession attempt ${attempt+1}: widening limit to $${limitPrice} (mid price)`);
+        }
+        const orderBody = {
+          symbol:        contract.symbol,
+          qty:           contracts,
+          side:          "buy",
+          type:          "limit",
+          time_in_force: "day",
+          limit_price:   limitPrice,
+        };
+        const orderResp = await alpacaPost("/orders", orderBody);
+        if (!orderResp || !orderResp.id) {
+          logEvent("warn", `Alpaca order failed (attempt ${attempt+1}): ${JSON.stringify(orderResp)?.slice(0,150)}`);
+          continue;
+        }
         alpacaOrderId = orderResp.id;
-        logEvent("trade", `Alpaca order submitted: ${orderResp.id} | ${contract.symbol} | ${contracts}x @ $${limitPrice}`);
+        logEvent("trade", `Alpaca order submitted: ${orderResp.id} | ${contract.symbol} | ${contracts}x @ $${limitPrice} (attempt ${attempt+1})`);
 
-        // - FILL CONFIRMATION - poll for up to 10 seconds -
-        // Limit orders are not guaranteed to fill immediately
-        // If unfilled after 10s, cancel and skip - don't update state on unfilled orders
-        let fillConfirmed  = false;
-        let fillPrice      = null;
-        const pollStart    = Date.now();
-        const FILL_TIMEOUT = 10000; // 10 seconds
-        const POLL_INTERVAL= 1000;  // check every 1 second
+        // Poll up to 8s per attempt (total max ~16s across both attempts)
+        const FILL_TIMEOUT  = attempt === 0 ? 6000 : 8000;
+        const POLL_INTERVAL = 1000;
+        const pollStart = Date.now();
 
-        // Check if immediately filled
         if (orderResp.status === "filled" && orderResp.filled_avg_price) {
           fillConfirmed = true;
           fillPrice = parseFloat(parseFloat(orderResp.filled_avg_price).toFixed(2));
           logEvent("trade", `Order ${alpacaOrderId} filled immediately @ $${fillPrice}`);
         } else {
-          // Poll for fill
           while (!fillConfirmed && Date.now() - pollStart < FILL_TIMEOUT) {
             await new Promise(r => setTimeout(r, POLL_INTERVAL));
             try {
@@ -391,33 +406,32 @@ async function executeTrade(stock, price, score, scoreReasons, vix, optionType =
               if (pollResp && pollResp.status === "filled" && pollResp.filled_avg_price) {
                 fillConfirmed = true;
                 fillPrice = parseFloat(parseFloat(pollResp.filled_avg_price).toFixed(2));
-                logEvent("trade", `Order ${alpacaOrderId} fill confirmed @ $${fillPrice} (${((Date.now()-pollStart)/1000).toFixed(1)}s)`);
+                logEvent("trade", `Order ${alpacaOrderId} fill confirmed @ $${fillPrice} (${((Date.now()-pollStart)/1000).toFixed(1)}s, attempt ${attempt+1})`);
               } else if (pollResp && ["canceled","expired","rejected"].includes(pollResp.status)) {
-                logEvent("warn", `Order ${alpacaOrderId} ${pollResp.status} - not filled`);
+                logEvent("warn", `Order ${alpacaOrderId} ${pollResp.status}`);
                 break;
               }
             } catch(e) { logEvent("warn", `Fill poll error: ${e.message}`); break; }
           }
+          if (!fillConfirmed) {
+            try { await alpacaDelete(`/orders/${alpacaOrderId}`); } catch(e) {}
+            logEvent("warn", `Order not filled in ${FILL_TIMEOUT/1000}s at $${limitPrice} — ${attempt < concessionPrices.length-1 ? 'trying concession' : 'all attempts exhausted'}`);
+            alpacaOrderId = null;
+          }
         }
+      }
 
-        if (!fillConfirmed) {
-          // Cancel unfilled order and abort trade
-          try { await alpacaDelete(`/orders/${alpacaOrderId}`); } catch(e) {}
-          logEvent("warn", `Order ${alpacaOrderId} not filled in ${FILL_TIMEOUT/1000}s - cancelled, skipping trade`);
-          state._pendingOrder = null; // Bug E3 FIX: clear pending so next scan can try
+      if (!fillConfirmed) {
+          state._pendingOrder = null;
           markDirty();
-          alpacaOrderId = null; // signal to caller to abort
-        } else if (fillPrice) {
-          contract.premium = fillPrice; // use actual fill price not limit price
-          state._pendingOrder = null; // Bug E4 FIX: clear pending after confirmed fill
+          alpacaOrderId = null;
+      } else if (fillPrice) {
+          contract.premium = fillPrice; // use actual fill price
+          state._pendingOrder = null;
           markDirty();
-          // Confirmed live fill - now count as a real trade for Kelly calibration
           if (!state.dataQuality) state.dataQuality = { realTrades: 0, estimatedTrades: 0, totalTrades: 0 };
           state.dataQuality.realTrades++;
           logEvent("trade", `Live fill confirmed - real trade count: ${state.dataQuality.realTrades}/30 before Kelly activates`);
-        }
-      } else {
-        logEvent("warn", `Alpaca order failed for ${contract.symbol}: ${JSON.stringify(orderResp)?.slice(0, 150)}`);
       }
     } catch(e) {
       logEvent("error", `Alpaca order submission error: ${e.message}`);
