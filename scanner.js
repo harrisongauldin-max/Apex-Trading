@@ -2416,7 +2416,9 @@ async function runScan() {
     //   (b) RSI has moved at least 10 points since the losing entry RSI
     // Prevents the pattern of re-entering the same thesis 3x on the same day.
     const recentLoss = (state._recentLosses || {})[stock.ticker];
-    if (recentLoss && (Date.now() - recentLoss.closedAt) < 24 * 3600 * 1000) {
+    // Only block re-entry in the SAME direction as the loss — opposite direction has a different thesis
+    const recentLossSameDir = recentLoss && (!recentLoss.optionType || recentLoss.optionType === optionType);
+    if (recentLossSameDir && (Date.now() - recentLoss.closedAt) < 24 * 3600 * 1000) {
       const hoursSinceLoss = ((Date.now() - recentLoss.closedAt) / 3600000).toFixed(1);
       const lossRSI    = recentLoss.entryRSI || 50; // RSI at losing entry
       const currentRSI = signals.rsi || liveStock.rsi || 50;
