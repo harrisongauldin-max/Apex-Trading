@@ -498,7 +498,7 @@ async function runScan() {
       ? (Date.now() - new Date(state._agentMacro.timestamp).getTime()) / 60000 : 999;
     // Extend freshness to 60 min - agent runs every 3 min but cache + restart gaps can widen this
     // If no agent signal ever (agentAge=999), allow defensive to fire (can't suppress without data)
-    const agentFresh       = agentAge < 60;
+    const agentFresh       = agentAge < 120; // Bug 4 FIX: 60→120min — stale agent should not fire defensive
     // Suppress if: agent is fresh AND (bullish or neutral) - don't close calls on keyword alone
     // Also suppress if: agent is fresh AND bearish but NOT strongly bearish (mild disagreement)
     const defensiveSuppressed = agentFresh && !agentIsBearish; // only strongly bearish fires through
@@ -521,15 +521,10 @@ async function runScan() {
     } else if (macro.mode === "defensive" && defensiveSuppressed) {
       logEvent("macro", `[AGENT OVERRIDE] Defensive suppressed - agent ${agentSignal} (${agentAge.toFixed(0)}min ago, conf:${(state._agentMacro||{}).confidence||"unknown"}) overrides keyword - keeping calls open`);
     } else if (macro.mode === "defensive" && !agentFresh) {
-      logEvent("warn", `[AGENT] Defensive triggered but agent stale (${agentAge.toFixed(0)}min) - firing anyway, redeploy to fix`);
-      for (const pos of [...state.positions]) {
-        if (pos.optionType === "call") {
-          // BF-W2: Stamp per-ticker cooldown to prevent mechanical FOMO re-entry
-          if (!state._macroDefensiveCooldown) state._macroDefensiveCooldown = {};
-          state._macroDefensiveCooldown[pos.ticker] = Date.now();
-          await closePosition(pos.ticker, "macro-defensive");
-        }
-      }
+      // Bug 4 FIX: Agent stale >120min — do NOT fire defensive close.
+      // A 5-hour-old bearish signal should not close calls at tomorrow's open.
+      // Stale agent = treat as neutral. Log warning, resume normal operations.
+      logEvent("warn", `[AGENT] Defensive triggered but agent stale (${agentAge.toFixed(0)}min) — treating as neutral, NOT closing calls`);
     }
 
     // Strongly bullish macro - close losing puts (thesis broken by macro tailwind)
@@ -2193,16 +2188,24 @@ async function runScan() {
         volPaceRatio: signals.volPaceRatio, intradayVWAP: signals.intradayVWAP },
       blocked: [],
     };
-    // In defensive mode - zero out call scores
-    if (macro.mode === "defensive") callScore = 0;
+    // Bug 3 FIX: Defensive mode zeros calls EXCEPT mean reversion calls.
+    // MR calls are specifically designed for strongly bearish macro — that's the entry signal.
+    // RSI 22 + VIX 28 + "strongly bearish" macro = textbook MR call setup.
+    // callSetup.isMeanReversion is set before this point (line ~2062).
+    if (macro.mode === "defensive" && !callSetup.isMeanReversion) callScore = 0;
 
     const bestScore = Math.max(callScore, putScore);
     const optionType = putScore > callScore ? "put" : "call";
 
-    // Skip if defensive and best setup is still a call
-    if (macro.mode === "defensive" && optionType === "call") {
-      logEvent("filter", `${stock.ticker} - macro defensive mode - skipping calls`);
+    // Bug 3 FIX: Skip defensive calls EXCEPT mean reversion — MR calls exempt from defensive block.
+    // A genuine capitulation (RSI 22, VIX spike) is exactly when MR calls should fire.
+    if (macro.mode === "defensive" && optionType === "call" && !callSetup.isMeanReversion) {
+      logEvent("filter", `${stock.ticker} - macro defensive mode - skipping non-MR calls`);
       continue;
+    }
+    // Log MR call proceeding despite defensive mode
+    if (macro.mode === "defensive" && optionType === "call" && callSetup.isMeanReversion) {
+      logEvent("filter", `${stock.ticker} - MR call proceeds despite defensive mode (RSI capitulation is the signal)`);
     }
     const bestReasons = optionType === "put" ? putSetup.reasons : callSetup.reasons;
 
