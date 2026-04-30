@@ -215,13 +215,16 @@ function isGLDEntryAllowed(optionType, dxy, spyReturn5d, vix, gldRSI, gldPrice, 
     // Credit puts: RSI irrelevant  -- selling premium above current price, not predicting direction
     // [Regime A] RSI gate applies fully
     // [Regime B credit] bypass RSI overbought  -- IV level is what matters for premium collection
-    const gldOverbought  = gldRSI >= 68;
+    const gldOverbought  = gldRSI >= 65;  // overbought reversal path
+    const gldFalling     = gldRSI !== null && gldRSI < 50 && gldMA20 > 0 && gldPrice < gldMA20; // GLD below 20MA + RSI neutral = falling trend
     const dxyRising      = dxy && dxy.change > 0;
     const isGLDCreditPut = arguments[7] === "credit_put";
-    if (!gldOverbought && !isGLDCreditPut) return { allowed: false, reason: `GLD put blocked - RSI ${gldRSI?.toFixed(0)||'?'} not overbought (need >68 for debit put thesis)` };
-    // Bug11 FIX: DXY rising blocks debit puts (gold rises = put loses) but NOT credit puts.
-    // Credit puts: rising DXY = gold supported above short strike = safer, not a reason to block.
-    if (dxyRising && !isGLDCreditPut) return { allowed: false, reason: `GLD put blocked - DXY rising (+${dxy?.change||0}%), dollar strength supports gold` };
+    // Fix 1: GLD puts have TWO valid theses:
+    // Path A — Overbought reversal: RSI >= 65, gold extended, mean reversion put
+    // Path B — Falling trend: GLD below 20MA + DXY strengthening (dollar up = gold down)
+    // OLD gate required RSI overbought ALWAYS — blocked Path B entirely (inverted for trend puts)
+    const gldPutAllowed = gldOverbought || gldFalling || (dxyRising && !gldOverbought) || isGLDCreditPut;
+    if (!gldPutAllowed) return { allowed: false, reason: `GLD put blocked - RSI ${gldRSI?.toFixed(0)||'?'} not overbought and GLD not in downtrend (need RSI>65 or GLD below 20MA)` };
     return { allowed: true };
   }
 }
@@ -245,7 +248,9 @@ function isXLEEntryAllowed(optionType, xleRSI, xleMomentum, vix, xlePrice, xleMA
     return { allowed: true };
   } else {
     // XLE calls: need RSI not deeply overbought (chasing energy run)
-    if (xleRSI && xleRSI >= 78) return { allowed: false, reason: `XLE call blocked - RSI ${xleRSI?.toFixed(0)} deeply overbought (energy extended - wrong for calls)` };
+    // Fix 2: Lower overbought threshold 78→72. Entries were happening at RSI 73-76 before gate fired.
+    // RSI 72+ on a gap-up energy day is already extended — don't wait for RSI 78.
+    if (xleRSI && xleRSI >= 72) return { allowed: false, reason: `XLE call blocked - RSI ${xleRSI?.toFixed(0)} overbought (energy extended - wrong for calls)` };
     // Oil confirmed downtrend (XLE >3% below 20MA) - calls into strong downtrend discouraged
     const xleBelow20MA = xleMA20 > 0 && xlePrice < xleMA20 * 0.97;
     if (xleBelow20MA) return { allowed: false, reason: `XLE call blocked - price $${xlePrice?.toFixed(2)} >3% below 20MA $${xleMA20?.toFixed(2)} (oil downtrend - don't catch falling knife)` };
