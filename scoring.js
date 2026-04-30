@@ -224,7 +224,8 @@ function isGLDEntryAllowed(optionType, dxy, spyReturn5d, vix, gldRSI, gldPrice, 
     // Path B — Falling trend: GLD below 20MA + DXY strengthening (dollar up = gold down)
     // OLD gate required RSI overbought ALWAYS — blocked Path B entirely (inverted for trend puts)
     // dxyRising alone is not enough — also require GLD in downtrend (below 20MA) to confirm thesis
-    const gldPutAllowed = gldOverbought || gldFalling || (dxyRising && gldFalling) || isGLDCreditPut;
+    // dxyRising && gldFalling is a subset of gldFalling — redundant condition removed
+    const gldPutAllowed = gldOverbought || gldFalling || isGLDCreditPut;
     if (!gldPutAllowed) return { allowed: false, reason: `GLD put blocked - RSI ${gldRSI?.toFixed(0)||'?'} not overbought and GLD not in downtrend (need RSI>65 or GLD below 20MA)` };
     return { allowed: true };
   }
