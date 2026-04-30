@@ -910,7 +910,7 @@ async function runScan() {
   // SPY gap-up delay REMOVED — gap up is supportive for bull put spreads (further from short strike).
   // Was designed for debit puts; wrong for current credit spread architecture (panel consensus).
   // Agent handles macro context from 8:30am including gap events.
-  if (spyGapUp && !dryRunMode) logEvent("filter", `[INFO] SPY gap-up >1.5% — credit spreads not affected (debit delay removed)`);
+  if (spyGapUp && !dryRunMode) logEvent("filter", `[INFO] SPY gap-up >1.5% — gap-up entry context noted (intraday RSI watch active)`);
 
   // - CONDITION-BASED POST-REVERSAL COOLDOWN -
   // FIX 2: Uses marketContext.macro (authoritative merged signal) not state._agentMacro (raw)
@@ -1734,7 +1734,15 @@ async function runScan() {
       // Overnight instrumentBias SKIP removed — no all-day instrument blockers.
       // The scoring + RSI/MACD gates decide entries. Overnight context is advisory only.
 
-      const spyRSI      = liveStock.dailyRsi || liveStock.rsi || 50;
+      // V2.85: RSI split by direction.
+      // Puts score on dailyRSI — need to know if instrument is GENUINELY overbought on multi-day basis.
+      //   dailyRSI 90 = truly extended, valid fade. intraday RSI is noise for put thesis.
+      // Calls score on intradayRSI — MR calls triggered by intraday capitulation (RSI 22-35).
+      //   dailyRSI 90 on a day SPY dipped intraday was killing all call scores.
+      //   Directional calls also use intraday RSI for timing (45-58 healthy dip in bull trend).
+      const spyRSIPut   = liveStock.dailyRsi || liveStock.rsi || 50;  // daily for puts
+      const spyRSICall  = liveStock.rsi || liveStock.dailyRsi || 50;  // intraday for calls
+      const spyRSI      = spyRSIPut; // default for legacy refs below (put path uses this)
       const spyMACD     = liveStock.macd || "neutral";
       const spyMomentum = liveStock.momentum || "steady";
       // FIX B: breadth is now an object {breadthPct, advancing, declining, breadthStrength}
@@ -1748,8 +1756,8 @@ async function runScan() {
       const scoringMacroBase  = { ...(agentMacro || {}), regime: authRegimeName, spyGapUp: !!spyGapUp };
       // APEX: no credit mode injection — scoring uses optionType directly
       const scoringMacro = scoringMacroBase;
-      const putResult  = scoreIndexSetup(liveStock, "put",  spyRSI, spyMACD, spyMomentum, breadthVal, state.vix, scoringMacro);
-      const callResult = scoreIndexSetup(liveStock, "call", spyRSI, spyMACD, spyMomentum, breadthVal, state.vix, scoringMacro);
+      const putResult  = scoreIndexSetup(liveStock, "put",  spyRSIPut,  spyMACD, spyMomentum, breadthVal, state.vix, scoringMacro);
+      const callResult = scoreIndexSetup(liveStock, "call", spyRSICall, spyMACD, spyMomentum, breadthVal, state.vix, scoringMacro);
 
       // NAKED OPTIONS: use scoreIndexSetup directly for put and call.
       // No spread-specific scoring — tradeType is always 'put' or 'call'.
@@ -2312,7 +2320,7 @@ async function runScan() {
     const sameTickerSameDir = state.positions.filter(p => p.ticker === stock.ticker && p.optionType === optionType);
     // Credit spreads: hard limit 1 per ticker per direction (premium exposure management)
     if (creditModeActive && sameTickerSameDir.length >= 1) {
-      logEvent("filter", `${stock.ticker} credit spread - already have ${sameTickerSameDir.length} position(s) in this direction`);
+      logEvent("filter", `${stock.ticker} already have ${sameTickerSameDir.length} position(s) in this direction`);
       continue;
     }
 
@@ -2567,7 +2575,7 @@ async function runScan() {
     if (state.cash <= CAPITAL_FLOOR) break;
 
     // Tag stock with credit mode so checkAllFilters can exempt credit puts from debit-era blocks
-    stock._creditPutMode = !!(tradeIntent && tradeIntent.type === "credit_put");
+    // _creditPutMode removed — APEX trades naked options only, no credit put routing
     // BUG5 FIX: was passing tradeIntent.type as prefetchedBars arg (wrong). Pass null.
     const { pass, reason } = await checkAllFilters(stock, price, null);
     if (!pass) {
