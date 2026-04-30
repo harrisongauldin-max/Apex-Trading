@@ -1859,19 +1859,10 @@ async function runScan() {
       putSetup  = scorePutSetup(liveStock, relStrength, signals.adx, todayVol, avgVol, state.vix);
     }
 
-    // Weekly trend adjustment - applies symmetrically to both puts and calls
-    if (weeklyTrend.above10wk === true) {
-      putSetup.score  = Math.max(0,  putSetup.score  - 10);
-      putSetup.reasons.push(`Above 10-wk MA $${weeklyTrend.ma10w} - puts fighting trend (-10)`);
-      callSetup.score = Math.min(95, callSetup.score + 8);
-      callSetup.reasons.push(`Above 10-wk MA $${weeklyTrend.ma10w} - calls aligned with trend (+8)`);
-      // Store for scoreIndexSetup reference
-      liveStock._weeklyTrend = weeklyTrend;
-    } else if (weeklyTrend.above10wk === false) {
-      putSetup.score  = Math.min(95, putSetup.score  + 8);
-      putSetup.reasons.push(`Below 10-wk MA $${weeklyTrend.ma10w} - aligned with downtrend (+8)`);
-      callSetup.score = Math.max(0,  callSetup.score - 8);
-      callSetup.reasons.push(`Below 10-wk MA $${weeklyTrend.ma10w} - calls fighting downtrend (-8)`);
+    // Fix 1: Weekly trend external adjustment REMOVED — double-counting with scoreIndexSetup.
+    // scoreIndexSetup already applies trendCtx bonuses (+12/-10) and above10wk (+5/-5).
+    // Keeping only the _weeklyTrend assignment so scoreIndexSetup can read it.
+    if (weeklyTrend.above10wk !== null) {
       liveStock._weeklyTrend = weeklyTrend;
     }
 
