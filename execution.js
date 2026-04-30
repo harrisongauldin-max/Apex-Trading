@@ -225,8 +225,8 @@ function calcPositionSize(premium, score, vix) {
                 : vix >= 35  ? 0.60   // elevated but still directional — modest reduction
                 : 1.0;                 // VIX <35: no sizing penalty on naked longs
 
-  // Step 4: Drawdown protocol from marketContext
-  const ddMult = (marketContext?.drawdownProtocol?.sizeMultiplier) || 1.0;
+  // Step 4: Drawdown protocol — use injected _getDrawdown() not marketContext (not in scope here)
+  const ddMult = (_getDrawdown()?.sizeMultiplier) || (_getDrawdown()?.sizeMult) || 1.0;
 
   // Step 5: Combine into single sizing decision
   const effectiveFraction = kellyBase * convictionMult * vixMult * ddMult * openingMult;
