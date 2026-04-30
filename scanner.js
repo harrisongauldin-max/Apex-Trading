@@ -2423,7 +2423,7 @@ async function runScan() {
       const lossRSI    = recentLoss.entryRSI || 50; // RSI at losing entry
       const currentRSI = signals.rsi || liveStock.rsi || 50;
       const rsidelta   = Math.abs(currentRSI - lossRSI);
-      const instrMin75 = (_instrLookup?.minScore || 65) < 75 ? 75 : (_instrLookup?.minScore || 75);
+      const instrMin75 = Math.max(75, stock.minScore || 65); // raise floor to 75 after a loss
       if (bestScore < instrMin75) {
         logEvent("filter", `${stock.ticker} re-entry blocked — loss ${hoursSinceLoss}h ago, need score ${instrMin75} (have ${bestScore})`);
         continue;
