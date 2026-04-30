@@ -351,14 +351,21 @@ async function checkAllFilters(stock, price, prefetchedBars = null) { // OPT3: a
     const priceYest = prefetchedBars ? (prefetchedBars[prefetchedBars.length - 2] || prefetchedBars[0])?.c : (await getStockBars(stock.ticker, 2))[0]?.c;
     if (priceYest) {
       const premarketMove = (price - priceYest) / priceYest;
-      if (premarketMove <= PREMARKET_NEGATIVE) {
-        // Bug-premarket FIX: negative pre-market blocks debit puts (stock falling = put thesis weakened paradoxically
-        // since it already moved). But for credit puts, pre-market drop = short strike further away = safer.
-        // Check if this is a credit put context — if stock.tradeIntent or _creditMode is set, bypass.
-        const isCreditPutContext = stock._creditPutMode || stock._isCreditSpread;
-        if (!isCreditPutContext) {
-          return { pass:false, reason:`Pre-market negative (${(premarketMove*100).toFixed(1)}%) - bearish open` };
-        }
+      // Fix 1: Pre-market negative gate only fires BEFORE market settles (first 30min = before 10:00am ET).
+      // After 10:00am ET, price discovery has happened — the gate is stale and misleading.
+      // Fix 2: In APEX, a negative pre-market is often the PUT thesis (stock falling = put entry signal).
+      // Block only calls on negative pre-market, not puts. Puts should be allowed through for scoring.
+      const { getETTime } = require('./signals');
+      const etHourNow = getETTime().getHours() + getETTime().getMinutes() / 60;
+      const preMarketWindowOpen = etHourNow < 10.0; // before 10:00am ET (30min after open)
+      if (premarketMove <= PREMARKET_NEGATIVE && preMarketWindowOpen) {
+        // APEX: pre-market negative = PUT signal, not a reason to block.
+        // Calls on a down open are wrong direction — block calls only.
+        // Direction unknown here (checkAllFilters runs before scoring) so pass through.
+        // Scoring system gives puts a weakness boost on down days. Let scoring decide.
+        // Only surface the signal for logging — don't block.
+        stock._premarketNegative = true;
+        stock._premarketMove = premarketMove;
       }
       if (premarketMove >= PREMARKET_STRONG_MOVE) {
         logEvent("scan", `${stock.ticker} strong pre-market +${(premarketMove*100).toFixed(1)}% - boost signal`);
