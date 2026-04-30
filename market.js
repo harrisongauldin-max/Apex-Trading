@@ -1042,7 +1042,21 @@ function getMacroCalendarModifier() {
   // Within 3 days of FOMC - reduce position sizing, avoid new entries day-of
   if (highImpact.length > 0) {
     const soonest = highImpact.sort((a, b) => a.daysTo - b.daysTo)[0];
-    if (soonest.daysTo === 0) return { modifier: -25, events, message: `${soonest.event} TODAY - minimal new entries` };
+    if (soonest.daysTo === 0) {
+      // Fix 4: FOMC day-of modifier time-gated to pre-announcement window only.
+      // The -25 suppression was firing all day — from open to close.
+      // FOMC announces at 2:00pm ET. Meaningful uncertainty only in the 60min before.
+      // 1:00pm-2:15pm ET: hard suppression (-25). Outside that window: normal caution (-8).
+      // Post-2:15pm: FOMC reaction IS the trade — don't suppress, let scoring react.
+      const etNow = getETTime();
+      const etH   = etNow.getHours() + etNow.getMinutes() / 60;
+      const inAnnouncementWindow = etH >= 13.0 && etH < 14.25; // 1:00pm–2:15pm ET
+      if (inAnnouncementWindow) {
+        return { modifier: -25, events, message: `${soonest.event} announcement imminent (1-2:15pm ET) - minimal new entries` };
+      } else {
+        return { modifier: -8, events, message: `${soonest.event} TODAY (outside announcement window) - normal caution` };
+      }
+    }
     if (soonest.daysTo <= 1) return { modifier: -15, events, message: `${soonest.event} tomorrow - reduced sizing` };
     if (soonest.daysTo <= 3) return { modifier: -8,  events, message: `${soonest.event} in ${soonest.daysTo} days - caution` };
   }
