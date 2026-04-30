@@ -2651,16 +2651,33 @@ async function closePos(ticker, contractSym) {
 }
 
 
+function getSecret() {
+  const s = sessionStorage.getItem('apexSecret');
+  if (s) return s;
+  const entered = prompt('Enter APEX secret to confirm this action:');
+  if (!entered) return null;
+  sessionStorage.setItem('apexSecret', entered);
+  return entered;
+}
+
+function secretHeaders() {
+  const s = getSecret();
+  if (!s) return null;
+  return { 'Content-Type': 'application/json', 'x-argo-secret': s };
+}
+
 async function resetCircuit() {
   if (!confirm('Reset circuit breaker? APEX will resume scanning and entering new trades.')) return;
-  const resp = await fetch('/api/reset-circuit', {method:'POST'});
+  const h = secretHeaders(); if (!h) return;
+  const resp = await fetch('/api/reset-circuit', {method:'POST', headers:h});
   const data = await resp.json();
   alert('Circuit breaker reset. APEX is scanning again.');
   await fetchState();
 }
 
 async function clearBlockers() {
-  const resp = await fetch('/api/clear-blocker', {method:'POST'});
+  const h = secretHeaders(); if (!h) return;
+  const resp = await fetch('/api/clear-blocker', {method:'POST', headers:h});
   const data = await resp.json();
   alert(data.message || 'Blockers cleared.');
   await fetchState();
@@ -2669,7 +2686,8 @@ async function clearBlockers() {
 async function fullReset() {
   if (!confirm('⚠ FULL RESET: This will wipe ALL positions, cash, and trade history back to $10,000. Are you sure?')) return;
   if (!confirm('This cannot be undone. Confirm full reset?')) return;
-  const resp = await fetch('/api/full-reset', {method:'POST'});
+  const h = secretHeaders(); if (!h) return;
+  const resp = await fetch('/api/full-reset', {method:'POST', headers:h});
   const data = await resp.json();
   alert('Full reset complete. APEX restarted with $10,000.');
   location.reload();
@@ -2677,7 +2695,8 @@ async function fullReset() {
 
 async function emergencyClose() {
   if (!confirm('EMERGENCY CLOSE ALL POSITIONS? This cannot be undone.')) return;
-  await fetch('/api/emergency-close', {method:'POST'});
+  const h = secretHeaders(); if (!h) return;
+  await fetch('/api/emergency-close', {method:'POST', headers:h});
   location.reload();
 }
 
@@ -4228,7 +4247,7 @@ function unblacklistTicker(ticker) {
 
 function resetMonth() {
   if (!confirm('Reset monthly revenue counter? This does not affect trade history.')) return;
-  fetch('/api/reset-month', { method:'POST' })
+  fetch('/api/reset-month', { method:'POST', headers: {'x-argo-secret': sessionStorage.getItem('apexSecret')||''} })
     .then(r => r.json()).then(d => { alert(d.message || 'Monthly reset done.'); fetchState(); })
     .catch(e => alert('Error: ' + e.message));
 }
@@ -4289,7 +4308,8 @@ function unblacklistTicker(ticker) {
 }
 async function resetMonth() {
   if (!confirm('Reset monthly P&L tracker?')) return;
-  const r = await fetch('/api/reset-month', {method:'POST'});
+  const _sh = secretHeaders(); if (!_sh) return;
+  const r = await fetch('/api/reset-month', {method:'POST', headers:_sh});
   const d = await r.json();
   alert(d.message || 'Monthly stats reset.');
   fetchState();
