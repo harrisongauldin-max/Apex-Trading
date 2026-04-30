@@ -621,18 +621,27 @@ function evaluateEntry(candidate, rulebook, state, context = {}) {
   const regimeClass   = rb.regimeClass || "A";
   const isPutTrade    = optionType === "put";
   const isCallTrade   = optionType === "call";
-  // Contrary signal threshold: adds to the BASE trade-type minimum, not the accumulated minScore.
-  // This prevents stacking with drawdown protocol (e.g. drawdown raises to 85, agent adds +7 → 92).
-  // Base minimums: credit=65, debit_put=70, debit_call=75. Agent adds +7 or +3 to those floors only.
-  // APEX: agent threshold base is simply put or call minimum
+  // Bug 1 FIX: Agent threshold raises bar on CONTRARY signals only (was inverted).
+  // Put trade: agent bearish = ALIGNED (same direction) → no penalty.
+  //            agent bullish = CONTRARY (fighting the put) → raise bar.
+  // Call trade: agent bullish = ALIGNED → no penalty.
+  //             agent bearish = CONTRARY (fighting the call) → raise bar.
+  // Logic: a marginal setup (score 67) should face a higher bar when macro contradicts it.
+  // A marginal setup that macro CONFIRMS should be allowed, not penalized.
   const baseTradeMin  = optionType === "put" ? rb.minScorePut : rb.minScoreCall;
   if (isPutTrade) {
-    if      (agentSignal === "strongly bearish") { minScore = Math.max(minScore, baseTradeMin + 7); }
-    else if (agentSignal === "bearish")          { minScore = Math.max(minScore, baseTradeMin + 3); }
-  }
-  if (isCallTrade) {
+    // Agent bullish = contrary to put thesis → raise bar
     if      (agentSignal === "strongly bullish") { minScore = Math.max(minScore, baseTradeMin + 7); }
     else if (agentSignal === "bullish")          { minScore = Math.max(minScore, baseTradeMin + 3); }
+    else if (agentSignal === "mild bullish")     { minScore = Math.max(minScore, baseTradeMin + 1); }
+    // Agent bearish = aligned with put → no threshold adjustment (scoring already rewarded this)
+  }
+  if (isCallTrade) {
+    // Agent bearish = contrary to call thesis → raise bar
+    if      (agentSignal === "strongly bearish") { minScore = Math.max(minScore, baseTradeMin + 7); }
+    else if (agentSignal === "bearish")          { minScore = Math.max(minScore, baseTradeMin + 3); }
+    else if (agentSignal === "mild bearish")     { minScore = Math.max(minScore, baseTradeMin + 1); }
+    // Agent bullish = aligned with call → no threshold adjustment
   }
 
   if (score < minScore)
