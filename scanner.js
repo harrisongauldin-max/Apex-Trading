@@ -1009,7 +1009,7 @@ async function runScan() {
   const overnightAge  = overnightScan?.generatedAt
     ? (Date.now() - new Date(overnightScan.generatedAt).getTime()) / 3600000 // hours
     : 999;
-  const useOvernightBias = overnightScan && overnightAge < 12; // stale after 12 hours
+  const useOvernightBias = false; // Overnight bias disabled — no all-day instrument blockers.
 
   if (useOvernightBias) {
     // Suppress entries until specified CT time (FOMC, CPI, etc.)
@@ -1438,6 +1438,9 @@ async function runScan() {
   if (_zeroScoreCount > 0) logEvent("filter", `[OPT-4] ${_zeroScoreCount} stocks scored 0 (no price/filtered before scoring) -- skipped verbose logs`);
   logEvent("scan", `Prefetch complete in ${((Date.now()-prefetchStart)/1000).toFixed(1)}s for ${WATCHLIST.length} instruments`);
   for (const { stock, price, bars, intradayBars, sectorResult, preMarket, newsArticles, analystData, eqScore } of stockData) {
+    // SKIP FIX: entryBlocked separates "score for context" from "allow entry".
+    // SKIPped instruments still run full scoring/logging — only scored.push is gated.
+    let entryBlocked = false;
     // Skip if already at max positions for this ticker
     const maxPerTicker = stock.isIndex ? 3 : 2;
     const existingForTicker = state.positions.filter(p => p.ticker === stock.ticker);
@@ -1493,10 +1496,16 @@ async function runScan() {
       // Gap DOWN: underlying moved toward short strike = genuinely dangerous, always skip.
       const _gapDir = bars[bars.length-1].o - bars[bars.length-2].c;
       const _isCreditPutMode = false; // APEX: no credit mode
-      const _skipForGap = overnightGap > MAX_GAP_PCT && (_gapDir < 0 || !_isCreditPutMode);
+      // Fix 3: Gap-down is a PUT entry signal in APEX — don't skip, let scoring decide.
+      // Only skip on gap-UP (stock moved away from put strike = puts less attractive).
+      // Gap-down: flag it, allow scoring to run. Gap-up on a put: scoring will suppress via RSI/MACD.
+      const _skipForGap = overnightGap > MAX_GAP_PCT && _gapDir > 0; // gap UP skips (not gap down)
       if (_skipForGap) {
-        logEvent("filter", `${stock.ticker} gap ${(overnightGap*100).toFixed(1)}% overnight - skip`);
+        logEvent("filter", `${stock.ticker} gap UP ${(overnightGap*100).toFixed(1)}% overnight - skip (puts not chasing gap up)`);
         continue;
+      }
+      if (overnightGap > MAX_GAP_PCT && _gapDir < 0) {
+        logEvent("filter", `${stock.ticker} gap DOWN ${(overnightGap*100).toFixed(1)}% — put thesis possible, scoring continues`);
       }
       const intradayCrash = (bars[bars.length-1].o - price) / bars[bars.length-1].o;
       if (intradayCrash > 0.15) {
@@ -1722,13 +1731,8 @@ async function runScan() {
       // V2.81: use daily RSI for scoring thresholds (panel fix -- 1-min RSI is noise at regime level)
       // intraday RSI (liveStock.rsi) retained for VWAP/timing logs only
       // Overnight instrument bias — skip instrument if flagged
-      if (useOvernightBias && overnightScan.instrumentBias) {
-        const instrBias = overnightScan.instrumentBias[stock.ticker];
-        if (instrBias === 'skip') {
-          logEvent("filter", `${stock.ticker} overnight scan: instrument flagged SKIP — avoiding today`);
-          continue;
-        }
-      }
+      // Overnight instrumentBias SKIP removed — no all-day instrument blockers.
+      // The scoring + RSI/MACD gates decide entries. Overnight context is advisory only.
 
       const spyRSI      = liveStock.dailyRsi || liveStock.rsi || 50;
       const spyMACD     = liveStock.macd || "neutral";
@@ -2435,8 +2439,10 @@ async function runScan() {
       }
       logEvent("filter", `${stock.ticker} fast RSI move ${rsiMove.toFixed(0)}pts - requiring high conviction (score ${bestScore} >= ${fastRSIMin}${regimeBException ? " Regime B" : ""})`);
     }
-    logEvent("filter", `${stock.ticker} best setup: ${optionType.toUpperCase()} score ${bestScore} | RSI:${signals.rsi} MACD:${signals.macd} MOM:${signals.momentum}`);
+    logEvent("filter", `${stock.ticker} best setup: ${optionType.toUpperCase()} score ${bestScore} | RSI:${signals.rsi} MACD:${signals.macd} MOM:${signals.momentum}${entryBlocked ? " [CONTEXT ONLY — entry blocked]" : ""}`);
     // Queue for execution - heat is rechecked live in the execution loop below
+    // SKIP FIX: entryBlocked instruments contribute scoring context but don't enter scored[]
+    if (entryBlocked) continue; // scoring + logging done — skip execution queue
     const isMR = optionType === "call" && callSetup.isMeanReversion;
     // BUG A FIX: stamp isMR on liveStock so prefetch can read it for correct DTE/delta.
     // callSetup.isMeanReversion is set but was never copied to stock object.
