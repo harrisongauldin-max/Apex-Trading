@@ -153,10 +153,14 @@ function getRegimeRulebook(state) {
   // Production targets (pre June 4): put=70/85, call=75/85, credit=65/75, debitCall=75.
   // lowVixMode uses local vars (spreadParams not yet assembled at this point)
   const lowVixMode     = isBullRegime && vix < 25 && vix >= 12 && !isCrisis;
-  const minScorePut    = isBullRegime ? 70 : 55;
-  const minScoreCall   = isBullRegime ? 60 : 70;
-  const minScoreDebitCall = lowVixMode ? 60 : 65; // lower bar when debit calls are only structure
-  const minScoreCredit = isBullRegime ? 65 : 55;
+  // Fix 2: Unified minimum scores — 65 across all regimes.
+  // Credit-spread legacy had 55 in Regime B (premium collection wins even at lower scores).
+  // Naked long options pay theta every day — need signal quality to overcome drag.
+  // A 55-score naked put at VIX 28 / 38 DTE burns ~$4-6/day before the thesis plays out.
+  const minScorePut    = 65; // was: isBullRegime ? 70 : 55 — Regime B 55 was credit spread legacy
+  const minScoreCall   = 65; // was: isBullRegime ? 60 : 70 — unified, both directions need quality
+  const minScoreDebitCall = lowVixMode ? 63 : 65; // slight low-VIX concession, was 60/65
+  const minScoreCredit = 65; // was: isBullRegime ? 65 : 55 — latent, for future use
   const agentMinAdj    = 0;                        // removed — stale agent uses keyword fallback
 
   const macroReversalThreshold = 0.025;            // unified (B1/B2 distinction removed)
