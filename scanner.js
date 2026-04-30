@@ -486,6 +486,16 @@ async function runScan() {
     // Previously macro = await getMacroNews() — now it's set via agent authority block above
     const macro = marketContext.macro;
 
+    // Bug 4 FIX: Compute agent staleness ONCE at scan scope for use in both:
+    // (a) defensive close block below, and (b) per-instrument defensive zero/skip in scan loop.
+    // Agent stale > 120min → treat defensive mode as neutral — don't block entries or close positions.
+    const _agentAgeForDefensive = state._agentMacro?.timestamp
+      ? (Date.now() - new Date(state._agentMacro.timestamp).getTime()) / 60000 : 999;
+    const _agentFreshForDefensive = _agentAgeForDefensive < 120;
+    // effectiveDefensive: true only when macro is defensive AND agent is fresh (< 120min)
+    // Stale agent (902min old) should not block new entries or close open calls
+    const effectiveDefensive = macro.mode === "defensive" && _agentFreshForDefensive;
+
     // Strongly bearish macro - close all calls immediately
     // ONLY fire if agent also confirms bearish - keyword scorer alone gives false positives
     // Agent signal takes priority: if agent ever said bullish/neutral, suppress keyword defensive
@@ -498,7 +508,7 @@ async function runScan() {
       ? (Date.now() - new Date(state._agentMacro.timestamp).getTime()) / 60000 : 999;
     // Extend freshness to 60 min - agent runs every 3 min but cache + restart gaps can widen this
     // If no agent signal ever (agentAge=999), allow defensive to fire (can't suppress without data)
-    const agentFresh       = agentAge < 120; // Bug 4 FIX: 60→120min — stale agent should not fire defensive
+    const agentFresh       = _agentFreshForDefensive; // Bug 4 FIX: uses scan-scope staleness
     // Suppress if: agent is fresh AND (bullish or neutral) - don't close calls on keyword alone
     // Also suppress if: agent is fresh AND bearish but NOT strongly bearish (mild disagreement)
     const defensiveSuppressed = agentFresh && !agentIsBearish; // only strongly bearish fires through
@@ -1024,7 +1034,7 @@ async function runScan() {
     : "BULL - long puts on overbought, MR calls on oversold";
   logEvent("scan", `[STRATEGY] Regime ${regimeClass}: ${strategyMode} | IVR:${ivRankNow} (${state._ivEnv})`);
   // NAKED OPTIONS: choppyDebitBlock removed from logs — no credit mode in APEX
-  if (creditCallModeActive && isBearTrend) logEvent("filter", `[CREDIT CALL] Trending bear + VIX ${state.vix} + IVR ${ivRankNow} - bear call spread mode active`);
+  // Bug 2 FIX: creditCallModeActive log removed — APEX has no credit call mode. Dead spread-era log.
   if (crisisDebitBlock && !dryRunMode) logEvent("filter", `[REGIME C] Crisis mode - debit put entries blocked, mean reversion unreliable`);
   if (skewElevated && state.vix >= 22 && state.vix < 28) logEvent("filter", `SKEW ${(state._skew?.skew||0)} elevated - credit VIX threshold lowered to 22`);
 
@@ -2192,19 +2202,19 @@ async function runScan() {
     // MR calls are specifically designed for strongly bearish macro — that's the entry signal.
     // RSI 22 + VIX 28 + "strongly bearish" macro = textbook MR call setup.
     // callSetup.isMeanReversion is set before this point (line ~2062).
-    if (macro.mode === "defensive" && !callSetup.isMeanReversion) callScore = 0;
+    if (effectiveDefensive && !callSetup.isMeanReversion) callScore = 0; // Bug 4 FIX: stale agent skipped
 
     const bestScore = Math.max(callScore, putScore);
     const optionType = putScore > callScore ? "put" : "call";
 
     // Bug 3 FIX: Skip defensive calls EXCEPT mean reversion — MR calls exempt from defensive block.
     // A genuine capitulation (RSI 22, VIX spike) is exactly when MR calls should fire.
-    if (macro.mode === "defensive" && optionType === "call" && !callSetup.isMeanReversion) {
+    if (effectiveDefensive && optionType === "call" && !callSetup.isMeanReversion) { // Bug 4 FIX
       logEvent("filter", `${stock.ticker} - macro defensive mode - skipping non-MR calls`);
       continue;
     }
     // Log MR call proceeding despite defensive mode
-    if (macro.mode === "defensive" && optionType === "call" && callSetup.isMeanReversion) {
+    if (effectiveDefensive && optionType === "call" && callSetup.isMeanReversion) { // MR exempt
       logEvent("filter", `${stock.ticker} - MR call proceeds despite defensive mode (RSI capitulation is the signal)`);
     }
     const bestReasons = optionType === "put" ? putSetup.reasons : callSetup.reasons;
@@ -2424,6 +2434,10 @@ async function runScan() {
     logEvent("filter", `${stock.ticker} best setup: ${optionType.toUpperCase()} score ${bestScore} | RSI:${signals.rsi} MACD:${signals.macd} MOM:${signals.momentum}`);
     // Queue for execution - heat is rechecked live in the execution loop below
     const isMR = optionType === "call" && callSetup.isMeanReversion;
+    // BUG A FIX: stamp isMR on liveStock so prefetch can read it for correct DTE/delta.
+    // callSetup.isMeanReversion is set but was never copied to stock object.
+    // Prefetch iterated scored[] and read stock._isMeanReversion → always false → wrong DTE.
+    liveStock._isMeanReversion = isMR;
     // ENTRY ENGINE: score candidate  -- locks tradeIntent at score time
     const eeCandidate = EE_scoreCandidate(
       { ...liveStock, isMeanReversion: isMR },
@@ -2465,14 +2479,14 @@ async function runScan() {
 
   // - PARALLEL OPTIONS PREFETCH -
   // Fetch options chains for all scored stocks simultaneously before executing
-  // Skip options prefetch entirely if choppy and credit mode not active (nothing will enter)
-  // Also skip if already at heat cap - entry will be blocked anyway, no need to fetch chains
-  const skipPrefetch = (choppyDebitBlock && !creditModeActive) || (_heatPct >= effectiveHeatCap());
+  // Bug 1 FIX: choppyDebitBlock removed from skipPrefetch.
+  // Agent saying "choppy/none" should not blind the options data layer.
+  // creditModeActive is always false in APEX — previous condition always skipped on choppy.
+  // MR calls in particular need options data even when agent is bearish/choppy.
+  // Only skip on heat cap — entry scoring will handle directional filtering.
+  const skipPrefetch = _heatPct >= effectiveHeatCap();
   if (skipPrefetch && !dryRunMode) {
-    if (_heatPct >= effectiveHeatCap())
-      logEvent("filter", `Heat ${_heatPctPc}% at cap - skipping options prefetch`);
-    else
-      logEvent("filter", `Choppy regime + low VIX - skipping options prefetch (no entries possible)`);
+    logEvent("filter", `Heat ${_heatPctPc}% at cap - skipping options prefetch`);
   }
   if (scored.length > 0 && !skipPrefetch) {
     logEvent("scan", `Prefetching options chains for ${scored.length} candidates in parallel...`);
@@ -2484,8 +2498,12 @@ async function runScan() {
       const batch = scored.slice(i, i + BATCH_SIZE);
       await Promise.all(batch.map(async ({ stock, price, optionType, score }) => {
         try {
-          const isMR = optionType === "call" && (stock._isMeanReversion || false);
-        const contract = await findContract(stock.ticker, optionType, isMR ? 0.40 : 0.35, isMR ? 21 : 28, state.vix, stock);
+          // Bug 6 FIX: Prefetch DTE/delta must match execution.js Fix 5 targets.
+        // MR calls: 14 DTE / 0.42 delta (short-dated, need fast move, higher gamma)
+        // Directional: 38 DTE / 0.35 delta (time for thesis to play out)
+        // Mismatch was: prefetch used 21/28 DTE, execution used 14/38 → wrong contract cached.
+        const isMR = optionType === "call" && (stock._isMeanReversion || false);
+        const contract = await findContract(stock.ticker, optionType, isMR ? 0.42 : 0.35, isMR ? 14 : 38, state.vix, stock);
           if (contract) {
             stock._cachedContract = contract;
             // Store real IV from options market for use in scoring
@@ -2526,7 +2544,8 @@ async function runScan() {
 
     // ENTRY ENGINE: evaluateEntry  -- single gate check using locked tradeIntent
     const intent     = tradeIntent || {};
-    const intentType = intent.type || (optionType === "put" ? "debit_put" : "debit_call");
+    // BUG C FIX: fallback was "debit_put"/"debit_call" — blocked by INSTRUMENT_CONSTRAINTS allowedTypes ["put","call"].
+    const intentType = intent.type || optionType; // APEX: always "put" or "call"
 
     // Build stagger context
     const sameTickerSameDirPos = state.positions.filter(p =>
