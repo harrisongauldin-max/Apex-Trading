@@ -69,7 +69,10 @@ function getRegimeRulebook(state) {
   const agentSig     = agentMacro.signal     || "neutral";
   const agentConf    = agentMacro.confidence || "low";
   const agentBias    = agentMacro.entryBias  || "neutral";
-  const agentType    = agentMacro.tradeType  || "spread";
+  // APEX: agent returns tradeType "spread"|"credit"|"naked"|"none"
+  // Default to "naked" not "spread" — prevents spurious agentSaysCredit=false ambiguity
+  // when agent doesn't return tradeType (agentType="spread" was a legacy ARGO default)
+  const agentType    = agentMacro.tradeType  || "naked";
   const agentTS      = agentMacro.timestamp  || null;
   const agentAge     = agentTS ? (Date.now() - new Date(agentTS).getTime()) / 60000 : 999;
   const agentStale   = agentAge > 30;
