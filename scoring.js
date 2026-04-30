@@ -218,7 +218,9 @@ function isGLDEntryAllowed(optionType, dxy, spyReturn5d, vix, gldRSI, gldPrice, 
     const gldOverbought  = gldRSI >= 65;  // overbought reversal path
     const gldFalling     = gldRSI !== null && gldRSI < 50 && gldMA20 > 0 && gldPrice < gldMA20; // GLD below 20MA + RSI neutral = falling trend
     const dxyRising      = dxy && dxy.change > 0;
-    const isGLDCreditPut = arguments[7] === "credit_put";
+    // isGLDCreditPut: legacy path for credit put routing — always false in APEX (naked only)
+    // Kept as passthrough so GLD put gate doesn't block on edge cases
+    const isGLDCreditPut = false; // APEX: no credit puts
     // Fix 1: GLD puts have TWO valid theses:
     // Path A — Overbought reversal: RSI >= 65, gold extended, mean reversion put
     // Path B — Falling trend: GLD below 20MA + DXY strengthening (dollar up = gold down)
@@ -523,100 +525,64 @@ function scoreIndexSetup(stock, optionType, spyRSI, spyMACD, spyMomentum, breadt
   const SUPP_MAX_AGE_MS = 60 * 60 * 1000; // 1 hour - stale beyond this, ignore
   const isDataFresh = (data) => data && data.updatedAt && (Date.now() - data.updatedAt) < SUPP_MAX_AGE_MS;
 
-  if (optionType === "put") {
-    // - Supplementary signals - capped at +25 total contribution -
-    // These signals CONFIRM the primary thesis (agent + regime + RSI + MACD)
-    // They should not dominate the score on their own
-    // Cap: track supplement score separately, add min(supplementScore, 25) at end
-
-    // - Put/Call Ratio signal (Bollen & Whaley 2004) -
+  // - Supplementary signals — direction-aware, run for BOTH puts and calls -
+  // Bug fix: these were all inside if(optionType==="put") making call-specific blocks dead code.
+  // PCR fear, AAII bearishness, vol contango, Zweig thrust were never applied to calls.
+  // Now hoisted above the put/call branch split so each direction gets the right signals.
+  {
     const pcrData = isDataFresh(state._pcr) ? state._pcr : null;
-    if (pcrData && optionType === "put") {
-      if (pcrData.signal === "extreme_fear")       { supplementScore += 10; reasons.push(`PCR ${pcrData.pcr} - extreme fear, put momentum strong (+10)`); }
-      else if (pcrData.signal === "fear")          { supplementScore += 6;  reasons.push(`PCR ${pcrData.pcr} - elevated fear, put bias (+6)`); }
-      else if (pcrData.signal === "extreme_greed") { score -= 12; reasons.push(`PCR ${pcrData.pcr} - extreme greed, puts risky (-12)`); }
-      else if (pcrData.signal === "greed")         { score -= 6;  reasons.push(`PCR ${pcrData.pcr} - greed, puts less favorable (-6)`); }
-    }
-    if (pcrData && optionType === "call") {
-      if (pcrData.signal === "extreme_fear")       { supplementScore += 12; reasons.push(`PCR ${pcrData.pcr} - extreme fear = contrarian call signal (+12)`); }
-      else if (pcrData.signal === "fear")          { supplementScore += 6;  reasons.push(`PCR ${pcrData.pcr} - elevated fear, contrarian call (+6)`); }
-      else if (pcrData.signal === "extreme_greed") { score -= 10; reasons.push(`PCR ${pcrData.pcr} - extreme greed, calls overextended (-10)`); }
+    if (pcrData) {
+      if (optionType === "put") {
+        if (pcrData.signal === "extreme_fear")       { supplementScore += 10; reasons.push(`PCR ${pcrData.pcr} - extreme fear, put momentum strong (+10)`); }
+        else if (pcrData.signal === "fear")          { supplementScore += 6;  reasons.push(`PCR ${pcrData.pcr} - elevated fear, put bias (+6)`); }
+        else if (pcrData.signal === "extreme_greed") { score -= 12; reasons.push(`PCR ${pcrData.pcr} - extreme greed, puts risky (-12)`); }
+        else if (pcrData.signal === "greed")         { score -= 6;  reasons.push(`PCR ${pcrData.pcr} - greed, puts less favorable (-6)`); }
+      } else {
+        if (pcrData.signal === "extreme_fear")       { supplementScore += 12; reasons.push(`PCR ${pcrData.pcr} - extreme fear = contrarian call signal (+12)`); }
+        else if (pcrData.signal === "fear")          { supplementScore += 6;  reasons.push(`PCR ${pcrData.pcr} - elevated fear, contrarian call (+6)`); }
+        else if (pcrData.signal === "extreme_greed") { score -= 10; reasons.push(`PCR ${pcrData.pcr} - extreme greed, calls overextended (-10)`); }
+      }
     }
 
-    // - Vol term structure (Natenberg) -
     const ts = isDataFresh(state._termStructure) ? state._termStructure : null;
-    if (ts && optionType === "put") {
-      if (ts.creditFavorable) { supplementScore += 8; reasons.push(`Vol backwardation (${ts.ratio}) - near-term fear premium elevated (+8)`); }
-    }
-    if (ts && optionType === "call") {
-      if (ts.callFavorable)   { supplementScore += 8; reasons.push(`Vol contango (${ts.ratio}) - calls relatively cheap (+8)`); }
+    if (ts) {
+      if (optionType === "put"  && ts.creditFavorable) { supplementScore += 8; reasons.push(`Vol backwardation (${ts.ratio}) - near-term fear premium elevated (+8)`); }
+      if (optionType === "call" && ts.callFavorable)   { supplementScore += 8; reasons.push(`Vol contango (${ts.ratio}) - calls relatively cheap (+8)`); }
     }
 
-    // - CBOE SKEW Index -
-    // SKEW elevated + VIX elevated = put premium doubly rich = ideal credit puts
-    // SKEW low = tail risk not priced = normal environment
     const skewData = isDataFresh(state._skew) ? state._skew : null;
     if (skewData) {
       if (optionType === "put") {
-        if (skewData.signal === "extreme" && skewData.creditPutIdeal) {
-          supplementScore += 12; reasons.push(`SKEW ${skewData.skew} extreme + VIX elevated - put premium doubly rich (+12)`);
-        } else if (skewData.signal === "elevated") {
-          supplementScore += 8; reasons.push(`SKEW ${skewData.skew} elevated - tail risk premium high (+8)`);
-        } else if (skewData.signal === "low") {
-          score -= 5; reasons.push(`SKEW ${skewData.skew} low - tail risk not priced (-5)`);
-        }
-      }
-      if (optionType === "call") {
-        if (skewData.signal === "low") {
-          supplementScore += 8; reasons.push(`SKEW ${skewData.skew} low - tail risk not priced, calls favorable (+8)`);
-        } else if (skewData.signal === "extreme") {
-          score -= 8; reasons.push(`SKEW ${skewData.skew} extreme - market fearing tail event, wrong for calls (-8)`);
-        }
+        if (skewData.signal === "extreme" && skewData.creditPutIdeal) { supplementScore += 12; reasons.push(`SKEW ${skewData.skew} extreme + VIX elevated - put premium doubly rich (+12)`); }
+        else if (skewData.signal === "elevated") { supplementScore += 8; reasons.push(`SKEW ${skewData.skew} elevated - tail risk premium high (+8)`); }
+        else if (skewData.signal === "low")      { score -= 5; reasons.push(`SKEW ${skewData.skew} low - tail risk not priced (-5)`); }
+      } else {
+        if (skewData.signal === "low")      { supplementScore += 8; reasons.push(`SKEW ${skewData.skew} low - tail risk not priced, calls favorable (+8)`); }
+        else if (skewData.signal === "extreme") { score -= 8; reasons.push(`SKEW ${skewData.skew} extreme - market fearing tail event, wrong for calls (-8)`); }
       }
     }
 
-    // - AAII Sentiment (Ned Davis Research validation) -
-    // Extreme retail bearishness = contrarian call signal (bulls historically wrong at extremes)
-    // Extreme retail bullishness = contrarian put signal
-    const aaiiData = (state._aaii && state._aaii.updatedAt && (Date.now() - state._aaii.updatedAt) < 8 * 24 * 60 * 60 * 1000) ? state._aaii : null; // 8-day TTL (weekly data)
+    const aaiiData = (state._aaii && state._aaii.updatedAt && (Date.now() - state._aaii.updatedAt) < 8 * 24 * 60 * 60 * 1000) ? state._aaii : null;
     if (aaiiData) {
       if (optionType === "call") {
-        if (aaiiData.signal === "extreme_bearish") {
-          supplementScore += 12; reasons.push(`AAII bulls ${aaiiData.bullish}% - extreme retail bearishness = contrarian call (+12)`);
-        } else if (aaiiData.signal === "bearish") {
-          supplementScore += 6; reasons.push(`AAII bulls ${aaiiData.bullish}% - retail bearish = mild contrarian call (+6)`);
-        } else if (aaiiData.signal === "extreme_bullish") {
-          score -= 10; reasons.push(`AAII bulls ${aaiiData.bullish}% - extreme retail greed, wrong for calls (-10)`);
-        }
-      }
-      if (optionType === "put") {
-        if (aaiiData.signal === "extreme_bullish") {
-          supplementScore += 10; reasons.push(`AAII bulls ${aaiiData.bullish}% - extreme retail greed = contrarian put (+10)`);
-        } else if (aaiiData.signal === "bullish") {
-          supplementScore += 5; reasons.push(`AAII bulls ${aaiiData.bullish}% - retail complacent = mild contrarian put (+5)`);
-        } else if (aaiiData.signal === "extreme_bearish") {
-          score -= 8; reasons.push(`AAII extreme bearish - contrary indicator, puts may be exhausted (-8)`);
-        }
+        if (aaiiData.signal === "extreme_bearish")  { supplementScore += 12; reasons.push(`AAII bulls ${aaiiData.bullish}% - extreme retail bearishness = contrarian call (+12)`); }
+        else if (aaiiData.signal === "bearish")     { supplementScore += 6;  reasons.push(`AAII bulls ${aaiiData.bullish}% - retail bearish = mild contrarian call (+6)`); }
+        else if (aaiiData.signal === "extreme_bullish") { score -= 10; reasons.push(`AAII bulls ${aaiiData.bullish}% - extreme retail greed, wrong for calls (-10)`); }
+      } else {
+        if (aaiiData.signal === "extreme_bullish")  { supplementScore += 10; reasons.push(`AAII bulls ${aaiiData.bullish}% - extreme retail greed = contrarian put (+10)`); }
+        else if (aaiiData.signal === "bullish")     { supplementScore += 5;  reasons.push(`AAII bulls ${aaiiData.bullish}% - retail complacent = mild contrarian put (+5)`); }
+        else if (aaiiData.signal === "extreme_bearish") { score -= 8; reasons.push(`AAII extreme bearish - contrary indicator, puts may be exhausted (-8)`); }
       }
     }
 
-    // - Breadth momentum (Aronson: direction > single reading) -
     const bMom = state._breadthTrend || "flat";
     const bMomVal = state._breadthMomentum || 0;
-    if (optionType === "put" && bMom === "falling") {
-      supplementScore += 8; reasons.push(`Breadth falling (${bMomVal.toFixed(1)}pts) - distribution (+8)`);
-    } else if (optionType === "call" && bMom === "rising") {
-      supplementScore += 8; reasons.push(`Breadth rising (${bMomVal.toFixed(1)}pts) - accumulation (+8)`);
-    }
+    if (optionType === "put"  && bMom === "falling") { supplementScore += 8; reasons.push(`Breadth falling (${bMomVal.toFixed(1)}pts) - distribution (+8)`); }
+    if (optionType === "call" && bMom === "rising")  { supplementScore += 8; reasons.push(`Breadth rising (${bMomVal.toFixed(1)}pts) - accumulation (+8)`); }
+    if (optionType === "call" && state._zweigThrust?.detected) { supplementScore += 10; reasons.push("Breadth recovery signal - watchlist went from weak to strong (+10)"); }
+  }
 
-    // - Breadth recovery signal -
-    // Note: True Zweig Thrust requires NYSE breadth (thousands of stocks)
-    // With 4-instrument watchlist, use gentler "breadth recovery" signal
-    // Only fires when breadth went from <40% to >60% in recent sessions
-    if (optionType === "call" && state._zweigThrust?.detected) {
-      supplementScore += 10; reasons.push("Breadth recovery signal - watchlist went from weak to strong (+10)");
-    }
-
+  if (optionType === "put") {
     // - Agent macro signal - primary gate -
     // Panel fix: mild bullish in bear regime = bounce read, not regime change.
     // -20 penalty only fires when agent is genuinely bullish AND regime confirms it.
@@ -936,10 +902,15 @@ function scoreIndexSetup(stock, optionType, spyRSI, spyMACD, spyMomentum, breadt
     }
 
     // V2.81 change 4 (call side): RSI velocity penalty
+    // Bug fix: _rsiHistory stores dailyRsi values (one per day).
+    // spyRSI for calls is now intradayRSI — comparing intraday vs daily history gives
+    // false velocity penalties (e.g. intraday 35 vs daily history 90 = 55pt "velocity").
+    // Fix: use stock.dailyRsi for the velocity comparison so both sides are daily values.
     const rsiHistoryCallRaw = state._rsiHistory?.[stock.ticker] || [];
     const rsiHistoryCall = rsiHistoryCallRaw.map(r => typeof r === 'object' ? (r?.rsi || 50) : r);
+    const dailyRsiForVelocity = stock.dailyRsi || spyRSI; // use daily for apples-to-apples comparison
     if (rsiHistoryCall.length >= 3) {
-      const rsiChangeCall = Math.abs(spyRSI - rsiHistoryCall[rsiHistoryCall.length - 3]);
+      const rsiChangeCall = Math.abs(dailyRsiForVelocity - rsiHistoryCall[rsiHistoryCall.length - 3]);
       if (rsiChangeCall >= 20) {
         score -= 8; reasons.push(`RSI velocity: ${rsiChangeCall.toFixed(0)}pt move in 3 sessions - fast bounce less reliable (-8)`);
       }
@@ -1103,8 +1074,8 @@ function scoreIndexSetup(stock, optionType, spyRSI, spyMACD, spyMomentum, breadt
     if (state._creditStress) { score -= 8; reasons.push("Credit stress: HYG+TLT falling - calls risky in liquidation (-8)"); }
   }
 
-  // Apply supplementary signals - capped at +25 total to prevent domination
-  // FIX F: Supplementary cap lowered 25 → 15.
+  // Apply supplementary signals - capped at +15 total to prevent domination
+  // FIX F: Supplementary cap at 15 — prevents weak primary + max supp reaching minimum.
   // Prevents weak primary (40) + max supplementary (25) = 65 reaching minimum.
   // With cap at 15: weak primary (40) + max supp (15) = 55 < 65 minimum.
   // Supplementary confirms — it doesn't carry.
@@ -1119,7 +1090,9 @@ function scoreIndexSetup(stock, optionType, spyRSI, spyMACD, spyMomentum, breadt
   score = Math.max(0, Math.min(100, score));
   // Surface mrCapitulation flag so evaluateEntry can apply correct minScore
   const _mrCapitulationFlag = optionType === "call" && spyRSI <= 30 && !["trending_bull","recovery"].includes(regime);
-  return { score, reasons, tradeType: tradeType || "spread", mrCapitulation: _mrCapitulationFlag };
+  // tradeType is always null in APEX (no credit/spread routing). Return "naked" not "spread".
+  // mrCapitulation flag is computed but not read downstream — kept for potential future use.
+  return { score, reasons, tradeType: "naked", mrCapitulation: _mrCapitulationFlag };
 }
 
 
