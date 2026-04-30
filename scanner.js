@@ -2410,6 +2410,29 @@ async function runScan() {
       continue;
     }
 
+    // Fix 3: Same-day loss re-entry gate — _recentLosses was written but never read.
+    // If this instrument was stopped out today in the same direction, require:
+    //   (a) score >= 75 (not just 65) — higher conviction needed after a loss
+    //   (b) RSI has moved at least 10 points since the losing entry RSI
+    // Prevents the pattern of re-entering the same thesis 3x on the same day.
+    const recentLoss = (state._recentLosses || {})[stock.ticker];
+    if (recentLoss && (Date.now() - recentLoss.closedAt) < 24 * 3600 * 1000) {
+      const hoursSinceLoss = ((Date.now() - recentLoss.closedAt) / 3600000).toFixed(1);
+      const lossRSI    = recentLoss.entryRSI || 50; // RSI at losing entry
+      const currentRSI = signals.rsi || liveStock.rsi || 50;
+      const rsidelta   = Math.abs(currentRSI - lossRSI);
+      const instrMin75 = (_instrLookup?.minScore || 65) < 75 ? 75 : (_instrLookup?.minScore || 75);
+      if (bestScore < instrMin75) {
+        logEvent("filter", `${stock.ticker} re-entry blocked — loss ${hoursSinceLoss}h ago, need score ${instrMin75} (have ${bestScore})`);
+        continue;
+      }
+      if (rsidelta < 10) {
+        logEvent("filter", `${stock.ticker} re-entry blocked — RSI only moved ${rsidelta.toFixed(0)}pts since loss (need 10pt shift for new thesis)`);
+        continue;
+      }
+      logEvent("filter", `${stock.ticker} re-entry allowed — loss ${hoursSinceLoss}h ago, score ${bestScore} >= ${instrMin75}, RSI moved ${rsidelta.toFixed(0)}pts`);
+    }
+
     // Fast RSI move gate - rapid RSI moves signal potential reversals for DEBIT entries
     // Credit spreads: fast RSI crash = ideal (max fear premium) - bypass gate
     // TODO #2 FIX: Regime B exception — in bear regime, a fast RSI drop IS the puts_on_bounces setup
