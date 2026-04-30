@@ -91,8 +91,13 @@ async function findContract(ticker, optionType, targetDelta, targetDTE, vix, sto
       fetchMin = fixedExpiry;
       fetchMax = fixedExpiry;
     } else {
+      // Expanded DTE window — don't lock into a single monthly expiry.
+      // MR calls (14 DTE): search 7–35 days (catch weeklies + next monthly)
+      // Directional (38 DTE): search 21–90 days (monthly + skip-month options)
+      // Cap raised from 60→120: SPY/QQQ 60-90 DTE contracts are liquid with tight spreads.
+      // The scorer picks the closest match to targetDTE within this window.
       const minDays = Math.max(7, targetDTE - 7);
-      const maxDays = Math.min(60, targetDTE + 14);
+      const maxDays = Math.min(120, targetDTE + 21); // was min(60, +14) — now 120d cap, +21d window
       fetchMin = new Date(today.getTime() + minDays * 86400000).toISOString().split("T")[0];
       fetchMax = new Date(today.getTime() + maxDays * 86400000).toISOString().split("T")[0];
     }
@@ -609,14 +614,17 @@ async function executeTrade(stock, price, score, scoreReasons, vix, optionType =
 
 
 // ============================================================
-// executeDebitCallSpread — debit call spread execution
-// Panel 4/22/2026: buy OTM call + sell further OTM call to reduce cost.
-// Profit from confirmed upward move. Theta works against you.
-// Parameters: price-relative width, 40% max debit/width gate.
-// ============================================================
+// Spread execution functions removed — APEX trades naked options only.
+// executeDebitCallSpread and executeCreditSpread are stubbed to prevent
+// TypeError when server.new.js destructures them from require('./execution').
+function executeCreditSpread() {
+  logEvent("warn", "executeCreditSpread called but APEX trades naked options only — returning null");
+  return null;
+}
 
 module.exports = {
   executeTrade,
+  executeCreditSpread,   // stub — prevents TypeError in server.new.js /force-entry endpoint
   findContract, bsStrikeForDelta, getOptionsPrice,
   initExecution,
   calcPositionSize,
