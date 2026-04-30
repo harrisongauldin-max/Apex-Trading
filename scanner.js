@@ -37,6 +37,7 @@ const {
   detectMarketRegime, getRegimeModifier, applyIntradayRegimeOverride,
   updateOversoldTracker, recordGateBlock, checkMacroShift,
   checkSectorETF, isGLDEntryAllowed, isXLEEntryAllowed, isTLTEntryAllowed,
+  isIYREntryAllowed, isHYGEntryAllowed,
 } = require('./scoring');
 
 const {
@@ -1829,7 +1830,27 @@ async function runScan() {
         if (!xleCallGate.allowed) { callSetup.score = 0; logEvent("filter", xleCallGate.reason); }
         if (!xlePutGate.allowed)  { putSetup.score  = 0; logEvent("filter", xlePutGate.reason);  }
         // XLE is NOT correlated with SPY/QQQ group - independent oil driver
-        // Do not suppress based on SPY/QQQ positions
+      }
+
+      // P3: IYR (Real Estate) — rate-sensitive entry gates
+      if (stock.ticker === "IYR") {
+        const iyrRSI     = liveStock.rsi || liveStock.dailyRsi || 50;
+        const yieldEnv   = state._yieldEnv || "normal";
+        const iyrCallGate = isIYREntryAllowed("call", yieldEnv, iyrRSI);
+        const iyrPutGate  = isIYREntryAllowed("put",  yieldEnv, iyrRSI);
+        if (!iyrCallGate.allowed) { callSetup.score = 0; logEvent("filter", iyrCallGate.reason); }
+        if (!iyrPutGate.allowed)  { putSetup.score  = 0; logEvent("filter", iyrPutGate.reason);  }
+      }
+
+      // P3: HYG (High Yield Bonds) — credit stress entry gates
+      if (stock.ticker === "HYG") {
+        const hygRelStr   = state._sectorRelStr?.HYG?.relStr || 0;
+        const hygRSI      = liveStock.rsi || liveStock.dailyRsi || 50;
+        const creditStress = !!state._creditStress;
+        const hygCallGate  = isHYGEntryAllowed("call", creditStress, hygRelStr, hygRSI);
+        const hygPutGate   = isHYGEntryAllowed("put",  creditStress, hygRelStr, hygRSI);
+        if (!hygCallGate.allowed) { callSetup.score = 0; logEvent("filter", hygCallGate.reason); }
+        if (!hygPutGate.allowed)  { putSetup.score  = 0; logEvent("filter", hygPutGate.reason);  }
       }
     } else {
       // Individual stocks: use scorePutSetup/scoreCallSetup
@@ -2025,14 +2046,12 @@ async function runScan() {
       putSetup.score  = Math.min(100, Math.max(0, putSetup.score  - globalMod));
     }
 
-    // Apply regime modifier
+    // P1 FIX: External getRegimeModifier removed — scoreIndexSetup handles regime internally.
+    // Double-counting was: +20 (internal) + 15 (external) = +35 for puts in Regime B.
+    // Regime bonuses now live exclusively inside scoreIndexSetup where they belong.
+    // regimeMod kept for MR bypass logic below (checks if regime is bear before applying).
     const regimeMod   = getRegimeModifier(marketContext.regime?.regime || "neutral", "call");
-    const regimePutMod= getRegimeModifier(marketContext.regime?.regime || "neutral", "put");
-    // Apply regime to regular calls first - MR calls bypass this (applied after MR check below)
-    putSetup.score    = Math.min(100, Math.max(0, putSetup.score  + regimePutMod));
-    if (regimeMod !== 0) {
-      callSetup.reasons.push(`Regime ${marketContext.regime?.regime}: ${regimeMod > 0 ? "+" : ""}${regimeMod}`);
-    }
+    // (not applied to scores — informational only for MR bypass below)
 
     // Mean reversion call scoring - runs AFTER regime so bypass works correctly
     // MR fires here so isMeanReversion flag is set before regime penalty check below
@@ -2056,10 +2075,9 @@ async function runScan() {
       }
     }
 
-    // Now apply regime to calls - MR calls bypass this penalty (they're designed for bear markets)
-    if (!callSetup.isMeanReversion) {
-      callSetup.score = Math.min(100, Math.max(0, callSetup.score + regimeMod));
-    }
+    // P1 FIX: Call regime modifier also removed — scoreIndexSetup handles this internally.
+    // MR calls already bypass regime inside scoreIndexSetup (mrCapitulationActive path).
+    // Non-MR calls get the correct regime penalty inside scoreIndexSetup.
 
     // Apply drawdown protocol min score
     const ddProtocol  = marketContext.drawdownProtocol || { minScore: MIN_SCORE, sizeMultiplier: 1.0 };
