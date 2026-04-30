@@ -492,9 +492,7 @@ async function runScan() {
     const _agentAgeForDefensive = state._agentMacro?.timestamp
       ? (Date.now() - new Date(state._agentMacro.timestamp).getTime()) / 60000 : 999;
     const _agentFreshForDefensive = _agentAgeForDefensive < 120;
-    // effectiveDefensive: true only when macro is defensive AND agent is fresh (< 120min)
-    // Stale agent (902min old) should not block new entries or close open calls
-    const effectiveDefensive = macro.mode === "defensive" && _agentFreshForDefensive;
+    // effectiveDefensive defined at scan scope above — available throughout runScan
 
     // Strongly bearish macro - close all calls immediately
     // ONLY fire if agent also confirms bearish - keyword scorer alone gives false positives
@@ -968,6 +966,12 @@ async function runScan() {
   // Agent is primary (if fresh), keyword is fallback (halved weight)
   const macroAuthStamp    = (marketContext.macro || {}).macroAuthority || "keyword_fallback";
   const agentMacroSignal  = (marketContext.macro || {}).signal || "neutral"; // use authoritative merged signal
+  // Scan-scope effectiveDefensive — used both in defensive close block AND per-instrument loop (line ~2205).
+  // Must be at runScan scope so both references resolve. Defined once, read everywhere.
+  const _defAgentAge   = state._agentMacro?.timestamp
+    ? (Date.now() - new Date(state._agentMacro.timestamp).getTime()) / 60000 : 999;
+  const _defAgentFresh = _defAgentAge < 120; // Bug 4 FIX: 60→120min threshold
+  const effectiveDefensive = (marketContext.macro || {}).mode === "defensive" && _defAgentFresh;
   const putsMacroAllowed  = ["bearish", "strongly bearish", "mild bearish", "neutral"].includes(agentMacroSignal);
   const agentHasRun       = !!state._agentMacro;
   const macroClearForPuts = !agentHasRun || putsMacroAllowed;
