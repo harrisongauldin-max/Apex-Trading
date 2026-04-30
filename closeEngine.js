@@ -410,12 +410,16 @@ async function _doClosePosition(ticker, reason, exitPremium = null, contractSym 
   // Record recent losses for re-entry veto (24hr agent confirmation required)
   if (pnl < 0) {
     state._recentLosses = state._recentLosses || {};
+    // Fix 3 SUPPORT: stamp entryRSI so scanner can check RSI delta on re-entry attempt
+    const _lossPos = state.positions.find(p => p.ticker === ticker) || {};
     state._recentLosses[ticker] = {
       closedAt:    Date.now(),
       reason,
       agentSignal: (state._agentMacro || {}).signal || "neutral",
       price:       ep,
       pnlPct:      parseFloat(pct),
+      entryRSI:    _lossPos.entryRSI || _lossPos.rsi || 50,
+      optionType:  _lossPos.optionType || null,
     };
     logEvent("warn", `[THESIS] ${ticker} loss recorded - re-entry requires agent confirmation for 24h`);
   }
