@@ -53,7 +53,10 @@ function getDrawdownProtocol() {
   // Use accountBaseline as the reference point - stable starting value from Alpaca sync
   // peakCash fluctuates with mark-to-market and doesn't represent actual starting capital
   const peak      = state.accountBaseline || state.peakCash || MONTHLY_BUDGET;
-  const current   = state.cash + openCostBasis(); // use cost basis not MTM for drawdown
+  // Fix 3: Use alpacaEquity (mark-to-market) for drawdown — same approach as profit-lock below.
+  // Cost basis hid real losses: positions down 25% each showed no drawdown until closed.
+  // alpacaEquity reflects actual market value. Falls back to cash + cost if not yet synced.
+  const current   = state.alpacaEquity || (state.cash + openCostBasis());
   const drawdown  = (current - peak) / peak * 100;
 
   // Only trigger if we have actual trade history
