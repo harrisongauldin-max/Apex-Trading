@@ -533,10 +533,14 @@ async function checkExits(positions, posSnapshots, posQuotes, posNewsCache, ctx)
     // Runs on every scan for positions open 2+ days
     // Compares current conditions to entry conditions
     if (daysOpen >= 2 && pos.optionType) {
-      const stockSnap   = WATCHLIST.find(s => s.ticker === pos.ticker) || {};
-      const curRSI      = stockSnap.rsi      || pos.entryRSI    || 52;
-      const curMACD     = stockSnap.macd     || pos.entryMACD   || "neutral";
-      const curMomentum = stockSnap.momentum || pos.entryMomentum || "steady";
+      // Bug 2 FIX: WATCHLIST has static init values (rsi:50, macd:"neutral") — not live data.
+      // Use live values cached on pos during this scan's trailing stop / RSI trigger checks.
+      // pos._prevRSI: set by trailing stop block using live bars (best available live RSI).
+      // pos._lastMACD: set during RSI reversal trigger check.
+      // Fall back to entry values if live hasn't been cached yet (first 2 days).
+      const curRSI      = pos._prevRSI      || pos.entryRSI      || 52;
+      const curMACD     = pos._lastMACD     || pos.entryMACD     || "neutral";
+      const curMomentum = pos._lastMomentum || pos.entryMomentum || "steady";
       const curMacro    = (state._agentMacro || {}).signal || "neutral";
       const integrity   = calcThesisIntegrity(pos, curRSI, curMACD, curMomentum, curMacro);
 
