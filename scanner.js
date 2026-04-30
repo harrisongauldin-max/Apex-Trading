@@ -2060,7 +2060,12 @@ async function runScan() {
     // Mean reversion call scoring - runs AFTER regime so bypass works correctly
     // MR fires here so isMeanReversion flag is set before regime penalty check below
     const mrSetup = scoreMeanReversionCall(liveStock, relStrength, signals.adx, bars, state.vix);
-    if (mrSetup.score > callSetup.score) {
+    // MR call gate: block if dailyRSI is also deeply oversold AND MACD bearish.
+    // This combination = trending crash (XLE energy sector down multi-day), not intraday capitulation.
+    // Genuine MR opportunities have intraday RSI compressed but daily trend still intact.
+    // Use liveStock not signals — liveStock has null-guarded fallbacks, signals.dailyRsi may be undefined
+    const mrBearishTrend = (liveStock.dailyRsi || 50) < 35 && (liveStock.macd || "").includes("bearish");
+    if (mrSetup.score > callSetup.score && !mrBearishTrend) {
       // MR liquidity check - contract not yet fetched at this stage
       // Use stock-level proxy: beta > 1.2 and sector with active options = liquid enough
       // Real OI/spread check happens at execution time via _cachedContract after prefetch
@@ -2417,6 +2422,9 @@ async function runScan() {
     // Prevents the pattern of re-entering the same thesis 3x on the same day.
     const recentLoss = (state._recentLosses || {})[stock.ticker];
     // Only block re-entry in the SAME direction as the loss — opposite direction has a different thesis
+    // recentLossSameDir = true → gate triggers → re-entry requires score>=75 + RSI delta
+    // !recentLoss.optionType = direction unknown → conservative: treat as same direction (block)
+    // recentLoss.optionType !== optionType = opposite direction → don't block (different thesis)
     const recentLossSameDir = recentLoss && (!recentLoss.optionType || recentLoss.optionType === optionType);
     if (recentLossSameDir && (Date.now() - recentLoss.closedAt) < 24 * 3600 * 1000) {
       const hoursSinceLoss = ((Date.now() - recentLoss.closedAt) / 3600000).toFixed(1);
