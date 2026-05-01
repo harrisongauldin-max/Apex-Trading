@@ -1240,12 +1240,23 @@ async function runScan() {
   // FIX 10: Max daily loss circuit breaker
   // Tracks intraday unrealized + realized P&L against daily limit.
   // If daily loss exceeds 3% of account, halt all new entries for the session.
+  //
+  // V2.86 fixes:
+  // 1. Staleness guard on unrealized P&L — stale currentPrice from API failures
+  //    was masking real losses (phantom gains from hours-old prices skipped circuit).
+  // 2. Overnight positions now included in daily loss calc.
+  //    Positions carried from prior day had unrealized losses invisible to todayRealizedPnL
+  //    until they closed — circuit fired too late.
   {
-    const todayPnL = (state.todayRealizedPnL || 0) +
-      (state.positions || []).reduce((s, p) => {
-        const chg = p.currentPrice && p.premium ? (p.currentPrice - p.premium) / p.premium : 0;
-        return s + chg * (p.premium || 0) * 100 * (p.contracts || 1);
-      }, 0);
+    const MAX_PRICE_STALE_MS = 60000; // 60s — if currentPrice is older, use premium (flat) for safety
+    const unrealizedPnL = (state.positions || []).reduce((s, p) => {
+      const priceAge = p._currentPriceUpdatedAt ? Date.now() - p._currentPriceUpdatedAt : Infinity;
+      const safeCurrentPrice = priceAge < MAX_PRICE_STALE_MS ? p.currentPrice : null;
+      if (!safeCurrentPrice || !p.premium) return s; // skip stale — treat as flat
+      const chg = (safeCurrentPrice - p.premium) / p.premium;
+      return s + chg * p.premium * 100 * (p.contracts || 1);
+    }, 0);
+    const todayPnL = (state.todayRealizedPnL || 0) + unrealizedPnL;
     const dailyLossLimit = (state.alpacaCash || state.cash || 30000) * -0.03; // -3% daily loss limit
     state._dailyPnL = parseFloat(todayPnL.toFixed(2));
     if (todayPnL < dailyLossLimit && !dryRunMode) {
@@ -2432,6 +2443,22 @@ async function runScan() {
     // Only block re-entry in the SAME direction as the loss — opposite direction has a different thesis
     // recentLossSameDir = true → gate triggers → re-entry requires score>=75 + RSI delta
     // !recentLoss.optionType = direction unknown → conservative: treat as same direction (block)
+    // --- Same-day close cooldown gate (30 min) ---
+    // Blocks re-entry for 30 minutes after ANY close (win or loss) on the same instrument.
+    // Prevents: GLD wins at 9:23am → system re-enters at 9:27am same direction, worse strike.
+    // Losses already have a 24-hour gate via _recentLosses. This 30-min gate covers wins too.
+    const recentClose = (state._recentCloses || {})[stock.ticker];
+    const recentCloseSameDir = recentClose && (!recentClose.optionType || recentClose.optionType === optionType);
+    if (recentCloseSameDir) {
+      const minsSinceClose = (Date.now() - recentClose.closedAt) / 60000;
+      const CLOSE_COOLDOWN_MINS = 30;
+      if (minsSinceClose < CLOSE_COOLDOWN_MINS) {
+        const wasWin = recentClose.pnl > 0 ? `win (+$${recentClose.pnl.toFixed(0)})` : `loss (-$${Math.abs(recentClose.pnl).toFixed(0)})`;
+        logEvent("filter", `${stock.ticker} re-entry cooldown — ${wasWin} closed ${minsSinceClose.toFixed(0)}min ago, need ${CLOSE_COOLDOWN_MINS}min`);
+        continue;
+      }
+    }
+
     // recentLoss.optionType !== optionType = opposite direction → don't block (different thesis)
     const recentLossSameDir = recentLoss && (!recentLoss.optionType || recentLoss.optionType === optionType);
     if (recentLossSameDir && (Date.now() - recentLoss.closedAt) < 24 * 3600 * 1000) {
