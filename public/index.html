@@ -996,6 +996,8 @@ input[type=text]:focus{border-color:var(--blue)}
       <option value="all">All rows</option>
     </select>
     <button class="btn" id="copy-log-btn" onclick="copyLogsForClaude()" style="font-size:11px;border-color:rgba(0,196,255,.4);color:#44aaff">&#9126; Copy for Claude</button>
+    <input type="date" id="redis-log-date" style="font-size:11px;background:#0a1628;color:#44aaff;border:1px solid rgba(0,196,255,.4);border-radius:4px;padding:3px 6px;cursor:pointer" title="Pick a date to copy from Redis" />
+    <button class="btn" id="copy-redis-btn" onclick="copyFullDayFromRedis()" style="font-size:11px;border-color:rgba(100,200,100,.5);color:#6ec97a">&#128190; Copy Day from Redis</button>
   </div>
   <!-- ── Log box ── -->
   <div class="log-box" id="server-log" style="height:560px;overflow-y:auto"></div>
@@ -3751,6 +3753,92 @@ function copyOpenPositions() {
 }
 
 // ── Copy logs for Claude ─────────────────────────────────────────────────────
+// Set Redis date picker to today on load
+(function() {
+  var el = document.getElementById('redis-log-date');
+  if (el) {
+    var d = new Date();
+    // Adjust to ET (UTC-4 or UTC-5)
+    var etOffset = -4 * 60; // approximate EDT
+    var etNow = new Date(d.getTime() + (d.getTimezoneOffset() + etOffset * -1) * 60000);
+    // Actually just use local date — close enough
+    el.value = d.toISOString().slice(0, 10);
+  }
+})();
+
+async function copyFullDayFromRedis() {
+  var btn = document.getElementById('copy-redis-btn');
+  var dateEl = document.getElementById('redis-log-date');
+  var date = dateEl ? dateEl.value : new Date().toISOString().slice(0, 10);
+  if (!date) { alert('Pick a date first'); return; }
+
+  btn.textContent = '⏳ Fetching...';
+  btn.disabled = true;
+
+  try {
+    var resp = await fetch('/api/logs/history?date=' + date + '&limit=5000');
+    if (!resp.ok) {
+      var err = await resp.json().catch(() => ({ error: 'HTTP ' + resp.status }));
+      throw new Error(err.error || 'Fetch failed');
+    }
+    var data = await resp.json();
+    var entries = data.entries || [];
+    var summary = data.summary || {};
+
+    if (!entries.length) {
+      btn.textContent = '⚠ No entries for ' + date;
+      setTimeout(() => { btn.textContent = '💾 Copy Day from Redis'; btn.disabled = false; }, 3000);
+      return;
+    }
+
+    // Format identically to copyLogsForClaude
+    var NL = '\n';
+    var lines = [
+      'APEX — Server Log — ' + date + ' (from Redis)',
+      'Cash EOD: $' + parseFloat(summary.cashEOD || 0).toFixed(2) +
+        ' | Positions EOD: ' + (summary.positionsEOD || 0) +
+        ' | Trades: ' + (summary.trades || 0) +
+        ' | Errors: ' + (summary.errors || 0) +
+        ' | Warns: ' + (summary.warns || 0),
+      'Total entries: ' + entries.length,
+      '─'.repeat(53),
+      ''
+    ];
+
+    // Sort oldest-first (entries may be stored oldest-first already)
+    entries.slice().sort((a, b) => new Date(a.time) - new Date(b.time)).forEach(function(e) {
+      var t = new Date(e.time).toLocaleTimeString();
+      var type = (e.type || 'info').toUpperCase();
+      while (type.length < 8) type += ' ';
+      lines.push('[' + t + '] ' + type + ' ' + (e.message || ''));
+    });
+
+    var text = lines.join(NL);
+
+    // Copy with fallback
+    var copied = false;
+    try {
+      await navigator.clipboard.writeText(text);
+      copied = true;
+    } catch(e) {
+      var ta = document.createElement('textarea');
+      ta.value = text;
+      ta.style.cssText = 'position:fixed;top:0;left:0;opacity:0;pointer-events:none';
+      document.body.appendChild(ta);
+      ta.focus(); ta.select();
+      copied = document.execCommand('copy');
+      document.body.removeChild(ta);
+    }
+
+    btn.textContent = copied ? '✅ Copied ' + entries.length + ' entries' : '❌ Copy failed — select manually';
+    setTimeout(() => { btn.textContent = '💾 Copy Day from Redis'; btn.disabled = false; }, 3000);
+
+  } catch(err) {
+    btn.textContent = '❌ ' + (err.message || 'Error');
+    setTimeout(() => { btn.textContent = '💾 Copy Day from Redis'; btn.disabled = false; }, 3000);
+  }
+}
+
 function copyLogsForClaude() {
   var btn = document.getElementById('copy-log-btn');
   var filterType = (document.getElementById('log-filter').value||'').trim();
@@ -4163,10 +4251,27 @@ async function copyJournal() {
     }
     lines.push('  '+new Date(e.time).toLocaleString());
   });
-  navigator.clipboard.writeText(lines.join('\n')).then(() => {
+  // navigator.clipboard requires HTTPS — use textarea fallback for iframe/HTTP contexts
+  const text = lines.join('\n');
+  try {
+    await navigator.clipboard.writeText(text);
     const btn = document.getElementById('copy-journal-btn');
     if (btn) { btn.textContent='✅ COPIED'; setTimeout(()=>btn.textContent='📋 COPY JOURNAL',2000); }
-  }).catch(() => alert('Copy failed — try manually selecting the text.'));
+  } catch(e) {
+    // Fallback: create a textarea, select it, execCommand copy
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    ta.style.cssText = 'position:fixed;top:0;left:0;opacity:0;pointer-events:none';
+    document.body.appendChild(ta);
+    ta.focus(); ta.select();
+    const ok = document.execCommand('copy');
+    document.body.removeChild(ta);
+    const btn = document.getElementById('copy-journal-btn');
+    if (btn) {
+      btn.textContent = ok ? '✅ COPIED' : '❌ COPY FAILED — select text manually';
+      setTimeout(()=>btn.textContent='📋 COPY JOURNAL',3000);
+    }
+  }
 }
 
 // ── Copy Attribution to clipboard ─────────────────────────────────────────
