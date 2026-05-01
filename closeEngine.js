@@ -268,6 +268,16 @@ async function _doClosePosition(ticker, reason, exitPremium = null, contractSym 
           }
         } else {
           logEvent("warn", `Alpaca close order failed for ${closeSym}: ${JSON.stringify(closeResp)?.slice(0,150)}`);
+          // Error 40310000: account not eligible to trade uncovered option contracts.
+          // This means the paper account lacks options permissions for this contract type.
+          // Mark position as permissionBlocked — stop infinite retry loop and alert.
+          // Manual resolution: fix paper account options permissions on Alpaca dashboard.
+          if (closeResp && closeResp.code === 40310000) {
+            pos._permissionBlocked = true;
+            pos._permissionBlockedAt = new Date().toISOString();
+            logEvent("warn", `[PERM BLOCK] ${ticker} ${closeSym} close blocked by Alpaca permissions (code 40310000). Paper account needs options level 2+ enabled. Position flagged — manual close required. Retry suppressed.`);
+            alpacaCloseOk = true; // mark as "handled" to remove from state and stop retry loop
+          }
         }
       } catch(e) {
         logEvent("error", `Alpaca close order error: ${e.message}`);
