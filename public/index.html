@@ -997,7 +997,8 @@ input[type=text]:focus{border-color:var(--blue)}
     </select>
     <button class="btn" id="copy-log-btn" onclick="copyLogsForClaude()" style="font-size:11px;border-color:rgba(0,196,255,.4);color:#44aaff">&#9126; Copy for Claude</button>
     <input type="date" id="redis-log-date" style="font-size:11px;background:#0a1628;color:#44aaff;border:1px solid rgba(0,196,255,.4);border-radius:4px;padding:3px 6px;cursor:pointer" title="Pick a date to copy from Redis" />
-    <button class="btn" id="copy-redis-btn" onclick="copyFullDayFromRedis()" style="font-size:11px;border-color:rgba(100,200,100,.5);color:#6ec97a">&#128190; Copy Day from Redis</button>
+    <button class="btn" id="save-redis-btn" onclick="saveLogToRedis()" style="font-size:11px;border-color:rgba(255,200,50,.4);color:#ffc832" title="Force-save current log buffer to Redis before copying">&#128190; Save Now</button>
+    <button class="btn" id="copy-redis-btn" onclick="copyFullDayFromRedis()" style="font-size:11px;border-color:rgba(100,200,100,.5);color:#6ec97a">&#9126; Copy Day from Redis</button>
   </div>
   <!-- ── Log box ── -->
   <div class="log-box" id="server-log" style="height:560px;overflow-y:auto"></div>
@@ -3765,6 +3766,21 @@ function copyOpenPositions() {
     el.value = d.toISOString().slice(0, 10);
   }
 })();
+
+async function saveLogToRedis() {
+  var btn = document.getElementById('save-redis-btn');
+  btn.textContent = '⏳ Saving...';
+  btn.disabled = true;
+  try {
+    var resp = await fetch('/api/logs/save-now', { method: 'POST' });
+    var data = await resp.json();
+    if (!resp.ok) throw new Error(data.error || 'Save failed');
+    btn.textContent = '✅ Saved ' + (data.entries || 0) + ' entries';
+  } catch(e) {
+    btn.textContent = '❌ ' + (e.message || 'Error');
+  }
+  setTimeout(() => { btn.textContent = '💾 Save Now'; btn.disabled = false; }, 3000);
+}
 
 async function copyFullDayFromRedis() {
   var btn = document.getElementById('copy-redis-btn');
