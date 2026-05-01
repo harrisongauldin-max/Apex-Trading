@@ -389,12 +389,13 @@ async function executeTrade(stock, price, score, scoreReasons, vix, optionType =
           logEvent("trade", `Order concession attempt ${attempt+1}: widening limit to $${limitPrice} (mid price)`);
         }
         const orderBody = {
-          symbol:        contract.symbol,
-          qty:           contracts,
-          side:          "buy",
-          type:          "limit",
-          time_in_force: "day",
-          limit_price:   limitPrice,
+          symbol:          contract.symbol,
+          qty:             contracts,
+          side:            "buy",
+          type:            "limit",
+          time_in_force:   "day",
+          limit_price:     limitPrice,
+          position_intent: "buy_to_open", // Required for options — tells Alpaca this is a new long position, not a closing buy
         };
         const orderResp = await alpacaPost("/orders", orderBody);
         if (!orderResp || !orderResp.id) {
