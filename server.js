@@ -1714,6 +1714,23 @@ app.post("/api/reset-circuit", requireSecret, async (req, res) => {
   res.json({ ok: true, cash: state.cash, positions: state.positions.length });
 });
 
+// Reset daily P&L loss counter + daily circuit — paper trading only
+// Clears todayRealizedPnL, _dailyCircuitOpen, and _dailyPnL so the system
+// can resume entries regardless of how bad the day's realized losses were.
+app.post("/api/reset-daily-pnl", requireSecret, async (req, res) => {
+  const before = {
+    todayRealizedPnL: state.todayRealizedPnL || 0,
+    _dailyPnL:        state._dailyPnL || 0,
+    _dailyCircuitOpen: state._dailyCircuitOpen,
+  };
+  state.todayRealizedPnL  = 0;
+  state._dailyPnL         = 0;
+  state._dailyCircuitOpen = true;
+  await saveStateNow();
+  logEvent("circuit", `[DAILY RESET] Daily P&L reset to $0 (was $${before.todayRealizedPnL.toFixed(0)}) — circuit cleared for paper trading`);
+  res.json({ ok: true, before, after: { todayRealizedPnL: 0, _dailyPnL: 0, _dailyCircuitOpen: true } });
+});
+
 // Clear VIX spike cooldown separately (e.g. when spike was triggered by bad data)
 app.post("/api/clear-vix-cooldown", requireSecret, async (req, res) => {
   state._vixSpikeAt = null;
