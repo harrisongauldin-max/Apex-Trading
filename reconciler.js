@@ -294,15 +294,20 @@ async function runReconciliation() {
               ? parseFloat((p.avgEntry * 100 * Math.abs(p.qty)).toFixed(2)) // long: cash paid
               : 0, // short: received premium, no cash outflow (margin handled separately)
             score: 75, reasons: ['Reconstructed from Alpaca reconciliation'],
-            openDate: p.alpPos.created_at || new Date().toISOString(), peakPremium: p.avgEntry,
+            openDate: p.alpPos.created_at || new Date().toISOString(),
+            // peakPremium: use current market price if higher than avgEntry.
+            // avgEntry alone misses intraday highs — a position that peaked at 2x entry
+            // gets its trail wiped on reconcile. Use max(avgEntry, curP from snapshot).
+            // If curP unknown, default to avgEntry (trail will re-calibrate as prices come in).
+            peakPremium: Math.max(p.avgEntry, curP || 0) || p.avgEntry,
             entryRSI: 50, entryMACD: 'neutral', entryMomentum: 'steady', entryMacro: 'neutral',
             entryThesisScore: 100, thesisHistory: [], agentHistory: [],
             realData: true, vix: _state.vix || 20, entryVIX: _state.vix || 20,
             expiryType: 'monthly', dteLabel: 'RECONCILED',
             partialClosed: false, isMeanReversion: false, trailStop: null,
             breakevenLocked: false, halfPosition: false,
-            target: parseFloat((p.avgEntry * 1.5).toFixed(2)),
-            stop: parseFloat((p.avgEntry * 0.65).toFixed(2)),
+            target: parseFloat((p.avgEntry * (1 + TAKE_PROFIT_PCT)).toFixed(2)),
+            stop:   parseFloat((p.avgEntry * (1 - STOP_LOSS_PCT)).toFixed(2)),
             takeProfitPct: TAKE_PROFIT_PCT, fastStopPct: STOP_LOSS_PCT, // individual leg: type unknown
           });
           used.add(i);
