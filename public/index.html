@@ -494,6 +494,7 @@ input[type=text]:focus{border-color:var(--blue)}
     <button class="btn" onclick="triggerTestScan()" style="background:#1a1a2a;border-color:#6644aa;color:#aa88ff" title="Forces a dry run scan regardless of market hours — safe for after-hours testing">🧪 TEST SCAN</button>
     <button class="btn btn-red" onclick="resetMonth()">↺ RESET MONTH</button>
     <button class="btn" style="background:#1a1a40;border:1px solid #4444ff;color:#8888ff" onclick="resetCircuit()">⟳ RESET CIRCUIT</button>
+    <button class="btn" style="background:#1a2a1a;border:1px solid #44aa44;color:#88dd88" onclick="resetDailyPnL()" title="Paper trading: reset today's loss counter and unblock daily circuit">📅 RESET DAY P&L</button>
     <button class="btn" style="background:#1a1a40;border:1px solid #ff9900;color:#ffbb44" onclick="clearBlockers()">🔓 CLEAR BLOCKERS</button>
     <button class="btn" style="background:#401010;border:1px solid #ff4444;color:#ff8888" onclick="fullReset()">🗑 FULL RESET</button>
     <button class="btn" style="background:#7b0000;border:1px solid #ff0000" onclick="emergencyClose()">⚠ EMERGENCY CLOSE ALL</button>
@@ -2667,6 +2668,22 @@ function secretHeaders() {
   const s = getSecret();
   if (!s) return null;
   return { 'Content-Type': 'application/json', 'x-argo-secret': s };
+}
+
+async function resetDailyPnL() {
+  if (!confirm('Reset today\'s P&L loss counter to $0 and clear the daily circuit? (Paper trading only)')) return;
+  const h = {'Content-Type':'application/json','x-apex-secret': window._apexSecret||''};
+  try {
+    const resp = await fetch('/api/reset-daily-pnl', {method:'POST', headers:h});
+    const data = await resp.json();
+    if (data.ok) {
+      alert(`Daily P&L reset. Was: $${data.before.todayRealizedPnL.toFixed(0)} → Now: $0. Circuit cleared.`);
+    } else {
+      alert('Reset failed: ' + JSON.stringify(data));
+    }
+  } catch(e) {
+    alert('Error: ' + e.message);
+  }
 }
 
 async function resetCircuit() {
