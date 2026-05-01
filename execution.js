@@ -244,8 +244,18 @@ function calcPositionSize(premium, score, vix) {
   const contracts = Math.max(1, Math.min(Math.min(5, preCalibCap), Math.floor(maxCost / (premium * 100))));
 
   // If even 1 contract exceeds the risk-based cap, return 0 to signal skip
-  // Caller checks contracts < 1 and skips the trade
-  if (premium * 100 > MAX_LOSS_PER_TRADE / STOP_LOSS_PCT) return 0;
+  // Exception: high-conviction (score >= 85) always gets 1 contract if premium is under $25
+  // Prevents 0-return on expensive instruments (SMH $15+) due to negative Kelly clamping
+  // when the position cost ($1,500-2,500) is still within acceptable risk limits.
+  const singleContractCost = premium * 100;
+  const riskCap = MAX_LOSS_PER_TRADE / STOP_LOSS_PCT; // e.g. $900/0.35 = $2,571
+  if (singleContractCost > riskCap) {
+    // High conviction override: allow 1 contract if cost < 20% of cash and premium < $25
+    if (score >= 85 && singleContractCost < state.cash * 0.20 && premium < 25) {
+      return 1;
+    }
+    return 0;
+  }
 
   return contracts;
 }
