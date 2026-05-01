@@ -905,10 +905,10 @@ app.get("/api/state", async (req, res) => {
     const cur  = parseFloat(pos.currentPrice) || prem;
     const maxProfitVal = parseFloat(pos.maxProfit) || Math.max(1, prem * 100 * c);
     let displayPnL;
-    // Use reconciler-computed unrealizedPnL when available (price-based, sign-corrected)
-    if (typeof pos.unrealizedPnL === 'number' && pos.unrealizedPnL !== 0) {
-      displayPnL = pos.unrealizedPnL;
-    } else if (pos.isCreditSpread) {
+    // Always recompute from live currentPrice — pos.unrealizedPnL can be stale from earlier
+    // scans (e.g. set when GLD was up, not updated when it fell back). Stale unrealizedPnL
+    // causes the dashboard to show a phantom gain while currentPrice shows the real loss.
+    if (pos.isCreditSpread) {
       displayPnL = parseFloat(((prem - cur) * 100 * c).toFixed(2));
     } else {
       displayPnL = parseFloat(((cur - prem) * 100 * c).toFixed(2));
