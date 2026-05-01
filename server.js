@@ -1482,14 +1482,38 @@ app.get("/api/logs/history", async (req, res) => {
         headers: { Authorization: `Bearer ${REDIS_TOKEN}` }
       });
       const data = await resp.json();
-      if (!data.result) return res.status(404).json({ error: `No log found for ${date}` });
-      const parsed = JSON.parse(data.result);
+      // If dedicated log key missing, fall back to live _dailyLogBuffer from state
+      // This happens when: server restarted during the day, EOD cron not yet fired,
+      // or multiple deploys wiped the in-memory buffer before 4:05pm save.
+      let entries, summary, source;
+      if (!data.result) {
+        const todayStr = getETTime().toISOString().slice(0, 10);
+        if (date === todayStr && state._dailyLogBuffer && state._dailyLogBuffer.length) {
+          entries = state._dailyLogBuffer;
+          summary = {
+            totalEntries: entries.length,
+            trades:  entries.filter(e => e.type === "trade").length,
+            errors:  entries.filter(e => e.type === "error").length,
+            warns:   entries.filter(e => e.type === "warn").length,
+            cashEOD: state.cash,
+            positionsEOD: state.positions.length,
+            note: "live buffer — EOD save not yet triggered"
+          };
+          source = "live_buffer";
+        } else {
+          return res.status(404).json({ error: `No log found for ${date} — EOD save fires at 4:05pm ET. Use the manual save endpoint (/api/logs/save-now) to force-save the current buffer.` });
+        }
+      } else {
+        const parsed = JSON.parse(data.result);
+        entries = parsed.entries || [];
+        summary = parsed.summary;
+        source  = "redis";
+      }
       const filter = req.query.filter;
-      const limit  = Math.min(parseInt(req.query.limit || 500), 2000);
+      const limit  = Math.min(parseInt(req.query.limit || 5000), 10000);
       const types  = filter ? filter.split(",").map(t => t.trim().toLowerCase()) : null;
-      let entries  = parsed.entries || [];
       if (types) entries = entries.filter(e => types.includes(e.type));
-      res.json({ date, entries: entries.slice(0, limit), summary: parsed.summary });
+      res.json({ date, entries: entries.slice(0, limit), summary, source });
     } else {
       // List available dates -- scan Redis keys with argo:logs: prefix
       const resp = await fetch(`${REDIS_URL}/keys/argo:logs:*`, {
@@ -1502,6 +1526,21 @@ app.get("/api/logs/history", async (req, res) => {
         .reverse(); // most recent first
       res.json({ available: dates, count: dates.length });
     }
+  } catch(e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Force-save current _dailyLogBuffer to Redis (manual trigger for mid-day saves)
+// Useful when: multiple deploys today, EOD cron hasn't fired yet, or debugging
+app.post("/api/logs/save-now", async (req, res) => {
+  if (!REDIS_URL || !REDIS_TOKEN) return res.status(503).json({ error: "Redis not configured" });
+  try {
+    const before = (state._dailyLogBuffer || []).length;
+    await saveDailyLogToRedis();
+    const dateStr = getETTime().toISOString().slice(0, 10);
+    logEvent("scan", `[MANUAL SAVE] Daily log force-saved to Redis: argo:logs:${dateStr} | ${before} entries`);
+    res.json({ ok: true, date: dateStr, entries: before, note: "Buffer saved. Buffer cleared — live logs will accumulate fresh from here." });
   } catch(e) {
     res.status(500).json({ error: e.message });
   }
@@ -1769,7 +1808,7 @@ app.post("/api/full-reset", requireSecret, async (req, res) => {
   // Reset state completely
   Object.assign(state, defaultState());
   await saveStateNow();
-  logEvent("reset", "FULL RESET - state wiped, starting fresh with $10,000");
+  logEvent("reset", `FULL RESET - state wiped, starting fresh with $${MONTHLY_BUDGET.toLocaleString()}`);
   res.json({ ok: true, message: "Full reset complete" });
 });
 
