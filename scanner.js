@@ -1241,15 +1241,18 @@ async function runScan() {
   // Tracks intraday unrealized + realized P&L against daily limit.
   // If daily loss exceeds 3% of account, halt all new entries for the session.
   //
-  // V2.86 fixes:
-  // 1. Staleness guard on unrealized P&L — stale currentPrice from API failures
+  // V2.86: Staleness guard on unrealized P&L — stale currentPrice from API failures
   //    was masking real losses (phantom gains from hours-old prices skipped circuit).
-  // 2. Overnight positions now included in daily loss calc.
-  //    Positions carried from prior day had unrealized losses invisible to todayRealizedPnL
-  //    until they closed — circuit fired too late.
+  //    NOTE: unrealized P&L only counts positions opened TODAY (openedToday flag).
+  //    Overnight carry positions are excluded — their losses belong to the prior day's session.
+  //    todayRealizedPnL includes all closed P&L from today's session.
   {
-    const MAX_PRICE_STALE_MS = 60000; // 60s — if currentPrice is older, use premium (flat) for safety
+    const MAX_PRICE_STALE_MS = 60000; // 60s — if currentPrice is older, treat as flat
+    const todayOpen = new Date(); todayOpen.setHours(0,0,0,0);
     const unrealizedPnL = (state.positions || []).reduce((s, p) => {
+      // Only count unrealized from TODAY's entries — carry positions excluded from daily circuit
+      const openedToday = p.openDate && new Date(p.openDate) >= todayOpen;
+      if (!openedToday) return s;
       const priceAge = p._currentPriceUpdatedAt ? Date.now() - p._currentPriceUpdatedAt : Infinity;
       const safeCurrentPrice = priceAge < MAX_PRICE_STALE_MS ? p.currentPrice : null;
       if (!safeCurrentPrice || !p.premium) return s; // skip stale — treat as flat
@@ -1262,8 +1265,10 @@ async function runScan() {
     if (todayPnL < dailyLossLimit && !dryRunMode) {
       logEvent("warn", `[DAILY CIRCUIT] Daily P&L $${todayPnL.toFixed(0)} below -3% limit ($${dailyLossLimit.toFixed(0)}) — halting new entries`);
       state._dailyCircuitOpen = false;
-    } else if (state._dailyCircuitOpen === false && todayPnL >= 0) {
-      // Auto-reset if account recovers to flat (rare intraday, mainly for testing)
+    } else if (state._dailyCircuitOpen === false && todayPnL >= dailyLossLimit * 0.75) {
+      // Auto-reset if losses recover to within 75% of limit (e.g. -$627 vs -$836 limit)
+      // Allows resumption after a partial recovery without requiring full return to flat
+      logEvent("scan", `[DAILY CIRCUIT] Auto-reset — P&L $${todayPnL.toFixed(0)} recovered to within 75% of limit ($${(dailyLossLimit * 0.75).toFixed(0)})`);
       state._dailyCircuitOpen = true;
     }
     if (state._dailyCircuitOpen === false) return; // halt entries
