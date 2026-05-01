@@ -2672,12 +2672,13 @@ function secretHeaders() {
 
 async function resetDailyPnL() {
   if (!confirm('Reset today\'s P&L loss counter to $0 and clear the daily circuit? (Paper trading only)')) return;
-  const h = {'Content-Type':'application/json','x-apex-secret': window._apexSecret||''};
+  const h = secretHeaders(); if (!h) return;
   try {
     const resp = await fetch('/api/reset-daily-pnl', {method:'POST', headers:h});
     const data = await resp.json();
     if (data.ok) {
       alert(`Daily P&L reset. Was: $${data.before.todayRealizedPnL.toFixed(0)} → Now: $0. Circuit cleared.`);
+      await fetchState();
     } else {
       alert('Reset failed: ' + JSON.stringify(data));
     }
