@@ -434,6 +434,18 @@ async function _doClosePosition(ticker, reason, exitPremium = null, contractSym 
     logEvent("warn", `[THESIS] ${ticker} loss recorded - re-entry requires agent confirmation for 24h`);
   }
 
+  // Record all closes (wins AND losses) for same-day cooldown gate.
+  // After any close, block same-instrument re-entry for 30 minutes.
+  // Prevents: win at 9:23am → re-enter at 9:27am same direction at worse strike.
+  state._recentCloses = state._recentCloses || {};
+  const _closingPos = state.positions.find(p => p.ticker === ticker) || {};
+  state._recentCloses[ticker] = {
+    closedAt:   Date.now(),
+    optionType: _closingPos.optionType || null,
+    pnl,
+    reason,
+  };
+
   // Peak cash tracking for drawdown
   const fullPortfolioValue = state.cash + openRisk() ;
   if (fullPortfolioValue > state.peakCash) state.peakCash = fullPortfolioValue;
