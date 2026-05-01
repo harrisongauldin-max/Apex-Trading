@@ -1,4 +1,5 @@
 <!DOCTYPE html>
+
 <html lang="en">
 <head>
 <meta charset="UTF-8"/>
@@ -154,6 +155,7 @@ input[type=text]:focus{border-color:var(--blue)}
 </div>
 
 <!-- ═══════════════ TRADING TAB ═══════════════ -->
+
 <div id="tab-trading" class="content active">
   <!-- SPY Live Tracker -->
   <div class="card" style="margin-bottom:12px;padding:12px 16px">
@@ -183,6 +185,7 @@ input[type=text]:focus{border-color:var(--blue)}
   </div>
 
   <!-- Spiral Warning -->
+
   <div id="spiral-warning" style="display:none;background:rgba(255,85,85,.1);border:1px solid rgba(255,85,85,.3);border-radius:8px;padding:10px 14px;margin-bottom:10px;font-size:11px;color:#ff5555">
     ⚠ <strong>SPIRAL DETECTED</strong> — <span id="spiral-warning-text"></span>
   </div>
@@ -206,45 +209,49 @@ input[type=text]:focus{border-color:var(--blue)}
       </div>
     </div>
 
-    <!-- Day Plan Row — populated from _dayPlan -->
-    <div id="day-plan-row" style="display:none;margin-bottom:8px;padding:8px;background:rgba(0,100,200,.08);border-radius:6px;border:1px solid rgba(0,100,200,.2)">
-      <div style="font-size:9px;color:var(--blue);letter-spacing:1px;margin-bottom:6px">📋 DAY PLAN</div>
-      <div style="display:flex;gap:16px;flex-wrap:wrap">
-        <div><div style="font-size:9px;color:var(--muted)">REGIME</div><div id="dp-regime" style="font-size:11px;font-weight:700;color:var(--text)">--</div></div>
-        <div><div style="font-size:9px;color:var(--muted)">ENTRY BIAS</div><div id="dp-bias" style="font-size:11px;font-weight:700;color:var(--text)">--</div></div>
-        <div><div style="font-size:9px;color:var(--muted)">TRADE TYPE</div><div id="dp-tradetype" style="font-size:11px;font-weight:700;color:var(--text)">--</div></div>
-        <div><div style="font-size:9px;color:var(--muted)">RISK LEVEL</div><div id="dp-risk" style="font-size:11px;font-weight:700;color:var(--text)">--</div></div>
-        <div id="dp-suppress-wrap" style="display:none"><div style="font-size:9px;color:var(--muted)">SUPPRESS UNTIL</div><div id="dp-suppress" style="font-size:11px;font-weight:700;color:var(--orange)">--</div></div>
-        <div id="dp-levels-wrap" style="display:none"><div style="font-size:9px;color:var(--muted)">KEY LEVELS</div><div id="dp-levels" style="font-size:11px;font-weight:700;color:var(--text)">--</div></div>
-      </div>
-      <div id="dp-catalysts-row" style="margin-top:6px;display:none">
-        <span style="font-size:9px;color:var(--muted)">CATALYSTS: </span>
-        <span id="dp-catalysts" style="font-size:10px;color:var(--gold)"></span>
-      </div>
-    </div>
+```
+<!-- Day Plan Row — populated from _dayPlan -->
+<div id="day-plan-row" style="display:none;margin-bottom:8px;padding:8px;background:rgba(0,100,200,.08);border-radius:6px;border:1px solid rgba(0,100,200,.2)">
+  <div style="font-size:9px;color:var(--blue);letter-spacing:1px;margin-bottom:6px">📋 DAY PLAN</div>
+  <div style="display:flex;gap:16px;flex-wrap:wrap">
+    <div><div style="font-size:9px;color:var(--muted)">REGIME</div><div id="dp-regime" style="font-size:11px;font-weight:700;color:var(--text)">--</div></div>
+    <div><div style="font-size:9px;color:var(--muted)">ENTRY BIAS</div><div id="dp-bias" style="font-size:11px;font-weight:700;color:var(--text)">--</div></div>
+    <div><div style="font-size:9px;color:var(--muted)">TRADE TYPE</div><div id="dp-tradetype" style="font-size:11px;font-weight:700;color:var(--text)">--</div></div>
+    <div><div style="font-size:9px;color:var(--muted)">RISK LEVEL</div><div id="dp-risk" style="font-size:11px;font-weight:700;color:var(--text)">--</div></div>
+    <div id="dp-suppress-wrap" style="display:none"><div style="font-size:9px;color:var(--muted)">SUPPRESS UNTIL</div><div id="dp-suppress" style="font-size:11px;font-weight:700;color:var(--orange)">--</div></div>
+    <div id="dp-levels-wrap" style="display:none"><div style="font-size:9px;color:var(--muted)">KEY LEVELS</div><div id="dp-levels" style="font-size:11px;font-weight:700;color:var(--text)">--</div></div>
+  </div>
+  <div id="dp-catalysts-row" style="margin-top:6px;display:none">
+    <span style="font-size:9px;color:var(--muted)">CATALYSTS: </span>
+    <span id="dp-catalysts" style="font-size:10px;color:var(--gold)"></span>
+  </div>
+</div>
 
-    <div id="agent-tickers-row" style="display:none">
-      <div style="font-size:9px;color:var(--muted);margin-bottom:4px">AFFECTED TICKERS</div>
-      <div id="agent-bearish-tickers" style="display:inline"></div>
-      <div id="agent-bullish-tickers" style="display:inline;margin-left:8px"></div>
+<div id="agent-tickers-row" style="display:none">
+  <div style="font-size:9px;color:var(--muted);margin-bottom:4px">AFFECTED TICKERS</div>
+  <div id="agent-bearish-tickers" style="display:inline"></div>
+  <div id="agent-bullish-tickers" style="display:inline;margin-left:8px"></div>
+</div>
+<div id="agent-themes-row" style="margin-top:6px;display:none">
+  <div style="font-size:9px;color:var(--muted);margin-bottom:4px">KEY THEMES</div>
+  <div id="agent-themes" style="font-size:10px;color:var(--muted)"></div>
+</div>
+<div style="display:flex;justify-content:space-between;align-items:center;margin-top:10px;padding-top:8px;border-top:1px solid var(--border)">
+  <div style="display:flex;align-items:center;gap:8px">
+    <span style="font-size:10px;color:var(--muted)">AGENT AUTO-EXIT</span>
+    <div id="agent-toggle" onclick="toggleAgentAutoExit()" style="width:36px;height:18px;border-radius:9px;background:var(--border);cursor:pointer;position:relative;transition:background .2s">
+      <div id="agent-toggle-knob" style="position:absolute;top:2px;left:2px;width:14px;height:14px;border-radius:50%;background:#555;transition:left .2s"></div>
     </div>
-    <div id="agent-themes-row" style="margin-top:6px;display:none">
-      <div style="font-size:9px;color:var(--muted);margin-bottom:4px">KEY THEMES</div>
-      <div id="agent-themes" style="font-size:10px;color:var(--muted)"></div>
-    </div>
-    <div style="display:flex;justify-content:space-between;align-items:center;margin-top:10px;padding-top:8px;border-top:1px solid var(--border)">
-      <div style="display:flex;align-items:center;gap:8px">
-        <span style="font-size:10px;color:var(--muted)">AGENT AUTO-EXIT</span>
-        <div id="agent-toggle" onclick="toggleAgentAutoExit()" style="width:36px;height:18px;border-radius:9px;background:var(--border);cursor:pointer;position:relative;transition:background .2s">
-          <div id="agent-toggle-knob" style="position:absolute;top:2px;left:2px;width:14px;height:14px;border-radius:50%;background:#555;transition:left .2s"></div>
-        </div>
-        <span id="agent-toggle-label" style="font-size:10px;color:var(--muted)">OFF — monitoring only</span>
-      </div>
-      <span style="font-size:9px;color:#555">Auto-exits losing overnight positions on EXIT + high confidence</span>
-    </div>
+    <span id="agent-toggle-label" style="font-size:10px;color:var(--muted)">OFF — monitoring only</span>
+  </div>
+  <span style="font-size:9px;color:#555">Auto-exits losing overnight positions on EXIT + high confidence</span>
+</div>
+```
+
   </div>
 
   <!-- Portfolio Value Chart -->
+
   <div class="card" style="margin-bottom:12px;padding:12px 16px">
     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
       <div>
@@ -288,11 +295,14 @@ input[type=text]:focus{border-color:var(--blue)}
       <div class="sub" id="revenue-sub">target: $2,000</div>
     </div>
 
-    <div class="card">
-      <div class="card-title">Alpaca Account</div>
-      <div class="metric-sm" id="alpaca-cash" style="color:var(--muted)">$--</div>
-      <div class="sub" id="alpaca-cash-sub">paper balance</div>
-    </div>
+```
+<div class="card">
+  <div class="card-title">Alpaca Account</div>
+  <div class="metric-sm" id="alpaca-cash" style="color:var(--muted)">$--</div>
+  <div class="sub" id="alpaca-cash-sub">paper balance</div>
+</div>
+```
+
   </div>
 
   <div class="grid4" style="margin-bottom:12px">
@@ -328,6 +338,7 @@ input[type=text]:focus{border-color:var(--blue)}
   </div>
 
   <!-- Market Context Row -->
+
   <div class="grid4" style="margin-bottom:12px">
     <div class="card">
       <div class="card-title">Fear & Greed</div>
@@ -357,6 +368,7 @@ input[type=text]:focus{border-color:var(--blue)}
   </div>
 
   <!-- Regime + Benchmark Row -->
+
   <div class="grid4" style="margin-bottom:12px">
     <div class="card">
       <div class="card-title">Market Regime</div>
@@ -381,6 +393,7 @@ input[type=text]:focus{border-color:var(--blue)}
   </div>
 
   <!-- Monte Carlo + Kelly Row -->
+
   <div class="grid4" style="margin-bottom:12px">
     <div class="card">
       <div class="card-title">Monte Carlo (3mo)</div>
@@ -405,6 +418,7 @@ input[type=text]:focus{border-color:var(--blue)}
   </div>
 
   <!-- Advanced Metrics Row -->
+
   <div class="grid4" style="margin-bottom:12px">
     <div class="card">
       <div class="card-title">Calmar Ratio</div>
@@ -429,6 +443,7 @@ input[type=text]:focus{border-color:var(--blue)}
   </div>
 
   <!-- Streak + Drawdown Duration Row -->
+
   <div class="grid4" style="margin-bottom:12px">
     <div class="card">
       <div class="card-title">Current Streak</div>
@@ -453,10 +468,12 @@ input[type=text]:focus{border-color:var(--blue)}
   </div>
 
   <!-- Concentration + Stress Test -->
+
   <div id="concentration-alerts" style="margin-bottom:12px"></div>
   <div id="stress-test-wrap" style="margin-bottom:12px"></div>
 
   <!-- Macro News Banner -->
+
   <div id="macro-banner" style="background:var(--panel);border:1px solid var(--border);border-radius:8px;padding:10px 14px;margin-bottom:12px;display:none">
     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
       <span style="font-size:10px;color:var(--muted);letter-spacing:1px">MACRO SIGNAL</span>
@@ -518,6 +535,7 @@ input[type=text]:focus{border-color:var(--blue)}
 </div>
 
 <!-- ═══════════════ ANALYTICS TAB ═══════════════ -->
+
 <div id="tab-analytics" class="content">
   <div class="grid3" style="margin-bottom:12px">
     <div class="card">
@@ -575,6 +593,7 @@ input[type=text]:focus{border-color:var(--blue)}
   </div>
 
   <!-- Exit Performance Stats Panel -->
+
   <div class="section-title" style="margin-top:16px">Exit Performance Stats</div>
   <div class="card" style="padding:0;overflow:hidden">
     <div style="padding:10px 14px;background:var(--panel);border-bottom:1px solid var(--border);display:flex;justify-content:space-between;align-items:center">
@@ -587,6 +606,7 @@ input[type=text]:focus{border-color:var(--blue)}
   </div>
 
   <!-- Max Positions Panel -->
+
   <div class="section-title" style="margin-top:16px">Position Limits</div>
   <div class="card">
     <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:12px;font-size:13px">
@@ -610,6 +630,7 @@ input[type=text]:focus{border-color:var(--blue)}
 </div>
 
 <!-- ═══════════════ THETA TAB ═══════════════ -->
+
 <div id="tab-theta" class="content">
   <div class="grid4" style="margin-bottom:12px">
     <div class="card"><div class="card-title">BETA-ADJ DELTA</div><div class="metric-sm" id="th-beta-delta">--</div><div class="sub">Portfolio directional exposure</div></div>
@@ -694,6 +715,7 @@ input[type=text]:focus{border-color:var(--blue)}
 </div>
 
 <!-- ═══════════════ ATTRIBUTION TAB ═══════════════ -->
+
 <div id="tab-attribution" class="content">
   <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;flex-wrap:wrap;gap:8px">
     <div class="section-title" style="margin:0">Trade Attribution & Analytics</div>
@@ -701,6 +723,7 @@ input[type=text]:focus{border-color:var(--blue)}
   </div>
 
   <!-- Summary Stats Row -->
+
   <div id="attr-summary-wrap" style="margin-bottom:16px"></div>
 
   <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:16px">
@@ -732,6 +755,7 @@ input[type=text]:focus{border-color:var(--blue)}
 </div>
 
 <!-- ═══════════════ TAX LOG TAB ═══════════════ -->
+
 <div id="tab-tax" class="content">
   <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;flex-wrap:wrap;gap:8px">
     <div class="section-title" style="margin:0">Tax Log — All Closed Trades</div>
@@ -749,6 +773,7 @@ input[type=text]:focus{border-color:var(--blue)}
 </div>
 
 <!-- ═══════════════ JOURNAL TAB ═══════════════ -->
+
 <div id="tab-journal" class="content">
   <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;flex-wrap:wrap;gap:8px">
     <div class="section-title" style="margin:0">Trade Journal — Entry Reasoning</div>
@@ -760,6 +785,7 @@ input[type=text]:focus{border-color:var(--blue)}
 </div>
 
 <!-- ═══════════════ STOCKS TAB ═══════════════ -->
+
 <div id="tab-stocks" class="content">
   <div class="grid3" style="margin-bottom:12px">
     <div class="card">
@@ -795,6 +821,7 @@ input[type=text]:focus{border-color:var(--blue)}
 </div>
 
 <!-- ═══════════════ REPORT TAB ═══════════════ -->
+
 <div id="tab-report" class="content">
   <div style="display:flex;gap:8px;margin-bottom:12px;flex-wrap:wrap">
     <button class="btn btn-green" onclick="loadReport()">↻ REFRESH REPORT</button>
@@ -804,7 +831,9 @@ input[type=text]:focus{border-color:var(--blue)}
 </div>
 
 <!-- ═══════════════ LOG TAB ═══════════════ -->
+
 <!-- ═══════════════ SCORE DEBUG TAB ═══════════════ -->
+
 <div id="tab-scoredebug" class="content">
   <div style="display:flex;gap:8px;margin-bottom:12px;flex-wrap:wrap;align-items:center">
     <button class="btn btn-green" onclick="loadScoreDebug()">&#8635; REFRESH SCORES</button>
@@ -815,6 +844,7 @@ input[type=text]:focus{border-color:var(--blue)}
 </div>
 
 <!-- ═══════════════ BACKTEST TAB ═══════════════ -->
+
 <div id="tab-backtest" class="content">
   <div style="margin-bottom:14px">
     <span style="font-size:13px;color:#00ff88;letter-spacing:2px;font-weight:700">⚙ BACKTEST ENGINE</span>
@@ -823,6 +853,7 @@ input[type=text]:focus{border-color:var(--blue)}
   </div>
 
   <!-- Config panel -->
+
   <div class="grid3" style="margin-bottom:12px">
     <div class="card">
       <div class="card-title">INSTRUMENT</div>
@@ -885,6 +916,7 @@ input[type=text]:focus{border-color:var(--blue)}
   </div>
 
   <!-- Results -->
+
   <div id="bt-results" style="display:none">
     <div class="grid4" id="bt-summary-cards" style="margin-bottom:12px"></div>
     <div class="grid2" style="margin-bottom:12px">
@@ -942,6 +974,7 @@ input[type=text]:focus{border-color:var(--blue)}
   </div>
 
   <!-- Stress test results -->
+
   <div id="bt-stress-results" style="display:none">
     <div class="card">
       <div class="card-title">STRESS TEST RESULTS</div>
@@ -1004,7 +1037,6 @@ input[type=text]:focus{border-color:var(--blue)}
   <!-- ── Log box ── -->
   <div class="log-box" id="server-log" style="height:560px;overflow-y:auto"></div>
 </div>
-
 
 <script>
 // ── State ──────────────────────────────────────────────────────────────────
@@ -1728,7 +1760,7 @@ function renderPositions() {
 
 // ── Helper: fmt ────────────────────────────────────────────────────────────
 function pnlColor(v) { return v >= 0 ? 'var(--green)' : 'var(--red)'; }
-function pnlSign(v)  { return v >= 0 ? '+' : ''; }
+function pnlSign(v)  { return v >= 0 ? '+' : '-'; }
 
 function scoreCol(s) {
   return s >= 85 ? 'var(--green)' : s >= 70 ? 'var(--blue)' : 'var(--orange)';
@@ -1932,10 +1964,14 @@ function renderNativeSpread(p) {
 function renderSingleLeg(p) {
   const curPrice  = parseFloat(p.currentPrice || p.premium);
   const c         = p.contracts || 1;
-  const chgDollar = p.unrealizedPnL !== undefined ? parseFloat(p.unrealizedPnL)
-    : (curPrice - parseFloat(p.premium)) * 100 * c;
-  const chgPct    = parseFloat(p.premium) > 0
-    ? (chgDollar / (parseFloat(p.premium) * 100 * c) * 100) : 0;
+  const prem      = parseFloat(p.premium) || 0;
+  // Use server-computed displayPnL (always fresh from currentPrice).
+  // p.unrealizedPnL is stale — set by reconciler hours ago when price was different.
+  const chgDollar = p.displayPnL !== undefined
+    ? parseFloat(p.displayPnL)
+    : (curPrice - prem) * 100 * c;
+  const chgPct    = prem > 0
+    ? (chgDollar / (prem * 100 * c) * 100) : 0;
   const estValue  = curPrice * 100 * c;
   const score     = p.score || 0;
   const dte       = Math.max(0, Math.round((new Date(p.expDate) - new Date()) / 86400000));
@@ -4460,5 +4496,6 @@ async function resetMonth() {
 }
 
 </script>
+
 </body>
 </html>
