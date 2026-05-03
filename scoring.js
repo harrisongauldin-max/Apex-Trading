@@ -205,9 +205,17 @@ function isGLDEntryAllowed(optionType, dxy, spyReturn5d, vix, gldRSI, gldPrice, 
     // GLD 2023: 8-13 trades but WR dropped 37%-23% with extra entries - gate was right at 20
     const vixTooLow        = vix < 20;                 // restored to 20
     const gldDowntrend     = gldMA20 > 0 && gldPrice > 0 && gldPrice < gldMA20; // gold below 20MA = downtrend
+    // V2.87 FIX 1: Minimum daily RSI gate for GLD calls.
+    // GLD $445C was entered at dailyRSI 49.5, score 99. Neutral daily momentum on a hedge
+    // instrument is insufficient conviction for a naked call. Daily RSI must show either:
+    //   (a) oversold setup (dailyRSI ≤ 40) for MR call, OR
+    //   (b) confirmed bullish momentum (dailyRSI ≥ 55) for trend call.
+    // The 40-55 neutral zone is a NO-TRADE zone for GLD calls — no directional edge.
+    const gldRSINeutralZone = gldRSI !== null && gldRSI > 40 && gldRSI < 55;
     if (dxyStrengthening) return { allowed: false, reason: `GLD call blocked - DXY strengthening (+${dxy.change.toFixed(2)}% 5d, dollar headwind for gold)` };
     if (vixTooLow)        return { allowed: false, reason: `GLD call blocked - VIX ${vix.toFixed(1)} below 20, insufficient uncertainty for gold catalyst` };
     if (gldDowntrend)     return { allowed: false, reason: `GLD call blocked - GLD $${gldPrice.toFixed(2)} below 20MA $${gldMA20.toFixed(2)}, don't buy calls in downtrend` };
+    if (gldRSINeutralZone) return { allowed: false, reason: `GLD call blocked - dailyRSI ${gldRSI?.toFixed(1)} in neutral zone (40-55), no directional edge (need ≤40 oversold or ≥55 bullish)` };
     return { allowed: true };
   } else {
     // GLD puts  -- two paths by trade type:
