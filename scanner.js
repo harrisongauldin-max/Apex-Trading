@@ -1881,13 +1881,22 @@ async function runScan() {
 
       // P3: HYG (High Yield Bonds) — credit stress entry gates
       if (stock.ticker === "HYG") {
-        const hygRelStr   = state._sectorRelStr?.HYG?.relStr || 0;
-        const hygRSI      = liveStock.rsi || liveStock.dailyRsi || 50;
-        const creditStress = !!state._creditStress;
-        const hygCallGate  = isHYGEntryAllowed("call", creditStress, hygRelStr, hygRSI);
-        const hygPutGate   = isHYGEntryAllowed("put",  creditStress, hygRelStr, hygRSI);
-        if (!hygCallGate.allowed) { callSetup.score = 0; logEvent("filter", hygCallGate.reason); }
-        if (!hygPutGate.allowed)  { putSetup.score  = 0; logEvent("filter", hygPutGate.reason);  }
+        // V2.87 FIX 8: Early HYG minimum premium screen before chain fetch.
+        // HYG options at VIX < 30 are structurally below the $0.50 minimum premium —
+        // bond ETF IV is too low. Skip entirely at VIX < 30 to avoid wasting the chain fetch.
+        // Heuristic: HYG $80 × 10% IV × √(38/365) × 0.6 ≈ $0.14 at VIX 27. Always below floor.
+        if ((state.vix || 20) < 30) {
+          logEvent("filter", `HYG skipped — VIX ${(state.vix||20).toFixed(1)} < 30, HYG options structurally below $0.50 minimum (bond ETF low IV)`);
+          callSetup.score = 0; putSetup.score = 0;
+        } else {
+          const hygRelStr   = state._sectorRelStr?.HYG?.relStr || 0;
+          const hygRSI      = liveStock.rsi || liveStock.dailyRsi || 50;
+          const creditStress = !!state._creditStress;
+          const hygCallGate  = isHYGEntryAllowed("call", creditStress, hygRelStr, hygRSI);
+          const hygPutGate   = isHYGEntryAllowed("put",  creditStress, hygRelStr, hygRSI);
+          if (!hygCallGate.allowed) { callSetup.score = 0; logEvent("filter", hygCallGate.reason); }
+          if (!hygPutGate.allowed)  { putSetup.score  = 0; logEvent("filter", hygPutGate.reason);  }
+        }
       }
     } else {
       // Individual stocks: use scorePutSetup/scoreCallSetup
@@ -2084,12 +2093,21 @@ async function runScan() {
     // Mean reversion call scoring - runs AFTER regime so bypass works correctly
     // MR fires here so isMeanReversion flag is set before regime penalty check below
     const mrSetup = scoreMeanReversionCall(liveStock, relStrength, signals.adx, bars, state.vix);
-    // MR call gate: block if dailyRSI is also deeply oversold AND MACD bearish.
-    // This combination = trending crash (XLE energy sector down multi-day), not intraday capitulation.
-    // Genuine MR opportunities have intraday RSI compressed but daily trend still intact.
-    // Use liveStock not signals — liveStock has null-guarded fallbacks, signals.dailyRsi may be undefined
-    const mrBearishTrend = (liveStock.dailyRsi || 50) < 35 && (liveStock.macd || "").includes("bearish");
-    if (mrSetup.score > callSetup.score && !mrBearishTrend) {
+    // MR call gates — two blocking conditions:
+    // 1. mrBearishTrend: dailyRSI < 40 AND MACD bearish = trending crash, not intraday capitulation.
+    //    V2.87: threshold tightened from 35→40. XLE at 26.5 daily RSI was blocked at 35 — correct.
+    //    But instruments at 37-40 daily RSI with bearish MACD are also in trend crash mode.
+    //    Genuine MR: intraday RSI compressed BUT daily trend still intact (dailyRSI 45+).
+    // 2. mrDailyOverbought: dailyRSI > 75 = already extended daily.
+    //    SPY/QQQ at dailyRSI 90+ with intraday dip at 37 → score 75 MR call.
+    //    But the daily trend is stretched — the "oversold" intraday signal is noise within
+    //    a strong daily uptrend. MR calls require the stock to actually be oversold on some timeframe.
+    //    If daily RSI is 90, the stock is overbought daily — entering a MR call here is
+    //    purely momentum chasing, not mean reversion. Block when dailyRSI > 75.
+    const _mrDailyRsi       = liveStock.dailyRsi || 50;
+    const mrBearishTrend    = _mrDailyRsi < 40 && (liveStock.macd || "").includes("bearish");
+    const mrDailyOverbought = _mrDailyRsi > 75; // daily RSI overbought = no MR thesis
+    if (mrSetup.score > callSetup.score && !mrBearishTrend && !mrDailyOverbought) {
       // MR liquidity check - contract not yet fetched at this stage
       // Use stock-level proxy: beta > 1.2 and sector with active options = liquid enough
       // Real OI/spread check happens at execution time via _cachedContract after prefetch
@@ -2102,7 +2120,13 @@ async function runScan() {
         callSetup.score   = mrSetup.score;
         callSetup.reasons = mrSetup.reasons;
         callSetup.isMeanReversion = true;
-        logEvent("filter", `${stock.ticker} MEAN REVERSION: score ${mrSetup.score} | beta:${mrBeta} | liquidity check deferred to execution`);
+        // V2.87 FIX 5: VIX premium context log for MR calls.
+        // At VIX 27+ the option premium is 40-60% elevated vs VIX 18 baseline.
+        // The underlying needs a proportionally larger move to overcome the premium paid.
+        // This is informational — logged so post-trade analysis can track VIX-adjusted win rate.
+        // Future sprint: apply score penalty when VIX > 28 on MR calls (needs backtest calibration).
+        const _mrVixContext = state.vix >= 28 ? ` | VIX ${state.vix?.toFixed(1)} elevated — premium ~${Math.round((state.vix/18-1)*100)}% above baseline` : "";
+        logEvent("filter", `${stock.ticker} MEAN REVERSION: score ${mrSetup.score} | beta:${mrBeta} | liquidity check deferred to execution${_mrVixContext}`);
       } else {
         logEvent("filter", `${stock.ticker} MEAN REVERSION skipped - beta:${mrBeta} sector:${mrSector} (low liquidity proxy)`);
       }
@@ -2448,6 +2472,18 @@ async function runScan() {
     // Only block re-entry in the SAME direction as the loss — opposite direction has a different thesis
     // recentLossSameDir = true → gate triggers → re-entry requires score>=75 + RSI delta
     // !recentLoss.optionType = direction unknown → conservative: treat as same direction (block)
+    // V2.87 FIX 7: Maximum daily RSI gate for calls.
+    // Entering calls when dailyRSI > 80 = stock already extended daily.
+    // SPY at dailyRSI 90.2, QQQ at 94.1 — these are not call entry conditions,
+    // they are conditions for PUTS or no trade. A "dip" in an overbought-daily
+    // instrument is not mean reversion — it's noise within an extended trend.
+    // Applied to ALL calls (not just MR) — daily RSI > 80 means the intraday
+    // oversold signal is structurally unreliable as a reversal indicator.
+    if (optionType === "call" && (stock.dailyRsi || 50) > 80) {
+      logEvent("filter", `${stock.ticker} call blocked — dailyRSI ${(stock.dailyRsi||50).toFixed(1)} overbought daily (>80). Intraday dip is noise, not MR signal.`);
+      continue;
+    }
+
     // --- Same-day close cooldown gate (30 min) ---
     // Blocks re-entry for 30 minutes after ANY close (win or loss) on the same instrument.
     // Prevents: GLD wins at 9:23am → system re-enters at 9:27am same direction, worse strike.
