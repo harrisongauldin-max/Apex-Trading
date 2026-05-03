@@ -160,10 +160,16 @@ function getRegimeRulebook(state) {
   // Credit-spread legacy had 55 in Regime B (premium collection wins even at lower scores).
   // Naked long options pay theta every day — need signal quality to overcome drag.
   // A 55-score naked put at VIX 28 / 38 DTE burns ~$4-6/day before the thesis plays out.
-  const minScorePut    = 65; // was: isBullRegime ? 70 : 55 — Regime B 55 was credit spread legacy
-  const minScoreCall   = 65; // was: isBullRegime ? 60 : 70 — unified, both directions need quality
-  const minScoreDebitCall = lowVixMode ? 63 : 65; // slight low-VIX concession, was 60/65
-  const minScoreCredit = 65; // was: isBullRegime ? 65 : 55 — latent, for future use
+  // V2.87 FIX 4: Raise minimum score from 65 → 70 for all naked option entries.
+  // 65 was calibrated for credit spreads (defined risk, theta collection edge).
+  // Naked long options: pay theta every day, no cap on loss, require stronger signal.
+  // At score 65: setup is marginal — 35% of the time conditions are wrong.
+  // At score 70: setup is solid — meaningful directional signal present.
+  // Concession: lowVixMode drops to 68 (not 65) — low vol bull trend is easier to read.
+  const minScorePut    = 70; // raised from 65 — naked longs need more conviction than spreads
+  const minScoreCall   = 70; // raised from 65 — same rationale
+  const minScoreDebitCall = lowVixMode ? 68 : 70; // slight low-VIX concession
+  const minScoreCredit = 65; // retained at 65 — latent (no credits in APEX), defined-risk logic
   const agentMinAdj    = 0;                        // removed — stale agent uses keyword fallback
 
   const macroReversalThreshold = 0.025;            // unified (B1/B2 distinction removed)
