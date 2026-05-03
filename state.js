@@ -289,10 +289,22 @@ function logEvent(type, message) {
   console.log(`[${type.toUpperCase()}] ${message}`);
 }
 
-async function saveDailyLogToRedis() {
+// Returns the current date in ET as YYYY-MM-DD string.
+// getETTime().toISOString() is WRONG — toISOString() always returns UTC.
+// On Railway (UTC server): at 9pm ET, getETTime() returns a Date whose
+// toISOString() gives tomorrow's UTC date. Must extract from locale string directly.
+function getETDateStr() {
+  const etStr = new Date().toLocaleString('en-US', { timeZone: 'America/New_York',
+    year: 'numeric', month: '2-digit', day: '2-digit' });
+  // etStr format: "MM/DD/YYYY"
+  const [m, d, y] = etStr.split('/');
+  return `${y}-${m.padStart(2,'0')}-${d.padStart(2,'0')}`;
+}
+
+async function saveDailyLogToRedis(isEOD = false) {
   if (!REDIS_URL || !REDIS_TOKEN) return;
   try {
-    const dateStr  = getETTime().toISOString().slice(0, 10); // YYYY-MM-DD
+    const dateStr  = getETDateStr(); // YYYY-MM-DD in ET timezone (not UTC)
     const logKey   = `argo:logs:${dateStr}`;
     const logData  = JSON.stringify({
       date:     dateStr,
@@ -315,8 +327,13 @@ async function saveDailyLogToRedis() {
     });
     if (res.ok) {
       logEvent("scan", `[EOD LOG] Daily log saved to Redis: ${logKey} | ${(state._dailyLogBuffer||[]).length} entries`);
-      state._dailyLogBuffer = []; // reset buffer for next day
-      markDirty();
+      // V2.87 FIX: Only wipe buffer on EOD cron saves, NOT on manual Save Now calls.
+      // Manual saves (isEOD=false) retain the buffer so mid-day saves don't lose
+      // the rest of the day's logs. EOD cron (isEOD=true) wipes to start fresh next day.
+      if (isEOD) {
+        state._dailyLogBuffer = []; // reset buffer for next day (EOD only)
+        markDirty();
+      }
     } else {
       console.error("[EOD LOG] Redis save failed:", res.status);
     }
@@ -328,4 +345,4 @@ async function saveDailyLogToRedis() {
 
 const state = defaultState();
 module.exports = { state, markDirty, saveStateNow, flushStateIfDirty, logEvent,
-                   redisSave, redisLoad, defaultState, saveDailyLogToRedis };
+                   redisSave, redisLoad, defaultState, saveDailyLogToRedis, getETDateStr };
