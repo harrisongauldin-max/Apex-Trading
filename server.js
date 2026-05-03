@@ -9,7 +9,7 @@ const fs      = require('fs');
 
 const { state, markDirty, saveStateNow, flushStateIfDirty,
         logEvent, redisSave, redisLoad, defaultState,
-        saveDailyLogToRedis }                             = require('./state');
+        saveDailyLogToRedis, getETDateStr }               = require('./state');
 const { alpacaGet, alpacaPost, alpacaDelete,
         getCircuitState, setBrokerLogger,
         getStockQuote, getStockBars, getIntradayBars,
@@ -778,7 +778,7 @@ cron.schedule("5 20,21 * * 1-5", async () => {
   const et = getETTime();
   if (et.getHours() === 16 && et.getMinutes() === 5) {
     sendEmail("eod").catch(e => logEvent("error", `[EMAIL] EOD email failed: ${e.message}`));
-    await saveDailyLogToRedis();
+    await saveDailyLogToRedis(true); // isEOD=true — wipes buffer after save for next day
   }
 });
 
@@ -1537,10 +1537,10 @@ app.post("/api/logs/save-now", async (req, res) => {
   if (!REDIS_URL || !REDIS_TOKEN) return res.status(503).json({ error: "Redis not configured" });
   try {
     const before = (state._dailyLogBuffer || []).length;
-    await saveDailyLogToRedis();
-    const dateStr = getETTime().toISOString().slice(0, 10);
-    logEvent("scan", `[MANUAL SAVE] Daily log force-saved to Redis: argo:logs:${dateStr} | ${before} entries`);
-    res.json({ ok: true, date: dateStr, entries: before, note: "Buffer saved. Buffer cleared — live logs will accumulate fresh from here." });
+    await saveDailyLogToRedis(false); // isEOD=false — buffer retained after manual save
+    const dateStr = getETDateStr();
+    logEvent("scan", `[MANUAL SAVE] Daily log force-saved to Redis: argo:logs:${dateStr} | ${before} entries (buffer retained)`);
+    res.json({ ok: true, date: dateStr, entries: before, note: "Buffer saved to Redis. Buffer retained in memory — logs continue accumulating." });
   } catch(e) {
     res.status(500).json({ error: e.message });
   }
