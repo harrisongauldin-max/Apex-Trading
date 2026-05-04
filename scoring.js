@@ -104,7 +104,17 @@ function applyIntradayRegimeOverride(newMacro) {
   // Prevents spurious overrides when only confidence level changes
   const regimeChanged = dayPlanRegime !== intradayRegime;
   const biasChanged   = dayPlanBias   !== newMacro.entryBias;
-  const strongShift   = confidence === "high" && (regimeChanged && biasChanged);
+  // V2.89 FIX: Lower override threshold for bias changes.
+  // Old: required confidence=high AND both regime AND bias changed.
+  // This meant medium-confidence "mild bearish" all day never overrode morning "calls_on_dips."
+  // Result: stale morning bias contributed +12 to every call entry all session.
+  // Fix: directional bias flip (calls_on_dips ↔ puts_on_bounces) overrides regardless of confidence.
+  // Regime changes still require high confidence (slower-moving, higher stakes).
+  const biasFliped    = biasChanged &&
+                        ((dayPlanBias === "calls_on_dips" && newMacro.entryBias === "puts_on_bounces") ||
+                         (dayPlanBias === "puts_on_bounces" && newMacro.entryBias === "calls_on_dips") ||
+                         (newMacro.entryBias === "avoid"));
+  const strongShift   = (confidence === "high" && regimeChanged && biasChanged) || biasFliped;
   const extremeShift = ["strongly bearish","strongly bullish"].includes(intradaySignal);
 
   // Check if previous override should expire (2-hour cooldown)
@@ -546,16 +556,37 @@ function scoreIndexSetup(stock, optionType, spyRSI, spyMACD, spyMomentum, breadt
         else if (pcrData.signal === "extreme_greed") { score -= 12; reasons.push(`PCR ${pcrData.pcr} - extreme greed, puts risky (-12)`); }
         else if (pcrData.signal === "greed")         { score -= 6;  reasons.push(`PCR ${pcrData.pcr} - greed, puts less favorable (-6)`); }
       } else {
-        if (pcrData.signal === "extreme_fear")       { supplementScore += 12; reasons.push(`PCR ${pcrData.pcr} - extreme fear = contrarian call signal (+12)`); }
-        else if (pcrData.signal === "fear")          { supplementScore += 6;  reasons.push(`PCR ${pcrData.pcr} - elevated fear, contrarian call (+6)`); }
-        else if (pcrData.signal === "extreme_greed") { score -= 10; reasons.push(`PCR ${pcrData.pcr} - extreme greed, calls overextended (-10)`); }
+        // V2.89: PCR contrarian call signal only valid when VIX is normalizing.
+        // High PCR in VIX 27+ is rational put-buying, not a contrarian opportunity.
+        // Only interpret PCR as contrarian call when VIX is falling or stable at lower levels.
+        const vixFalling = (state._agentMacro?.vixOutlook || "") === "mean_reverting" ||
+                           (state._agentMacro?.vixOutlook || "") === "falling";
+        const pcrCallOk  = vix < 25 || (vix < 28 && vixFalling);
+        if (pcrCallOk) {
+          if (pcrData.signal === "extreme_fear")  { supplementScore += 12; reasons.push(`PCR ${pcrData.pcr} - extreme fear = contrarian call (VIX normalizing) (+12)`); }
+          else if (pcrData.signal === "fear")     { supplementScore += 6;  reasons.push(`PCR ${pcrData.pcr} - elevated fear, contrarian call (+6)`); }
+        } else {
+          if (pcrData.signal === "extreme_fear" || pcrData.signal === "fear") {
+            reasons.push(`PCR ${pcrData.pcr} - elevated fear but VIX ${vix} too high for contrarian call (+0)`);
+          }
+        }
+        // Greed/complacency is always a call penalty regardless of VIX
+        if (pcrData.signal === "extreme_greed") { score -= 10; reasons.push(`PCR ${pcrData.pcr} - extreme greed, calls overextended (-10)`); }
       }
     }
 
     const ts = isDataFresh(state._termStructure) ? state._termStructure : null;
     if (ts) {
       if (optionType === "put"  && ts.creditFavorable) { supplementScore += 8; reasons.push(`Vol backwardation (${ts.ratio}) - near-term fear premium elevated (+8)`); }
-      if (optionType === "call" && ts.callFavorable)   { supplementScore += 8; reasons.push(`Vol contango (${ts.ratio}) - calls relatively cheap (+8)`); }
+      // V2.89: Vol contango only signals cheap calls when VIX < 24.
+      // At VIX 25+, mild contango is normal market structure — calls are expensive regardless.
+      // Giving +8 "calls cheap" at VIX 27 with ratio 0.92 is misleading — it's just the normal curve.
+      if (optionType === "call" && ts.callFavorable && (vix || 25) < 24) {
+        supplementScore += 8; reasons.push(`Vol contango (${ts.ratio}) - calls relatively cheap at VIX ${vix} (+8)`);
+      } else if (optionType === "call" && ts.callFavorable) {
+        // Contango present but VIX too high for it to matter
+        reasons.push(`Vol contango (${ts.ratio}) - calls not cheap at VIX ${vix} (+0)`);
+      }
     }
 
     const skewData = isDataFresh(state._skew) ? state._skew : null;
@@ -587,7 +618,16 @@ function scoreIndexSetup(stock, optionType, spyRSI, spyMACD, spyMomentum, breadt
     const bMomVal = state._breadthMomentum || 0;
     if (optionType === "put"  && bMom === "falling") { supplementScore += 8; reasons.push(`Breadth falling (${bMomVal.toFixed(1)}pts) - distribution (+8)`); }
     if (optionType === "call" && bMom === "rising")  { supplementScore += 8; reasons.push(`Breadth rising (${bMomVal.toFixed(1)}pts) - accumulation (+8)`); }
-    if (optionType === "call" && state._zweigThrust?.detected) { supplementScore += 10; reasons.push("Breadth recovery signal - watchlist went from weak to strong (+10)"); }
+    // V2.89: Breadth recovery signal requires current breadth to still be strong (>=50%)
+    // Previously: fired for 2 days regardless of current breadth.
+    // A stale recovery during a down day with 15% breadth is not a call signal.
+    const _currentBreadth = state._breadth || 50;
+    if (optionType === "call" && state._zweigThrust?.detected && _currentBreadth >= 50) {
+      supplementScore += 10; reasons.push(`Breadth recovery signal — breadth still strong at ${_currentBreadth}% (+10)`);
+    } else if (optionType === "call" && state._zweigThrust?.detected) {
+      // Signal fired historically but breadth is now weak — not actionable
+      reasons.push(`Breadth recovery signal stale — current breadth ${_currentBreadth}% too weak (+0)`);
+    }
   }
 
   if (optionType === "put") {
@@ -840,23 +880,53 @@ function scoreIndexSetup(stock, optionType, spyRSI, spyMACD, spyMomentum, breadt
     // Capitulation bypass: RSI <= 30 means the crash IS the thesis for MR calls.
     // Strongly bearish agent + deeply oversold RSI = textbook mean reversion entry.
     // Apply bypass for agent penalty only — regime bonus still applies below.
-    const mrCapitulationActive = spyRSI <= 30; // FIX C: no longer gated on credit mode
+    // V2.89: Tighter capitulation bypass.
+    // Old: RSI <= 30 bypassed the bearish agent. Fired on every downtrend (XLE RSI 17 for 2 hours).
+    // New: bypass requires session low RSI <= 22 AND current RSI is AT the session low
+    //      (not recovering yet — that's handled by mrStabilized/mrBouncing in RSI section).
+    // This reserves the bypass for genuine single-session panic, not sustained downtrends.
+    const sessionLowRSIForBypass = state._sessionLowRSI?.[stock.ticker] ?? 100;
+    // capitulationActive: true panic (RSI session low <=22 and currently at/near that low)
+    const mrCapitulationActive = sessionLowRSIForBypass <= 22 && spyRSI <= 28;
+    // Mild capitulation: RSI hit 23-30 at some point, currently oversold (25-35)
+    const mrMildCapitulation   = sessionLowRSIForBypass <= 30 && spyRSI <= 35 && !mrCapitulationActive;
+
     if (["strongly bullish","bullish"].includes(signal) && confidence === "high") { score += 35; reasons.push(`Agent ${signal} high confidence (+35)`); }
     else if (["strongly bullish","bullish"].includes(signal))                     { score += 25; reasons.push(`Agent ${signal} (+25)`); }
     else if (signal === "mild bullish")                                            { score += 8;  reasons.push("Agent mild bullish (+8)"); }
     else if (signal === "neutral" && spyRSI <= 35)                                { score += 20; reasons.push("Mean reversion call - SPY oversold on neutral macro (+20)"); }
     else if (signal === "neutral")                                                 { score += 0;  reasons.push("Agent neutral (+0)"); }
     else if (mrCapitulationActive) {
-      // Bypass bearish agent penalty in capitulation — extreme oversold IS the MR entry signal
-      score += 5; reasons.push(`Agent ${signal} bypassed - RSI ${spyRSI} capitulation confirms MR call (+5)`);
+      // True panic capitulation — bypass bearish agent
+      score += 5; reasons.push(`Agent ${signal} bypassed — session panic RSI ${sessionLowRSIForBypass.toFixed(0)}, confirming MR capitulation entry (+5)`);
+    } else if (mrMildCapitulation) {
+      // Mild oversold — don't fully bypass but soften the penalty
+      score += 0; reasons.push(`Agent ${signal} — mild oversold (session low ${sessionLowRSIForBypass.toFixed(0)}), impact softened (+0)`);
     }
     else if (["mild bearish","bearish","strongly bearish"].includes(signal)) {
       // Agent signal removed from call scoring — threshold-only in evaluateEntry.
       reasons.push(`Agent signal: ${signal} — scoring impact removed, threshold-only`);
     }
 
-    // - Regime confirmation -
-    if (["trending_bull","recovery"].includes(regime))                            { score += 20; reasons.push(`Regime: ${regime} (+20)`); }
+    // - Regime confirmation - V2.89: conditional on intraday alignment -
+    // Weekly Regime A (trending_bull) is the macro backdrop, not a per-entry signal.
+    // Giving flat +20 on every call regardless of the day's intraday action inflated
+    // scores 20 points even when every instrument was declining on macro-bearish days.
+    // Fix: scale regime bonus by intraday alignment (VWAP position + breadth).
+    // Full +20: regime bull AND instrument above VWAP AND breadth >= 40%
+    // Partial +10: regime bull AND (above VWAP OR breadth >= 30%)
+    // Minimal +3: regime bull but intraday is bearish (stale weekly signal, not actionable)
+    if (["trending_bull","recovery"].includes(regime)) {
+      const _breadthNow  = state._breadth || 50;
+      const _aboveVWAP   = (stock.lastPrice || stock.price || 0) >= (stock.vwap || 0) * 0.995;
+      if (_aboveVWAP && _breadthNow >= 40) {
+        score += 20; reasons.push(`Regime: ${regime} (+20) — intraday aligned (above VWAP, breadth ${_breadthNow}%)`);
+      } else if (_aboveVWAP || _breadthNow >= 30) {
+        score += 10; reasons.push(`Regime: ${regime} (+10) — partial intraday alignment`);
+      } else {
+        score += 3;  reasons.push(`Regime: ${regime} (+3) — weekly bull but intraday bearish context`);
+      }
+    }
     else if (regime === "choppy")                                                  { score -= 10; reasons.push("Choppy regime - calls risky (-10)"); }
     else if (["trending_bear","breakdown"].includes(regime)) {
       // Credit calls (bear call spreads) in Regime B: legitimate directional premium trade
@@ -890,15 +960,24 @@ function scoreIndexSetup(stock, optionType, spyRSI, spyMACD, spyMomentum, breadt
     // V2.81 change 5 continued: RSI stabilization gate for mean reversion calls
     // Require 3 consecutive intraday scans of RSI <=35 before MR call entry fires
     // Prevents entering at the exact moment of maximum spread width and worst fills
+    // V2.89: mrStabilized now means "bounced FROM oversold" not "continued oversold"
+    // _intradayOversoldScans = scans since RSI bounced from session low above 38
+    // _sessionLowRSI = lowest RSI seen this session (set in scanner.js)
     const intradayOversoldScans = state._intradayOversoldScans?.[stock.ticker] || 0;
-    const mrStabilized = intradayOversoldScans >= 3; // 3 scans = ~30 seconds of stability
+    const sessionLowRSI         = state._sessionLowRSI?.[stock.ticker] ?? 100;
+    // mrStabilized: session was oversold (low <=30) AND current RSI has bounced (>=38) AND held 3+ scans
+    const mrStabilized = sessionLowRSI <= 30 && (spyRSI || 50) >= 38 && intradayOversoldScans >= 3;
+    // mrBouncing: session was oversold but bounce not yet confirmed (1-2 scans above 38)
+    const mrBouncing   = sessionLowRSI <= 30 && (spyRSI || 50) >= 38 && intradayOversoldScans >= 1;
     if (spyRSI <= 25) {
-      if (mrStabilized) { score += 25; reasons.push(`${stock.ticker} RSI ${spyRSI} extreme oversold - stabilized (${intradayOversoldScans} scans) - mean reversion call (+25)`); }
-      else              { score += 10; reasons.push(`${stock.ticker} RSI ${spyRSI} extreme oversold - not yet stabilized (${intradayOversoldScans}/3 scans) - partial credit (+10)`); }
+      if (mrStabilized) { score += 25; reasons.push(`${stock.ticker} RSI bounced from session low ${sessionLowRSI.toFixed(0)} to ${spyRSI} - mean reversion confirmed (+25)`); }
+      else if (mrBouncing) { score += 12; reasons.push(`${stock.ticker} RSI bouncing from session low ${sessionLowRSI.toFixed(0)} - not yet confirmed (+12)`); }
+      else { score += 2; reasons.push(`${stock.ticker} RSI ${spyRSI} extreme oversold - no bounce yet, waiting for recovery (+2)`); }
     }
     else if (spyRSI <= 35) {
-      if (mrStabilized) { score += 18; reasons.push(`${stock.ticker} RSI ${spyRSI} deeply oversold - stabilized - mean reversion (+18)`); }
-      else              { score += 8;  reasons.push(`${stock.ticker} RSI ${spyRSI} deeply oversold - awaiting stabilization (${intradayOversoldScans}/3 scans) (+8)`); }
+      if (mrStabilized) { score += 18; reasons.push(`${stock.ticker} RSI bounced from session low ${sessionLowRSI.toFixed(0)} to ${spyRSI} - mean reversion (+18)`); }
+      else if (mrBouncing) { score += 8; reasons.push(`${stock.ticker} RSI bouncing from session low ${sessionLowRSI.toFixed(0)} - partial credit (+8)`); }
+      else { score += 2; reasons.push(`${stock.ticker} RSI ${spyRSI} deeply oversold - no bounce yet (+2)`); }
     }
     else if (spyRSI <= 42)                                                        { score += 10; reasons.push(`${stock.ticker} RSI ${spyRSI} oversold (+10)`); }
     else if (spyRSI >= 45 && spyRSI <= 58 && ["trending_bull","recovery"].includes(regime)) {
@@ -1019,13 +1098,20 @@ function scoreIndexSetup(stock, optionType, spyRSI, spyMACD, spyMomentum, breadt
     // Market maker fix: halve bonus when agent already scored bullish to avoid double-counting
     // Agent signal + regime already capture the macro view - bias refines TIMING not direction
     const agentAlreadyBullish = ["strongly bullish","bullish","mild bullish"].includes(signal);
+    // V2.89: Entry bias calls_on_dips requires intraday confirmation.
+    // If the instrument is below VWAP (down day not just a dip), the morning bias is stale.
+    // Only apply bonus when we have evidence the dip is actually a dip within an uptrend.
     if (entryBias === "calls_on_dips") {
-      if (spyMomentum === "recovering" || spyRSI <= 45) {
+      const _aboveVWAPNow = (stock.lastPrice || stock.price || 0) >= (stock.vwap || 0) * 0.995;
+      const _dipConfirmed = _aboveVWAPNow && (spyMomentum === "recovering" || spyRSI <= 45);
+      if (_dipConfirmed) {
         const biasBonus = agentAlreadyBullish ? 6 : 12;
-        score += biasBonus; reasons.push(`Entry bias: calls on dips - dip confirmed (+${biasBonus})`);
-      } else {
+        score += biasBonus; reasons.push(`Entry bias: calls on dips - dip confirmed near VWAP (+${biasBonus})`);
+      } else if (_aboveVWAPNow) {
         const biasBonus = agentAlreadyBullish ? 3 : 6;
         score += biasBonus; reasons.push(`Entry bias: calls on dips (+${biasBonus})`);
+      } else {
+        reasons.push(`Entry bias: calls on dips — but below VWAP, bias stale (+0)`);
       }
     }
     if (entryBias === "avoid") { score = Math.min(score, 0); reasons.push("Agent says avoid - blocked"); }
