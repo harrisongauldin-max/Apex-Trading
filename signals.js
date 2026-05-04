@@ -21,7 +21,13 @@ function erf(x) {
 }
 
 function calcRSI(bars, period = 14) {
-  if (bars.length < period + 1) return 50;
+  // V2.87 FIX: Return null on insufficient data, not 50.
+  // 50 is indistinguishable from a real neutral RSI and poisons scoring.
+  // At market open with ECONNRESET errors, bars return with 0-5 bars.
+  // calcRSI(2 bars) = 50 → every instrument looks neutral → scores deflate,
+  // MR gates fail to fire, and the system makes decisions on fabricated data.
+  // Callers must handle null: `signals.rsi === null` means "no data, skip scan."
+  if (!bars || bars.length < period + 1) return null;
   let gains = 0, losses = 0;
   for (let i = bars.length - period; i < bars.length; i++) {
     const change = bars[i].c - bars[i-1].c;
