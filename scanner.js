@@ -149,7 +149,10 @@ async function runScan() {
     // but no such cron exists. Every Monday APEX boots with Friday's full loss still active,
     // immediately fires the daily circuit, and stays blocked until manual RESET DAY P&L.
     const _prevDayPnL = state.todayRealizedPnL || 0;
-    state.todayRealizedPnL  = 0;
+    state.todayRealizedPnL       = 0;
+    state._intradayOversoldScans = {}; // Reset bounce counters — new session
+    state._sessionLowRSI         = {}; // Reset session low RSI — new session
+    state._sessionLowRSIAt       = {}; // Reset timestamps
     logEvent("scan", `[DAILY RESET] New trading day ${todayScanDate} — circuit reset, P&L zeroed (was $${_prevDayPnL.toFixed(0)})`);
     markDirty();
   }
@@ -1375,6 +1378,21 @@ async function runScan() {
     }
   }
 
+  // V2.89: Hard cap on simultaneous call positions — max 2 open calls at any time.
+  // Previously: 4-5 calls could open simultaneously (all "market goes up" bets).
+  // In macro-driven selloffs, correlated instruments all lose together.
+  // Cap forces selection of the 2 best setups rather than entering everything at once.
+  // Put positions are uncapped — puts hedge the call exposure.
+  // openCalls/openPuts already declared above (line ~1337)
+  const MAX_SIMULTANEOUS_CALLS = 2;
+  if (openCalls >= MAX_SIMULTANEOUS_CALLS) {
+    logEvent("filter", `[CALL CAP] ${openCalls} calls already open (max ${MAX_SIMULTANEOUS_CALLS}) — no new call entries until one closes`);
+    // Block call entries at execution point via _callCapActive flag
+    state._callCapActive = true;
+  } else {
+    state._callCapActive = false;
+  }
+
   // High-beta block removed — ARGO trades index ETFs (SPY, QQQ, GLD, TLT, XLE),
   // none of which have beta > 1.5 relative to each other. Vestigial from individual stock mode.
 
@@ -1647,6 +1665,18 @@ async function runScan() {
       if (Math.abs(price - vwap) / vwap > 0.005) { // only log if >0.5% from VWAP
         logEvent("scan", `[VWAP] ${stock.ticker} $${price.toFixed(2)} vs VWAP $${vwap.toFixed(2)} (${vwapPct}%) - ${vwapBias}`);
       }
+      // V2.89: Hard gate for MR call entries below VWAP.
+      // If price is more than 1% below VWAP, the instrument is having a sustained down day.
+      // MR calls below VWAP = catching a falling knife, not buying a dip in an uptrend.
+      // Only applies when isMeanReversion is likely (RSI < 40 = probable MR path).
+      // Exception: first 30min of session (VWAP not yet reliable — needs price history).
+      const _etMinutes = (etHourNow % 1) * 60;
+      const _sessionMinutes = etHourNow >= 9.5 ? (etHourNow - 9.5) * 60 : 0;
+      const _vwapReliable = _sessionMinutes >= 30; // VWAP needs 30min to stabilize
+      if (_vwapReliable && signals.rsi < 40 && optionType === "call" && price < vwap * 0.99) {
+        logEvent("filter", `[VWAP] ${stock.ticker} MR call blocked — price ${((price/vwap-1)*100).toFixed(1)}% below VWAP (down day, not dip)`);
+        continue;
+      }
       // Bear call credit: strongly prefer below VWAP (market already weak intraday)
       // putSetup/callSetup not yet initialized here -- creditCallModeActive already implies call direction
       const _putsOnBounceActive = rb.gates.putsOnBounceMode && rb.isBearRegime;
@@ -1758,14 +1788,41 @@ async function runScan() {
       // Store as objects -- scoreIndexSetup reads rsiHist.map(r => r.rsi) at call time
       state._rsiHistory[stock.ticker] = rsiHist;
 
-      // V2.81: Intraday oversold scan counter for MR stabilization gate
-      // Counts consecutive intraday scans where RSI <=35 -- resets when RSI recovers
-      // Used to prevent entering mean reversion calls at exact bottom (worst fills)
-      if (!state._intradayOversoldScans) state._intradayOversoldScans = {};
-      if (signals.rsi <= 35) {
-        state._intradayOversoldScans[stock.ticker] = (state._intradayOversoldScans[stock.ticker] || 0) + 1;
-      } else {
-        state._intradayOversoldScans[stock.ticker] = 0;
+      // V2.89 FIX: MR stabilization gate overhaul.
+      // Previous logic counted consecutive scans with RSI <=35. This is BACKWARDS:
+      // instruments in sustained downtrends spend minutes/hours with RSI 14-20 and
+      // scored +25 (highest bonus in the system). "Stabilized 17 scans" = "declining for 170 seconds."
+      //
+      // Real mean reversion requires a BOUNCE, not continued oversold.
+      // New logic:
+      //   1. Track session low RSI for each instrument (reset at open via daily reset)
+      //   2. mrStabilized = session low RSI was <=30 AND current RSI has recovered to >=38
+      //   3. This means: "was oversold AND is now bouncing" — actual mean reversion signal
+      //   4. _intradayOversoldScans now tracks scans-since-bounce (for scoring context)
+      //      rather than scans-of-continued-oversold
+      if (!state._intradayOversoldScans)  state._intradayOversoldScans  = {};
+      if (!state._sessionLowRSI)          state._sessionLowRSI          = {};
+      if (!state._sessionLowRSIAt)        state._sessionLowRSIAt        = {};
+
+      const curRSI = signals.rsi;
+      // Track session minimum RSI
+      if (curRSI !== null && curRSI !== undefined) {
+        const prevLow = state._sessionLowRSI[stock.ticker] ?? 100;
+        if (curRSI < prevLow) {
+          state._sessionLowRSI[stock.ticker]   = curRSI;
+          state._sessionLowRSIAt[stock.ticker] = Date.now();
+        }
+        // Count scans since the instrument was last at its session low (bounce counter)
+        const sessionLow = state._sessionLowRSI[stock.ticker] ?? 100;
+        if (curRSI <= sessionLow + 2) {
+          // Still at/near session low — reset bounce counter
+          state._intradayOversoldScans[stock.ticker] = 0;
+        } else if (sessionLow <= 30 && curRSI >= 38) {
+          // Bouncing from oversold — increment bounce counter
+          state._intradayOversoldScans[stock.ticker] = (state._intradayOversoldScans[stock.ticker] || 0) + 1;
+        } else {
+          state._intradayOversoldScans[stock.ticker] = 0;
+        }
       }
     }
 
@@ -2158,7 +2215,14 @@ async function runScan() {
     //    If daily RSI is 90, the stock is overbought daily — entering a MR call here is
     //    purely momentum chasing, not mean reversion. Block when dailyRSI > 75.
     const _mrDailyRsi       = liveStock.dailyRsi || 50;
-    const mrBearishTrend    = _mrDailyRsi < 40 && (liveStock.macd || "").includes("bearish");
+    // V2.89: Tightened mrBearishTrend gate.
+    // Old: required BOTH daily RSI < 40 AND bearish MACD (too narrow — missed XLE today)
+    // New: block MR calls when daily RSI < 45 OR (daily RSI < 50 AND bearish MACD)
+    // Rationale: daily RSI < 45 means the instrument has been weak for multiple days.
+    // Entering MR calls on multi-day downtrends is not mean reversion — it's catching knives.
+    // A single bad intraday session in an otherwise healthy instrument has daily RSI 45-55.
+    const mrBearishTrend    = _mrDailyRsi < 45 ||
+                              (_mrDailyRsi < 52 && (liveStock.macd || "").includes("bearish"));
     const mrDailyOverbought = _mrDailyRsi > 75; // daily RSI overbought = no MR thesis
     if (mrSetup.score > callSetup.score && !mrBearishTrend && !mrDailyOverbought) {
       // MR liquidity check - contract not yet fetched at this stage
@@ -2674,7 +2738,9 @@ async function runScan() {
         // MR calls: 14 DTE / 0.42 delta (short-dated, need fast move, higher gamma)
         // Directional: 38 DTE / 0.35 delta (time for thesis to play out)
         // Mismatch was: prefetch used 21/28 DTE, execution used 14/38 → wrong contract cached.
-        const isMR = optionType === "call" && (stock._isMeanReversion || false);
+        // V2.89 BUG FIX: was reading stock._isMeanReversion (WATCHLIST entry, always undefined)
+        // Fix: read from liveStock._isMeanReversion (set correctly at line ~2676)
+        const isMR = optionType === "call" && (liveStock._isMeanReversion || false);
         const contract = await findContract(stock.ticker, optionType, isMR ? 0.42 : 0.35, isMR ? 14 : 38, state.vix, stock);
           if (contract) {
             stock._cachedContract = contract;
@@ -2785,6 +2851,11 @@ async function runScan() {
     // Puts still allowed — market weakness is the signal
     if (_vixCallGate && optionType === "call") {
       logEvent("filter", `${stock.ticker} call blocked — VIX ${state.vix?.toFixed(1)} >= 28 + bearish macro (high-cost call environment)`);
+      continue;
+    }
+    // V2.89: Call cap gate — max 2 simultaneous call positions
+    if (state._callCapActive && optionType === "call") {
+      logEvent("filter", `${stock.ticker} call blocked — call cap active (${openCalls}/${MAX_SIMULTANEOUS_CALLS} calls open)`);
       continue;
     }
     logEvent("filter", `${stock.ticker} entry approved — intent:${intentType} score:${score} regime:${rb.regimeName}`);
