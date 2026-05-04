@@ -1228,8 +1228,8 @@ async function runScan() {
   // Weekly circuit breaker REMOVED — penalizes new code for old code's losses (panel consensus).
   // Daily circuit breaker retained for paper trading safety.
   // V2.87 FIX: circuitOpen=false halts entries only — exits still run (see _circuitHaltEntries flag).
-  // The early return here was blocking morning exit flags and stop-loss exits when circuit was open.
-  const _circuitEntryHalt = (state.circuitOpen === false) || (state._circuitHaltEntries === true);
+  // _circuitEntryHalt evaluated AFTER daily circuit block below (line ~1292) to avoid one-scan gap.
+  // See: _circuitEntryHalt declaration after FIX 10 daily circuit block.
 
   // - ACT ON MORNING EXIT FLAGS -
   // Positions flagged by morning review get closed at open
@@ -1289,6 +1289,24 @@ async function runScan() {
       state._circuitHaltEntries = false;
     }
   }
+
+  // V2.87 BUG FIX: _circuitEntryHalt evaluated HERE (after daily circuit sets _circuitHaltEntries).
+  // Previous position (before morning exit flags) had a one-scan gap where entries weren't blocked
+  // on the scan that first tripped the daily circuit — _circuitHaltEntries was still false from
+  // the previous scan when _circuitEntryHalt was evaluated.
+  const _circuitEntryHalt = (state.circuitOpen === false) || (state._circuitHaltEntries === true);
+
+  // V2.88: VIX-AWARE CALL GATE
+  // When VIX >= 28 AND macro agent is bearish, block NEW call entries.
+  // Rationale: at VIX 28+ buying calls is expensive (options priced for big moves).
+  // In a bearish macro environment, RSI dipping to 30 is the trend continuing, not a reversal.
+  // Put entries remain open — market weakness is the signal for puts.
+  // VIX_PAUSE (35) is the hard halt for ALL entries. This is a softer call-only gate at 28.
+  const _macroSignal    = (state._agentMacro?.signal || "").toLowerCase();
+  const _macroIsBearish = _macroSignal.includes("bearish");
+  const _vixCallGate    = (state.vix || 0) >= 28 && _macroIsBearish;
+  // Full halt at VIX_PAUSE (35) regardless of macro
+  const _vixFullHalt    = (state.vix || 0) >= VIX_PAUSE;
 
   // - PORTFOLIO GREEKS LIMITS -
   // Prevent extreme one-sided exposure
@@ -2756,6 +2774,17 @@ async function runScan() {
     // _circuitEntryHalt = daily circuit tripped OR weekly circuit open.
     if (_circuitEntryHalt) {
       logEvent("filter", `${stock.ticker} entry blocked — circuit halt active (daily P&L limit reached)`);
+      continue;
+    }
+    // V2.88: VIX full halt — all entries blocked above VIX_PAUSE (35)
+    if (_vixFullHalt) {
+      logEvent("filter", `${stock.ticker} entry blocked — VIX ${state.vix?.toFixed(1)} >= ${VIX_PAUSE} (full halt)`);
+      continue;
+    }
+    // V2.88: VIX call gate — calls blocked when VIX >= 28 AND macro is bearish
+    // Puts still allowed — market weakness is the signal
+    if (_vixCallGate && optionType === "call") {
+      logEvent("filter", `${stock.ticker} call blocked — VIX ${state.vix?.toFixed(1)} >= 28 + bearish macro (high-cost call environment)`);
       continue;
     }
     logEvent("filter", `${stock.ticker} entry approved — intent:${intentType} score:${score} regime:${rb.regimeName}`);
