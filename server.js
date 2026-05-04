@@ -702,6 +702,48 @@ cron.schedule("45 12,13 * * 1-5", async () => {
   }
 });
 
+// 6:30am CT (7:30am ET) — pre-market daily bar seeding
+// Fetches 60-day daily bars for all watchlist instruments and seeds _rsiHistory.
+// Goal: ensure RSI is computed from real data before market open at 8:30am CT.
+// Without this, the first 5 minutes of each session use stale or null RSI
+// because getIntradayBars returns [] (no completed 1-min bars yet at open).
+// By seeding dailyRsi from fresh daily bars 1 hour before open, the fallback
+// path in scanner.js has real yesterday-close RSI to work with immediately.
+cron.schedule("32 11,12 * * 1-5", async () => {
+  const et = getETTime();
+  if (et.getHours() === 7 && et.getMinutes() === 32) {
+    logEvent("scan", "[PRE-MARKET] 6:32am CT (7:32am ET) bar seeding — fetching daily bars for RSI pre-computation");
+    const tickers = WATCHLIST.map(w => w.ticker);
+    let seeded = 0;
+    for (const ticker of tickers) {
+      try {
+        const bars = await getStockBars(ticker, 60);
+        if (bars && bars.length >= 15) {
+          // Compute RSI from daily bars and seed _rsiHistory
+          const { calcRSI } = require('./signals');
+          const rsi = calcRSI(bars);
+          if (rsi !== null) {
+            if (!state._rsiHistory) state._rsiHistory = {};
+            const todayStr = getETDateStr(); // ET date string (not UTC toISOString)
+            let hist = state._rsiHistory[ticker] || [];
+            // Only add if we don't already have today's entry
+            if (hist.length === 0 || hist[hist.length - 1]?.date !== todayStr) {
+              hist.push({ date: todayStr, rsi });
+              if (hist.length > 5) hist.shift();
+              state._rsiHistory[ticker] = hist;
+              seeded++;
+            }
+          }
+        }
+      } catch(e) {
+        logEvent("warn", `[PRE-MARKET] Bar seed failed for ${ticker}: ${e.message}`);
+      }
+    }
+    markDirty();
+    logEvent("scan", `[PRE-MARKET] Bar seeding complete — ${seeded}/${tickers.length} tickers seeded with daily RSI`);
+  }
+});
+
 // 9:00am ET morning reset + briefing (fires at :00, checks ET hour = 9)
 cron.schedule("0 13,14 * * 1-5", async () => {
   const et = getETTime();
@@ -809,6 +851,24 @@ cron.schedule("0 4,5 * * 2-6", async () => {
   if (et.getHours() === 0 && et.getMinutes() === 0) {
     logEvent("macro", "[OVERNIGHT] 11pm CT midnight digest starting...");
     await getAgentOvernightScan("midnight-digest");
+  }
+});
+
+// 9:25am ET daily P&L reset — belt-and-suspenders before market open.
+// Zeros todayRealizedPnL and clears daily circuit so fresh day starts clean.
+// The scanner's per-scan date check handles this too, but Railway restarts
+// during weekends can leave stale state where _lastScanDate never changes.
+// This cron is the authoritative daily reset — fires 5 min before open every weekday.
+cron.schedule("25 13 * * 1-5", async () => {
+  const et = getETTime();
+  if (et.getHours() === 9 && et.getMinutes() === 25) {
+    const prev = state.todayRealizedPnL || 0;
+    state.todayRealizedPnL  = 0;
+    state._dailyPnL         = 0;
+    state._dailyCircuitOpen = true;
+    state.todayTrades       = 0;
+    await saveStateNow();
+    logEvent("circuit", `[MORNING RESET] Daily P&L zeroed before open (was $${prev.toFixed(0)}) — circuit armed for new session`);
   }
 });
 
