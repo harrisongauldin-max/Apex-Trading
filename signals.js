@@ -109,7 +109,9 @@ function calcADX(bars, period = 14) {
 }
 
 function calcIVRank(currentIV, bars) {
-  if (bars.length < 30) return 50;
+  // V2.89: Return null on insufficient data (same fix as calcRSI).
+  // 50 fabricates "options fairly priced" — same fabricated-neutral problem.
+  if (!bars || bars.length < 30) return null;
   // Approximate historical vol from price bars
   const returns = [];
   for (let i = 1; i < bars.length; i++) {
