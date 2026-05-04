@@ -140,11 +140,17 @@ async function runScan() {
   // FIX 10: Reset daily circuit and P&L tracker at start of each new trading day
   const todayScanDate = scanET.toLocaleDateString("en-US", { timeZone: "America/New_York" });
   if (todayScanDate !== (state._lastScanDate || "")) {
-    state._lastScanDate    = todayScanDate;
+    state._lastScanDate     = todayScanDate;
     state._dailyCircuitOpen = true;
-    state._dailyPnL        = 0;
-    state.todayRealizedPnL = state.todayRealizedPnL || 0; // reset in server.new.js at midnight
-    logEvent("scan", `[DAILY RESET] New trading day ${todayScanDate} — daily circuit reset`);
+    state._dailyPnL         = 0;
+    // V2.87 FIX: Actually zero todayRealizedPnL on new day.
+    // Previous code: `state.todayRealizedPnL || 0` is a NO-OP for negative values.
+    // -$4374 is truthy — the OR never fires. Comment said "reset in server.new.js at midnight"
+    // but no such cron exists. Every Monday APEX boots with Friday's full loss still active,
+    // immediately fires the daily circuit, and stays blocked until manual RESET DAY P&L.
+    const _prevDayPnL = state.todayRealizedPnL || 0;
+    state.todayRealizedPnL  = 0;
+    logEvent("scan", `[DAILY RESET] New trading day ${todayScanDate} — circuit reset, P&L zeroed (was $${_prevDayPnL.toFixed(0)})`);
     markDirty();
   }
 
@@ -1221,7 +1227,9 @@ async function runScan() {
   // [opening/final hour blocks moved above callsAllowed]
   // Weekly circuit breaker REMOVED — penalizes new code for old code's losses (panel consensus).
   // Daily circuit breaker retained for paper trading safety.
-  if (state.circuitOpen === false) return;
+  // V2.87 FIX: circuitOpen=false halts entries only — exits still run (see _circuitHaltEntries flag).
+  // The early return here was blocking morning exit flags and stop-loss exits when circuit was open.
+  const _circuitEntryHalt = (state.circuitOpen === false) || (state._circuitHaltEntries === true);
 
   // - ACT ON MORNING EXIT FLAGS -
   // Positions flagged by morning review get closed at open
@@ -1271,7 +1279,15 @@ async function runScan() {
       logEvent("scan", `[DAILY CIRCUIT] Auto-reset — P&L $${todayPnL.toFixed(0)} recovered to within 75% of limit ($${(dailyLossLimit * 0.75).toFixed(0)})`);
       state._dailyCircuitOpen = true;
     }
-    if (state._dailyCircuitOpen === false) return; // halt entries
+    if (state._dailyCircuitOpen === false) {
+      // V2.87 FIX: Halt ENTRIES only — exits must always run regardless of circuit state.
+      // Previous behavior: return here exited runScan() entirely, blocking checkExits().
+      // GLD at -41% could not close because the circuit return fired before checkExits ran.
+      // Fix: set a flag, skip entry logic below, but allow the scan to continue to exits.
+      state._circuitHaltEntries = true;
+    } else {
+      state._circuitHaltEntries = false;
+    }
   }
 
   // - PORTFOLIO GREEKS LIMITS -
@@ -1675,6 +1691,25 @@ async function runScan() {
       hasIntraday:   signals.hasIntraday || false,
       ivPercentile:  signals.ivPercentile || 50,
     };
+    // V2.87 FIX: When intraday bars are insufficient (first 5 min of session or API failure),
+    // use the last known daily RSI from _rsiHistory as fallback instead of skipping or using 50.
+    // Yesterday's daily RSI is real data — XLE at 26.5 or QQQ at 81 is directionally valid
+    // at 9:30am. Much better than either skipping the instrument or fabricating RSI:50.
+    if (signals.rsi === null || signals.dailyRsi === null) {
+      const _rsiHist = (state._rsiHistory || {})[stock.ticker] || [];
+      const _lastKnownRsi = _rsiHist.length > 0 ? _rsiHist[_rsiHist.length - 1].rsi : null;
+      if (_lastKnownRsi !== null) {
+        // Patch null values with last known daily RSI — real data, not fabricated
+        if (signals.rsi    === null) signals.rsi    = _lastKnownRsi;
+        if (signals.dailyRsi === null) signals.dailyRsi = _lastKnownRsi;
+        logEvent("filter", `${stock.ticker} RSI fallback — using last known daily RSI ${_lastKnownRsi.toFixed(1)} (insufficient bars this scan)`);
+      } else {
+        // No history at all (first ever scan of this ticker) — skip rather than fabricate
+        logEvent("filter", `${stock.ticker} scan skipped — no RSI data and no history to fall back to`);
+        continue;
+      }
+    }
+
     // Log intraday data quality -- show both RSI values for transparency
     if (signals.hasIntraday) {
       logEvent("filter", `${stock.ticker} intraday RSI:${signals.rsi} dailyRSI:${signals.dailyRsi} MACD:${signals.macd} MOM:${signals.momentum} VWAP:$${signals.intradayVWAP?.toFixed(2)} VolPace:${signals.volPaceRatio?.toFixed(1)}x`);
@@ -2717,6 +2752,12 @@ async function runScan() {
 
     // Derive execution path from locked intentType
     // Richard/Gilfoyle: log intentType immediately after pass — makes the dark gap visible
+    // V2.87 FIX: Check circuit halt flag here (not at top of scan) so exits above still ran.
+    // _circuitEntryHalt = daily circuit tripped OR weekly circuit open.
+    if (_circuitEntryHalt) {
+      logEvent("filter", `${stock.ticker} entry blocked — circuit halt active (daily P&L limit reached)`);
+      continue;
+    }
     logEvent("filter", `${stock.ticker} entry approved — intent:${intentType} score:${score} regime:${rb.regimeName}`);
     // NAKED OPTIONS MODE: single-leg long calls and puts only.
     // Spreads, iron condors, and multi-leg strategies removed.
