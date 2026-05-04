@@ -273,10 +273,18 @@ async function _doClosePosition(ticker, reason, exitPremium = null, contractSym 
           // Mark position as permissionBlocked — stop infinite retry loop and alert.
           // Manual resolution: fix paper account options permissions on Alpaca dashboard.
           if (closeResp && closeResp.code === 40310000) {
+            // V2.88 FIX: Do NOT set alpacaCloseOk=true here. Previous behavior wiped the position
+            // from APEX state but left it in Alpaca → reconciler reconstructed it as an orphan
+            // every scan → 40310000 loop repeated indefinitely.
+            // Fix: leave position in state with _permissionBlocked=true. Suppress close retries
+            // by checking this flag before attempting close. Position stays visible in dashboard
+            // until paper account options permissions are fixed on Alpaca.
             pos._permissionBlocked = true;
             pos._permissionBlockedAt = new Date().toISOString();
-            logEvent("warn", `[PERM BLOCK] ${ticker} ${closeSym} close blocked by Alpaca permissions (code 40310000). Paper account needs options level 2+ enabled. Position flagged — manual close required. Retry suppressed.`);
-            alpacaCloseOk = true; // mark as "handled" to remove from state and stop retry loop
+            pos._permBlockReason = "account not eligible to trade uncovered option contracts";
+            logEvent("warn", `[PERM BLOCK] ${ticker} ${closeSym} PERMANENTLY BLOCKED (40310000) — position retained in state. Fix paper account options tier on Alpaca dashboard. All further close attempts suppressed.`);
+            // alpacaCloseOk stays false — state NOT wiped, position visible until manually resolved
+            return; // exit closePosition, don't update state, don't retry
           }
         }
       } catch(e) {
