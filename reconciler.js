@@ -294,7 +294,21 @@ async function runReconciliation() {
               ? parseFloat((p.avgEntry * 100 * Math.abs(p.qty)).toFixed(2)) // long: cash paid
               : 0, // short: received premium, no cash outflow (margin handled separately)
             score: 75, reasons: ['Reconstructed from Alpaca reconciliation'],
-            openDate: p.alpPos.created_at || new Date().toISOString(),
+            // V2.87 FIX: Wash trade bug. Reconciler was setting openDate = alpPos.created_at
+            // which on Alpaca paper trading is the API creation timestamp (often current time).
+            // The wash trade guard (60s minimum hold) then blocked every close attempt for 60s.
+            // GLD at -41% could not close: "held only 1s, 11s, 23s..." for 6 consecutive scans.
+            // Fix: try to preserve original openDate from existing state position first.
+            // If no existing state (true orphan), use created_at but backdate by 120s so the
+            // 60s wash trade guard doesn't block immediate closes on positions that are clearly old.
+            openDate: (function() {
+              const existingPos = (_state.positions || []).find(ep => ep.contractSymbol === p.symbol || ep.ticker === p.ticker);
+              if (existingPos && existingPos.openDate) return existingPos.openDate;
+              // True orphan: backdate by 120s so wash trade guard doesn't block
+              const created = p.alpPos.created_at ? new Date(p.alpPos.created_at) : new Date();
+              const backdated = new Date(created.getTime() - 120000); // -120s
+              return backdated.toISOString();
+            })(),
             // peakPremium: use current market price if higher than avgEntry.
             // avgEntry alone misses intraday highs — a position that peaked at 2x entry
             // gets its trail wiped on reconcile. Use max(avgEntry, curP from snapshot).
