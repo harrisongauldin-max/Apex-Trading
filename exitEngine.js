@@ -83,30 +83,42 @@ function getDTEExitParams(dte, daysOpen = 0) {
     else if (daysOpen >= 3) { overnightMult = 0.85; overnightLabel = "(3D+)"; }
     else if (daysOpen >= 1) { overnightMult = 0.92; overnightLabel = "(OVERNIGHT)"; }
   }
+
+  // V2.88 VIX-ADJUSTED TP: At elevated VIX, options cost 40-60% more than VIX 18 baseline.
+  // The same underlying price move produces proportionally less % gain on premium.
+  // Lower TP in high-VIX = take profits faster when they appear rather than waiting for full target.
+  // This improves realized win rate in choppy/volatile environments.
+  //   VIX 18-24: normal targets (40% MONTHLY, 55% LEAPS, 20% SHORT-DTE)
+  //   VIX 25-29: reduce TP 20% (32% MONTHLY, 44% LEAPS, 16% SHORT-DTE) — options 35-50% expensive
+  //   VIX 30+:   reduce TP 35% (26% MONTHLY, 36% LEAPS, 13% SHORT-DTE) — options 65%+ expensive
+  const vix = state.vix || 22;
+  const vixTPMult = vix >= 30 ? 0.65 : vix >= 25 ? 0.80 : 1.0;
+  const vixLabel  = vix >= 30 ? " VIX30+" : vix >= 25 ? " VIX25+" : "";
+
   if (dte <= 21) {
     const base = pdtLocked ? 0.12 : pdtTight ? 0.15 : 0.20;
-    const tp   = parseFloat((base * overnightMult).toFixed(3));
+    const tp   = parseFloat((base * overnightMult * vixTPMult).toFixed(3));
     return { takeProfitPct: tp, partialPct: parseFloat((tp*0.60).toFixed(3)),
              ridePct: parseFloat((tp*1.30).toFixed(3)), stopLossPct: 0.30, fastStopPct: 0.15,
              trailActivate: pdtLocked ? 0.08 : pdtTight ? 0.10 : 0.12,
              trailStop: pdtLocked ? 0.05 : 0.07,
-             label: (pdtLocked ? "SHORT-DTE(PDT-LOCKED)" : pdtTight ? "SHORT-DTE(PDT-TIGHT)" : "SHORT-DTE") + overnightLabel };
+             label: "SHORT-DTE" + overnightLabel + vixLabel };
   } else if (dte <= 45) {
     const base = pdtLocked ? 0.25 : pdtTight ? 0.30 : 0.40;
-    const tp   = parseFloat((base * overnightMult).toFixed(3));
+    const tp   = parseFloat((base * overnightMult * vixTPMult).toFixed(3));
     return { takeProfitPct: tp, partialPct: parseFloat((tp*0.55).toFixed(3)),
              ridePct: parseFloat((tp*1.40).toFixed(3)), stopLossPct: 0.35, fastStopPct: 0.20,
              trailActivate: pdtLocked ? 0.15 : pdtTight ? 0.18 : 0.22,
              trailStop: pdtLocked ? 0.08 : pdtTight ? 0.10 : 0.12,
-             label: (pdtLocked ? "MONTHLY(PDT-LOCKED)" : pdtTight ? "MONTHLY(PDT-TIGHT)" : "MONTHLY") + overnightLabel };
+             label: "MONTHLY" + overnightLabel + vixLabel };
   } else {
     const base = pdtLocked ? 0.35 : pdtTight ? 0.45 : 0.55;
-    const tp   = parseFloat((base * overnightMult).toFixed(3));
+    const tp   = parseFloat((base * overnightMult * vixTPMult).toFixed(3));
     return { takeProfitPct: tp, partialPct: parseFloat((tp*0.55).toFixed(3)),
              ridePct: parseFloat((tp*1.50).toFixed(3)), stopLossPct: 0.35, fastStopPct: 0.20,
              trailActivate: pdtLocked ? 0.20 : pdtTight ? 0.25 : 0.30,
              trailStop: pdtLocked ? 0.10 : pdtTight ? 0.12 : 0.15,
-             label: (pdtLocked ? "LEAPS(PDT-LOCKED)" : pdtTight ? "LEAPS(PDT-TIGHT)" : "LEAPS") + overnightLabel };
+             label: "LEAPS" + overnightLabel + vixLabel };
   }
 }
 
