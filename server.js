@@ -713,15 +713,17 @@ cron.schedule("32 11,12 * * 1-5", async () => {
   const et = getETTime();
   if (et.getHours() === 7 && et.getMinutes() === 32) {
     logEvent("scan", "[PRE-MARKET] 6:32am CT (7:32am ET) bar seeding — fetching daily bars for RSI pre-computation");
-    const tickers = WATCHLIST.map(w => w.ticker);
+    // Only seed primary index ETFs — not individual stocks (INDIVIDUAL_STOCKS_ENABLED controls those).
+    // Fetching 20+ individual stock bars at 7:32am ET would exceed Alpaca's rate limit.
+    const _primaryETFs = ["SPY","QQQ","GLD","TLT","XLE","SMH","IYR","HYG"];
+    const tickers = WATCHLIST.filter(w => _primaryETFs.includes(w.ticker)).map(w => w.ticker);
     let seeded = 0;
     for (const ticker of tickers) {
       try {
         const bars = await getStockBars(ticker, 60);
         if (bars && bars.length >= 15) {
           // Compute RSI from daily bars and seed _rsiHistory
-          const { calcRSI } = require('./signals');
-          const rsi = calcRSI(bars);
+          const rsi = calcRSI(bars); // calcRSI imported from signals.js at top
           if (rsi !== null) {
             if (!state._rsiHistory) state._rsiHistory = {};
             const todayStr = getETDateStr(); // ET date string (not UTC toISOString)
