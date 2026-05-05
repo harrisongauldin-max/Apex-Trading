@@ -656,9 +656,19 @@ async function checkExits(positions, posSnapshots, posQuotes, posNewsCache, ctx)
     // Rationale: overnight mult already tightens TP; stop must match to avoid asymmetry.
     const _activeHardStop = _isOvernightCarry && chg <= -0.10 ? _overnightStopPct : STOP_LOSS_PCT;
     if (chg <= -_activeHardStop) {
-      const _stopLabel = _activeHardStop < STOP_LOSS_PCT ? `overnight-tightened-stop (${(_activeHardStop*100).toFixed(0)}%)` : `stop-loss`;
-      logEvent("scan", `${pos.ticker} ${_stopLabel} ${(chg*100).toFixed(0)}%`);
-      decisions.push({ pi, ticker: pos.ticker, action: 'close', reason: "stop", exitPremium: null, contractSym: null }); continue;
+      // V2.89 GUARD: Skip stop if position < 2 minutes old AND loss > 50%.
+      // Options snapshots can return yesterday's close price for newly-entered positions.
+      // A -50% loss within 2 minutes of entry is almost certainly stale data, not a real move.
+      // Real options don't lose 50% in 2 minutes from a valid entry. Hold and re-evaluate.
+      const _minsOpen = hoursOpen * 60;
+      if (_minsOpen < 2 && chg <= -0.50) {
+        logEvent("warn", `${pos.ticker} stop skipped — position only ${_minsOpen.toFixed(1)}min old, ${(chg*100).toFixed(0)}% likely stale options snapshot (re-evaluating next scan)`);
+        // Fall through — don't fire stop on likely stale data
+      } else {
+        const _stopLabel = _activeHardStop < STOP_LOSS_PCT ? `overnight-tightened-stop (${(_activeHardStop*100).toFixed(0)}%)` : `stop-loss`;
+        logEvent("scan", `${pos.ticker} ${_stopLabel} ${(chg*100).toFixed(0)}%`);
+        decisions.push({ pi, ticker: pos.ticker, action: 'close', reason: "stop", exitPremium: null, contractSym: null }); continue;
+      }
     }
 
     // 3. TRAILING STOP - activates at tier threshold, tightens on signal decay
