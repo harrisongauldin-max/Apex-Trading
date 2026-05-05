@@ -499,8 +499,15 @@ function scoreMeanReversionCall(stock, relStrength, adx, bars, vix) {
 function scoreIndexSetup(stock, optionType, spyRSI, spyMACD, spyMomentum, breadth, vix, agentMacro) {
   let score = 0;
   const reasons = [];
-  const signal     = (agentMacro || {}).signal     || "neutral";
-  const confidence = (agentMacro || {}).confidence || "low";
+  // V2.89: Agent accuracy gate — when 30min accuracy drops below 25%, treat agent as neutral.
+  // At 8.5% accuracy (logged today), the agent is directionally wrong 91.5% of the time.
+  // Allowing it to add/subtract score at that accuracy level makes entries worse not better.
+  // Threshold: < 25% accuracy at 30min over ≥ 30 calls → degrade to neutral for scoring.
+  const _agentAcc30  = state._agentAccuracy?.acc30  ?? 50; // default 50 = unknown
+  const _agentAccN   = state._agentAccuracy?.calls   ?? 0;
+  const _agentDegraded = _agentAccN >= 30 && _agentAcc30 < 25;
+  const signal     = _agentDegraded ? "neutral" : ((agentMacro || {}).signal     || "neutral");
+  const confidence = _agentDegraded ? "low"     : ((agentMacro || {}).confidence || "low");
   // FIX A: Regime source — use price-based regime (deterministic) not agent regime (9.6% accurate).
   // state._regimeClass: "A" = bull (SPY above 200MA), "B" = bear, "C" = breakdown.
   // Agent regime field kept for context only — not used for scoring gates.
