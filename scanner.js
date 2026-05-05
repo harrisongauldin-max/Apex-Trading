@@ -1378,19 +1378,41 @@ async function runScan() {
     }
   }
 
-  // V2.89: Hard cap on simultaneous call positions — max 2 open calls at any time.
-  // Previously: 4-5 calls could open simultaneously (all "market goes up" bets).
-  // In macro-driven selloffs, correlated instruments all lose together.
-  // Cap forces selection of the 2 best setups rather than entering everything at once.
-  // Put positions are uncapped — puts hedge the call exposure.
+  // V2.90: 3-slot call cap with correlation groups and tiered score threshold.
+  // Slot 1-2: standard MR entry, score >= 70/73 (existing gates apply).
+  // Slot 3: high-conviction only — score >= 85 AND instrument must be from a
+  //   different correlation group than BOTH existing call positions.
+  // Correlation groups:
+  //   EQUITY:  SPY, QQQ, SMH   (beta-correlated, move together)
+  //   MACRO:   GLD, TLT        (inflation/fear hedge, negative equity correlation)
+  //   SECTOR:  XLE, IYR, HYG   (sector-specific, lower correlation to equity index)
+  // Put positions are uncapped — puts hedge call exposure.
   // openCalls/openPuts already declared above (line ~1337)
-  const MAX_SIMULTANEOUS_CALLS = 2;
+  const MAX_SIMULTANEOUS_CALLS = 3;
+  const SLOT3_MIN_SCORE = 85;
+  const CORR_GROUPS = {
+    SPY: 'equity', QQQ: 'equity', SMH: 'equity',
+    GLD: 'macro',  TLT: 'macro',
+    XLE: 'sector', IYR: 'sector', HYG: 'sector',
+  };
+  // Build set of correlation groups currently occupied by open calls
+  const openCallPositions = (state.positions || []).filter(p => p.optionType === 'call');
+  const occupiedGroups    = new Set(openCallPositions.map(p => CORR_GROUPS[p.ticker] || 'other'));
+  state._occupiedCorrGroups = [...occupiedGroups];
+  state._openCallCount = openCalls;
+
   if (openCalls >= MAX_SIMULTANEOUS_CALLS) {
     logEvent("filter", `[CALL CAP] ${openCalls} calls already open (max ${MAX_SIMULTANEOUS_CALLS}) — no new call entries until one closes`);
-    // Block call entries at execution point via _callCapActive flag
     state._callCapActive = true;
+    state._slot3Active   = false;
+  } else if (openCalls === 2) {
+    // Slot 3 mode: active but requires score >= 85 + uncorrelated group
+    state._callCapActive = false;
+    state._slot3Active   = true;
+    logEvent("filter", `[CALL CAP] 2 calls open — slot 3 available (score >= ${SLOT3_MIN_SCORE} + uncorrelated group only)`);
   } else {
     state._callCapActive = false;
+    state._slot3Active   = false;
   }
 
   // High-beta block removed — ARGO trades index ETFs (SPY, QQQ, GLD, TLT, XLE),
@@ -2857,10 +2879,27 @@ async function runScan() {
       logEvent("filter", `${stock.ticker} call blocked — VIX ${state.vix?.toFixed(1)} >= 28 + bearish macro (high-cost call environment)`);
       continue;
     }
-    // V2.89: Call cap gate — max 2 simultaneous call positions
+    // V2.90: Call cap gate — 3-slot system with tiered score threshold
     if (state._callCapActive && optionType === "call") {
       logEvent("filter", `${stock.ticker} call blocked — call cap active (${openCalls}/${MAX_SIMULTANEOUS_CALLS} calls open)`);
       continue;
+    }
+    // Slot 3 gate: score >= 85 AND instrument must be from an unoccupied correlation group
+    if (state._slot3Active && optionType === "call") {
+      const _ticker3    = stock.ticker;
+      const _group3     = (CORR_GROUPS || {})[_ticker3] || 'other';
+      const _occupied3  = state._occupiedCorrGroups || [];
+      const _groupOk    = !_occupied3.includes(_group3);
+      const _scoreOk    = score >= SLOT3_MIN_SCORE;
+      if (!_scoreOk) {
+        logEvent("filter", `${_ticker3} call blocked — slot 3 requires score >= ${SLOT3_MIN_SCORE} (have ${score})`);
+        continue;
+      }
+      if (!_groupOk) {
+        logEvent("filter", `${_ticker3} call blocked — slot 3 requires uncorrelated group (${_group3} already open: [${_occupied3.join(',')}])`);
+        continue;
+      }
+      logEvent("filter", `${_ticker3} call SLOT 3 APPROVED — score ${score} >= ${SLOT3_MIN_SCORE}, group ${_group3} uncorrelated`);
     }
     logEvent("filter", `${stock.ticker} entry approved — intent:${intentType} score:${score} regime:${rb.regimeName}`);
     // NAKED OPTIONS MODE: single-leg long calls and puts only.
