@@ -826,6 +826,25 @@ cron.schedule("5 20,21 * * 1-5", async () => {
   }
 });
 
+// ── HOURLY AUTO-SAVE: persist log buffer to Redis every hour during trading day ──
+// Protects against Railway restarts losing the in-memory buffer mid-session.
+// isEOD=false so buffer is retained (not wiped) — EOD cron at 4:05pm does the final save.
+// Fires at :30 past each hour, 8am-4pm ET (13:30-21:30 UTC covers EDT/EST).
+// ET-hour check ensures it only fires during the actual trading window.
+cron.schedule("30 13-21 * * 1-5", async () => {
+  const et = getETTime();
+  const etH = et.getHours();
+  const etM = et.getMinutes();
+  // Only auto-save 9:30am-4:00pm ET, at the :30 mark each hour
+  if (etM !== 30 || etH < 9 || etH > 15) return;
+  // Skip if EOD save just ran (4:05pm) — avoid redundant back-to-back saves
+  if (etH === 16) return;
+  const bufLen = (state._dailyLogBuffer || []).length;
+  if (bufLen === 0) return; // nothing to save
+  logEvent("scan", `[AUTO-SAVE] Hourly log checkpoint: saving ${bufLen} entries to Redis...`);
+  await saveDailyLogToRedis(false); // isEOD=false — retains buffer
+});
+
 // 4:15pm ET post-market assessment - ET-hour aware
 cron.schedule("15 20,21 * * 1-5", async () => {
   const et = getETTime();
@@ -1531,6 +1550,37 @@ app.get("/api/logs", (req, res) => {
 });
 
 // V2.83: Historical log retrieval from Redis
+// GET /api/analytics/history?date=2026-05-05 -- retrieves analytics snapshot for a date
+// GET /api/analytics/history -- lists available analytics dates
+app.get("/api/analytics/history", async (req, res) => {
+  if (!REDIS_URL || !REDIS_TOKEN) return res.status(503).json({ error: "Redis not configured" });
+  try {
+    const { date } = req.query;
+    if (date) {
+      const key  = `argo:analytics:${date}`;
+      const resp = await fetch(`${REDIS_URL}/get/${key}`, {
+        headers: { Authorization: `Bearer ${REDIS_TOKEN}` }
+      });
+      const data = await resp.json();
+      if (!data.result) return res.status(404).json({ error: `No analytics snapshot for ${date}` });
+      const parsed = JSON.parse(data.result);
+      return res.json(parsed);
+    } else {
+      // List available dates
+      const resp  = await fetch(`${REDIS_URL}/keys/argo:analytics:*`, {
+        headers: { Authorization: `Bearer ${REDIS_TOKEN}` }
+      });
+      const data  = await resp.json();
+      const dates = (data.result || [])
+        .map(k => k.replace('argo:analytics:', ''))
+        .sort().reverse();
+      return res.json({ available: dates, count: dates.length });
+    }
+  } catch(e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // GET /api/logs/history?date=2026-04-09 -- retrieves archived daily log
 // GET /api/logs/history -- lists available log dates (last 90 days)
 app.get("/api/logs/history", async (req, res) => {
