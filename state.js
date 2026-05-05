@@ -340,6 +340,104 @@ async function saveDailyLogToRedis(isEOD = false) {
   } catch(e) {
     console.error("[EOD LOG] Daily log save error:", e.message);
   }
+
+  // ── Analytics snapshot — saved alongside log on every checkpoint ──────────
+  // Captures point-in-time performance metrics for historical trend analysis.
+  // Separate key per day so you can compare APEX performance across sessions.
+  // Key: argo:analytics:YYYY-MM-DD | TTL: 180 days
+  try {
+    const dateStr   = getETDateStr();
+    const analyticsKey = `argo:analytics:${dateStr}`;
+    const trades    = state.closedTrades || [];
+    const todayTrades = trades.filter(t => {
+      const d = t.closeTime || t.date;
+      return d && new Date(d).toISOString().slice(0,10) === dateStr;
+    });
+    const wins      = trades.filter(t => (t.pnl||0) > 0);
+    const losses    = trades.filter(t => (t.pnl||0) <= 0);
+    const grossW    = wins.reduce((s,t) => s+(t.pnl||0), 0);
+    const grossL    = Math.abs(losses.reduce((s,t) => s+(t.pnl||0), 0));
+    const todayWins = todayTrades.filter(t => (t.pnl||0) > 0);
+
+    // Score bracket breakdown
+    const brackets  = {};
+    trades.forEach(t => {
+      const s = t.score || 0;
+      const b = s >= 95 ? '95-100' : s >= 90 ? '90-94' : s >= 85 ? '85-89' :
+                s >= 80 ? '80-84' : s >= 75 ? '75-79' : s >= 70 ? '70-74' : '<70';
+      if (!brackets[b]) brackets[b] = { trades: 0, wins: 0, pnl: 0 };
+      brackets[b].trades++;
+      if ((t.pnl||0) > 0) brackets[b].wins++;
+      brackets[b].pnl += (t.pnl||0);
+    });
+
+    // Exit reason breakdown
+    const byExit = {};
+    trades.forEach(t => {
+      const r = t.reason || 'unknown';
+      if (!byExit[r]) byExit[r] = { count: 0, wins: 0, pnl: 0 };
+      byExit[r].count++;
+      if ((t.pnl||0) > 0) byExit[r].wins++;
+      byExit[r].pnl += (t.pnl||0);
+    });
+
+    const analyticsData = JSON.stringify({
+      date:       dateStr,
+      savedAt:    new Date().toISOString(),
+      isEOD,
+      account: {
+        cash:         state.cash,
+        budget:       state.customBudget || 30000,
+        openPositions: (state.positions || []).length,
+        realizedPnL:  state.realizedPnL || 0,
+        monthlyPnL:   state.monthlyProfit || 0,
+        peakCash:     state.peakCash || state.cash,
+        drawdownPct:  state.peakCash > 0 ? parseFloat(((state.cash - state.peakCash) / state.peakCash * 100).toFixed(2)) : 0,
+      },
+      performance: {
+        totalTrades:  trades.length,
+        wins:         wins.length,
+        losses:       losses.length,
+        winRate:      trades.length > 0 ? parseFloat((wins.length / trades.length * 100).toFixed(1)) : 0,
+        avgWin:       wins.length > 0 ? parseFloat((grossW / wins.length).toFixed(2)) : 0,
+        avgLoss:      losses.length > 0 ? parseFloat((-grossL / losses.length).toFixed(2)) : 0,
+        profitFactor: grossL > 0 ? parseFloat((grossW / grossL).toFixed(2)) : null,
+        totalPnL:     parseFloat((grossW - grossL).toFixed(2)),
+        expectancy:   trades.length > 0 ? parseFloat(((grossW - grossL) / trades.length).toFixed(2)) : 0,
+      },
+      today: {
+        trades:   todayTrades.length,
+        wins:     todayWins.length,
+        winRate:  todayTrades.length > 0 ? parseFloat((todayWins.length / todayTrades.length * 100).toFixed(1)) : 0,
+        pnl:      parseFloat(todayTrades.reduce((s,t) => s+(t.pnl||0), 0).toFixed(2)),
+      },
+      scoreBrackets: brackets,
+      exitBreakdown: byExit,
+      vix:       state.vix || null,
+      regime:    state._regimeClass || 'A',
+      agentSignal: (state._agentMacro || {}).signal || 'unknown',
+      journal:   (state.tradeJournal || []).slice(0, 50).map(t => ({
+        time: t.time, ticker: t.ticker, action: t.action,
+        optionType: t.optionType, score: t.score,
+        pnl: t.pnl, pct: t.pct, reason: t.reason,
+        strike: t.strike, expDate: t.expDate,
+        tradeType: t.tradeType,
+      })),
+    });
+
+    const aRes = await fetch(`${REDIS_URL}/set/${analyticsKey}`, {
+      method:  "POST",
+      headers: { Authorization: `Bearer ${REDIS_TOKEN}`, "Content-Type": "application/json" },
+      body:    JSON.stringify({ value: analyticsData, ex: 15552000 }), // 180-day TTL
+    });
+    if (aRes.ok) {
+      logEvent("scan", `[ANALYTICS] Snapshot saved: ${analyticsKey} | ${trades.length} trades | WR:${trades.length > 0 ? (wins.length/trades.length*100).toFixed(0) : 0}% | PnL:$${(grossW-grossL).toFixed(0)}`);
+    } else {
+      console.error("[ANALYTICS] Save failed:", aRes.status);
+    }
+  } catch(e) {
+    console.error("[ANALYTICS] Snapshot error:", e.message);
+  }
 }
 
 
