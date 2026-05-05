@@ -1673,8 +1673,12 @@ async function runScan() {
       const _etMinutes = (etHourNow % 1) * 60;
       const _sessionMinutes = etHourNow >= 9.5 ? (etHourNow - 9.5) * 60 : 0;
       const _vwapReliable = _sessionMinutes >= 30; // VWAP needs 30min to stabilize
-      if (_vwapReliable && signals.rsi < 40 && optionType === "call" && price < vwap * 0.99) {
-        logEvent("filter", `[VWAP] ${stock.ticker} MR call blocked — price ${((price/vwap-1)*100).toFixed(1)}% below VWAP (down day, not dip)`);
+      // optionType not yet declared at this point in the loop — use callScore proxy check instead.
+      // _callLikelyWins: if RSI < 40 we're on the MR call path; block if below VWAP.
+      // Full optionType check happens at execution gate below (~line 2860) as well.
+      const _callLikelyPath = signals.rsi !== null && signals.rsi < 40;
+      if (_vwapReliable && _callLikelyPath && price < vwap * 0.99) {
+        logEvent("filter", `[VWAP] ${stock.ticker} MR call path blocked — price ${((price/vwap-1)*100).toFixed(1)}% below VWAP (down day, not dip)`);
         continue;
       }
       // Bear call credit: strongly prefer below VWAP (market already weak intraday)
