@@ -678,6 +678,36 @@ async function checkExits(positions, posSnapshots, posQuotes, posNewsCache, ctx)
     const peakChg = pos.premium > 0 ? (pos.peakPremium - pos.premium) / pos.premium : 0;
     const trailActivated = chg >= (pos.trailActivate || TRAIL_ACTIVATE_PCT)
                         || peakChg >= (pos.trailActivate || TRAIL_ACTIVATE_PCT);
+
+    // ── V2.92: HYBRID PROFIT LOCK (panel consensus 5/5/2026) ─────────────────
+    // Fires ONCE when position first crosses +15% peak gain.
+    // 2-contract path (Option B): partial close 1 contract, trail remaining at 6%.
+    // 1-contract path (Option C): tighten trail to 6% at +15%, further to 4% at +20%.
+    // Uses peakChg (not chg) so it latches permanently once +15% is ever reached.
+    // _profitLockActive flag prevents re-firing on subsequent scans.
+    const contracts = pos.contracts || 1;
+    if (!pos._profitLockActive && peakChg >= 0.15) {
+      pos._profitLockActive = true; // latch — only fires once per position
+      if (contracts >= 2) {
+        // ── 2-CONTRACT PATH (B): partial close 1, trail remaining at 6% ────
+        logEvent("scan", `[PROFIT LOCK] ${pos.ticker} hit +${(peakChg*100).toFixed(0)}% peak — closing 1/${contracts} contracts, tightening trail to 6%`);
+        pos.trailPct = 0.06; // tighten trail on remaining contract
+        decisions.push({ pi, ticker: pos.ticker, action: 'partial', reason: 'partial-lock', exitPremium: null, contractSym: null });
+        // Trail floor will be computed below with the new 0.06 trailPct
+      } else {
+        // ── 1-CONTRACT PATH (C): tighten trail to 6%, no partial close ─────
+        pos.trailPct = 0.06;
+        logEvent("scan", `[PROFIT LOCK] ${pos.ticker} hit +${(peakChg*100).toFixed(0)}% peak — 1-contract, trail tightened to 6%`);
+      }
+    }
+    // 1-contract path only: further tighten to 4% if peak reaches +20%
+    if (contracts === 1 && pos._profitLockActive && !pos._trail4Active && peakChg >= 0.20) {
+      pos._trail4Active = true;
+      pos.trailPct = 0.04;
+      logEvent("scan", `[PROFIT LOCK] ${pos.ticker} hit +${(peakChg*100).toFixed(0)}% peak — trail tightened to 4%`);
+    }
+    // ── END HYBRID PROFIT LOCK ────────────────────────────────────────────────
+
     if (trailActivated) {
       // pos.trailPct stores the % width (0.15 = 15%), pos.trailStop stores the $ floor
       // These are separate fields - reading pos.trailStop as % was the bug
@@ -690,14 +720,19 @@ async function checkExits(positions, posSnapshots, posQuotes, posNewsCache, ctx)
         if (posBars.length >= 15) liveRSI = calcRSI(posBars);
       } catch(e) {}
       if (pos.optionType === "call" && liveRSI < 45 && (pos.entryRSI || 55) >= 50) {
-        trailPct = TRAIL_STOP_PCT * 0.6;
-        pos.trailPct = trailPct; // persist tightened % for next scan
-        logEvent("scan", `${pos.ticker} signal decay - RSI ${liveRSI} - tightening trail to ${(trailPct*100).toFixed(0)}%`);
+        // Only apply signal decay tightening if profit lock hasn't already tightened further
+        if (!pos._profitLockActive) {
+          trailPct = TRAIL_STOP_PCT * 0.6;
+          pos.trailPct = trailPct; // persist tightened % for next scan
+          logEvent("scan", `${pos.ticker} signal decay - RSI ${liveRSI} - tightening trail to ${(trailPct*100).toFixed(0)}%`);
+        }
       }
       if (pos.optionType === "put" && liveRSI > 55 && (pos.entryRSI || 55) <= 50) {
-        trailPct = TRAIL_STOP_PCT * 0.6;
-        pos.trailPct = trailPct;
-        logEvent("scan", `${pos.ticker} signal decay (put) - RSI ${liveRSI} - tightening trail to ${(trailPct*100).toFixed(0)}%`);
+        if (!pos._profitLockActive) {
+          trailPct = TRAIL_STOP_PCT * 0.6;
+          pos.trailPct = trailPct;
+          logEvent("scan", `${pos.ticker} signal decay (put) - RSI ${liveRSI} - tightening trail to ${(trailPct*100).toFixed(0)}%`);
+        }
       }
       const trailFloor = pos.peakPremium * (1 - trailPct); // $ floor value
       pos.trailStop    = trailFloor;                        // store $ floor separately
