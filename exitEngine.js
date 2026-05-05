@@ -744,21 +744,64 @@ async function checkExits(positions, posSnapshots, posQuotes, posNewsCache, ctx)
     // - F10: THESIS DEGRADATION - re-score entry conditions every hour -
     // If the original entry thesis has weakened significantly, partial close
     // regardless of price movement - the edge is gone even if position is flat
+    //
+    // V2.91 FIX (panel consensus 5/5/2026):
+    // PUTS and CALLS are fundamentally different here:
+    //   PUT  thesis degradation: RSI recovery IS degradation — entry was overbought,
+    //        recovery means the sell signal is gone. Current logic correct for puts.
+    //   CALL thesis degradation: RSI recovery is thesis FULFILLMENT — entry was
+    //        oversold, recovery means the bounce happened as predicted. The problem
+    //        is option pricing lag — the underlying recovered but the option hasn't
+    //        had time to price it in yet (delta lag + IV normalization takes time).
+    //        GLD example: entered RSI 28, recovered to RSI 71, option still -1%.
+    //        Old code closed it at -$50. Correct behavior: hold — thesis worked,
+    //        option just needs time to catch up.
+    //
+    // Three fixes applied:
+    //   1. Separate call/put partial close thresholds
+    //   2. Calls: only partial close if down > 10% DESPITE RSI recovery (IV crush signal)
+    //   3. Calls: suppress entirely if macro is neutral or bullish (conditions improved)
     if (hoursOpen >= 1 && Math.floor(hoursOpen) > (pos._lastThesisCheck || 0)) {
       pos._lastThesisCheck = Math.floor(hoursOpen);
       try {
         const tBars  = _posBarCache.get(pos.ticker) || await getStockBars(pos.ticker, 20); // OPT7: reuse cached bars
         if (!_posBarCache.has(pos.ticker) && tBars.length) _posBarCache.set(pos.ticker, tBars);
         if (tBars.length >= 15) {
-          const curRSI = calcRSI(tBars);
+          const curRSI   = calcRSI(tBars);
           const entryRSI = pos.entryRSI || (pos.optionType === "put" ? 75 : 30);
-          // For puts: if RSI has dropped from overbought to neutral, thesis weakening
+          const curMacro = (state._agentMacro || {}).signal || "neutral";
+          const macroIsBullish = curMacro.includes("bullish");
+          const macroIsNeutral = curMacro === "neutral";
+
+          // ── PUT thesis degradation (unchanged) ──────────────────────────────
+          // RSI recovery from overbought = put thesis genuinely dead
           const rsiReversed = pos.optionType === "put" && entryRSI >= 65 && curRSI < 50;
-          // For calls: if RSI has risen from oversold to neutral, thesis weakening
-          const callRsiReversed = pos.optionType === "call" && entryRSI <= 40 && curRSI > 55;
-          if ((rsiReversed || callRsiReversed) && !pos.partialClosed && chg < 0.10) {
-            logEvent("scan", `${pos.ticker} thesis degradation - RSI moved from ${entryRSI} to ${curRSI.toFixed(0)} - partial close`);
+          if (rsiReversed && !pos.partialClosed && chg < 0.10) {
+            logEvent("scan", `${pos.ticker} PUT thesis degradation — RSI ${entryRSI}→${curRSI.toFixed(0)}, partial close`);
             decisions.push({ pi, ticker: pos.ticker, action: 'partial', reason: 'partial', exitPremium: null, contractSym: null });
+          }
+
+          // ── CALL thesis degradation (v2.91 — much stricter) ─────────────────
+          // RSI recovery for a call = thesis FULFILLED, not degraded.
+          // Only partial close a call when ALL THREE conditions are met:
+          //   1. RSI recovered past 55 (bounce happened)
+          //   2. Option is STILL DOWN > 10% despite the bounce (IV crush confirmed)
+          //   3. Macro is NOT neutral or bullish (conditions haven't improved)
+          // If macro is bullish/neutral, suppress entirely — hold and let it run.
+          const callRsiRecovered = pos.optionType === "call" && entryRSI <= 40 && curRSI > 55;
+          if (callRsiRecovered && !pos.partialClosed) {
+            if (macroIsBullish || macroIsNeutral) {
+              // Macro improved or neutral — RSI bounce is signal working as intended.
+              // Log for visibility but DO NOT close.
+              logEvent("scan", `${pos.ticker} CALL RSI recovered ${entryRSI}→${curRSI.toFixed(0)} — thesis fulfilled, macro ${curMacro}, holding`);
+            } else if (chg < -0.10) {
+              // Macro is bearish AND option is down 10%+ despite bounce = IV crush confirmed
+              logEvent("scan", `${pos.ticker} CALL RSI recovered but option down ${(chg*100).toFixed(0)}% with bearish macro — IV crush likely, partial close`);
+              decisions.push({ pi, ticker: pos.ticker, action: 'partial', reason: 'partial', exitPremium: null, contractSym: null });
+            } else {
+              // Macro bearish but option not deeply down — log and monitor
+              logEvent("scan", `${pos.ticker} CALL RSI recovered ${entryRSI}→${curRSI.toFixed(0)}, chg ${(chg*100).toFixed(0)}%, bearish macro but not deeply underwater — monitoring`);
+            }
           }
         }
       } catch(e) {}
