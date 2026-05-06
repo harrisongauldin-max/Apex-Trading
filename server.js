@@ -25,6 +25,90 @@ const { runScan, getScannerState, setDryRunMode,
 const { runReconciliation, syncPositionPnLFromAlpaca,
         initReconciler }                                  = require('./reconciler');
 const { closePosition, syncCashFromAlpaca }               = require('./closeEngine');
+
+// ─── Alpaca Truth: single source of financial reality ────────────────────────
+// V2.94: APEX's internal P&L accounting (closedTrades, tradeJournal) is
+// unreliable due to partial close bugs, churn cycles, dashboard closes, and
+// cost basis mismatches with Alpaca. This function queries Alpaca directly
+// and returns the authoritative financial picture. All dashboard P&L display
+// should use this, never state.closedTrades or tradeJournal dollar amounts.
+//
+// Methodology:
+//   realizedPnL = cashDelta + deployedCapital
+//   where cashDelta = currentCash - dayOpenCash
+//   and deployedCapital = sum(pos.costBasis for all open positions from Alpaca)
+//   Total P&L = realizedPnL + sum(unrealizedPnL for all open positions)
+//
+// dayOpenCash is stored in state at market open (9:30am) by the scan loop.
+// Fallback: if dayOpenCash not set, use state.cash as opening approximation.
+async function getAlpacaTruth() {
+  try {
+    const [acct, positions] = await Promise.all([
+      alpacaGet("/account"),
+      alpacaGet("/positions"),
+    ]);
+    if (!acct) return null;
+
+    const currentCash    = parseFloat(acct.cash || 0);
+    const currentEquity  = parseFloat(acct.equity || acct.portfolio_value || currentCash);
+
+    // V2.94: Equity delta is the single authoritative P&L number.
+    // equity = cash + market value of all open positions.
+    // dayOpenEquity = yesterday's closing equity (stored at 9:25am reset).
+    // P&L = currentEquity - dayOpenEquity — no cost basis ambiguity, no journal needed.
+    // Fallback: if dayOpenEquity not set yet (first run), use last_equity from Alpaca.
+    const dayOpenEquity  = state.dayOpenEquity
+      || parseFloat(acct.last_equity || acct.last_portfolio_value || currentEquity);
+
+    // Store dayOpenEquity once per day if not yet set
+    if (!state.dayOpenEquity && dayOpenEquity > 0) {
+      state.dayOpenEquity = dayOpenEquity;
+      logEvent("scan", `[ALPACA TRUTH] dayOpenEquity initialized: $${dayOpenEquity.toFixed(2)}`);
+    }
+
+    const totalPnL_equity = parseFloat((currentEquity - dayOpenEquity).toFixed(2));
+
+    // Unrealized P&L from Alpaca's own calculation per position
+    const unrealizedPnL  = Array.isArray(positions)
+      ? positions.reduce((sum, p) => sum + parseFloat(p.unrealized_pl || 0), 0)
+      : 0;
+
+    // Realized = total - unrealized
+    const realizedPnL    = parseFloat((totalPnL_equity - unrealizedPnL).toFixed(2));
+
+    // Today's intraday P&L from Alpaca (resets at market open)
+    const todayPnL       = Array.isArray(positions)
+      ? positions.reduce((sum, p) => sum + parseFloat(p.unrealized_intraday_pl || 0), 0)
+      : 0;
+
+    // Map open positions for dashboard display
+    const openPositions  = Array.isArray(positions) ? positions.map(p => ({
+      symbol:        p.symbol,
+      qty:           parseInt(p.qty || 0),
+      side:          p.side,
+      marketValue:   parseFloat(p.market_value || 0),
+      avgEntry:      parseFloat(p.avg_entry_price || 0),
+      costBasis:     parseFloat(p.cost_basis || 0),
+      unrealizedPnL: parseFloat(p.unrealized_pl || 0),
+      unrealizedPct: parseFloat(p.unrealized_plpc || 0) * 100,
+      todayPnL:      parseFloat(p.unrealized_intraday_pl || 0),
+      todayPct:      parseFloat(p.unrealized_intraday_plpc || 0) * 100,
+    })) : [];
+
+    return {
+      currentCash,
+      currentEquity,
+      dayOpenEquity,
+      realizedPnL,                                          // equity-delta minus unrealized
+      unrealizedPnL:   parseFloat(unrealizedPnL.toFixed(2)),
+      totalPnL:        totalPnL_equity,                     // equity delta = ground truth
+      openPositions,
+    };
+  } catch(e) {
+    logEvent("warn", `[ALPACA TRUTH] Failed to fetch: ${e.message}`);
+    return null;
+  }
+}
 const { runBacktest }                                     = require('./backtest');
 const { sendEmail, sendMorningBriefing, sendResendEmail,
         initReporting, setReportingContext,
@@ -529,6 +613,35 @@ setInterval(() => {
   if (day >= 1 && day <= 5) runScan();
 }, 10000);
 
+// V2.94: Alpaca truth refresh — every 5 minutes during market hours.
+// Queries Alpaca account + positions directly and stores in state._alpacaTruth.
+// Dashboard reads state._alpacaTruth for all P&L display — never closedTrades.
+// Runs independent of scan loop so P&L stays current even between scans.
+setInterval(async () => {
+  const et  = getETTime();
+  const day = et.getDay();
+  const h   = et.getHours();
+  const m   = et.getMinutes();
+  if (day < 1 || day > 5) return;          // weekends
+  if (h < 9 || h > 16) return;             // outside 9am-4pm ET
+  if (h === 9 && m < 30) return;           // pre-open
+  try {
+    const truth = await getAlpacaTruth();
+    if (truth) {
+      state._alpacaTruth = truth;
+      logEvent("scan",
+        `[ALPACA TRUTH] realized:$${truth.realizedPnL.toFixed(0)} ` +
+        `unrealized:$${truth.unrealizedPnL.toFixed(0)} ` +
+        `total:$${truth.totalPnL.toFixed(0)} | ` +
+        `cash:$${truth.currentCash.toFixed(0)} ` +
+        `positions:${truth.openPositions.length}`
+      );
+    }
+  } catch(e) {
+    logEvent("warn", `[ALPACA TRUTH] refresh error: ${e.message}`);
+  }
+}, 5 * 60 * 1000); // every 5 minutes
+
 // - F3: After-hours context update - every 15 min Mon-Fri outside market hours -
 // Updates macro news, VIX proxy, Fear&Greed overnight
 // Ensures APEX walks into market open with fresh context, not stale data
@@ -888,6 +1001,18 @@ cron.schedule("25 13 * * 1-5", async () => {
     state._dailyPnL         = 0;
     state._dailyCircuitOpen = true;
     state.todayTrades       = 0;
+    // V2.94: Capture dayOpenEquity from Alpaca at market open.
+    // equity = cash + open position market value = the authoritative account value.
+    // getAlpacaTruth() computes P&L as (currentEquity - dayOpenEquity).
+    // This is the only formula that survives partial closes, addons, churn, and
+    // cost basis mismatches — equity doesn't lie.
+    try {
+      const acct = await alpacaGet("/account");
+      if (acct) {
+        state.dayOpenEquity = parseFloat(acct.equity || acct.portfolio_value || acct.cash || 0);
+        logEvent("scan", `[ALPACA TRUTH] dayOpenEquity set: $${state.dayOpenEquity.toFixed(2)}`);
+      }
+    } catch(e) { logEvent("warn", `[ALPACA TRUTH] dayOpenEquity capture failed: ${e.message}`); }
     await saveStateNow();
     logEvent("circuit", `[MORNING RESET] Daily P&L zeroed before open (was $${prev.toFixed(0)}) — circuit armed for new session`);
   }
@@ -1018,7 +1143,9 @@ app.get("/api/state", async (req, res) => {
     portfolioBetaDelta: state._portfolioBetaDelta || 0,
     accountPhase: getAccountPhase(),
     agentHealth: state._agentHealth || { calls: 0, successes: 0, timeouts: 0, parseErrors: 0 },
-    realizedPnL:   parseFloat(realizedPnL().toFixed(2)),
+    realizedPnL:   parseFloat(realizedPnL().toFixed(2)), // legacy: closedTrades sum (may be inaccurate)
+    // V2.94: Alpaca truth fields — use these for display, not realizedPnL above
+    alpacaTruth:   state._alpacaTruth || null,
     totalCap:      totalCap(),
     stockValue:    parseFloat(stockValue().toFixed(2)),
     isMarketHours:      isMarketHours(),
