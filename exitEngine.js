@@ -112,13 +112,19 @@ function getDTEExitParams(dte, daysOpen = 0) {
              trailStop: pdtLocked ? 0.08 : pdtTight ? 0.10 : 0.12,
              label: "MONTHLY" + overnightLabel + vixLabel };
   } else {
-    const base = pdtLocked ? 0.35 : pdtTight ? 0.45 : 0.55;
+    // V2.94: LEAPS tier retired — merged into MONTHLY parameters.
+    // Previously LEAPS used base 55% TP giving 44% at VIX 27.
+    // Problem: APEX enters 46-65 DTE options, not true LEAPS. These positions
+    // behave like MONTHLY in terms of delta/theta/vega dynamics. Higher TP just
+    // caused over-holding into vega compression. MONTHLY params apply universally
+    // for all positions > 45 DTE.
+    const base = pdtLocked ? 0.25 : pdtTight ? 0.30 : 0.40;
     const tp   = parseFloat((base * overnightMult * vixTPMult).toFixed(3));
     return { takeProfitPct: tp, partialPct: parseFloat((tp*0.55).toFixed(3)),
-             ridePct: parseFloat((tp*1.50).toFixed(3)), stopLossPct: 0.35, fastStopPct: 0.20,
-             trailActivate: pdtLocked ? 0.20 : pdtTight ? 0.25 : 0.30,
-             trailStop: pdtLocked ? 0.10 : pdtTight ? 0.12 : 0.15,
-             label: "LEAPS" + overnightLabel + vixLabel };
+             ridePct: parseFloat((tp*1.40).toFixed(3)), stopLossPct: 0.35, fastStopPct: 0.20,
+             trailActivate: pdtLocked ? 0.15 : pdtTight ? 0.18 : 0.22,
+             trailStop: pdtLocked ? 0.08 : pdtTight ? 0.10 : 0.12,
+             label: "MONTHLY+" + overnightLabel + vixLabel };
   }
 }
 
@@ -494,7 +500,57 @@ async function checkExits(positions, posSnapshots, posQuotes, posNewsCache, ctx)
         activeTakeProfitPct = 0.40;
       }
     } else {
-      activeTakeProfitPct = parseFloat((currentExitParams.takeProfitPct * dteMult).toFixed(3));
+      // V2.94 CHANGE 2: Thesis-aware TP for naked options.
+      // Two-phase exit logic:
+      //   Phase 1 (thesis active)   — RSI not yet normalized → standard TP
+      //   Phase 2 (thesis fulfilled) — RSI crossed 55 (calls) / 45 (puts) → TP drops
+      //     to protect current gain. Trail tightens to 3% from peak. No longer
+      //     seeking the full target — protecting what the bounce produced.
+      //
+      // RSI normalization thresholds:
+      //   Calls: entryRSI <= 40 AND curRSI > 55 → bounce complete
+      //   Puts:  entryRSI >= 60 AND curRSI < 45 → reversal complete
+      const _entryRSI  = pos.entryRSI || 50;
+      const _curRSI    = pos._prevRSI || _entryRSI; // _prevRSI updated every scan at line ~339
+      const _callFulfilled = pos.optionType === "call" && _entryRSI <= 40 && _curRSI > 55;
+      const _putFulfilled  = pos.optionType === "put"  && _entryRSI >= 60 && _curRSI < 45;
+      const _thesisFulfilled = _callFulfilled || _putFulfilled;
+
+      if (_thesisFulfilled && !pos._thesisFulfilled) {
+        pos._thesisFulfilled = true;
+        logEvent("scan", `[THESIS FULFILLED] ${pos.ticker} RSI ${_entryRSI}→${_curRSI.toFixed(0)} — entering profit protection mode`);
+      }
+
+      if (pos._thesisFulfilled && chg > 0) {
+        // Phase 2: thesis fulfilled and position is profitable.
+        // Lock in current gain — TP becomes current gain (exit now or trail very tight).
+        activeTakeProfitPct = parseFloat(Math.max(chg - 0.01, currentExitParams.takeProfitPct * 0.70).toFixed(3));
+        // Tighten trail to 3% if not already tighter from profit lock
+        if (!pos._trail4Active && pos.trailPct > 0.03) {
+          pos.trailPct = 0.03;
+          logEvent("scan", `[THESIS FULFILLED] ${pos.ticker} trail tightened to 3% — profit protection active`);
+        }
+        logEvent("scan", `[THESIS FULFILLED] ${pos.ticker} phase 2 TP: ${(activeTakeProfitPct*100).toFixed(0)}% | cur gain: ${(chg*100).toFixed(0)}%`);
+      } else {
+        activeTakeProfitPct = parseFloat((currentExitParams.takeProfitPct * dteMult).toFixed(3));
+      }
+
+      // V2.94 CHANGE 3: Vega stress check.
+      // If more than 25% of current position value is at risk from a 3-point VIX drop,
+      // the position is vega-dominant — apply phase 2 exit logic regardless of RSI.
+      // Formula: vegaRisk = |pos.greeks.vega| × 3 VIX points / pos.cost
+      // This catches positions like SPY where vega expansion inflated gains artificially.
+      if (chg > 0.10 && !pos._thesisFulfilled) {
+        const _posVega   = Math.abs(parseFloat(pos.greeks?.vega || 0));
+        const _vegaRisk3 = _posVega * 3 * 100 * (pos.contracts || 1); // $ risk from 3pt VIX drop
+        const _vegaRatio = pos.cost > 0 ? _vegaRisk3 / (pos.currentPrice * 100 * (pos.contracts || 1)) : 0;
+        if (_vegaRatio > 0.25) {
+          pos._thesisFulfilled = true;
+          if (pos.trailPct > 0.03) pos.trailPct = 0.03;
+          activeTakeProfitPct = parseFloat(Math.max(chg - 0.01, currentExitParams.takeProfitPct * 0.70).toFixed(3));
+          logEvent("scan", `[VEGA DOMINANT] ${pos.ticker} vega risk ${(_vegaRatio*100).toFixed(0)}% of value at VIX-3 — entering profit protection mode`);
+        }
+      }
     }
     // partialPct already derived from tp (which has overnightMult) - don't apply dteMult again
     // Partial should fire at 60% of the DTE-adjusted take profit target
