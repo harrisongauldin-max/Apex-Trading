@@ -1753,7 +1753,7 @@ async function runScan() {
       ...stock,
       price:         price,
       rsi:           signals.rsi,       // intraday RSI -- display/timing only
-      dailyRsi:      (signals && typeof signals.dailyRsi === "number") ? signals.dailyRsi : (signals?.rsi || 50), // daily RSI -- scoring thresholds (V2.81), null-guarded
+      dailyRsi:      (signals && signals.dailyRsi != null) ? parseFloat(signals.dailyRsi) : parseFloat(signals?.rsi || 50), // V2.94 FIX: typeof check replaced with null check + explicit parseFloat. typeof failed when dailyRsi arrived as string "99.6", causing fallback to intraday RSI (41.2) and bypassing the dailyRSI > 80 call block.
       macd:          signals.macd,
       momentum:      signals.momentum,  // now intraday momentum when available
       ivr:           signals.ivr,
@@ -2002,6 +2002,32 @@ async function runScan() {
         const xlePutGate  = isXLEEntryAllowed("put",  liveStock.rsi, liveStock.momentum, state.vix, liveStock.price || 0, xleMA20Live, liveStock.dailyRsi); // panel M4: passes dailyRsi for dual-condition block
         if (!xleCallGate.allowed) { callSetup.score = 0; logEvent("filter", xleCallGate.reason); }
         if (!xlePutGate.allowed)  { putSetup.score  = 0; logEvent("filter", xlePutGate.reason);  }
+
+        // V2.94 Change 4: XLE dailyRSI gate for calls.
+        // Daily RSI must confirm oversold (< 45) for a call entry to be valid.
+        // Intraday RSI can be oversold while daily trend is still neutral/overbought.
+        // XLE at intraday RSI 29 but dailyRSI 35 is a valid setup (confirmed multi-day weakness).
+        // XLE at intraday RSI 29 but dailyRSI 55 is NOT — intraday noise in a neutral trend.
+        // Today's loss: XLE entered at intraday RSI 31.8, dailyRSI 31.8 — both confirmed.
+        // Gate kept for future protection when dailyRSI diverges from intraday.
+        const _xleDailyRsi = parseFloat(liveStock.dailyRsi || 50);
+        if (callSetup.score > 0 && _xleDailyRsi >= 45) {
+          callSetup.score = 0;
+          logEvent("filter", `XLE call blocked — dailyRSI ${_xleDailyRsi.toFixed(1)} not oversold daily (need < 45 for confirmed MR setup)`);
+        }
+
+        // V2.94 Change 5: XLE gap-down > 3% call block.
+        // Entering a call into a gap-down on a sector ETF is momentum chasing, not MR.
+        // A gap-down means sellers are aggressive overnight — options premium is distorted
+        // by elevated IV from the gap move, and the bounce (if it comes) may not
+        // recover the option cost before IV compresses.
+        // XLE today: -3.45% gap, entered call, lost -$174. This gate would have blocked it.
+        const _xleGap = parseFloat(preMarket?.gapPct || 0);
+        if (callSetup.score > 0 && _xleGap < -3) {
+          callSetup.score = 0;
+          logEvent("filter", `XLE call blocked — pre-market gap ${_xleGap.toFixed(1)}% (gap-down > 3% = distorted IV, not MR entry)`);
+        }
+
         // XLE is NOT correlated with SPY/QQQ group - independent oil driver
       }
 
