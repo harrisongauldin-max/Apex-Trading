@@ -158,6 +158,27 @@ async function runReconciliation() {
           date: new Date().toLocaleDateString(), score: pos.score || 0, closeTime: Date.now(),
           tradeType: pos.isCreditSpread ? "credit_spread" : pos.isSpread ? "debit_spread" : "naked",
         });
+        // V2.94: Write journal entry for reconcile-removed positions.
+        // Previously missing — caused SMH (manually closed via dashboard) to have no
+        // CLOSE entry in the journal. The dashboard close path bypasses closePosition()
+        // and relies on reconciler to detect the position is gone. Now journal gets the entry.
+        if (!_state.tradeJournal) _state.tradeJournal = [];
+        _state.tradeJournal.unshift({
+          time:       new Date().toISOString(),
+          ticker:     pos.ticker,
+          action:     "CLOSE",
+          reason:     "reconcile-removed",
+          optionType: pos.optionType,
+          tradeType:  pos.isCreditSpread ? "credit_spread" : pos.isSpread ? "debit_spread" : "naked",
+          strike:     pos.strike || null,
+          expDate:    pos.expDate || null,
+          exitPremium: pos.currentPrice || pos.premium || null,
+          pnl:        0, // unknown — position was closed externally, no fill price available
+          pct:        "0",
+          reasoning:  `Position closed externally (dashboard/manual) — reconciler detected removal. P&L not available from APEX; check Alpaca fills for actual P&L.`,
+          score:      pos.score || 0,
+        });
+        if (_state.tradeJournal.length > 100) _state.tradeJournal = _state.tradeJournal.slice(0, 100);
         ghosts++;
       }
     }
