@@ -168,29 +168,17 @@ const WATCHLIST = [
     earningsDate: null,
     isIndex:   true,   // treated as index - same scoring path as SPY/QQQ
     isPrimary: false,
+    minScore:  80, // V2.94: raised from 70 — sector ETFs need higher conviction than broad indices
   },
 ];
 
-// FIX 12: Expanded watchlist — SMH (semiconductors), IYR (real estate), HYG (high yield credit)
-// All ETF-based: no earnings risk, liquid options markets, genuinely uncorrelated theses
-// SMH: pure-play semiconductors, high beta to AI narrative, independent of broad QQQ
+// V2.94: SMH REMOVED from WATCHLIST (trading panel unanimous, 5/6/2026)
+// Failure modes: beta 1.6 (too volatile), premium $21+ (8% account per contract),
+// dailyRSI 99.6 (zero MR room), narrative-driven (chip cycle/geopolitics not RSI-predictable),
+// 0 wins observed across all sessions. Kept in dataSectors for breadth/rotation data only.
 // IYR: rate-driven real estate, negative correlation with yields, independent macro driver
 // HYG: high yield bonds, credit stress leading indicator, already used as data signal — now tradeable
 WATCHLIST.push(
-  {
-    ticker:    "SMH",
-    sector:    "Technology",
-    momentum:  "steady",
-    rsi:       50,
-    macd:      "neutral",
-    catalyst:  "Semiconductor cycle — AI chip demand + geopolitics",
-    ivr:       45,
-    beta:      1.6,
-    earningsDate: null,
-    isIndex:   true,
-    isPrimary: false,
-    minScore:  75, // FIX 11: higher bar for thinner liquidity instruments
-  },
   {
     ticker:    "IYR",
     sector:    "Real Estate",
