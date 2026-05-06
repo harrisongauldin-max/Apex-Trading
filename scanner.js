@@ -577,6 +577,7 @@ async function runScan() {
     // Always compute streaks live from closedTrades - avoids stale Redis values
     const liveStreaks = getStreakAnalysis();
     logEvent("scan", `[5min] Regime:${regime.regime}(${regime.confidence}%) | Kelly:${marketContext.kelly?.contracts||1}x | Streak:${liveStreaks.currentStreak}x${liveStreaks.currentType||'--'}`);
+
     // Record portfolio value snapshot every 5 minutes during market hours
     if (!state.portfolioSnapshots) state.portfolioSnapshots = [];
     const snapValue = state.cash + openRisk();
@@ -2673,8 +2674,12 @@ async function runScan() {
     const recentLossSameDir = recentLoss && (!recentLoss.optionType || recentLoss.optionType === optionType);
     if (recentLossSameDir && (Date.now() - recentLoss.closedAt) < 24 * 3600 * 1000) {
       const hoursSinceLoss = ((Date.now() - recentLoss.closedAt) / 3600000).toFixed(1);
-      const lossRSI    = recentLoss.entryRSI || 50; // RSI at losing entry
-      const currentRSI = signals.rsi || liveStock.rsi || 50;
+      // SPRINT-08: Use exitRSI (RSI when position closed) not entryRSI.
+      // Re-entry gate asks: has RSI moved 10pts since we CLOSED the position?
+      // entryRSI caused drift because it's a stale reference from the open time.
+      // exitRSI is the stable snapshot captured at close time.
+      const lossRSI    = recentLoss.exitRSI || recentLoss.entryRSI || 50; // prefer exitRSI
+      const currentRSI = liveStock.rsi || signals.rsi || 50; // use liveStock for freshness
       const rsidelta   = Math.abs(currentRSI - lossRSI);
       const instrMin75 = Math.max(75, stock.minScore || 65); // raise floor to 75 after a loss
       if (bestScore < instrMin75) {
