@@ -1189,9 +1189,26 @@ app.get("/api/state", async (req, res) => {
     portfolioBetaDelta: state._portfolioBetaDelta || 0,
     accountPhase: getAccountPhase(),
     agentHealth: state._agentHealth || { calls: 0, successes: 0, timeouts: 0, parseErrors: 0 },
-    realizedPnL:   parseFloat(realizedPnL().toFixed(2)), // legacy: closedTrades sum (may be inaccurate)
-    // V2.94: Alpaca truth fields — use these for display, not realizedPnL above
+    // V2.94: realizedPnL now serves Alpaca equity-delta truth when available.
+    // The dashboard reads this field for "Realized P&L" display — by replacing it
+    // with Alpaca truth here at the API level, no frontend changes are needed.
+    // _alpacaTruth.totalPnL = currentEquity - dayOpenEquity (equity delta = ground truth).
+    // Falls back to closedTrades sum if Alpaca truth not yet populated (e.g. pre-market).
+    realizedPnL:   state._alpacaTruth
+      ? parseFloat(state._alpacaTruth.totalPnL.toFixed(2))
+      : parseFloat(realizedPnL().toFixed(2)),
     alpacaTruth:   state._alpacaTruth || null,
+    // V2.94: Override state.todayRealizedPnL with Alpaca truth total P&L.
+    // state.todayRealizedPnL is updated by closeEngine from broken journal data.
+    // Dashboard "today" sub-label reads todayRealizedPnL — serve Alpaca truth here.
+    todayRealizedPnL: state._alpacaTruth
+      ? parseFloat(state._alpacaTruth.totalPnL.toFixed(2))
+      : (state.todayRealizedPnL || 0),
+    // Also override monthlyProfit with Alpaca truth where available
+    // (monthly target progress bar is otherwise driven by journal)
+    monthlyProfit: state._alpacaTruth
+      ? parseFloat(state._alpacaTruth.totalPnL.toFixed(2))
+      : (state.monthlyProfit || 0),
     totalCap:      totalCap(),
     stockValue:    parseFloat(stockValue().toFixed(2)),
     isMarketHours:      isMarketHours(),
