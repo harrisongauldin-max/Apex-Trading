@@ -158,11 +158,33 @@ async function runReconciliation() {
           date: new Date().toLocaleDateString(), score: pos.score || 0, closeTime: Date.now(),
           tradeType: pos.isCreditSpread ? "credit_spread" : pos.isSpread ? "debit_spread" : "naked",
         });
-        // V2.94: Write journal entry for reconcile-removed positions.
-        // Previously missing — caused SMH (manually closed via dashboard) to have no
-        // CLOSE entry in the journal. The dashboard close path bypasses closePosition()
-        // and relies on reconciler to detect the position is gone. Now journal gets the entry.
+        // SPRINT-02: Dashboard close P&L from Alpaca fills.
+        // When position is closed via dashboard (bypasses closePosition), query Alpaca
+        // activities to find the actual fill price and compute real P&L for the journal.
         if (!_state.tradeJournal) _state.tradeJournal = [];
+        let _ghostPnl = 0;
+        let _ghostEp  = pos.currentPrice || pos.premium || 0;
+        let _ghostReasoning = `Position closed externally (dashboard/manual). P&L not available from APEX — check Alpaca fills.`;
+        try {
+          const today = new Date().toISOString().split('T')[0];
+          const acts  = await alpacaGet(`/account/activities?activity_type=FILL&date=${today}&direction=desc&page_size=50`);
+          if (Array.isArray(acts)) {
+            // Find the most recent sell fill for this contract symbol
+            const sym = pos.contractSymbol || pos.buySymbol;
+            const sellFill = acts.find(a =>
+              a.symbol === sym && a.side === 'sell' &&
+              new Date(a.transaction_time).getTime() > Date.now() - 2 * 60 * 60 * 1000
+            );
+            if (sellFill) {
+              _ghostEp  = parseFloat(sellFill.price || _ghostEp);
+              _ghostPnl = parseFloat(((_ghostEp - pos.premium) * 100 * (pos.contracts || 1)).toFixed(2));
+              _ghostReasoning = `Closed externally (dashboard/manual) @ $${_ghostEp} via Alpaca fill. P&L computed from fill data.`;
+              _log("info", `[SPRINT-02] ${pos.ticker} dashboard-close P&L resolved from Alpaca fill: $${_ghostPnl}`);
+            }
+          }
+        } catch(e) {
+          _log("warn", `[SPRINT-02] Failed to fetch Alpaca activities for ${pos.ticker}: ${e.message}`);
+        }
         _state.tradeJournal.unshift({
           time:       new Date().toISOString(),
           ticker:     pos.ticker,
@@ -172,10 +194,10 @@ async function runReconciliation() {
           tradeType:  pos.isCreditSpread ? "credit_spread" : pos.isSpread ? "debit_spread" : "naked",
           strike:     pos.strike || null,
           expDate:    pos.expDate || null,
-          exitPremium: pos.currentPrice || pos.premium || null,
-          pnl:        0, // unknown — position was closed externally, no fill price available
-          pct:        "0",
-          reasoning:  `Position closed externally (dashboard/manual) — reconciler detected removal. P&L not available from APEX; check Alpaca fills for actual P&L.`,
+          exitPremium: _ghostEp,
+          pnl:        _ghostPnl,
+          pct:        pos.premium > 0 ? ((_ghostPnl / (pos.premium * 100 * (pos.contracts||1))) * 100).toFixed(1) : "0",
+          reasoning:  _ghostReasoning,
           score:      pos.score || 0,
         });
         if (_state.tradeJournal.length > 100) _state.tradeJournal = _state.tradeJournal.slice(0, 100);
