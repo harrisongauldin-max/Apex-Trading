@@ -192,14 +192,23 @@ async function _doClosePosition(ticker, reason, exitPremium = null, contractSym 
     }
   }
   ep = parseFloat(ep.toFixed(2));
-  const ev   = parseFloat((ep*100*pos.contracts*mult).toFixed(2));
+  // V2.94 FIX: Use contractsToSell for P&L calculation, not pos.contracts*mult.
+  // After V2.93 partial fix, pos.contracts is updated (e.g. 3→2 after first partial).
+  // When trail fires on remaining 2, contractsToSell=2 but Alpaca may only fill 1
+  // if it already has fewer contracts than pos.contracts due to async state lag.
+  // Using contractsToSell (= Math.floor(pos.contracts*mult)) gives the correct
+  // qty-based P&L that matches what was actually submitted to Alpaca.
+  // For pos.cost we use (pos.premium * 100 * contractsToSell) as the cost basis
+  // for exactly the contracts being closed, not the full remaining position cost.
+  const ev   = parseFloat((ep * 100 * contractsToSell).toFixed(2));
+  const costBasis = parseFloat((pos.premium * 100 * contractsToSell).toFixed(2));
   // Credit spreads: P&L = (premium received - cost to close) - 100 - contracts
   // Debit spreads:  P&L = (current value - premium paid) - 100 - contracts
   let pnl;
   if (pos.isCreditSpread) {
-    pnl = parseFloat(((pos.premium - ep) * 100 * pos.contracts * mult).toFixed(2));
+    pnl = parseFloat(((pos.premium - ep) * 100 * contractsToSell).toFixed(2));
   } else {
-    pnl = parseFloat((ev - pos.cost * mult).toFixed(2));
+    pnl = parseFloat((ev - costBasis).toFixed(2));
   }
   const pct  = pos.isCreditSpread
     ? ((pnl / (pos.maxProfit || (pos.premium * 100 * pos.contracts))) * 100).toFixed(1)
@@ -619,13 +628,30 @@ async function partialClose(ticker) {
   state.cash = parseFloat((state.cash + ev).toFixed(2));
   state.monthlyProfit = parseFloat((state.monthlyProfit + pnl).toFixed(2));
   state.closedTrades.push({
-    ticker, pnl, pct: ((pnl/(pos.cost*0.5))*100).toFixed(1),
+    ticker, pnl, pct: ((pnl/pos.cost)*100).toFixed(1), // V2.93: pos.cost already reflects remaining contracts after fix
     date: new Date().toLocaleDateString(), reason: "partial",
     tradeType:  pos.isCreditSpread ? "credit_spread" : (pos.isSpread || (pos.buySymbol && pos.sellSymbol)) ? "debit_spread" : "naked",
     optionType: pos.optionType,
     closeTime:  Date.now(),
   });
-  logEvent("partial", `PARTIAL ${ticker} - ${half}/${pos.contracts} @ $${ep} | +${_fmt(pnl)} | cash ${_fmt(state.cash)}`);
+  // V2.93 FIX: Update pos.contracts, pos.cost, AND reset partialClosed flag.
+  //
+  // Root cause of -$210 bug on QQQ:
+  //   Before partial: contracts=2, cost=$1282, partialClosed=false
+  //   After partial:  contracts=2 (NOT updated), cost=$1282, partialClosed=true
+  //   Final close:    mult = partialClosed ? 0.5 : 1.0 = 0.5
+  //                   ev   = $8.62 × 100 × 1 (Alpaca qty) × 0.5 = $431
+  //                   cost = $1282 × 0.5 = $641
+  //                   pnl  = $431 - $641 = -$210  ← WRONG
+  //
+  // Fix: after partial close, decrement contracts, recalculate cost, and reset
+  // partialClosed to false so the remaining contract is treated as a fresh position.
+  // The partial P&L is already booked above — the remaining contract just needs
+  // a clean slate with its correct cost basis.
+  pos.contracts     = Math.max(0, pos.contracts - half);
+  pos.cost          = parseFloat((pos.premium * 100 * pos.contracts).toFixed(2));
+  pos.partialClosed = false; // Reset: remaining contract is now a standalone position
+  logEvent("partial", `PARTIAL ${ticker} - ${half}x @ $${ep} | P&L:${pnl>=0?"+":""}${_fmt(pnl)} | ${pos.contracts}x remaining @ cost $${pos.cost} | cash ${_fmt(state.cash)}`);
   await saveStateNow();
 }
 
