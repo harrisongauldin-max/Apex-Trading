@@ -70,9 +70,11 @@ function getDTEExitParams(dte, daysOpen = 0) {
   const { countRecentDayTrades } = require('./risk'); // lazy to break circular dep
   // PDT_RULE_ACTIVE=false (FINRA PDT rule sunset April 2026) — day trades not enforced.
   // Force pdtLocked/pdtTight to false so exit params use standard values.
+  // SPRINT-04: PDT_RULE_ACTIVE=false (FINRA PDT rule sunset April 2026).
+  // pdtLocked/pdtTight are always false — keeping variables for easy re-enable if needed.
   const pdtRemaining = PDT_RULE_ACTIVE ? Math.max(0, PDT_LIMIT - countRecentDayTrades()) : 3;
-  const pdtTight     = PDT_RULE_ACTIVE && pdtRemaining <= 1;
-  const pdtLocked    = PDT_RULE_ACTIVE && pdtRemaining === 0;
+  const pdtTight     = false; // PDT_RULE_ACTIVE=false
+  const pdtLocked    = false; // PDT_RULE_ACTIVE=false
   let overnightMult  = 1.0;
   let overnightLabel = "";
   if (dte <= 21) {
@@ -96,20 +98,20 @@ function getDTEExitParams(dte, daysOpen = 0) {
   const vixLabel  = vix >= 30 ? " VIX30+" : vix >= 25 ? " VIX25+" : "";
 
   if (dte <= 21) {
-    const base = pdtLocked ? 0.12 : pdtTight ? 0.15 : 0.20;
+    const base = 0.20; // SPRINT-04: PDT_RULE_ACTIVE=false, pdtLocked/pdtTight always false
     const tp   = parseFloat((base * overnightMult * vixTPMult).toFixed(3));
     return { takeProfitPct: tp, partialPct: parseFloat((tp*0.60).toFixed(3)),
              ridePct: parseFloat((tp*1.30).toFixed(3)), stopLossPct: 0.30, fastStopPct: 0.15,
-             trailActivate: pdtLocked ? 0.08 : pdtTight ? 0.10 : 0.12,
-             trailStop: pdtLocked ? 0.05 : 0.07,
+             trailActivate: 0.12, // SPRINT-04: PDT dead code removed
+             trailStop: 0.07, // SPRINT-04: PDT dead code removed
              label: "SHORT-DTE" + overnightLabel + vixLabel };
   } else if (dte <= 45) {
-    const base = pdtLocked ? 0.25 : pdtTight ? 0.30 : 0.40;
+    const base = 0.40; // SPRINT-04: PDT_RULE_ACTIVE=false, pdtLocked/pdtTight always false
     const tp   = parseFloat((base * overnightMult * vixTPMult).toFixed(3));
     return { takeProfitPct: tp, partialPct: parseFloat((tp*0.55).toFixed(3)),
              ridePct: parseFloat((tp*1.40).toFixed(3)), stopLossPct: 0.35, fastStopPct: 0.20,
-             trailActivate: pdtLocked ? 0.15 : pdtTight ? 0.18 : 0.22,
-             trailStop: pdtLocked ? 0.08 : pdtTight ? 0.10 : 0.12,
+             trailActivate: 0.22, // SPRINT-04: PDT dead code removed
+             trailStop: 0.12, // SPRINT-04: PDT dead code removed
              label: "MONTHLY" + overnightLabel + vixLabel };
   } else {
     // V2.94: LEAPS tier retired — merged into MONTHLY parameters.
@@ -118,12 +120,12 @@ function getDTEExitParams(dte, daysOpen = 0) {
     // behave like MONTHLY in terms of delta/theta/vega dynamics. Higher TP just
     // caused over-holding into vega compression. MONTHLY params apply universally
     // for all positions > 45 DTE.
-    const base = pdtLocked ? 0.25 : pdtTight ? 0.30 : 0.40;
+    const base = 0.40; // SPRINT-04: PDT_RULE_ACTIVE=false, pdtLocked/pdtTight always false
     const tp   = parseFloat((base * overnightMult * vixTPMult).toFixed(3));
     return { takeProfitPct: tp, partialPct: parseFloat((tp*0.55).toFixed(3)),
              ridePct: parseFloat((tp*1.40).toFixed(3)), stopLossPct: 0.35, fastStopPct: 0.20,
-             trailActivate: pdtLocked ? 0.15 : pdtTight ? 0.18 : 0.22,
-             trailStop: pdtLocked ? 0.08 : pdtTight ? 0.10 : 0.12,
+             trailActivate: 0.22, // SPRINT-04: PDT dead code removed
+             trailStop: 0.12, // SPRINT-04: PDT dead code removed
              label: "MONTHLY+" + overnightLabel + vixLabel };
   }
 }
@@ -561,6 +563,12 @@ async function checkExits(positions, posSnapshots, posQuotes, posNewsCache, ctx)
     // partialPct already derived from tp (which has overnightMult) - don't apply dteMult again
     // Partial should fire at 60% of the DTE-adjusted take profit target
     const activePartialPct    = parseFloat((activeTakeProfitPct * 0.60).toFixed(3));
+
+    // SPRINT-05: Store VIX-adjusted runtime target on position for dashboard display.
+    // Dashboard was showing pos.target (entry × TAKE_PROFIT_PCT constant = e.g. $6.84)
+    // instead of the actual exit engine target (entry × activeTakeProfitPct = e.g. $5.99).
+    // Now dashboard reads pos.activeTarget which is always the live adjusted value.
+    pos.activeTarget = parseFloat((pos.premium * (1 + activeTakeProfitPct)).toFixed(2));
     const activeRidePct       = currentExitParams.ridePct || (activeTakeProfitPct * 1.30);
     if (dteMult < 1.0 && pos.isSpread) logEvent("scan", `${pos.ticker} DTE-adjusted target: ${(activeTakeProfitPct*100).toFixed(0)}% (${dteLeft}d remaining)`);
 
