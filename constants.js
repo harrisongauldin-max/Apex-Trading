@@ -173,6 +173,13 @@ const WATCHLIST = [
 ];
 
 // V2.94: SMH REMOVED from WATCHLIST (trading panel unanimous, 5/6/2026)
+// SPRINT-12: SMH wash sale monitoring note.
+// SMH was sold on 5/6/2026 at slight gain (+$5). No wash sale concern from that trade.
+// If SMH is ever re-added to WATCHLIST, ensure _recentLosses tracking covers
+// the 30-day wash sale window. The scanner wash sale warning fires on losses only —
+// a gain followed by a loss within 30 days is technically not a wash sale, but
+// monitor any re-entry within 30 days of a loss on SMH.
+// SMH re-entry earliest: 6/5/2026 (30 days from last trade).
 // Failure modes: beta 1.6 (too volatile), premium $21+ (8% account per contract),
 // dailyRSI 99.6 (zero MR room), narrative-driven (chip cycle/geopolitics not RSI-predictable),
 // 0 wins observed across all sessions. Kept in dataSectors for breadth/rotation data only.
