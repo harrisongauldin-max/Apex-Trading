@@ -2905,9 +2905,23 @@ async function runScan() {
     // NAKED OPTIONS MODE: single-leg long calls and puts only.
     // Spreads, iron condors, and multi-leg strategies removed.
     // All instruments route to executeTrade (limit order, long only).
+
+    // V2.94 CHANGE 4: Minimum delta gate — 0.28 floor.
+    // Target delta is 0.35. Allowing entries as low as 0.23 (SPY today) creates
+    // positions that need large underlying moves to generate option gains.
+    // At delta 0.23, you need 1.5x the underlying move of a 0.35 delta position
+    // for the same option gain. Low delta = slow response = poor risk/reward.
+    // Gate: if contract delta is below 0.28, block entry and log reason.
+    const _contractDelta = parseFloat(stock._cachedContract?.delta || 0.35);
+    const MIN_ENTRY_DELTA = 0.28;
+    if (_contractDelta > 0 && _contractDelta < MIN_ENTRY_DELTA) {
+      logEvent("filter", `${stock.ticker} entry blocked — delta ${_contractDelta.toFixed(3)} below minimum ${MIN_ENTRY_DELTA} (need stronger delta for efficient option leverage)`);
+      continue;
+    }
+
     let entered = false;
     state._lastEntryType = isMeanReversion ? `mr_${optionType}` : `naked_${optionType}`;
-    logEvent("filter", `${stock.ticker} execution branch: naked_${optionType} (MR:${isMeanReversion})`);
+    logEvent("filter", `${stock.ticker} execution branch: naked_${optionType} (MR:${isMeanReversion}) delta:${_contractDelta.toFixed(3)}`);
     const _sizeModNaked = sizeMod || 1.0;
     entered = await executeTrade(stock, price, score, reasons, state.vix, optionType, isMeanReversion, _sizeModNaked);
     if (entered) await new Promise(r=>setTimeout(r,500));
