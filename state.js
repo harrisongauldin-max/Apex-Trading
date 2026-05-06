@@ -385,14 +385,24 @@ async function saveDailyLogToRedis(isEOD = false) {
       date:       dateStr,
       savedAt:    new Date().toISOString(),
       isEOD,
+      // SPRINT-11: Use Alpaca truth for all P&L fields in analytics.
+      // state._alpacaTruth is refreshed every 5 minutes during market hours.
+      // Falls back to broken closedTrades values if truth not yet available.
       account: {
-        cash:         state.cash,
-        budget:       state.customBudget || 30000,
-        openPositions: (state.positions || []).length,
-        realizedPnL:  state.realizedPnL || 0,
-        monthlyPnL:   state.monthlyProfit || 0,
-        peakCash:     state.peakCash || state.cash,
-        drawdownPct:  state.peakCash > 0 ? parseFloat(((state.cash - state.peakCash) / state.peakCash * 100).toFixed(2)) : 0,
+        cash:           state.cash,
+        budget:         state.customBudget || 30000,
+        openPositions:  (state.positions || []).length,
+        // Alpaca truth P&L — equity delta is the authoritative number
+        realizedPnL:    state._alpacaTruth ? state._alpacaTruth.realizedPnL  : (state.realizedPnL || 0),
+        unrealizedPnL:  state._alpacaTruth ? state._alpacaTruth.unrealizedPnL : 0,
+        totalPnL:       state._alpacaTruth ? state._alpacaTruth.totalPnL      : 0,
+        currentEquity:  state._alpacaTruth ? state._alpacaTruth.currentEquity : state.cash,
+        dayOpenEquity:  state._alpacaTruth ? state._alpacaTruth.dayOpenEquity : state.cash,
+        alpacaTruthAt:  state._alpacaTruth ? new Date().toISOString() : null,
+        // Legacy fields kept for backward compat
+        monthlyPnL:     state.monthlyProfit || 0,
+        peakCash:       state.peakCash || state.cash,
+        drawdownPct:    state.peakCash > 0 ? parseFloat(((state.cash - state.peakCash) / state.peakCash * 100).toFixed(2)) : 0,
       },
       performance: {
         totalTrades:  trades.length,
@@ -409,7 +419,9 @@ async function saveDailyLogToRedis(isEOD = false) {
         trades:   todayTrades.length,
         wins:     todayWins.length,
         winRate:  todayTrades.length > 0 ? parseFloat((todayWins.length / todayTrades.length * 100).toFixed(1)) : 0,
-        pnl:      parseFloat(todayTrades.reduce((s,t) => s+(t.pnl||0), 0).toFixed(2)),
+        // SPRINT-11: Use Alpaca totalPnL for today's P&L — closedTrades sum is unreliable
+        pnl:      state._alpacaTruth ? state._alpacaTruth.totalPnL
+                : parseFloat(todayTrades.reduce((s,t) => s+(t.pnl||0), 0).toFixed(2)),
       },
       scoreBrackets: brackets,
       exitBreakdown: byExit,
@@ -431,7 +443,8 @@ async function saveDailyLogToRedis(isEOD = false) {
       body:    JSON.stringify({ value: analyticsData, ex: 15552000 }), // 180-day TTL
     });
     if (aRes.ok) {
-      logEvent("scan", `[ANALYTICS] Snapshot saved: ${analyticsKey} | ${trades.length} trades | WR:${trades.length > 0 ? (wins.length/trades.length*100).toFixed(0) : 0}% | PnL:$${(grossW-grossL).toFixed(0)}`);
+      const _logPnL = state._alpacaTruth ? state._alpacaTruth.totalPnL : (grossW - grossL);
+      logEvent("scan", `[ANALYTICS] Snapshot saved: ${analyticsKey} | ${trades.length} trades | WR:${trades.length > 0 ? (wins.length/trades.length*100).toFixed(0) : 0}% | PnL:$${_logPnL.toFixed(0)} (${state._alpacaTruth ? 'Alpaca truth' : 'journal estimate'})`);
     } else {
       console.error("[ANALYTICS] Save failed:", aRes.status);
     }
