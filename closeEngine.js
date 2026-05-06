@@ -439,13 +439,19 @@ async function _doClosePosition(ticker, reason, exitPremium = null, contractSym 
     state._recentLosses = state._recentLosses || {};
     // Fix 3 SUPPORT: stamp entryRSI so scanner can check RSI delta on re-entry attempt
     const _lossPos = state.positions.find(p => p.ticker === ticker) || {};
+    // SPRINT-08: Store exitRSI (RSI at time of close) not entryRSI.
+    // The re-entry gate measures RSI shift since the position CLOSED, not since it OPENED.
+    // Using entryRSI caused drift: QQQ entered at RSI 50, closed at RSI 39, then
+    // comparing current RSI to 50 (not 39) gave wrong delta → gate fired inconsistently.
+    const _exitRSI = _lossPos._prevRSI || _lossPos.rsi || _lossPos.entryRSI || 50;
     state._recentLosses[ticker] = {
       closedAt:    Date.now(),
       reason,
       agentSignal: (state._agentMacro || {}).signal || "neutral",
       price:       ep,
       pnlPct:      parseFloat(pct),
-      entryRSI:    _lossPos.entryRSI || _lossPos.rsi || 50,
+      entryRSI:    _lossPos.entryRSI || _lossPos.rsi || 50, // kept for reference
+      exitRSI:     _exitRSI, // SPRINT-08: RSI at close time — use this for re-entry delta
       optionType:  _lossPos.optionType || null,
     };
     logEvent("warn", `[THESIS] ${ticker} loss recorded - re-entry requires agent confirmation for 24h`);
@@ -609,8 +615,13 @@ async function partialClose(ticker) {
         if (partialResp.filled_avg_price && parseFloat(partialResp.filled_avg_price) > 0) {
           ep = parseFloat(parseFloat(partialResp.filled_avg_price).toFixed(2));
         }
+        // SPRINT-03: Mark order as submitted — state mutation (contracts/cost) only
+        // happens below if this flag is true. If Alpaca rejects the order,
+        // we skip the state mutation so pos.contracts stays accurate.
+        pos._partialOrderSubmitted = true;
       } else {
-        logEvent("warn", `Alpaca partial close failed for ${pos.contractSymbol}: ${JSON.stringify(partialResp)?.slice(0,100)}`);
+        logEvent("warn", `Alpaca partial close FAILED for ${pos.contractSymbol}: ${JSON.stringify(partialResp)?.slice(0,100)} — state NOT mutated`);
+        pos._partialOrderSubmitted = false;
       }
     } catch(e) {
       logEvent("error", `Alpaca partial close error: ${e.message}`);
@@ -644,14 +655,20 @@ async function partialClose(ticker) {
   //                   cost = $1282 × 0.5 = $641
   //                   pnl  = $431 - $641 = -$210  ← WRONG
   //
-  // Fix: after partial close, decrement contracts, recalculate cost, and reset
-  // partialClosed to false so the remaining contract is treated as a fresh position.
-  // The partial P&L is already booked above — the remaining contract just needs
-  // a clean slate with its correct cost basis.
-  pos.contracts     = Math.max(0, pos.contracts - half);
-  pos.cost          = parseFloat((pos.premium * 100 * pos.contracts).toFixed(2));
-  pos.partialClosed = false; // Reset: remaining contract is now a standalone position
-  logEvent("partial", `PARTIAL ${ticker} - ${half}x @ $${ep} | P&L:${pnl>=0?"+":""}${_fmt(pnl)} | ${pos.contracts}x remaining @ cost $${pos.cost} | cash ${_fmt(state.cash)}`);
+  // SPRINT-03: Guard state mutation — only decrement contracts if Alpaca confirmed
+  // the partial order was submitted. If the flag is false, the order failed and
+  // Alpaca still has all contracts — don't mutate pos.contracts.
+  if (pos._partialOrderSubmitted !== false) {
+    // Fix: after partial close, decrement contracts, recalculate cost, and reset
+    // partialClosed to false so the remaining contract is treated as a fresh position.
+    pos.contracts     = Math.max(0, pos.contracts - half);
+    pos.cost          = parseFloat((pos.premium * 100 * pos.contracts).toFixed(2));
+    pos.partialClosed = false; // Reset: remaining contract is now a standalone position
+    logEvent("partial", `PARTIAL ${ticker} - ${half}x @ $${ep} | P&L:${pnl>=0?"+":""}${_fmt(pnl)} | ${pos.contracts}x remaining @ cost $${pos.cost} | cash ${_fmt(state.cash)}`);
+  } else {
+    logEvent("warn", `[SPRINT-03] ${ticker} partial order rejected by Alpaca — pos.contracts unchanged at ${pos.contracts}`);
+  }
+  delete pos._partialOrderSubmitted;
   await saveStateNow();
 }
 
@@ -705,6 +722,27 @@ async function confirmPendingOrder() {
           ? parseFloat((pending.strike - fillPrice).toFixed(2))
           : parseFloat((pending.strike + fillPrice).toFixed(2)),
       };
+
+      // SPRINT-01: Same-symbol re-entry detection.
+      // If the same contract symbol was closed within the last 10 minutes,
+      // this is a churn re-entry (APEX exited and immediately re-entered the
+      // same option). Log it clearly but still create the position — the key
+      // fix is the warning so we can detect the churn pattern in logs.
+      const _tenMinAgo = Date.now() - 10 * 60 * 1000;
+      const _recentSameSymbol = (state.closedTrades || []).find(t =>
+        t.contractSymbol === pending.contractSymbol &&
+        t.closeTime && t.closeTime > _tenMinAgo
+      );
+      if (_recentSameSymbol) {
+        logEvent("warn",
+          `[CHURN DETECTED] ${pending.ticker} ${pending.contractSymbol} re-entered ` +
+          `${((Date.now() - _recentSameSymbol.closeTime)/60000).toFixed(1)}min after close. ` +
+          `Prior close reason: ${_recentSameSymbol.reason || 'unknown'}. ` +
+          `This may be a rapid exit/re-entry cycle — review exit logic.`
+        );
+        position._churnReEntry = true;
+        position._priorCloseReason = _recentSameSymbol.reason;
+      }
 
       state.positions.push(position);
       state.todayTrades = (state.todayTrades || 0) + 1;
