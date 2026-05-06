@@ -958,6 +958,52 @@ cron.schedule("30 13-21 * * 1-5", async () => {
   await saveDailyLogToRedis(false); // isEOD=false — retains buffer
 });
 
+// SPRINT-06: 3:15pm ET overnight cut gate
+// Evaluates open positions 15 minutes before close and exits any position where:
+//   - Thesis has failed (_thesisFailure flag) OR
+//   - Position has been open > 4 hours AND is down > 5% with no recovery
+// Intent: prevent holding underwater positions overnight into FOMC, earnings, etc.
+// Toggle: set state._overnightCutDisabled = true via dashboard to skip for a session.
+cron.schedule("15 19,20 * * 1-5", async () => {
+  const et = getETTime();
+  if (!(et.getHours() === 15 && et.getMinutes() === 15)) return;
+  if (state._overnightCutDisabled) {
+    logEvent("scan", "[OVERNIGHT CUT] Disabled for this session — skipping 3:15pm evaluation");
+    return;
+  }
+  const positions = state.positions || [];
+  if (positions.length === 0) return;
+  logEvent("scan", `[OVERNIGHT CUT] 3:15pm evaluation — ${positions.length} open position(s)`);
+
+  for (const pos of [...positions]) {
+    const hoursOpen     = (Date.now() - new Date(pos.openDate || Date.now()).getTime()) / 3600000;
+    const chg           = pos.premium > 0 ? (pos.currentPrice - pos.premium) / pos.premium : 0;
+    const peakChg       = pos.premium > 0 ? (pos.peakPremium - pos.premium) / pos.premium : 0;
+    const _thesisFailed = pos._thesisFailure;
+    const _stuckLoser   = hoursOpen > 4 && chg < -0.05 && peakChg < 0.10;
+
+    if (_thesisFailed || _stuckLoser) {
+      const reason = _thesisFailed ? "thesis-failure-eod" : "stuck-loser-eod";
+      logEvent("scan",
+        `[OVERNIGHT CUT] Closing ${pos.ticker} before overnight — ` +
+        `reason:${reason} chg:${(chg*100).toFixed(0)}% hoursOpen:${hoursOpen.toFixed(1)}h`
+      );
+      try {
+        await closePosition(pos.ticker, reason, null, pos.contractSymbol || pos.buySymbol);
+      } catch(e) {
+        logEvent("error", `[OVERNIGHT CUT] Failed to close ${pos.ticker}: ${e.message}`);
+      }
+      // Small delay between closes to avoid rate limiting
+      await new Promise(r => setTimeout(r, 1000));
+    } else {
+      logEvent("scan",
+        `[OVERNIGHT CUT] Holding ${pos.ticker} overnight — ` +
+        `chg:${(chg*100).toFixed(0)}% peak:${(peakChg*100).toFixed(0)}% hours:${hoursOpen.toFixed(1)}h`
+      );
+    }
+  }
+});
+
 // 4:15pm ET post-market assessment - ET-hour aware
 cron.schedule("15 20,21 * * 1-5", async () => {
   const et = getETTime();
