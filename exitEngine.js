@@ -307,7 +307,13 @@ async function checkExits(positions, posSnapshots, posQuotes, posNewsCache, ctx)
     const daysOpen = hoursOpen / 24;
 
     // Update peak premium for trailing stop
-    if (curP > pos.peakPremium) pos.peakPremium = curP;
+    // V2.94: _peakTime stamps when the peak was last updated — used by thesis-failure detection
+    if (curP > pos.peakPremium) {
+      pos.peakPremium = curP;
+      pos._peakTime = Date.now(); // record when this new peak was reached
+    }
+    // Fallback: if _peakTime never set (pre-existing positions), use openDate
+    if (!pos._peakTime) pos._peakTime = new Date(pos.openDate || Date.now()).getTime();
 
     // Update peak cash for drawdown tracking
     const curCash = state.cash + openRisk() + realizedPnL();
@@ -734,6 +740,42 @@ async function checkExits(positions, posSnapshots, posQuotes, posNewsCache, ctx)
     const peakChg = pos.premium > 0 ? (pos.peakPremium - pos.premium) / pos.premium : 0;
     const trailActivated = chg >= (pos.trailActivate || TRAIL_ACTIVATE_PCT)
                         || peakChg >= (pos.trailActivate || TRAIL_ACTIVATE_PCT);
+
+    // ── V2.94: THESIS FAILURE DETECTION ──────────────────────────────────────
+    // Detects positions where the MR bounce never materialized:
+    //   - Position peaked within 30 minutes of entry (no real appreciation)
+    //   - Peak has been decaying for > 60 minutes (not a temporary dip)
+    //   - Peak decay > 10% from peak (meaningful deterioration confirmed)
+    //
+    // This catches GLD-type failures: entered on RSI 20 oversold, option peaked at
+    // entry premium (vega already compressed), declined steadily as thesis failed.
+    // Normal exit logic (stop at -35%, fast-stop at -20%) lets these bleed too long.
+    //
+    // Action: mark _thesisFailure, tighten trail to 4% from CURRENT price (not peak).
+    // Unlike thesis-fulfilled (winners), this protects against further loss on losers.
+    if (!pos._thesisFailure && !pos._profitLockActive && chg < 0.05) {
+      const _entryTime     = new Date(pos.openDate || pos.entryTime || Date.now()).getTime();
+      const _peakAge       = (Date.now() - (pos._peakTime || _entryTime)) / 60000; // minutes since last peak
+      const _timeSinceEntry = (Date.now() - _entryTime) / 60000;
+      const _peakDecay     = pos.peakPremium > 0 ? (pos.peakPremium - curP) / pos.peakPremium : 0;
+      const _earlyPeak     = (pos._peakTime || _entryTime) - _entryTime < 30 * 60 * 1000; // peaked within 30min of entry
+      const _sustainedDecay = _peakAge > 60;  // peak has been falling for >60min
+      const _significantDecay = _peakDecay > 0.10; // >10% below peak
+
+      if (_earlyPeak && _sustainedDecay && _significantDecay && _timeSinceEntry > 90) {
+        pos._thesisFailure = true;
+        // Tighten trail to 4% from CURRENT price — not peak (peak is too far above)
+        // This creates a tight floor at current level to stop further bleeding
+        if (!pos.trailPct || pos.trailPct > 0.04) pos.trailPct = 0.04;
+        // Override peakPremium to current price so trail fires near here
+        pos.peakPremium = curP;
+        logEvent("scan",
+          `[THESIS FAILURE] ${pos.ticker} — peaked $${(pos.premium * (1+peakChg)).toFixed(2)} within ${(_peakAge + _timeSinceEntry).toFixed(0)}min of entry, ` +
+          `now $${curP} (${(_peakDecay*100).toFixed(0)}% below peak, held ${_timeSinceEntry.toFixed(0)}min). ` +
+          `Trail tightened to 4% from current. Stop: $${(curP * 0.96).toFixed(2)}`
+        );
+      }
+    }
 
     // ── V2.92: HYBRID PROFIT LOCK (panel consensus 5/5/2026) ─────────────────
     // Fires ONCE when position first crosses +15% peak gain.
