@@ -1778,18 +1778,27 @@ function renderPositions() {
   }
 
   // ── Pair legs into spreads ───────────────────────────────────────────────
+  // V2.94 FIX: Only pair positions that were explicitly opened as spread legs.
+  // Two separate naked calls on same ticker/expiry (e.g. QQQ $720C + QQQ $725C)
+  // should render as individual cards, NOT be consumed into a fake paired spread.
+  // A spread leg is identified by: isSpread=true, isCreditSpread=true,
+  // or dteLabel containing 'SPREAD'. Naked positions (dteLabel='RECONCILED' or
+  // 'MONTHLY VIX25+' etc.) are NEVER auto-paired — always render as single cards.
   const used = {}, groups = [];
   positions.forEach(function(p, i) {
     if (used[i]) return;
-    // Try to pair with another leg: same ticker, expDate, optionType, different strike
-    if (!p.isSpread && !p.isCreditSpread) {
+    // Only attempt pairing if this position is explicitly a spread leg
+    const isExplicitSpread = p.isSpread || p.isCreditSpread ||
+      (p.dteLabel && p.dteLabel.toUpperCase().includes('SPREAD'));
+    if (isExplicitSpread) {
       for (let j = i+1; j < positions.length; j++) {
         if (used[j]) return;
         const q = positions[j];
-        if (q.ticker === p.ticker && q.expDate === p.expDate &&
+        const qIsSpread = q.isSpread || q.isCreditSpread ||
+          (q.dteLabel && q.dteLabel.toUpperCase().includes('SPREAD'));
+        if (qIsSpread && q.ticker === p.ticker && q.expDate === p.expDate &&
             q.optionType === p.optionType && q.strike !== p.strike) {
           used[i] = used[j] = true;
-          // Short = higher strike (more OTM for puts = short leg), Long = lower strike
           const legs = [p, q].sort(function(a,b){ return b.strike - a.strike; });
           groups.push({ type:'paired', short: legs[0], long: legs[1] });
           return;
