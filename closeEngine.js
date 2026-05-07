@@ -36,7 +36,8 @@ const WEEKLY_DD_LIMIT = 0.25;
 const FAST_PROFIT_PCT = 0.65;
 
 const { alpacaGet, alpacaPost, alpacaDelete } = require('./broker');
-const { state, logEvent, markDirty, saveStateNow } = require('./state');
+const { state, logEvent, markDirty, saveStateNow,
+        writeJournalEntry, updateJournalExit } = require('./state');
 const { calcCreditSpreadTP, realizedPnL ,
   openRisk, totalCap
 }     = require('./signals');
@@ -513,6 +514,69 @@ async function _doClosePosition(ticker, reason, exitPremium = null, contractSym 
     reasoning: `Closed ${reason}. Exit premium $${ep} vs entry $${pos.premium}. P&L: ${pnl>=0?"+":""}${_fmt(pnl)} (${pct}%).`,
   });
 
+  // V2.94: Write authoritative exit to new journal — merges onto open entry.
+  // updateJournalExit finds the OPEN entry for this contractSymbol and merges
+  // all exit fields. If not found (e.g. position pre-dates new journal), writes
+  // standalone exit record so no data is lost.
+  const _now       = new Date();
+  const _etStr2    = (dt) => new Date(dt).toLocaleString('en-US', {timeZone:'America/New_York',
+    month:'2-digit', day:'2-digit', year:'numeric', hour:'2-digit', minute:'2-digit'});
+  const _hoursHeld = pos.openDate
+    ? parseFloat(((Date.now() - new Date(pos.openDate).getTime()) / 3600000).toFixed(2))
+    : null;
+  const _peakPct   = pos.premium > 0
+    ? parseFloat(((pos.peakPremium - pos.premium) / pos.premium * 100).toFixed(1))
+    : 0;
+  const _minsToPeak = pos.openDate && pos._peakTime
+    ? parseFloat(((pos._peakTime - new Date(pos.openDate).getTime()) / 60000).toFixed(0))
+    : null;
+  const _pnlApex   = parseFloat(((ep - pos.premium) * 100 * (pos.contracts || contractsToSell)).toFixed(2));
+  // actualFillProceeds: will be filled by Alpaca activities lookup in reconciler if not available here
+  const _exitFields = {
+    closeDate:          _now.toISOString(),
+    closeDateET:        _etStr2(_now),
+    exitPrice:          ep,
+    exitReason:         reason,
+    exitRSI:            pos._prevRSI || null,
+    exitVIX:            state.vix || null,
+    exitScore:          pos._lastAgentScore || null,
+    actualFillProceeds: null, // reconciler will fill this from Alpaca activities
+    // Lifecycle final values
+    peakPrice:          pos.peakPremium || ep,
+    peakPct:            _peakPct,
+    peakTime:           pos._peakTime ? new Date(pos._peakTime).toISOString() : null,
+    minsToPeak:         _minsToPeak,
+    _thesisFulfilled:   pos._thesisFulfilled || false,
+    _thesisFailure:     pos._thesisFailure || false,
+    contractsAtClose:   pos.contracts || contractsToSell,
+    // P&L
+    pnl_apex:           _pnlApex,
+    pnl_alpaca:         null, // requires Alpaca fill lookup — set by reconciler
+    pnl_pct:            pos.cost > 0 ? parseFloat((_pnlApex / pos.cost * 100).toFixed(1)) : 0,
+    hoursHeld:          _hoursHeld,
+    isWin:              _pnlApex > 0,
+    status:             'CLOSED',
+  };
+  const _sym = pos.contractSymbol || pos.buySymbol;
+  updateJournalExit(_sym, _exitFields).then(found => {
+    if (!found) {
+      // No open entry found — write standalone exit record
+      writeJournalEntry({
+        id:             `${_sym}_exit_${Date.now()}`,
+        contractSymbol: _sym,
+        ticker,
+        status:         'CLOSED',
+        openDate:       pos.openDate || _now.toISOString(),
+        openDateET:     pos.openDate ? _etStr2(new Date(pos.openDate)) : _etStr2(_now),
+        entryPrice:     pos.premium,
+        entryContracts: pos.contracts || contractsToSell,
+        entryCost:      pos.cost,
+        entryScore:     pos.score || 0,
+        ..._exitFields,
+      }).catch(e => logEvent('warn', `[JOURNAL] Standalone exit write failed: ${e.message}`));
+    }
+  }).catch(e => logEvent('warn', `[JOURNAL] Exit update failed for ${ticker}: ${e.message}`));
+
   logEvent("close",
     `${reason.toUpperCase()} ${ticker} | exit $${ep} | P&L ${pnl>=0?"+":""}${_fmt(pnl)} (${pct}%) | ` +
     `cash ${_fmt(state.cash)}`
@@ -762,6 +826,74 @@ async function confirmPendingOrder() {
         reasoning:  `[${pending.optionType.toUpperCase()} OPTION] Score ${pending.score}/100. Strike $${pending.strike} exp ${pending.expDate}. Premium $${fillPrice}. Cost $${cost}.`,
       });
       if (state.tradeJournal.length > 100) state.tradeJournal = state.tradeJournal.slice(0, 100);
+
+      // V2.94: Write authoritative journal entry to Redis.
+      // This is the new journal — complete, accurate, Alpaca-reconcilable.
+      const _etStr = (dt) => new Date(dt).toLocaleString('en-US', {timeZone:'America/New_York',
+        month:'2-digit', day:'2-digit', year:'numeric', hour:'2-digit', minute:'2-digit'});
+      const _journalEntry = {
+        // Identity
+        id:               `${pending.contractSymbol}_${Date.now()}`,
+        contractSymbol:   pending.contractSymbol || `${pending.ticker}${pending.expDate}${pending.optionType[0].toUpperCase()}${pending.strike}`,
+        ticker:           pending.ticker,
+        optionType:       pending.optionType,
+        strike:           pending.strike,
+        expDate:          pending.expDate,
+        tradeType:        'naked',
+        isMeanReversion:  pending.isMeanReversion || false,
+        // Entry
+        openDate:         new Date().toISOString(),
+        openDateET:       _etStr(new Date()),
+        entryPrice:       fillPrice,
+        entryContracts:   contracts,
+        entryCost:        cost,
+        actualFillCost:   fillResp.filled_avg_price
+          ? parseFloat((parseFloat(fillResp.filled_avg_price) * 100 * contracts).toFixed(2))
+          : cost, // Alpaca fill total (includes commission)
+        entryScore:       pending.score || 0,
+        entryReasons:     pending.reasons || [],
+        entryRSI:         pending.rsi || pending.liveRSI || null,
+        entryDailyRSI:    pending.dailyRsi || null,
+        entryDelta:       pending.delta || null,
+        entryIV:          pending.iv || null,
+        entryVIX:         state.vix || null,
+        entryIVR:         state._ivRank || null,
+        entryDTE:         pending.dte || null,
+        entryMACD:        pending.macd || null,
+        entryMomentum:    pending.momentum || null,
+        macroSignal:      (state._agentMacro || {}).signal || 'neutral',
+        regimeAtEntry:    (state._marketRegime || {}).regime || 'unknown',
+        // Lifecycle (will be updated at close)
+        peakPrice:        fillPrice, // updated each scan
+        peakPct:          0,
+        peakTime:         new Date().toISOString(),
+        minsToPeak:       0,
+        maxAdverseMove:   0,
+        _thesisFulfilled: false,
+        _thesisFailure:   false,
+        _churnReEntry:    position._churnReEntry || false,
+        contractsAtClose: contracts,
+        // Exit (null until closed)
+        closeDate:        null,
+        closeDateET:      null,
+        exitPrice:        null,
+        exitReason:       null,
+        exitRSI:          null,
+        exitVIX:          null,
+        exitScore:        null,
+        actualFillProceeds: null,
+        // P&L (null until closed)
+        pnl_apex:         null,
+        pnl_alpaca:       null,
+        pnl_pct:          null,
+        hoursHeld:        null,
+        isWin:            null,
+        // Status
+        status:           'OPEN',
+      };
+      writeJournalEntry(_journalEntry).catch(e =>
+        logEvent('warn', `[JOURNAL] Entry write failed for ${pending.ticker}: ${e.message}`)
+      );
 
       await syncCashFromAlpaca();
       await saveStateNow();
