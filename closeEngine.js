@@ -193,14 +193,14 @@ async function _doClosePosition(ticker, reason, exitPremium = null, contractSym 
     }
   }
   ep = parseFloat(ep.toFixed(2));
-  // V2.94 FIX: Use contractsToSell for P&L calculation, not pos.contracts*mult.
-  // After V2.93 partial fix, pos.contracts is updated (e.g. 3→2 after first partial).
-  // When trail fires on remaining 2, contractsToSell=2 but Alpaca may only fill 1
-  // if it already has fewer contracts than pos.contracts due to async state lag.
-  // Using contractsToSell (= Math.floor(pos.contracts*mult)) gives the correct
-  // qty-based P&L that matches what was actually submitted to Alpaca.
+  // V2.94 FIX: contractsToSell declared HERE (before first use) to fix
+  // "Cannot access 'contractsToSell' before initialization" crash.
+  // Was previously declared with const 26 lines below its first reference —
+  // const declarations do not hoist, causing closePosition to crash on every
+  // TP/trail/stop event and force-removing positions from state.
   // For pos.cost we use (pos.premium * 100 * contractsToSell) as the cost basis
   // for exactly the contracts being closed, not the full remaining position cost.
+  const contractsToSell = pos.contracts === 1 ? 1 : Math.max(1, Math.floor(pos.contracts * mult));
   const ev   = parseFloat((ep * 100 * contractsToSell).toFixed(2));
   const costBasis = parseFloat((pos.premium * 100 * contractsToSell).toFixed(2));
   // Credit spreads: P&L = (premium received - cost to close) - 100 - contracts
@@ -227,7 +227,7 @@ async function _doClosePosition(ticker, reason, exitPremium = null, contractSym 
   // Submit close order to Alpaca if we have a contract symbol
   // For partial closes (mult=0.5), sell half; for full closes (mult=1.0), sell all
   // But minimum 1 contract - if only 1 contract, full close regardless
-  const contractsToSell = pos.contracts === 1 ? 1 : Math.max(1, Math.floor(pos.contracts * mult));
+  // contractsToSell already declared above (moved to fix hoisting crash)
   const closeQty = contractsToSell;
   // Minimum 60 seconds hold before Alpaca close - prevents wash trade rejections
   const heldSeconds = (Date.now() - new Date(pos.openDate).getTime()) / 1000;
