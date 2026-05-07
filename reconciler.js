@@ -4,6 +4,7 @@
 'use strict';
 
 const { alpacaGet } = require('./broker');
+const { updateJournalExit, writeJournalEntry } = require('./state');
 const { WATCHLIST ,
   ALPACA_KEY, INDIVIDUAL_STOCKS_ENABLED, MS_PER_DAY, STOP_LOSS_PCT, TAKE_PROFIT_PCT
 }  = require('./constants');
@@ -180,6 +181,17 @@ async function runReconciliation() {
               _ghostPnl = parseFloat(((_ghostEp - pos.premium) * 100 * (pos.contracts || 1)).toFixed(2));
               _ghostReasoning = `Closed externally (dashboard/manual) @ $${_ghostEp} via Alpaca fill. P&L computed from fill data.`;
               _log("info", `[SPRINT-02] ${pos.ticker} dashboard-close P&L resolved from Alpaca fill: $${_ghostPnl}`);
+            // V2.94 JOURNAL: Update pnl_alpaca on the journal entry with the real fill proceeds
+            const _ghostProceeds = parseFloat((parseFloat(sellFill.price || 0) * 100 * (pos.contracts || 1)).toFixed(2));
+            updateJournalExit(sym, {
+              actualFillProceeds: _ghostProceeds,
+              pnl_alpaca:         parseFloat((_ghostProceeds - (pos.premium * 100 * (pos.contracts || 1))).toFixed(2)),
+              exitPrice:          _ghostEp,
+              exitReason:         'reconcile-removed',
+              closeDate:          new Date().toISOString(),
+              isWin:              _ghostPnl > 0,
+              status:             'CLOSED',
+            }).catch(e => _log('warn', `[JOURNAL] reconciler exit update failed: ${e.message}`));
             }
           }
         } catch(e) {
