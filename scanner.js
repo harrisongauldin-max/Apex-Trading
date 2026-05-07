@@ -2533,6 +2533,14 @@ async function runScan() {
       logEvent("filter", `${stock.ticker} already have ${sameTickerSameDir.length} position(s) in this direction`);
       continue;
     }
+    // FIX BUG1: Naked options — same hard limit 1 per ticker per direction.
+    // Previously this gate only fired for credit spreads, allowing APEX to open
+    // GLD $455C while GLD $451C was already open, and IYR $106C despite recent loss.
+    // Gate checks by TICKER not contractSymbol — different strikes = same underlying = blocked.
+    if (!creditModeActive && sameTickerSameDir.length >= 1) {
+      logEvent("filter", `${stock.ticker} already have ${sameTickerSameDir.length} position(s) in this direction`);
+      continue;
+    }
 
     // MACD contradiction  -- rulebook handles regime-awareness (A only, bypass in B via gate flag)
     const macdSignal    = liveStock.macd || "neutral";
