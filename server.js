@@ -631,6 +631,38 @@ setInterval(async () => {
     const truth = await getAlpacaTruth();
     if (truth) {
       state._alpacaTruth = truth;
+
+      // V2.94: Push Alpaca prices into state.positions — Alpaca is source of truth.
+      // This ensures exit logic (stops/trails) uses Alpaca's last trade price,
+      // not the stale mid-price from the options chain prefetch.
+      // Critical for after-hours: IYR at $0.50 (Alpaca) vs $0.75 (stale scan).
+      if (truth.openPositions && truth.openPositions.length > 0) {
+        const alpacaBySymbol = {};
+        truth.openPositions.forEach(ap => { alpacaBySymbol[ap.symbol] = ap; });
+        let priceUpdates = 0;
+        for (const pos of (state.positions || [])) {
+          const sym = pos.contractSymbol || pos.buySymbol;
+          const ap  = alpacaBySymbol[sym];
+          if (!ap) continue;
+          const mktVal  = parseFloat(ap.marketValue || 0);
+          const qty     = parseInt(ap.qty || pos.contracts || 1);
+          if (mktVal > 0 && qty > 0) {
+            const alpacaPrice = parseFloat((mktVal / (qty * 100)).toFixed(2));
+            if (alpacaPrice > 0 && alpacaPrice !== pos.currentPrice) {
+              pos.currentPrice = alpacaPrice;
+              // Update peak if Alpaca price is higher
+              if (alpacaPrice > (pos.peakPremium || 0)) pos.peakPremium = alpacaPrice;
+              // Sync contracts
+              if (qty !== pos.contracts) pos.contracts = qty;
+              priceUpdates++;
+            }
+          }
+        }
+        if (priceUpdates > 0) {
+          logEvent("scan", `[ALPACA TRUTH] Updated ${priceUpdates} position price(s) from Alpaca`);
+        }
+      }
+
       logEvent("scan",
         `[ALPACA TRUTH] realized:$${truth.realizedPnL.toFixed(0)} ` +
         `unrealized:$${truth.unrealizedPnL.toFixed(0)} ` +
