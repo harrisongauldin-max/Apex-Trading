@@ -2634,8 +2634,37 @@ app.post("/api/reset-account", requireSecret, async (req, res) => {
   logEvent("reset", `[V2.5] Clean account reset - previous cash: $${prevCash?.toFixed(2)||'?'} | ARGO state cleared | awaiting Alpaca sync`);
   res.json({ ok: true, message: "Account reset complete. ARGO state cleared. Cash will sync from Alpaca on next scan." });
 });
-app.get("/api/journal",      (req,res) => res.json((state.tradeJournal||[]).slice(0,100))); // full unstripped entries
+// V2.94: /api/journal now serves Redis-backed journal (see endpoint at line ~2086)
+// Legacy state.tradeJournal route removed to prevent duplicate route conflict.
 app.get("/api/report",       (req,res) => res.json({report:buildMonthlyReport()}));
+
+// V2.94: Journal debug endpoint — check Redis connectivity and journal contents
+app.get("/api/journal/debug", async (req, res) => {
+  try {
+    const today = new Date().toLocaleDateString('en-US', {
+      timeZone:'America/New_York', year:'numeric', month:'2-digit', day:'2-digit'
+    }).split('/');
+    const todayStr = `${today[2]}-${today[0]}-${today[1]}`;
+    const entries = await loadJournalDay(todayStr);
+    const yesterday = new Date(Date.now()-86400000).toLocaleDateString('en-US', {
+      timeZone:'America/New_York', year:'numeric', month:'2-digit', day:'2-digit'
+    }).split('/');
+    const yesterdayStr = `${yesterday[2]}-${yesterday[0]}-${yesterday[1]}`;
+    const yEntries = await loadJournalDay(yesterdayStr);
+    res.json({
+      today: todayStr,
+      todayEntries: entries.length,
+      todayData: entries,
+      yesterday: yesterdayStr,
+      yesterdayEntries: yEntries.length,
+      redisUrl: process.env.REDIS_URL ? 'configured' : 'MISSING',
+      redisToken: process.env.REDIS_TOKEN ? 'configured' : 'MISSING',
+      stateTradeJournalLegacy: (state.tradeJournal||[]).length,
+    });
+  } catch(e) {
+    res.status(500).json({ error: e.message });
+  }
+});
 
 // - New Feature Endpoints -
 
