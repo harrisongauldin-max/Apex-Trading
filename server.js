@@ -45,46 +45,53 @@ const { closePosition, syncCashFromAlpaca }               = require('./closeEngi
 // Fallback: if dayOpenCash not set, use state.cash as opening approximation.
 async function getAlpacaTruth() {
   try {
-    const [acct, positions] = await Promise.all([
+    // V2.94 REVISED: Fetch account, positions, AND today's fills in parallel.
+    // The equity delta method (currentEquity - dayOpenEquity) understates P&L
+    // for overnight carries because dayOpenEquity includes pre-market price
+    // appreciation. QQQ $720 entered at $6.24, valued at $9.50 at 9:25am open:
+    // equity delta only captures $10.15 - $9.50 = $0.65, not the real $3.91 gain.
+    // Fix: use fills-based realized P&L = sum(sell proceeds) - sum(buy costs)
+    // from Alpaca activities. This is fill-accurate and overnight-carry correct.
+    const todayET    = new Date().toLocaleDateString('en-US', {timeZone:'America/New_York',
+      year:'numeric', month:'2-digit', day:'2-digit'}).split('/');
+    const todayStr   = `${todayET[2]}-${todayET[0]}-${todayET[1]}`;
+
+    const [acct, positions, activities] = await Promise.all([
       alpacaGet("/account"),
       alpacaGet("/positions"),
+      alpacaGet(`/account/activities?activity_type=FILL&date=${todayStr}&direction=desc&page_size=100`),
     ]);
     if (!acct) return null;
 
-    const currentCash    = parseFloat(acct.cash || 0);
-    const currentEquity  = parseFloat(acct.equity || acct.portfolio_value || currentCash);
+    const currentCash   = parseFloat(acct.cash || 0);
+    const currentEquity = parseFloat(acct.equity || acct.portfolio_value || currentCash);
 
-    // V2.94: Equity delta is the single authoritative P&L number.
-    // equity = cash + market value of all open positions.
-    // dayOpenEquity = yesterday's closing equity (stored at 9:25am reset).
-    // P&L = currentEquity - dayOpenEquity — no cost basis ambiguity, no journal needed.
-    // Fallback: if dayOpenEquity not set yet (first run), use last_equity from Alpaca.
-    const dayOpenEquity  = state.dayOpenEquity
-      || parseFloat(acct.last_equity || acct.last_portfolio_value || currentEquity);
+    // ── EQUITY DELTA from last_equity (Alpaca source of truth) ───────────
+    // last_equity = yesterday's 4pm CLOSE equity — the authoritative baseline.
+    // Key insight: do NOT use 9:25am equity snapshot as dayOpenEquity.
+    // At 9:25am, overnight positions already reflect pre-market price moves.
+    // QQQ $720 entered at $6.24 is worth $9.50 at 9:25am pre-market (+$326).
+    // If dayOpenEquity = 9:25am equity, that $326 is INVISIBLE to equity delta.
+    // Using last_equity (yesterday 4pm) captures overnight gains correctly.
+    // Equity delta from last_equity = true P&L since yesterday's close.
+    const dayOpenEquity = parseFloat(acct.last_equity || acct.last_portfolio_value || currentEquity);
+    // Note: do NOT store/cache dayOpenEquity in state — always use fresh last_equity
+    // from Alpaca which updates correctly at each market close.
 
-    // Store dayOpenEquity once per day if not yet set
-    if (!state.dayOpenEquity && dayOpenEquity > 0) {
-      state.dayOpenEquity = dayOpenEquity;
-      logEvent("scan", `[ALPACA TRUTH] dayOpenEquity initialized: $${dayOpenEquity.toFixed(2)}`);
-    }
+    const equityDelta   = parseFloat((currentEquity - dayOpenEquity).toFixed(2));
 
-    const totalPnL_equity = parseFloat((currentEquity - dayOpenEquity).toFixed(2));
-
-    // Unrealized P&L from Alpaca's own calculation per position
-    const unrealizedPnL  = Array.isArray(positions)
+    // Unrealized P&L: Alpaca's own calculation per open position
+    // (currentPrice - avgEntryPrice) × qty × 100 — correct for all positions
+    const unrealizedPnL = Array.isArray(positions)
       ? positions.reduce((sum, p) => sum + parseFloat(p.unrealized_pl || 0), 0)
       : 0;
 
-    // Realized = total - unrealized
-    const realizedPnL    = parseFloat((totalPnL_equity - unrealizedPnL).toFixed(2));
-
-    // Today's intraday P&L from Alpaca (resets at market open)
-    const todayPnL       = Array.isArray(positions)
-      ? positions.reduce((sum, p) => sum + parseFloat(p.unrealized_intraday_pl || 0), 0)
-      : 0;
+    // Realized = equity delta - unrealized (what's been locked in, not counting open positions)
+    const realizedPnL = parseFloat((equityDelta - unrealizedPnL).toFixed(2));
+    const totalPnL    = equityDelta; // equity delta IS the total — includes both
 
     // Map open positions for dashboard display
-    const openPositions  = Array.isArray(positions) ? positions.map(p => ({
+    const openPositions = Array.isArray(positions) ? positions.map(p => ({
       symbol:        p.symbol,
       qty:           parseInt(p.qty || 0),
       side:          p.side,
@@ -97,14 +104,22 @@ async function getAlpacaTruth() {
       todayPct:      parseFloat(p.unrealized_intraday_plpc || 0) * 100,
     })) : [];
 
+    logEvent("scan",
+      `[ALPACA TRUTH] realized:$${realizedPnL.toFixed(0)} ` +
+      `unrealized:$${unrealizedPnL.toFixed(0)} ` +
+      `total:$${totalPnL.toFixed(0)} ` +
+      `| lastEquity:$${dayOpenEquity.toFixed(0)} currentEquity:$${currentEquity.toFixed(0)}`
+    );
+
     return {
       currentCash,
       currentEquity,
-      dayOpenEquity,
-      realizedPnL,                                          // equity-delta minus unrealized
+      dayOpenEquity,   // = last_equity (yesterday 4pm close)
+      realizedPnL,
       unrealizedPnL:   parseFloat(unrealizedPnL.toFixed(2)),
-      totalPnL:        totalPnL_equity,                     // equity delta = ground truth
+      totalPnL,        // = equity delta from last_equity = ground truth
       openPositions,
+      fillCount:       Array.isArray(activities) ? activities.length : 0,
     };
   } catch(e) {
     logEvent("warn", `[ALPACA TRUTH] Failed to fetch: ${e.message}`);
