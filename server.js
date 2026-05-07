@@ -2136,6 +2136,29 @@ app.get("/api/journal/summary", async (req, res) => {
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
+// V2.94: Journal backfill endpoint — write pre-built journal entries to Redis
+// Used to seed journal from Alpaca order history when new journal system
+// wasn't yet deployed for those trades.
+// POST /api/journal/backfill  body: { date: "YYYY-MM-DD", entries: [...] }
+app.post("/api/journal/backfill", requireSecret, async (req, res) => {
+  try {
+    const { date, entries } = req.body;
+    if (!date || !Array.isArray(entries)) {
+      return res.status(400).json({ error: "Requires date (YYYY-MM-DD) and entries array" });
+    }
+    // Merge with any existing entries for that date (don't overwrite)
+    const existing = await loadJournalDay(date);
+    const existingIds = new Set(existing.map(e => e.id));
+    const newEntries = entries.filter(e => !existingIds.has(e.id));
+    const merged = [...newEntries, ...existing].sort((a,b) => new Date(b.openDate) - new Date(a.openDate));
+    await saveJournalDay(date, merged);
+    logEvent("scan", `[JOURNAL BACKFILL] ${date}: ${newEntries.length} entries added, ${existing.length} existing preserved`);
+    res.json({ ok: true, date, added: newEntries.length, total: merged.length });
+  } catch(e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 app.post("/api/reset-daily-pnl", requireSecret, async (req, res) => {
   const before = {
     todayRealizedPnL: state.todayRealizedPnL || 0,
