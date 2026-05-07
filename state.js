@@ -455,5 +455,80 @@ async function saveDailyLogToRedis(isEOD = false) {
 
 
 const state = defaultState();
+// ── V2.94: Journal persistence helpers ───────────────────────────────────────
+// Journal entries stored in Redis under argo:journal:YYYY-MM-DD
+// Each day's journal is a JSON array of JournalEntry objects.
+// Separate from state.closedTrades (kept for risk engine compatibility).
+
+async function loadJournalDay(dateStr) {
+  if (!REDIS_URL || !REDIS_TOKEN) return [];
+  try {
+    const res = await fetch(`${REDIS_URL}/get/argo:journal:${dateStr}`, {
+      headers: { Authorization: `Bearer ${REDIS_TOKEN}` }
+    });
+    const data = await res.json();
+    if (!data.result) return [];
+    return JSON.parse(data.result);
+  } catch(e) { return []; }
+}
+
+async function saveJournalDay(dateStr, entries) {
+  if (!REDIS_URL || !REDIS_TOKEN) return;
+  try {
+    await fetch(`${REDIS_URL}/set/argo:journal:${dateStr}`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${REDIS_TOKEN}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ value: JSON.stringify(entries), ex: 90 * 24 * 3600 }) // 90d TTL
+    });
+  } catch(e) { console.error('[JOURNAL] Save failed:', e.message); }
+}
+
+async function writeJournalEntry(entry) {
+  // Write or update a journal entry for today.
+  // If entry with same id exists, merge (update exit fields).
+  // If not, append as new entry.
+  const dateStr = entry.openDate
+    ? entry.openDate.split('T')[0]
+    : new Date().toISOString().split('T')[0];
+  const entries = await loadJournalDay(dateStr);
+  const idx = entries.findIndex(e => e.id === entry.id);
+  if (idx >= 0) {
+    entries[idx] = { ...entries[idx], ...entry }; // merge exit fields onto existing entry
+  } else {
+    entries.unshift(entry); // prepend — newest first
+  }
+  await saveJournalDay(dateStr, entries);
+}
+
+async function updateJournalExit(contractSymbol, exitFields) {
+  // Find the open journal entry for this contractSymbol (today or recent days)
+  // and merge exit fields onto it.
+  const today = new Date().toISOString().split('T')[0];
+  const yesterday = new Date(Date.now() - 86400000).toISOString().split('T')[0];
+  for (const dateStr of [today, yesterday]) {
+    const entries = await loadJournalDay(dateStr);
+    const idx = entries.findIndex(e => e.contractSymbol === contractSymbol && e.status === 'OPEN');
+    if (idx >= 0) {
+      entries[idx] = { ...entries[idx], ...exitFields, status: 'CLOSED' };
+      await saveJournalDay(dateStr, entries);
+      return true; // found and updated
+    }
+  }
+  return false; // not found — will be written as standalone exit
+}
+
+async function getJournalRange(fromDate, toDate) {
+  // Fetch all journal entries between two dates (inclusive)
+  const results = [];
+  const start = new Date(fromDate), end = new Date(toDate);
+  for (let d = new Date(start); d <= end; d.setDate(d.getDate() + 1)) {
+    const dateStr = d.toISOString().split('T')[0];
+    const entries = await loadJournalDay(dateStr);
+    results.push(...entries);
+  }
+  return results.sort((a, b) => new Date(b.openDate) - new Date(a.openDate));
+}
+
 module.exports = { state, markDirty, saveStateNow, flushStateIfDirty, logEvent,
-                   redisSave, redisLoad, defaultState, saveDailyLogToRedis, getETDateStr };
+                   redisSave, redisLoad, defaultState, saveDailyLogToRedis, getETDateStr,
+                   writeJournalEntry, updateJournalExit, loadJournalDay, getJournalRange };
