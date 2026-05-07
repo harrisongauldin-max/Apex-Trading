@@ -38,6 +38,37 @@ async function runReconciliation() {
     for (const ap of alpacaPositions) alpacaBySymbol[ap.symbol] = ap;
     let ghosts = 0, orphans = 0;
 
+    // BUG2 FIX Part B: Deduplicate state.positions by contractSymbol.
+    // The addon bug creates two position records with the same contractSymbol
+    // (e.g. QQQ260612C00720000 from original entry AND from the addon).
+    // Keep only the record with the highest contracts count. If tied, keep
+    // the one with the most recent openDate (latest addon record).
+    // This runs before price updates so deduplication is clean.
+    const _symSeen = new Map();
+    for (const pos of _state.positions) {
+      const sym = pos.contractSymbol || pos.buySymbol || `${pos.ticker}_${pos.optionType}`;
+      if (!sym) continue;
+      if (!_symSeen.has(sym)) {
+        _symSeen.set(sym, pos);
+      } else {
+        const existing = _symSeen.get(sym);
+        const existContracts = existing.contracts || 0;
+        const posContracts   = pos.contracts || 0;
+        // Keep whichever has more contracts; if equal, keep more recent openDate
+        if (posContracts > existContracts ||
+           (posContracts === existContracts && new Date(pos.openDate||0) > new Date(existing.openDate||0))) {
+          _symSeen.set(sym, pos);
+        }
+      }
+    }
+    const _dedupedPositions = Array.from(_symSeen.values());
+    if (_dedupedPositions.length < _state.positions.length) {
+      _log("warn",
+        `[RECONCILE] Deduped ${_state.positions.length - _dedupedPositions.length} duplicate position(s) by contractSymbol`
+      );
+      _state.positions = _dedupedPositions;
+    }
+
     // - Update currentPrice on existing positions from Alpaca data -
     for (const pos of _state.positions) {
       const alpPos = alpacaPositions.find(p =>
@@ -232,10 +263,14 @@ async function runReconciliation() {
         _log("warn", `[RECONCILE] Skipping orphan for removed ticker ${underlyingTicker} (${alpPos.symbol}) - not in active watchlist`);
         return false;
       }
+      // BUG2 FIX Part A: Only count a state position as "covering" this Alpaca
+      // position if it has contracts > 0. A 0-contract or stale addon ghost with
+      // the same contractSymbol was blocking legitimate orphan reconstruction.
       return !_state.positions.find(p =>
-        p.contractSymbol === alpPos.symbol ||
-        p.buySymbol      === alpPos.symbol ||
-        p.sellSymbol     === alpPos.symbol
+        (p.contractSymbol === alpPos.symbol ||
+         p.buySymbol      === alpPos.symbol ||
+         p.sellSymbol     === alpPos.symbol) &&
+        (p.contracts || 0) > 0 // must have actual contracts to count as covering
       );
     });
 
