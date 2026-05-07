@@ -9,7 +9,9 @@ const fs      = require('fs');
 
 const { state, markDirty, saveStateNow, flushStateIfDirty,
         logEvent, redisSave, redisLoad, defaultState,
-        saveDailyLogToRedis, getETDateStr }               = require('./state');
+        saveDailyLogToRedis, getETDateStr,
+        writeJournalEntry, updateJournalExit,
+        loadJournalDay, getJournalRange }              = require('./state');
 const { alpacaGet, alpacaPost, alpacaDelete,
         getCircuitState, setBrokerLogger,
         getStockQuote, getStockBars, getIntradayBars,
@@ -2019,6 +2021,89 @@ app.post("/api/reset-circuit", requireSecret, async (req, res) => {
 // Reset daily P&L loss counter + daily circuit — paper trading only
 // Clears todayRealizedPnL, _dailyCircuitOpen, and _dailyPnL so the system
 // can resume entries regardless of how bad the day's realized losses were.
+// ─── V2.94: Journal API endpoints ───────────────────────────────────────────
+// GET /api/journal?date=YYYY-MM-DD       — single day journal
+// GET /api/journal?from=YYYY-MM-DD&to=YYYY-MM-DD — date range
+// GET /api/journal/summary               — aggregated P&L stats
+// GET /api/journal/today                 — today's journal
+app.get("/api/journal/today", async (req, res) => {
+  try {
+    const dateStr = new Date().toLocaleString('en-US', {timeZone:'America/New_York'}).split(',')[0].split('/').map((v,i) => i<2 ? v.padStart(2,'0') : v).reverse().join('-');
+    const etDate  = new Date().toLocaleDateString('en-US', {timeZone:'America/New_York', year:'numeric', month:'2-digit', day:'2-digit'}).split('/');
+    const today   = `${etDate[2]}-${etDate[0]}-${etDate[1]}`;
+    const entries = await loadJournalDay(today);
+    res.json({ date: today, count: entries.length, entries });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+app.get("/api/journal", async (req, res) => {
+  try {
+    const { date, from, to } = req.query;
+    if (date) {
+      const entries = await loadJournalDay(date);
+      return res.json({ date, count: entries.length, entries });
+    }
+    if (from && to) {
+      const entries = await getJournalRange(from, to);
+      return res.json({ from, to, count: entries.length, entries });
+    }
+    // Default: today
+    const today = new Date().toLocaleDateString('en-US', {timeZone:'America/New_York', year:'numeric', month:'2-digit', day:'2-digit'}).split('/');
+    const todayStr = `${today[2]}-${today[0]}-${today[1]}`;
+    const entries  = await loadJournalDay(todayStr);
+    res.json({ date: todayStr, count: entries.length, entries });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+app.get("/api/journal/summary", async (req, res) => {
+  try {
+    const { days = 30 } = req.query;
+    const to   = new Date();
+    const from = new Date(Date.now() - parseInt(days) * 86400000);
+    const toStr   = to.toISOString().split('T')[0];
+    const fromStr = from.toISOString().split('T')[0];
+    const entries = await getJournalRange(fromStr, toStr);
+    const closed  = entries.filter(e => e.status === 'CLOSED');
+    const wins    = closed.filter(e => e.isWin);
+    const grossW  = wins.reduce((s,e)   => s + (e.pnl_alpaca || e.pnl_apex || 0), 0);
+    const grossL  = closed.filter(e => !e.isWin).reduce((s,e) => s + Math.abs(e.pnl_alpaca || e.pnl_apex || 0), 0);
+    const byReason = {};
+    closed.forEach(e => {
+      const r = e.exitReason || 'unknown';
+      if (!byReason[r]) byReason[r] = { count: 0, pnl: 0, wins: 0 };
+      byReason[r].count++;
+      byReason[r].pnl += (e.pnl_alpaca || e.pnl_apex || 0);
+      if (e.isWin) byReason[r].wins++;
+    });
+    const byTicker = {};
+    closed.forEach(e => {
+      const t = e.ticker;
+      if (!byTicker[t]) byTicker[t] = { count: 0, pnl: 0, wins: 0 };
+      byTicker[t].count++;
+      byTicker[t].pnl += (e.pnl_alpaca || e.pnl_apex || 0);
+      if (e.isWin) byTicker[t].wins++;
+    });
+    res.json({
+      period:    { from: fromStr, to: toStr, days: parseInt(days) },
+      totals: {
+        trades:    closed.length,
+        open:      entries.filter(e => e.status === 'OPEN').length,
+        wins:      wins.length,
+        losses:    closed.length - wins.length,
+        winRate:   closed.length > 0 ? parseFloat((wins.length / closed.length * 100).toFixed(1)) : 0,
+        grossWins: parseFloat(grossW.toFixed(2)),
+        grossLoss: parseFloat(grossL.toFixed(2)),
+        netPnL:    parseFloat((grossW - grossL).toFixed(2)),
+        avgWin:    wins.length > 0 ? parseFloat((grossW / wins.length).toFixed(2)) : 0,
+        avgLoss:   (closed.length - wins.length) > 0 ? parseFloat((grossL / (closed.length - wins.length)).toFixed(2)) : 0,
+        payoff:    grossL > 0 ? parseFloat((grossW / wins.length / (grossL / (closed.length - wins.length))).toFixed(2)) : 0,
+      },
+      byExitReason: byReason,
+      byTicker:     byTicker,
+    });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
 app.post("/api/reset-daily-pnl", requireSecret, async (req, res) => {
   const before = {
     todayRealizedPnL: state.todayRealizedPnL || 0,
