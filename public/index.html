@@ -775,13 +775,67 @@ input[type=text]:focus{border-color:var(--blue)}
 <!-- ═══════════════ JOURNAL TAB ═══════════════ -->
 
 <div id="tab-journal" class="content">
-  <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;flex-wrap:wrap;gap:8px">
-    <div class="section-title" style="margin:0">Trade Journal — Entry Reasoning</div>
-    <button class="btn btn-green" onclick="copyJournal()" id="copy-journal-btn">📋 COPY JOURNAL</button>
+
+  <!-- ── Header bar ── -->
+  <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;flex-wrap:wrap;gap:8px">
+    <div style="display:flex;align-items:center;gap:8px">
+      <button class="btn" id="jv-prev" onclick="journalPrevDay()" title="previous day">&#8249;</button>
+      <span id="jv-date-label" style="font-size:13px;font-weight:700;color:var(--blue);min-width:160px;text-align:center;letter-spacing:.5px"></span>
+      <button class="btn" id="jv-next" onclick="journalNextDay()" title="next day">&#8250;</button>
+    </div>
+    <div style="display:flex;align-items:center;gap:8px">
+      <button class="btn btn-green" onclick="journalLoadToday()">TODAY</button>
+      <button class="btn" onclick="journalShowSummary()">30D SUMMARY</button>
+      <button class="btn" onclick="copyJournal()" id="copy-journal-btn">📋 COPY</button>
+    </div>
   </div>
-  <div id="journal-wrap">
-    <div class="no-data">No journal entries yet. APEX logs detailed reasoning for every trade.</div>
+
+  <!-- ── Metrics row ── -->
+  <div id="jv-metrics" class="grid4" style="margin-bottom:14px"></div>
+
+  <!-- ── Filter bar ── -->
+  <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px;flex-wrap:wrap">
+    <span style="font-size:10px;color:var(--muted);letter-spacing:.5px">FILTER:</span>
+    <button class="btn jv-filter-btn active" data-filter="all"    onclick="journalFilter('all')">ALL</button>
+    <button class="btn jv-filter-btn"        data-filter="win"    onclick="journalFilter('win')">WINS</button>
+    <button class="btn jv-filter-btn"        data-filter="loss"   onclick="journalFilter('loss')">LOSSES</button>
+    <button class="btn jv-filter-btn"        data-filter="open"   onclick="journalFilter('open')">OPEN</button>
+    <button class="btn jv-filter-btn"        data-filter="mr"     onclick="journalFilter('mr')">MR ONLY</button>
+    <button class="btn jv-filter-btn"        data-filter="failed" onclick="journalFilter('failed')">THESIS FAIL</button>
   </div>
+
+  <!-- ── Trade table ── -->
+  <div style="overflow-x:auto">
+    <table id="jv-table" style="width:100%;font-size:11px">
+      <thead>
+        <tr>
+          <th style="width:75px">TIME ET</th>
+          <th style="width:55px">TICKER</th>
+          <th style="width:42px">TYPE</th>
+          <th style="width:50px">STRIKE</th>
+          <th style="width:38px">QTY</th>
+          <th style="width:48px">SCORE</th>
+          <th style="width:58px">ENTRY $</th>
+          <th style="width:58px">EXIT $</th>
+          <th style="width:80px">EXIT REASON</th>
+          <th style="width:65px">P/L APEX</th>
+          <th style="width:72px">P/L ALPACA</th>
+          <th style="width:50px">RSI IN</th>
+          <th style="width:50px">RSI OUT</th>
+          <th style="width:48px">HELD</th>
+          <th style="width:50px">STATUS</th>
+        </tr>
+      </thead>
+      <tbody id="jv-tbody"></tbody>
+    </table>
+  </div>
+
+  <!-- ── Detail panel (row click expands) ── -->
+  <div id="jv-detail" style="display:none;margin-top:12px;background:#050e1a;border:1px solid var(--border);border-radius:10px;padding:14px"></div>
+
+  <!-- ── 30d summary panel ── -->
+  <div id="jv-summary" style="display:none;margin-top:12px"></div>
+
 </div>
 
 <!-- ═══════════════ STOCKS TAB ═══════════════ -->
@@ -2372,54 +2426,287 @@ function renderActivityLog() {
   }).join('');
 }
 
-async function renderJournal() {
-  const wrap = document.getElementById('journal-wrap');
-  let journal = state.tradeJournal || [];
-  try { const r = await fetch('/api/journal'); if (r.ok) journal = await r.json(); } catch(e) {}
-  journal = journal || [];
-  if (!journal.length) { wrap.innerHTML = '<div class="no-data">No journal entries yet.</div>'; return; }
-  wrap.innerHTML = journal.slice(0, 30).map(e => {
-    const isOpen  = e.action === 'OPEN';
-    const color   = isOpen ? 'var(--green)' : (e.pnl >= 0 ? 'var(--blue)' : 'var(--red)');
-    const score   = e.score;
-    const scoreColor = score >= 85 ? 'var(--green)' : score >= 70 ? 'var(--blue)' : 'var(--orange)';
-    return `
-    <div class="journal-entry">
-      <div class="journal-header">
-        <div style="display:flex;align-items:center;gap:10px">
-          <span class="journal-ticker">${e.ticker}</span>
-          <span style="font-size:10px;padding:2px 8px;border-radius:10px;background:${isOpen?'rgba(0,255,136,.1)':'rgba(0,196,255,.1)'};color:${color}">${e.action}</span>
-          ${isOpen ? `<span style="font-size:10px;color:var(--muted)">${
-            e.isSpread && e.buyStrike && e.sellStrike
-              ? '$'+e.buyStrike+'/'+'$'+e.sellStrike+((e.optionType==='call'?'C':'P')+'-SPRD')
-              : e.strike
-                ? '$'+e.strike+(e.optionType==='put'?'P':'C')+' · '+(e.expDate||'?')
-                : e.optionType
-                  ? e.optionType.toUpperCase()
-                  : '--'
-          }</span>` : ''}
-          ${e.isCreditSpread ? '<span style="font-size:9px;padding:2px 6px;border-radius:10px;background:rgba(0,255,136,.15);color:var(--green)">CREDIT</span>' : e.isSpread ? '<span style="font-size:9px;padding:2px 6px;border-radius:10px;background:rgba(0,150,255,.15);color:var(--blue)">DEBIT</span>' : ''}
-        </div>
-        <div style="display:flex;align-items:center;gap:8px">
-          ${score ? `<span class="journal-score" style="background:rgba(0,196,255,.1);color:${scoreColor}">${score}/100</span>` : ''}
-          ${!isOpen && e.pnl !== undefined ? `<span style="font-weight:700;color:${e.pnl>=0?'var(--green)':'var(--red)'}">${e.pnl>=0?'+':''}${(e.pnl||0).toFixed(2)}</span>` : ''}
-        </div>
-      </div>
-      <div class="journal-reasoning">${e.reasoning || '--'}</div>
-      ${(isOpen && e.scoreReasons && e.scoreReasons.length) ? ('<div style="margin-top:4px;padding:4px 0;border-top:1px solid #1a2a3a">' + e.scoreReasons.map(function(r) {
-        var isNeg = r.indexOf('(-') > -1 || r.indexOf('contradicts') > -1 || r.indexOf('bad for') > -1 || r.indexOf('capped') > -1 || r.indexOf('fighting') > -1 || r.indexOf('Neither') > -1;
-        var isPos = !isNeg && r.indexOf('(+') > -1 && r.indexOf('+0)') === -1;
-        var col = isNeg ? '#ff7766' : isPos ? '#88dd88' : '#666';
-        return '<span style="font-size:10px;color:' + col + ';display:block;line-height:1.5">' + r + '</span>';
-      }).join('') + '</div>') : ''}
-      <div class="journal-meta">
-        <span>${new Date(e.time).toLocaleString()}</span>
-        ${isOpen ? `<span>δ ${e.delta}</span><span>IV ${e.iv}%</span><span>VIX ${e.vix}</span>` : `<span>Reason: ${e.reason}</span><span style="font-size:9px;padding:1px 5px;border-radius:8px;background:${e.tradeType==='credit_spread'?'rgba(0,255,136,.12)':e.tradeType==='debit_spread'?'rgba(0,150,255,.12)':'rgba(100,100,100,.1)'};color:${e.tradeType==='credit_spread'?'var(--green)':e.tradeType==='debit_spread'?'var(--blue)':'var(--muted)'}">${(e.tradeType||'naked').replace('_',' ').toUpperCase()}</span>`}
-        ${e.catalyst ? `<span>Catalyst: ${e.catalyst}</span>` : ''}
-      </div>
-    </div>`;
+// ══════════════════════════════════════════════════════════════
+// V2.94 JOURNAL — full rebuild, reads from /api/journal endpoint
+// ══════════════════════════════════════════════════════════════
+let jvEntries  = [];
+let jvFiltered = [];
+let jvDate     = '';
+let jvSelRow   = -1;
+let jvFilter   = 'all';
+
+function journalTodayStr() {
+  const d = new Date();
+  const p = d.toLocaleDateString('en-US', {timeZone:'America/New_York', year:'numeric', month:'2-digit', day:'2-digit'});
+  const [m, dy, y] = p.split('/');
+  return y + '-' + m + '-' + dy;
+}
+
+function journalOffset(dateStr, days) {
+  const d = new Date(dateStr + 'T12:00:00Z');
+  d.setUTCDate(d.getUTCDate() + days);
+  return d.toISOString().split('T')[0];
+}
+
+async function journalLoad(dateStr) {
+  jvDate   = dateStr;
+  jvSelRow = -1;
+  document.getElementById('jv-detail').style.display  = 'none';
+  document.getElementById('jv-summary').style.display = 'none';
+  const label = document.getElementById('jv-date-label');
+  if (!label) return;
+  label.textContent = '...';
+  try {
+    const res  = await fetch('/api/journal?date=' + dateStr);
+    const data = await res.json();
+    jvEntries  = data.entries || [];
+    const d    = new Date(dateStr + 'T12:00:00Z');
+    label.textContent = d.toLocaleDateString('en-US', {weekday:'short', month:'short', day:'numeric', year:'numeric', timeZone:'UTC'}).toUpperCase();
+  } catch(e) {
+    jvEntries = [];
+    if (label) label.textContent = dateStr + ' (error)';
+  }
+  journalApplyFilter();
+}
+
+function journalLoadToday() { journalLoad(journalTodayStr()); }
+
+function journalPrevDay() { journalLoad(journalOffset(jvDate, -1)); }
+function journalNextDay() {
+  const next = journalOffset(jvDate, 1);
+  if (next <= journalTodayStr()) journalLoad(next);
+}
+
+function journalFilter(f) {
+  jvFilter = f;
+  document.querySelectorAll('.jv-filter-btn').forEach(b => {
+    b.classList.toggle('active', b.dataset.filter === f);
+  });
+  journalApplyFilter();
+}
+
+function journalApplyFilter() {
+  if      (jvFilter === 'win')    jvFiltered = jvEntries.filter(e => e.isWin === true);
+  else if (jvFilter === 'loss')   jvFiltered = jvEntries.filter(e => e.isWin === false);
+  else if (jvFilter === 'open')   jvFiltered = jvEntries.filter(e => e.status === 'OPEN');
+  else if (jvFilter === 'mr')     jvFiltered = jvEntries.filter(e => e.isMeanReversion);
+  else if (jvFilter === 'failed') jvFiltered = jvEntries.filter(e => e._thesisFailure);
+  else                            jvFiltered = [...jvEntries];
+  journalRenderMetrics();
+  journalRenderTable();
+}
+
+function journalRenderMetrics() {
+  const el = document.getElementById('jv-metrics');
+  if (!el) return;
+  const closed = jvEntries.filter(e => e.status === 'CLOSED');
+  const wins   = closed.filter(e => e.isWin);
+  const grossW = wins.reduce((s,e) => s + (e.pnl_alpaca || 0), 0);
+  const grossL = closed.filter(e => !e.isWin).reduce((s,e) => s + Math.abs(e.pnl_alpaca || 0), 0);
+  const net    = grossW - grossL;
+  const wr     = closed.length > 0 ? (wins.length / closed.length * 100) : 0;
+  const netCol = net >= 0 ? 'var(--green)' : 'var(--red)';
+  el.innerHTML = `
+    <div class="card"><div class="card-title">NET P/L (ALPACA)</div>
+      <div class="metric-sm" style="color:${netCol}">${net>=0?'+':'-'}\$${Math.abs(net).toFixed(2)}</div>
+      <div class="sub">equity delta ground truth</div></div>
+    <div class="card"><div class="card-title">TRADES / WIN RATE</div>
+      <div class="metric-sm" style="color:var(--blue)">${closed.length} / ${wr.toFixed(0)}%</div>
+      <div class="sub">${wins.length}W · ${closed.length - wins.length}L · ${jvEntries.filter(e=>e.status==='OPEN').length} open</div></div>
+    <div class="card"><div class="card-title">GROSS WINS</div>
+      <div class="metric-sm" style="color:var(--green)">+\$${grossW.toFixed(2)}</div>
+      <div class="sub">avg \$${wins.length > 0 ? (grossW/wins.length).toFixed(0) : 0}/trade</div></div>
+    <div class="card"><div class="card-title">GROSS LOSSES</div>
+      <div class="metric-sm" style="color:var(--red)">-\$${grossL.toFixed(2)}</div>
+      <div class="sub">avg \$${(closed.length-wins.length) > 0 ? (grossL/(closed.length-wins.length)).toFixed(0) : 0}/trade</div></div>
+  `;
+}
+
+function jvFmt(v)       { if (v===null||v===undefined) return '--'; return (v>=0?'+':'-')+'\$'+Math.abs(v).toFixed(2); }
+function jvHeld(h)      { if (!h) return '--'; return h < 1 ? Math.round(h*60)+'m' : h.toFixed(1)+'h'; }
+function jvPnlCol(v)    { if (v===null||v===undefined) return ''; return v>0?'color:var(--green)':v<0?'color:var(--red)':''; }
+
+function journalRenderTable() {
+  const tbody = document.getElementById('jv-tbody');
+  if (!tbody) return;
+  if (!jvFiltered.length) {
+    tbody.innerHTML = '<tr><td colspan="15" style="text-align:center;padding:20px;color:var(--muted)">No entries for this date / filter.</td></tr>';
+    return;
+  }
+  tbody.innerHTML = jvFiltered.map((e, i) => {
+    const chip = e.status==='OPEN'
+      ? '<span style="font-size:9px;padding:1px 6px;border-radius:8px;background:rgba(0,196,255,.15);color:var(--blue)">OPEN</span>'
+      : e.isWin
+        ? '<span style="font-size:9px;padding:1px 6px;border-radius:8px;background:rgba(0,255,136,.15);color:var(--green)">WIN</span>'
+        : '<span style="font-size:9px;padding:1px 6px;border-radius:8px;background:rgba(255,85,85,.15);color:var(--red)">LOSS</span>';
+    const typeChip = e.optionType==='call'
+      ? '<span style="font-size:9px;padding:1px 5px;border-radius:4px;background:rgba(0,196,255,.15);color:var(--blue)">C</span>'
+      : '<span style="font-size:9px;padding:1px 5px;border-radius:4px;background:rgba(255,153,68,.15);color:var(--orange)">P</span>';
+    const tf  = e._thesisFailure   ? ' <span style="color:var(--red);font-size:9px" title="thesis failure">⚠</span>'   : '';
+    const tc  = e._thesisFulfilled ? ' <span style="color:var(--green);font-size:9px" title="thesis fulfilled">✓</span>' : '';
+    const time = (e.openDateET||'').split(',').pop().trim().substring(0,5) || '--';
+    const sCol = e.entryScore>=85?'var(--green)':e.entryScore>=70?'var(--blue)':'var(--orange)';
+    return `<tr onclick="journalSelectRow(${i})" style="cursor:pointer">
+      <td style="color:var(--muted)">${time}</td>
+      <td style="font-weight:700;color:var(--blue)">${e.ticker||'--'}${tf}${tc}</td>
+      <td>${typeChip}</td>
+      <td>\$${e.strike||'--'}</td>
+      <td>${e.entryContracts||'--'}x</td>
+      <td style="color:${sCol}">${e.entryScore||'--'}</td>
+      <td>\$${(e.entryPrice||0).toFixed(2)}</td>
+      <td>${e.exitPrice!=null?'\$'+e.exitPrice.toFixed(2):'--'}</td>
+      <td style="color:var(--muted);font-size:10px">${e.exitReason||'open'}</td>
+      <td style="${jvPnlCol(e.pnl_apex)}">${jvFmt(e.pnl_apex)}</td>
+      <td style="${jvPnlCol(e.pnl_alpaca)};font-weight:700">${jvFmt(e.pnl_alpaca)}</td>
+      <td style="color:var(--muted)">${e.entryRSI??'--'}</td>
+      <td style="color:var(--muted)">${e.exitRSI??'--'}</td>
+      <td style="color:var(--muted)">${jvHeld(e.hoursHeld)}</td>
+      <td>${chip}</td>
+    </tr>`;
   }).join('');
 }
+
+function journalSelectRow(idx) {
+  const e = jvFiltered[idx];
+  const panel = document.getElementById('jv-detail');
+  if (!panel) return;
+  if (jvSelRow === idx) {
+    panel.style.display = 'none'; jvSelRow = -1;
+    document.querySelectorAll('#jv-tbody tr').forEach(r => r.style.background = '');
+    return;
+  }
+  jvSelRow = idx;
+  document.querySelectorAll('#jv-tbody tr').forEach((r,i) => r.style.background = i===idx ? 'rgba(0,196,255,.05)' : '');
+  const r  = v => (v!==null && v!==undefined) ? v : '--';
+  const row = (label, val, col='') => `<tr><td style="color:var(--muted);padding:3px 0;font-size:11px">${label}</td><td style="text-align:right;font-size:11px;${col?'color:'+col:''}">${r(val)}</td></tr>`;
+  const prow = (label, val, bold) => `<tr><td style="color:var(--muted);padding:3px 0;font-size:11px">${label}</td><td style="text-align:right;font-size:11px;font-weight:${bold?700:400};${jvPnlCol(val)}">${jvFmt(val)}</td></tr>`;
+  const reasonColor = rn => rn==='stop'?'var(--red)':rn==='trail'?'var(--green)':rn==='tp'?'var(--gold)':'var(--muted)';
+  panel.style.display = 'block';
+  panel.innerHTML = `
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;flex-wrap:wrap;gap:6px">
+      <span style="font-size:12px;font-weight:700;color:var(--blue)">${e.ticker} — ${e.contractSymbol||''}</span>
+      <span style="font-size:10px;color:var(--muted)">${e.openDateET||''} → ${e.closeDateET||'still open'}</span>
+    </div>
+    <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:14px">
+      <div>
+        <div class="section-title" style="margin-top:0">Entry</div>
+        <table style="width:100%">
+          ${row('score',       (e.entryScore||'--')+'/100', e.entryScore>=85?'var(--green)':e.entryScore>=70?'var(--blue)':'var(--orange)')}
+          ${row('contracts',   (e.entryContracts||'--')+'x @ $'+(e.entryPrice||0).toFixed(2))}
+          ${row('cost (apex)', '$'+(e.entryCost||0).toFixed(2))}
+          ${row('cost (fill)', '$'+(e.actualFillCost||0).toFixed(2))}
+          ${row('delta',       (e.entryDelta||0).toFixed(3))}
+          ${row('IV',          e.entryIV!=null?(e.entryIV*100).toFixed(1)+'%':'--')}
+          ${row('VIX',         (e.entryVIX||0).toFixed(2))}
+          ${row('IVR',         e.entryIVR!=null?e.entryIVR.toFixed(1):'--')}
+          ${row('RSI (intra)', e.entryRSI)}
+          ${row('RSI (daily)', e.entryDailyRSI)}
+          ${row('DTE',         e.entryDTE!=null?e.entryDTE+'d':'--')}
+          ${row('MACD',        e.entryMACD)}
+          ${row('macro',       e.macroSignal)}
+          ${row('regime',      e.regimeAtEntry)}
+          ${row('MR entry',    e.isMeanReversion?'yes':'no')}
+        </table>
+        <div class="section-title" style="margin-top:10px">Scoring reasons</div>
+        ${(e.entryReasons||[]).map(s=>`<div style="font-size:10px;color:${s.indexOf('(+')>-1&&s.indexOf('+0)')===-1?'#88dd88':s.indexOf('(-')>-1?'#ff7766':'var(--muted)'};padding:2px 0;border-bottom:1px solid rgba(13,48,80,.4);line-height:1.5">${s}</div>`).join('')||'<div style="color:var(--muted);font-size:10px">none recorded</div>'}
+      </div>
+      <div>
+        <div class="section-title" style="margin-top:0">Lifecycle</div>
+        <table style="width:100%">
+          ${row('peak price',       '$'+(e.peakPrice||0).toFixed(2))}
+          ${row('peak gain',        e.peakPct!=null?'+'+e.peakPct.toFixed(1)+'%':'--', 'var(--green)')}
+          ${row('mins to peak',     e.minsToPeak!=null?e.minsToPeak+'m':'--')}
+          ${row('thesis fulfilled', e._thesisFulfilled?'yes ✓':'no', e._thesisFulfilled?'var(--green)':'')}
+          ${row('thesis failure',   e._thesisFailure?'yes ⚠':'no',  e._thesisFailure?'var(--red)':'')}
+          ${row('churn re-entry',   e._churnReEntry?'yes':'no',      e._churnReEntry?'var(--orange)':'')}
+          ${row('contracts closed', (e.contractsAtClose||'--')+'x')}
+        </table>
+        <div class="section-title" style="margin-top:10px">Exit</div>
+        <table style="width:100%">
+          ${row('exit time',   e.closeDateET)}
+          ${row('exit price',  e.exitPrice!=null?'$'+e.exitPrice.toFixed(2):'--')}
+          ${row('exit reason', e.exitReason, reasonColor(e.exitReason))}
+          ${row('exit RSI',    e.exitRSI)}
+          ${row('exit VIX',    e.exitVIX!=null?e.exitVIX.toFixed(2):'--')}
+          ${row('agent score', e.exitScore!=null?e.exitScore+'/100':'--')}
+          ${row('held',        jvHeld(e.hoursHeld))}
+        </table>
+      </div>
+      <div>
+        <div class="section-title" style="margin-top:0">P/L breakdown</div>
+        <table style="width:100%">
+          ${prow('p/l (apex)',   e.pnl_apex,   false)}
+          ${prow('p/l (alpaca)', e.pnl_alpaca, true)}
+          <tr><td style="color:var(--muted);padding:3px 0;font-size:11px">commission</td><td style="text-align:right;font-size:11px;color:var(--red)">${e.pnl_apex!=null&&e.pnl_alpaca!=null?'-$'+Math.abs(e.pnl_apex-e.pnl_alpaca).toFixed(2):'--'}</td></tr>
+          <tr><td style="color:var(--muted);padding:3px 0;font-size:11px">p/l %</td><td style="text-align:right;font-size:11px;${jvPnlCol(e.pnl_pct)}">${e.pnl_pct!=null?(e.pnl_pct>=0?'+':'')+e.pnl_pct.toFixed(1)+'%':'--'}</td></tr>
+          <tr><td style="color:var(--muted);padding:3px 0;font-size:11px">fill proceeds</td><td style="text-align:right;font-size:11px">${e.actualFillProceeds!=null?'$'+e.actualFillProceeds.toFixed(2):'--'}</td></tr>
+          <tr><td style="color:var(--muted);padding:3px 0;font-size:11px">result</td>
+            <td style="text-align:right;font-size:11px;font-weight:700;${e.isWin===true?'color:var(--green)':e.isWin===false?'color:var(--red)':'color:var(--muted)'}">
+              ${e.isWin===true?'WIN ✓':e.isWin===false?'LOSS ✗':'OPEN'}
+            </td></tr>
+        </table>
+      </div>
+    </div>`;
+}
+
+async function journalShowSummary() {
+  const panel = document.getElementById('jv-summary');
+  if (!panel) return;
+  if (panel.style.display !== 'none') { panel.style.display = 'none'; return; }
+  panel.innerHTML = '<div style="color:var(--muted);padding:10px;font-size:11px">Loading 30-day summary...</div>';
+  panel.style.display = 'block';
+  try {
+    const res  = await fetch('/api/journal/summary?days=30');
+    const data = await res.json();
+    const t    = data.totals || {};
+    const byR  = data.byExitReason || {};
+    const byT  = data.byTicker || {};
+    const nCol = (t.netPnL||0) >= 0 ? 'var(--green)' : 'var(--red)';
+    panel.innerHTML = `
+      <div class="section-title">30-Day Journal Summary</div>
+      <div class="grid4" style="margin-bottom:14px">
+        <div class="card"><div class="card-title">NET P/L</div>
+          <div class="metric-sm" style="color:${nCol}">${(t.netPnL||0)>=0?'+':'-'}\$${Math.abs(t.netPnL||0).toFixed(2)}</div></div>
+        <div class="card"><div class="card-title">WIN RATE</div>
+          <div class="metric-sm" style="color:var(--blue)">${(t.winRate||0).toFixed(0)}%</div>
+          <div class="sub">${t.wins||0}W / ${t.losses||0}L of ${t.trades||0}</div></div>
+        <div class="card"><div class="card-title">AVG WIN / LOSS</div>
+          <div class="metric-sm" style="color:var(--green)">+\$${(t.avgWin||0).toFixed(0)}</div>
+          <div class="sub" style="color:var(--red)">-\$${(t.avgLoss||0).toFixed(0)}</div></div>
+        <div class="card"><div class="card-title">PAYOFF RATIO</div>
+          <div class="metric-sm" style="color:var(--gold)">${(t.payoff||0).toFixed(2)}x</div></div>
+      </div>
+      <div class="grid2">
+        <div>
+          <div class="section-title">By exit reason</div>
+          <table><thead><tr><th>REASON</th><th>COUNT</th><th>NET P/L</th><th>WIN%</th></tr></thead><tbody>
+            ${Object.entries(byR).sort((a,b)=>b[1].pnl-a[1].pnl).map(([rn,d])=>`
+              <tr><td>${rn}</td><td>${d.count}</td>
+              <td style="color:${d.pnl>=0?'var(--green)':'var(--red)'}">${d.pnl>=0?'+':'-'}\$${Math.abs(d.pnl).toFixed(0)}</td>
+              <td>${d.count>0?(d.wins/d.count*100).toFixed(0):0}%</td></tr>`).join('')||'<tr><td colspan="4" style="color:var(--muted)">No data</td></tr>'}
+          </tbody></table>
+        </div>
+        <div>
+          <div class="section-title">By ticker</div>
+          <table><thead><tr><th>TICKER</th><th>COUNT</th><th>NET P/L</th><th>WIN%</th></tr></thead><tbody>
+            ${Object.entries(byT).sort((a,b)=>b[1].pnl-a[1].pnl).map(([tn,d])=>`
+              <tr><td style="color:var(--blue)">${tn}</td><td>${d.count}</td>
+              <td style="color:${d.pnl>=0?'var(--green)':'var(--red)'}">${d.pnl>=0?'+':'-'}\$${Math.abs(d.pnl).toFixed(0)}</td>
+              <td>${d.count>0?(d.wins/d.count*100).toFixed(0):0}%</td></tr>`).join('')||'<tr><td colspan="4" style="color:var(--muted)">No data</td></tr>'}
+          </tbody></table>
+        </div>
+      </div>`;
+  } catch(e) {
+    panel.innerHTML = '<div style="color:var(--red);padding:10px;font-size:11px">Failed to load: ' + e.message + '</div>';
+  }
+}
+
+async function renderJournal() {
+  // V2.94: Journal tab now reads from /api/journal (Redis-backed, 50-field entries)
+  // Load today on first open; date navigation handles subsequent loads
+  if (!jvDate) await journalLoadToday();
+}
+
 
 function renderStocks() {
   const sp   = state.stockPositions || [];
@@ -4306,34 +4593,49 @@ async function loadAttribution() {
 
 // ── Copy Journal to clipboard ─────────────────────────────────────────────
 async function copyJournal() {
-  let journal = state.tradeJournal || [];
-  try { const r = await fetch('/api/journal'); if (r.ok) journal = await r.json(); } catch(e) {}
-  if (!journal || !journal.length) { alert('No journal entries to copy.'); return; }
-  const lines = ['APEX — Trade Journal — ' + new Date().toLocaleString(), '═'.repeat(60)];
-  journal.slice(0, 50).forEach(e => {
+  const btn = document.getElementById('copy-journal-btn');
+  if (btn) btn.textContent = '...';
+  let entries = jvEntries || [];
+  if (!entries.length) {
+    // Try loading today if not already loaded
+    try {
+      const res  = await fetch('/api/journal?date=' + journalTodayStr());
+      const data = await res.json();
+      entries    = data.entries || [];
+    } catch(e) {}
+  }
+  if (!entries.length) { alert('No journal entries to copy.'); if (btn) btn.textContent = '📋 COPY'; return; }
+
+  const lines = ['APEX — Trade Journal — ' + new Date().toLocaleString(), '═'.repeat(70)];
+  entries.forEach(e => {
     lines.push('');
-    const header = [e.ticker, e.action, e.isSpread ? (e.isCreditSpread?'CREDIT SPREAD':'DEBIT SPREAD') : 'NAKED', e.optionType?.toUpperCase()].filter(Boolean).join(' · ');
-    lines.push(header);
-    if (e.action === 'OPEN') {
-      if (e.buyStrike && e.sellStrike) lines.push('  Strike: $'+e.sellStrike+'/$'+e.buyStrike+' '+e.expDate);
-      if (e.score) lines.push('  Score: '+e.score+'/100');
-    } else {
-      if (e.pnl !== undefined) lines.push('  P&L: '+(e.pnl>=0?'+':'')+e.pnl.toFixed(2)+' | Reason: '+(e.reason||'?'));
+    lines.push([
+      e.ticker, e.optionType?.toUpperCase(),
+      '$' + e.strike, 'exp ' + (e.expDate||'?'),
+      e.entryContracts + 'x @ $' + (e.entryPrice||0).toFixed(2)
+    ].join(' · '));
+    lines.push('  Score: ' + (e.entryScore||'--') + '/100 | Status: ' + (e.status||'?') + ' | ' + (e.openDateET||''));
+    if (e.isMeanReversion) lines.push('  MR entry | Regime: ' + (e.regimeAtEntry||'?') + ' | Macro: ' + (e.macroSignal||'?'));
+    lines.push('  Entry: RSI ' + (e.entryRSI||'--') + ' | Delta ' + (e.entryDelta||'--') + ' | IV ' + (e.entryIV!=null?(e.entryIV*100).toFixed(1)+'%':'--') + ' | VIX ' + (e.entryVIX||'--') + ' | IVR ' + (e.entryIVR||'--'));
+    if (e.entryReasons && e.entryReasons.length) {
+      e.entryReasons.forEach(r => lines.push('    ' + r));
     }
-    if (e.reasoning) lines.push('  '+e.reasoning);
-    if (e.scoreReasons && e.scoreReasons.length) {
-      e.scoreReasons.forEach(r => lines.push('    '+r));
+    if (e.status === 'CLOSED') {
+      lines.push('  Exit: ' + (e.exitReason||'?') + ' @ $' + (e.exitPrice||0).toFixed(2) + ' | ' + (e.closeDateET||''));
+      lines.push('  RSI out: ' + (e.exitRSI||'--') + ' | Held: ' + (e.hoursHeld!=null?(e.hoursHeld<1?Math.round(e.hoursHeld*60)+'m':e.hoursHeld.toFixed(1)+'h'):'--'));
+      lines.push('  P/L apex:   ' + (e.pnl_apex!=null?(e.pnl_apex>=0?'+':'')+'\$'+e.pnl_apex.toFixed(2):'--'));
+      lines.push('  P/L alpaca: ' + (e.pnl_alpaca!=null?(e.pnl_alpaca>=0?'+':'')+'\$'+e.pnl_alpaca.toFixed(2):'--') + '  ← ground truth');
+      if (e._thesisFulfilled) lines.push('  ✓ Thesis fulfilled (RSI normalized before exit)');
+      if (e._thesisFailure)   lines.push('  ⚠ Thesis failure (peaked early, sustained decline)');
     }
-    lines.push('  '+new Date(e.time).toLocaleString());
   });
-  // navigator.clipboard requires HTTPS — use textarea fallback for iframe/HTTP contexts
+  lines.push('', '═'.repeat(70));
+
   const text = lines.join('\n');
   try {
     await navigator.clipboard.writeText(text);
-    const btn = document.getElementById('copy-journal-btn');
-    if (btn) { btn.textContent='✅ COPIED'; setTimeout(()=>btn.textContent='📋 COPY JOURNAL',2000); }
+    if (btn) { btn.textContent = '✅ COPIED'; setTimeout(() => btn.textContent = '📋 COPY', 2000); }
   } catch(e) {
-    // Fallback: create a textarea, select it, execCommand copy
     const ta = document.createElement('textarea');
     ta.value = text;
     ta.style.cssText = 'position:fixed;top:0;left:0;opacity:0;pointer-events:none';
@@ -4341,13 +4643,10 @@ async function copyJournal() {
     ta.focus(); ta.select();
     const ok = document.execCommand('copy');
     document.body.removeChild(ta);
-    const btn = document.getElementById('copy-journal-btn');
-    if (btn) {
-      btn.textContent = ok ? '✅ COPIED' : '❌ COPY FAILED — select text manually';
-      setTimeout(()=>btn.textContent='📋 COPY JOURNAL',3000);
-    }
+    if (btn) { btn.textContent = ok ? '✅ COPIED' : '❌ FAILED'; setTimeout(() => btn.textContent = '📋 COPY', 3000); }
   }
 }
+
 
 // ── Copy Attribution to clipboard ─────────────────────────────────────────
 function copyAttribution() {
