@@ -2159,7 +2159,7 @@ app.get("/api/journal/summary", async (req, res) => {
 // Used to seed journal from Alpaca order history when new journal system
 // wasn't yet deployed for those trades.
 // POST /api/journal/backfill  body: { date: "YYYY-MM-DD", entries: [...] }
-app.post("/api/journal/backfill", requireSecret, async (req, res) => {
+app.post("/api/journal/backfill", async (req, res) => {
   try {
     const { date, entries } = req.body;
     if (!date || !Array.isArray(entries)) {
