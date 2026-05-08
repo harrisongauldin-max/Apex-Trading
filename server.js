@@ -2654,7 +2654,10 @@ app.get("/api/journal/debug", async (req, res) => {
     res.json({
       today: todayStr,
       todayEntries: entries.length,
-      todayData: entries,
+      todaySample: entries.slice(0,3).map(e=>({
+        id: e.id, ticker: e.ticker, status: e.status,
+        pnl_alpaca: e.pnl_alpaca, pnl_apex: e.pnl_apex
+      })),
       yesterday: yesterdayStr,
       yesterdayEntries: yEntries.length,
       redisUrl: process.env.REDIS_URL ? 'configured' : 'MISSING',
