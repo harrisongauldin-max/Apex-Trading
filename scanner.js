@@ -2032,15 +2032,8 @@ async function runScan() {
         // XLE is NOT correlated with SPY/QQQ group - independent oil driver
       }
 
-      // P3: IYR (Real Estate) — rate-sensitive entry gates
-      if (stock.ticker === "IYR") {
-        const iyrRSI     = liveStock.rsi || liveStock.dailyRsi || 50;
-        const yieldEnv   = state._yieldEnv || "normal";
-        const iyrCallGate = isIYREntryAllowed("call", yieldEnv, iyrRSI);
-        const iyrPutGate  = isIYREntryAllowed("put",  yieldEnv, iyrRSI);
-        if (!iyrCallGate.allowed) { callSetup.score = 0; logEvent("filter", iyrCallGate.reason); }
-        if (!iyrPutGate.allowed)  { putSetup.score  = 0; logEvent("filter", iyrPutGate.reason);  }
-      }
+      // IYR removed from watchlist 5/8/2026 — 0 wins, -$702 total losses.
+      // Dead code block kept as tombstone but IYR will never appear in stock loop.
 
       // P3: HYG (High Yield Bonds) — credit stress entry gates
       if (stock.ticker === "HYG") {
