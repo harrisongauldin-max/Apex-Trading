@@ -463,23 +463,43 @@ const state = defaultState();
 async function loadJournalDay(dateStr) {
   if (!REDIS_URL || !REDIS_TOKEN) return [];
   try {
-    const res = await fetch(`${REDIS_URL}/get/argo:journal:${dateStr}`, {
-      headers: { Authorization: `Bearer ${REDIS_TOKEN}` }
+    // Use pipeline format — same as redisSave, most reliable Upstash format
+    const res = await fetch(`${REDIS_URL}/pipeline`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${REDIS_TOKEN}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify([['get', `argo:journal:${dateStr}`]]),
     });
     const data = await res.json();
-    if (!data.result) return [];
-    return JSON.parse(data.result);
+    // Pipeline returns [{result: "..."}]
+    const raw = data[0]?.result;
+    if (!raw) return [];
+    // Handle legacy format: if stored as {value: "...", ex: ...} object, unwrap it
+    try {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed)) return parsed; // correct format
+      if (parsed && typeof parsed.value === 'string') {
+        // Legacy: stored as {value: stringified_array, ex: ttl}
+        const inner = JSON.parse(parsed.value);
+        return Array.isArray(inner) ? inner : [];
+      }
+      return [];
+    } catch(e) { return []; }
   } catch(e) { return []; }
 }
 
 async function saveJournalDay(dateStr, entries) {
   if (!REDIS_URL || !REDIS_TOKEN) return;
   try {
-    await fetch(`${REDIS_URL}/set/argo:journal:${dateStr}`, {
+    // Use pipeline format with EX (TTL 90 days) — same as redisSave
+    const serialized = JSON.stringify(entries);
+    const TTL = 90 * 24 * 3600;
+    const res = await fetch(`${REDIS_URL}/pipeline`, {
       method: 'POST',
       headers: { Authorization: `Bearer ${REDIS_TOKEN}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ value: JSON.stringify(entries), ex: 90 * 24 * 3600 }) // 90d TTL
+      body: JSON.stringify([['set', `argo:journal:${dateStr}`, serialized, 'EX', TTL]]),
     });
+    const data = await res.json();
+    if (data[0]?.error) console.error('[JOURNAL] Save error:', data[0].error);
   } catch(e) { console.error('[JOURNAL] Save failed:', e.message); }
 }
 
