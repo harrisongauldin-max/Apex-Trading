@@ -294,10 +294,19 @@ async function checkExits(positions, posSnapshots, posQuotes, posNewsCache, ctx)
         if (snap.impliedVolatility) pos.iv = parseFloat(snap.impliedVolatility);
       }
     } else {
-      // V2.88: No snapshot available — use last known currentPrice if fresh, else entry premium (chg=0, neutral).
-      // Never use IV formula: it produces phantom prices using underlying price, not option price.
-      const _noSnapStaleSecs = pos._currentPriceUpdatedAt ? (Date.now() - pos._currentPriceUpdatedAt) / 1000 : 9999;
-      curP = (_noSnapStaleSecs < 30 ? pos.currentPrice : null) || pos.premium;
+      // V2.94 FIX: No snapshot available — use currentPrice if set (even without timestamp),
+      // fall back to entry premium only if currentPrice is genuinely missing.
+      // BUG: Reconciled positions have currentPrice set by Alpaca sync but no _currentPriceUpdatedAt
+      // timestamp, causing _noSnapStaleSecs=9999 → curP=entry premium → chg=0 → stops never fire.
+      // Fix: if currentPrice exists and differs from entry premium, trust it regardless of timestamp.
+      // Only fall back to entry premium if currentPrice is literally not set or equals entry premium.
+      const _noSnapStaleSecs = pos._currentPriceUpdatedAt
+        ? (Date.now() - pos._currentPriceUpdatedAt) / 1000
+        : 0; // V2.94: treat missing timestamp as fresh — currentPrice is Alpaca-sourced
+      const _currentPriceValid = pos.currentPrice > 0 && pos.currentPrice !== pos.premium;
+      curP = (_noSnapStaleSecs < 300 && _currentPriceValid ? pos.currentPrice : null)
+          || (pos.currentPrice > 0 ? pos.currentPrice : null)
+          || pos.premium;
     }
     // Credit spreads: curP = sellMid - buyMid (profit when spread narrows)
     // premium = net credit received at entry (positive)
