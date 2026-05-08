@@ -665,6 +665,10 @@ setInterval(async () => {
             const alpacaPrice = parseFloat((mktVal / (qty * 100)).toFixed(2));
             if (alpacaPrice > 0 && alpacaPrice !== pos.currentPrice) {
               pos.currentPrice = alpacaPrice;
+              // V2.94: Set _currentPriceUpdatedAt so exitEngine stale-check trusts this price.
+              // Without this, reconciled positions have no timestamp → stale=9999s →
+              // exitEngine falls back to entry premium → chg=0 → stops never fire.
+              pos._currentPriceUpdatedAt = Date.now();
               // Update peak if Alpaca price is higher
               if (alpacaPrice > (pos.peakPremium || 0)) pos.peakPremium = alpacaPrice;
               // Sync contracts
