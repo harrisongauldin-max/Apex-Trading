@@ -190,6 +190,38 @@ async function runReconciliation() {
           date: new Date().toLocaleDateString(), score: pos.score || 0, closeTime: Date.now(),
           tradeType: pos.isCreditSpread ? "credit_spread" : pos.isSpread ? "debit_spread" : "naked",
         });
+
+        // V2.94 FIX: Write loss record when ghost position is removed externally.
+        // Previously, manually closed positions (via Alpaca UI or dashboard) bypassed
+        // closePosition() entirely so no _recentLosses entry was written.
+        // This allowed immediate re-entry — APEX re-entered IYR 17min after manual close
+        // and lost $405 in 68 seconds on a bad fill (IYR $107C @ $1.50, stopped at $0.15).
+        // Fix: write the loss record here so the re-entry gate fires correctly.
+        const _ghostCurrentPrice = pos.currentPrice || pos.premium || 0;
+        const _ghostPnlEstimate  = (_ghostCurrentPrice - pos.premium) * 100 * (pos.contracts || 1);
+        if (_ghostPnlEstimate < 0 || pos.premium > _ghostCurrentPrice) {
+          // Position was closed at a loss (or unknown — default to treating as loss for safety)
+          _state._recentLosses = _state._recentLosses || {};
+          _state._recentLosses[pos.ticker] = {
+            closedAt:    Date.now(),
+            reason:      'reconcile-removed',
+            agentSignal: (_state._agentMacro || {}).signal || 'neutral',
+            price:       _ghostCurrentPrice,
+            pnlPct:      pos.premium > 0
+              ? parseFloat((((_ghostCurrentPrice - pos.premium) / pos.premium) * 100).toFixed(1))
+              : -100,
+            exitRSI:     pos._prevRSI || pos.rsi || pos.entryRSI || 50,
+            optionType:  pos.optionType || null,
+          };
+          _log('warn', `[RECONCILE] Loss record written for ${pos.ticker} (removed externally) — re-entry cooldown active`);
+        }
+        // Also write 30-minute same-instrument cooldown regardless of P&L
+        _state._recentCloses = _state._recentCloses || {};
+        _state._recentCloses[pos.ticker] = {
+          closedAt:   Date.now(),
+          direction:  pos.optionType || 'call',
+          reason:     'reconcile-removed',
+        };
         // SPRINT-02: Dashboard close P&L from Alpaca fills.
         // When position is closed via dashboard (bypasses closePosition), query Alpaca
         // activities to find the actual fill price and compute real P&L for the journal.
