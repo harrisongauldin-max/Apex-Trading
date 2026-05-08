@@ -183,23 +183,12 @@ const WATCHLIST = [
 // Failure modes: beta 1.6 (too volatile), premium $21+ (8% account per contract),
 // dailyRSI 99.6 (zero MR room), narrative-driven (chip cycle/geopolitics not RSI-predictable),
 // 0 wins observed across all sessions. Kept in dataSectors for breadth/rotation data only.
-// IYR: rate-driven real estate, negative correlation with yields, independent macro driver
+// IYR REMOVED — 5/8/2026. 0 winning trades across all sessions.
+// -$150 (May 7), -$405 (May 8 bad fill), -$147 (May 8 manual). Total: -$702.
+// REIT options are illiquid with wide spreads. Rate sensitivity makes thesis
+// unreliable (hawkish Fed = headwind, even pre-market +2% gaps don't translate).
 // HYG: high yield bonds, credit stress leading indicator, already used as data signal — now tradeable
 WATCHLIST.push(
-  {
-    ticker:    "IYR",
-    sector:    "Real Estate",
-    momentum:  "steady",
-    rsi:       50,
-    macd:      "neutral",
-    catalyst:  "Rate cycle — REITs rally on rate cuts, sell on hikes",
-    ivr:       22,
-    beta:      0.7,
-    earningsDate: null,
-    isIndex:   true,
-    isPrimary: false,
-    minScore:  75,
-  },
   {
     ticker:    "HYG",
     sector:    "Bonds",
