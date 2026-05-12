@@ -366,13 +366,31 @@ async function executeTrade(stock, price, score, scoreReasons, vix, optionType =
   // Prevents a concurrent scan from submitting the same ticker during fill wait
   if (!_dryRunMode) {
     state._pendingOrder = {
-      orderId:     `argo-naked-${stock.ticker}-${Date.now()}`,
-      ticker:      stock.ticker,
+      orderId:        `argo-naked-${stock.ticker}-${Date.now()}`,
+      ticker:         stock.ticker,
       optionType,
       isCreditSpread: false,
-      isNaked:     true,
-      submittedAt: Date.now(),
-      _preSubmit:  true,
+      isNaked:        true,
+      submittedAt:    Date.now(),
+      _preSubmit:     true,
+      // V2.94 FIX: Copy all fields needed for journal entry at fill confirmation.
+      // Previously these were undefined in _pendingOrder causing $undefined strike
+      // and exp ? in journal display.
+      strike:         contract.strike,
+      expDate:        contract.expDate || contract.exp,
+      expDays:        contract.dte || contract.expDays,
+      contractSymbol: contract.symbol,
+      premium:        contract.ask,
+      delta:          contract.delta,
+      iv:             contract.iv,
+      score:          stock._lastScore || stock.score || 0,
+      reasons:        stock._lastReasons || [],
+      rsi:            stock.rsi || stock.liveRSI,
+      dailyRsi:       stock.dailyRsi,
+      macd:           stock.macd,
+      momentum:       stock.momentum,
+      dte:            contract.dte,
+      isMeanReversion: stock.isMeanReversion || false,
     };
     markDirty();
   }
