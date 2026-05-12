@@ -58,6 +58,17 @@ const MIN_STOCK_PRICE     = 20;
 const MIN_OPTION_PREMIUM  = 0.50;
 const MIN_OI              = 5;
 const MAX_SPREAD_PCT      = 0.30;
+
+// ── VIX CALL QUALITY GATE (V2.96) ────────────────────────────────────────
+// At VIX >= 25, naked call entries require RSI < 38 (deeply oversold).
+// Blocks shallow-oversold entries (RSI 40-50) that lose on gap/digestion days.
+// Preserves deep-oversold entries (RSI < 38) that produce thesis-complete wins.
+// Evidence: May 12 — AM losses RSI 46-50 (blocked), PM wins RSI 33-36 (pass).
+const VIX_CREDIT_PRIMARY  = 25;    // VIX >= 25: tighter RSI required for calls
+const VIX_CALLS_BLOCKED   = 30;    // VIX >= 30: calls fully blocked
+const VIX_HIGH_CALL_SCORE = 90;    // score floor when VIX >= 25
+const VIX_HIGH_CALL_RSI   = 38;    // RSI must be < 38 when VIX >= 25
+// ── END VIX CALL QUALITY GATE ────────────────────────────────────────────
 const EARLY_SPREAD_PCT    = 0.10;
 const MAX_GAP_PCT         = 0.03;
 const TARGET_DELTA_MIN    = 0.22; // Lowered from 0.28 — expanded DTE window finds 48d contracts at delta 0.23-0.26
@@ -272,6 +283,8 @@ module.exports = {
   MA50_BUFFER, MACRO_REVERSAL_PCT, MIN_SCORE, MIN_SCORE_CREDIT, MIN_SCORE_MR, IVR_MAX,
   EARNINGS_SKIP_DAYS, MIN_OPEN_INTEREST, MIN_STOCK_PRICE, MIN_OPTION_PREMIUM,
   MIN_OI, MAX_SPREAD_PCT, EARLY_SPREAD_PCT, MAX_GAP_PCT, TARGET_DELTA_MIN,
+  VIX_CREDIT_PRIMARY, VIX_CALLS_BLOCKED,
+  VIX_HIGH_CALL_SCORE, VIX_HIGH_CALL_RSI,
   TARGET_DELTA_MAX, MAX_BETA_POSITIONS, MAX_HIGH_BETA, PDT_RULE_ACTIVE, PDT_LIMIT,
   PDT_PROFIT_EXIT, PDT_STOP_LOSS, MS_PER_DAY, TRIGGER_COOLDOWN_MS,
   SAME_DAY_INTERVAL, OVERNIGHT_INTERVAL, SLOW_CACHE_TTL, BARS_CACHE_TTL,
