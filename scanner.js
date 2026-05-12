@@ -1468,9 +1468,9 @@ async function runScan() {
   const _vixCallsBlocked  = _vixNow >= VIX_CALLS_BLOCKED;   // VIX >= 30
 
   if (_vixCreditMode && !_vixCallsBlocked) {
-    logEvent("filter", `[VIX REGIME] VIX ${_vixNow.toFixed(1)} >= ${VIX_CREDIT_PRIMARY} — credit PUT mode PRIMARY | naked calls require score >= ${VIX_HIGH_CALL_SCORE} + RSI < ${VIX_HIGH_CALL_RSI} + below VWAP`);
+    logEvent("filter", `[VIX REGIME] VIX ${_vixNow.toFixed(1)} >= ${VIX_CREDIT_PRIMARY} — RSI gate ACTIVE | calls require RSI < ${VIX_HIGH_CALL_RSI} (deeply oversold only)`);
   } else if (_vixCallsBlocked) {
-    logEvent("filter", `[VIX REGIME] VIX ${_vixNow.toFixed(1)} >= ${VIX_CALLS_BLOCKED} — credit ONLY mode | naked calls FULLY BLOCKED`);
+    logEvent("filter", `[VIX REGIME] VIX ${_vixNow.toFixed(1)} >= ${VIX_CALLS_BLOCKED} — calls FULLY BLOCKED`);
   }
   // ── END REGIME RULEBOOK ───────────────────────────────────────────────────
 
