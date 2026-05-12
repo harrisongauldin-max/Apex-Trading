@@ -85,6 +85,8 @@ const {
   TARGET_DELTA_MIN, TARGET_DELTA_MAX,
   ALPACA_KEY, ALPACA_SECRET, ALPACA_DATA, ALPACA_OPT_SNAP, ALPACA_OPTIONS,
   MAX_GAP_PCT, MIN_STOCK_PRICE, GMAIL_USER, RESEND_API_KEY, VIX_PAUSE, VIX_REDUCE25, VIX_REDUCE50,
+  VIX_CREDIT_PRIMARY, VIX_CALLS_BLOCKED,
+  VIX_HIGH_CALL_SCORE, VIX_HIGH_CALL_RSI,
 } = require('./constants');
 
 let scanRunning  = false;
@@ -922,6 +924,35 @@ async function runScan() {
   // Agent handles macro context from 8:30am including gap events.
   if (spyGapUp && !dryRunMode) logEvent("filter", `[INFO] SPY gap-up >1.5% — gap-up entry context noted (intraday RSI watch active)`);
 
+  // ── FIX 3: GAP-REVERSAL DAY DETECTOR (V2.96) ────────────────────────────
+  // Problem: QQQ +7.7% yesterday → market gave it back today.
+  // Day-2-of-a-gap is high-risk for call entries: underlying digests the move,
+  // IV compresses overnight, and any intraday dip is a hangover dip not MR.
+  //
+  // Detection: compare SPY's yesterday close to the prior close (2 bars back).
+  // If yesterday moved 3%+, set _gapReversalDay flag until EOD reset.
+  // Gate (per-stock below ~line 2410): if _gapReversalDay, call entries require
+  // RSI < 35 (stricter than normal 45) AND price < VWAP. Both must pass.
+  //
+  // Note: this is complementary to the existing gap-VWAP gate (line ~1759)
+  // which uses today's gapPct. Today's gapPct on day 2 is near 0 — the gap
+  // happened yesterday so the existing gate doesn't fire. This gate does.
+  if (spyBars.length >= 3) {
+    const _dayBeforeYesterday = spyBars[spyBars.length-3].c;
+    const _yesterday          = spyBars[spyBars.length-2].c;
+    if (_dayBeforeYesterday > 0) {
+      const _yesterdayMove = (_yesterday - _dayBeforeYesterday) / _dayBeforeYesterday;
+      state._yesterdayGapPct = parseFloat((_yesterdayMove * 100).toFixed(2));
+      if (Math.abs(_yesterdayMove) >= 0.03) {
+        state._gapReversalDay = true;
+        logEvent("filter", `[GAP-REVERSAL] Yesterday SPY moved ${state._yesterdayGapPct > 0 ? '+' : ''}${state._yesterdayGapPct.toFixed(1)}% — day-2 reversal risk elevated. Call entries require RSI < 35 + price < VWAP`);
+      } else {
+        state._gapReversalDay = false;
+      }
+    }
+  }
+  // ── END GAP-REVERSAL DETECTOR ─────────────────────────────────────────────
+
   // - CONDITION-BASED POST-REVERSAL COOLDOWN -
   // FIX 2: Uses marketContext.macro (authoritative merged signal) not state._agentMacro (raw)
   // Prevents split-brain where cooldown and entry gate use different macro objects
@@ -1419,12 +1450,59 @@ async function runScan() {
   // High-beta block removed — ARGO trades index ETFs (SPY, QQQ, GLD, TLT, XLE),
   // none of which have beta > 1.5 relative to each other. Vestigial from individual stock mode.
 
-  // Burst entry cooldown - max 3 new positions per 10 minutes
-  // Prevents over-concentration at a single market moment (e.g. after reset)
-  // Burst entry cooldown removed — startup burst is fixed by agent mutex. This was a workaround (panel consensus).
+  // ── V2.96: REGIME RULEBOOK — compute once per scan ──────────────────────
+  // getRegimeRulebook returns creditPutActive, choppyDebitBlock, and other flags.
+  // Used here for: (1) VIX regime mode switch, (2) credit spread entry path.
+  // Previously APEX never called this — it was ARGO-only infrastructure.
+  const _rb               = getRegimeRulebook(state);
+  const _creditPutActive  = _rb.gates.creditPutActive;
+  const _choppyDebitBlock = _rb.gates.choppyDebitBlock;
+  const _vixNow           = state.vix || 20;
+
+  // VIX regime mode — determines whether calls are allowed and at what bar
+  // VIX < 25:  Normal mode. Calls allowed at standard score threshold (MIN_SCORE 70).
+  // VIX 25-30: Credit primary mode. Calls blocked UNLESS score >= VIX_HIGH_CALL_SCORE (90)
+  //            AND RSI < VIX_HIGH_CALL_RSI (32) AND price < VWAP. Escape hatch only.
+  // VIX >= 30: Credit only. Naked calls fully blocked regardless of score.
+  const _vixCreditMode    = _vixNow >= VIX_CREDIT_PRIMARY;  // VIX >= 25
+  const _vixCallsBlocked  = _vixNow >= VIX_CALLS_BLOCKED;   // VIX >= 30
+
+  if (_vixCreditMode && !_vixCallsBlocked) {
+    logEvent("filter", `[VIX REGIME] VIX ${_vixNow.toFixed(1)} >= ${VIX_CREDIT_PRIMARY} — credit PUT mode PRIMARY | naked calls require score >= ${VIX_HIGH_CALL_SCORE} + RSI < ${VIX_HIGH_CALL_RSI} + below VWAP`);
+  } else if (_vixCallsBlocked) {
+    logEvent("filter", `[VIX REGIME] VIX ${_vixNow.toFixed(1)} >= ${VIX_CALLS_BLOCKED} — credit ONLY mode | naked calls FULLY BLOCKED`);
+  }
+  // ── END REGIME RULEBOOK ───────────────────────────────────────────────────
+
+  // ── FIX 1: SAME-SESSION ENTRY STAGGER (V2.96) ───────────────────────────
+  // Problem: 3 positions opened in 6 minutes on May 12 → -$555 when market reversed.
+  // Rule 1: No entries in the first 30 minutes of the session.
+  //         VWAP is unreliable until ~30min of price history has built up.
+  //         RSI oversold reads at open are often false — momentum needs to confirm.
+  // Rule 2: After any confirmed fill, block new entries for 20 minutes.
+  //         Forces APEX to observe how the first position behaves before adding exposure.
+  //         20 minutes = roughly 2 scan cycles + time for option price to settle.
+  // Exception: neither rule applies to exit logic — only entry gate.
+  const _sessionMinsNow   = etHourNow >= 9.5 ? (etHourNow - 9.5) * 60 : 0;
+  const _msSinceLastEntry = Date.now() - (state._lastEntryAt || 0);
+  const _minsSinceEntry   = _msSinceLastEntry / 60000;
+  const _staggerCooling   = state._lastEntryAt && _minsSinceEntry < 20;
+  const _tooEarlyToTrade  = _sessionMinsNow < 30;
+
+  if (_tooEarlyToTrade) {
+    logEvent("filter", `[STAGGER] Session only ${_sessionMinsNow.toFixed(0)}min old — no entries until 30min mark (VWAP/RSI need time to stabilize)`);
+  } else if (_staggerCooling) {
+    logEvent("filter", `[STAGGER] Last entry ${_minsSinceEntry.toFixed(0)}min ago — cooling 20min before next entry (${(20 - _minsSinceEntry).toFixed(0)}min remaining)`);
+  }
+  // Flags consumed per-stock in entry gate below (~line 2960)
+  state._tooEarlyToTrade = _tooEarlyToTrade;
+  state._staggerCooling  = _staggerCooling;
+
+  // Legacy burst log (kept for reference)
   const tenMinAgo = Date.now() - 10 * 60 * 1000;
   const recentEntries = state.positions.filter(p => new Date(p.openDate).getTime() > tenMinAgo).length;
   if (recentEntries >= 3) logEvent("filter", `[INFO] ${recentEntries} entries in last 10min (heat cap governs)`);
+  // ── END STAGGER GATE SETUP ────────────────────────────────────────────────
 
   // [SPY fetch moved above callsAllowed]
 
@@ -1739,6 +1817,30 @@ async function runScan() {
     if (preMarket && Math.abs(preMarket.gapPct) > 3) {
       logEvent("filter", `${stock.ticker} pre-market gap ${preMarket.gapPct > 0 ? "+" : ""}${preMarket.gapPct}%`);
     }
+
+    // ── V2.95: GAP-DAY VWAP GATE ─────────────────────────────────────────
+    // Panel recommendation (7/7 unanimous): if underlying gapped >1.5% from
+    // prior close, CALL entries only permitted when price <= VWAP.
+    // Rationale: buying calls into a gap-up day means paying elevated IV at
+    // the top of the intraday range. QQQ +7.7% May 11 → options lost -26%
+    // overnight via IV crush even as underlying held. The MR thesis requires
+    // entering into weakness — above VWAP on a gap day is the opposite of that.
+    // Put entries on gap-up days are unaffected (they're fading the gap).
+    // Call entries on gap-DOWN days are also unaffected (buying oversold dip).
+    //
+    // Flag: _gapDayCallBlocked — read by score gate below to zero callScore.
+    // vwap already computed above (line ~1680). preMarket.gapPct from prefetch.
+    const _gapPctForGate = parseFloat(preMarket?.gapPct || 0);
+    const _priceAboveVWAP = vwap > 0 && price > vwap;
+    if (_gapPctForGate > 1.5 && _priceAboveVWAP) {
+      // Gap-up day AND price still above VWAP — block call entries
+      liveStock._gapDayCallBlocked = true;
+      logEvent("filter", `[GAP-VWAP] ${stock.ticker} gap-up ${_gapPctForGate.toFixed(1)}% and price $${price.toFixed(2)} > VWAP $${vwap.toFixed(2)} — call entries blocked until pullback to VWAP`);
+    } else if (_gapPctForGate > 1.5 && !_priceAboveVWAP) {
+      // Gap-up day but price has pulled back below VWAP — call entry permitted
+      logEvent("filter", `[GAP-VWAP] ${stock.ticker} gap-up ${_gapPctForGate.toFixed(1)}% but price $${price.toFixed(2)} <= VWAP $${vwap.toFixed(2)} — intraday pullback confirmed, call entry permitted`);
+    }
+    // ── END GAP-DAY VWAP GATE ─────────────────────────────────────────────
 
     // Short interest - computed from prefetched bars
     const shortSignal = { signal: "neutral", modifier: 0 }; // short interest disabled
@@ -2362,6 +2464,53 @@ async function runScan() {
       if (macroPutMod  !== 0) putSetup.reasons.push(`Macro ${agentMacroForScoring} (regime-aligned): ${macroPutMod > 0 ? "+" : ""}${macroPutMod}`);
     }
 
+    // ── V2.95: IVR PENALTY FOR CALL BUYERS ───────────────────────────────
+    // Panel recommendation (6/7): when IVR > 50, buying options is negative
+    // edge. Elevated IV means you're paying a premium that reverts against you
+    // the moment volatility normalizes — even if the underlying holds its move.
+    // QQQ May 11: IVR ~46, VIX 27 — borderline. Had IVR been 55+, this gate
+    // would have reduced score by 10, making entry less likely.
+    //
+    // Penalty applies to CALLS only (we buy calls in MR strategy).
+    // Puts benefit from high IV (sellers of premium), so no put penalty.
+    // Threshold: IVR > 50 = -10 call score. Logged for visibility.
+    // Note: liveStock.ivr populated from signals.ivr (live scan each cycle).
+    const _liveIVR = parseFloat(liveStock.ivr || state._ivRank || 0);
+    if (_liveIVR > 50 && callSetup.score > 0) {
+      const _ivrPenalty = _liveIVR > 65 ? 15 : 10; // steeper penalty at very high IV
+      callSetup.score = Math.max(0, callSetup.score - _ivrPenalty);
+      callSetup.reasons.push(`High IV penalty: IVR ${_liveIVR.toFixed(0)} > 50 (-${_ivrPenalty})`);
+      logEvent("filter", `[IVR] ${stock.ticker} IVR ${_liveIVR.toFixed(0)} elevated — call score penalized -${_ivrPenalty} (buying expensive options)`);
+    }
+
+    // ── GAP-DAY CALL BLOCK: apply flag set in VWAP gate above ────────────
+    if (liveStock._gapDayCallBlocked) {
+      callSetup.score = 0;
+      callSetup.reasons.push('Gap-day VWAP block: price above VWAP on gap-up day');
+    }
+
+    // ── FIX 3b: GAP-REVERSAL DAY GATE ────────────────────────────────────
+    // Day after a 3%+ SPY move: require RSI < 35 AND price < VWAP for call entries.
+    // Standard RSI threshold is 45 — this tightens to 35 on hangover days.
+    // Both conditions must pass. Either failing blocks the call.
+    if (state._gapReversalDay && callSetup.score > 0) {
+      const _grRSI       = liveStock.rsi || signals.rsi || 50;
+      const _grVWAP      = signals.intradayVWAP || 0;
+      const _grAboveVWAP = _grVWAP > 0 && price > _grVWAP;
+      const _grRSITooHigh = _grRSI >= 35;
+      if (_grRSITooHigh || _grAboveVWAP) {
+        callSetup.score = 0;
+        const _grReason = _grRSITooHigh
+          ? `Gap-reversal day: RSI ${_grRSI.toFixed(0)} >= 35 (need < 35 on day-after-gap)`
+          : `Gap-reversal day: price $${price.toFixed(2)} above VWAP $${_grVWAP.toFixed(2)} (need pullback)`;
+        callSetup.reasons.push(_grReason);
+        logEvent("filter", `[GAP-REVERSAL] ${stock.ticker} call blocked — ${_grReason}`);
+      } else {
+        logEvent("filter", `[GAP-REVERSAL] ${stock.ticker} call permitted — RSI ${_grRSI.toFixed(0)} < 35 AND price below VWAP (genuine oversold on reversal day)`);
+      }
+    }
+    // ── END V2.95/V2.96 SCORE ADJUSTMENTS ────────────────────────────────
+
     // Apply gap direction constraint
     let callScore = callSetup.score;
     let putScore  = putSetup.score;
@@ -2665,7 +2814,8 @@ async function runScan() {
       const minsSinceClose = (Date.now() - recentClose.closedAt) / 60000;
       const CLOSE_COOLDOWN_MINS = 30;
       if (minsSinceClose < CLOSE_COOLDOWN_MINS) {
-        const wasWin = recentClose.pnl > 0 ? `win (+$${recentClose.pnl.toFixed(0)})` : `loss (-$${Math.abs(recentClose.pnl).toFixed(0)})`;
+        const _pnl = parseFloat(recentClose.pnl) || 0;
+        const wasWin = _pnl > 0 ? `win (+$${_pnl.toFixed(0)})` : _pnl < 0 ? `loss (-$${Math.abs(_pnl).toFixed(0)})` : 'cooldown';
         logEvent("filter", `${stock.ticker} re-entry cooldown — ${wasWin} closed ${minsSinceClose.toFixed(0)}min ago, need ${CLOSE_COOLDOWN_MINS}min`);
         continue;
       }
@@ -2911,11 +3061,33 @@ async function runScan() {
       logEvent("filter", `${stock.ticker} call blocked — VIX ${state.vix?.toFixed(1)} >= 28 + bearish macro (high-cost call environment)`);
       continue;
     }
+    // V2.96: Stagger gate — enforced per-stock after all circuit/VIX gates
+    if (state._tooEarlyToTrade) {
+      logEvent("filter", `${stock.ticker} entry blocked — session < 30min old, waiting for VWAP/RSI to stabilize`);
+      continue;
+    }
+    if (state._staggerCooling) {
+      logEvent("filter", `${stock.ticker} entry blocked — stagger cooldown active (last entry ${((Date.now() - (state._lastEntryAt||0))/60000).toFixed(0)}min ago, need 20min)`);
+      continue;
+    }
+
     // V2.90: Call cap gate — 3-slot system with tiered score threshold
     if (state._callCapActive && optionType === "call") {
       logEvent("filter", `${stock.ticker} call blocked — call cap active (${openCalls}/${MAX_SIMULTANEOUS_CALLS} calls open)`);
       continue;
     }
+    // V2.96 FIX 2: Slot 2 score escalation
+    // When 1 call is already open, require score >= 75 (vs 70) for second call.
+    // QQQ(77) + SPY(77) both at minimum bar — slightly higher bar reduces marginal entries.
+    // Does NOT block correlated pairs outright (slot3 handles that at slot 3).
+    if (openCalls === 1 && optionType === "call") {
+      const SLOT2_MIN_SCORE = 75;
+      if (score < SLOT2_MIN_SCORE) {
+        logEvent("filter", `${stock.ticker} call blocked — slot 2 requires score >= ${SLOT2_MIN_SCORE} (have ${score}, 1 call already open)`);
+        continue;
+      }
+    }
+
     // Slot 3 gate: score >= 85 AND instrument must be from an unoccupied correlation group
     if (state._slot3Active && optionType === "call") {
       const _ticker3    = stock.ticker;
@@ -2953,10 +3125,42 @@ async function runScan() {
 
     let entered = false;
     state._lastEntryType = isMeanReversion ? `mr_${optionType}` : `naked_${optionType}`;
-    logEvent("filter", `${stock.ticker} execution branch: naked_${optionType} (MR:${isMeanReversion}) delta:${_contractDelta.toFixed(3)}`);
-    const _sizeModNaked = sizeMod || 1.0;
-    entered = await executeTrade(stock, price, score, reasons, state.vix, optionType, isMeanReversion, _sizeModNaked);
-    if (entered) await new Promise(r=>setTimeout(r,500));
+
+    // ── V2.96: VIX CALL QUALITY GATE ────────────────────────────────────
+    // At VIX >= 25: call entries require RSI < 38 (deeply oversold).
+    // Evidence: May 12 — AM losses had RSI 46-50 (blocked), PM wins had RSI 33-36 (pass).
+    // At VIX >= 30: calls fully blocked regardless of RSI.
+    // Puts are never blocked by this gate.
+    const _entryRSI_now = liveStock.rsi || signals.rsi || 50;
+    // RSI gate: at VIX >= 25, only allow calls when RSI is deeply oversold (< 38).
+    // Score threshold handled upstream. This gate is RSI-only.
+    // May 12 evidence: AM losses RSI 46-50 blocked, PM wins RSI 33-36 pass.
+    const _callRSIOk = _entryRSI_now < VIX_HIGH_CALL_RSI; // RSI < 38
+
+    if (optionType === "call" && _vixCallsBlocked) {
+      logEvent("filter", `${stock.ticker} call BLOCKED — VIX ${_vixNow.toFixed(1)} >= ${VIX_CALLS_BLOCKED}`);
+      continue;
+
+    } else if (optionType === "call" && _vixCreditMode && !_callRSIOk) {
+      logEvent("filter", `${stock.ticker} call BLOCKED — VIX ${_vixNow.toFixed(1)} >= ${VIX_CREDIT_PRIMARY}, RSI ${_entryRSI_now.toFixed(0)} >= ${VIX_HIGH_CALL_RSI} (need RSI < ${VIX_HIGH_CALL_RSI} for high-vol entry)`);
+      continue;
+
+    } else {
+      if (optionType === "call" && _vixCreditMode && _callRSIOk) {
+        logEvent("filter", `${stock.ticker} call PERMITTED — VIX ${_vixNow.toFixed(1)} high but RSI ${_entryRSI_now.toFixed(0)} deeply oversold`);
+      }
+      logEvent("filter", `${stock.ticker} execution branch: naked_${optionType} (MR:${isMeanReversion}) delta:${_contractDelta.toFixed(3)}`);
+      const _sizeModNaked = sizeMod || 1.0;
+      entered = await executeTrade(stock, price, score, reasons, state.vix, optionType, isMeanReversion, _sizeModNaked);
+    }
+    // ── END VIX CALL QUALITY GATE ─────────────────────────────────────────
+
+    if (entered) {
+      // V2.96 FIX 1: stamp _lastEntryAt on confirmed fill for stagger gate
+      state._lastEntryAt = Date.now();
+      markDirty();
+      await new Promise(r=>setTimeout(r,500));
+    }
   }
 
   // Individual stock buys disabled - SPY/QQQ only
