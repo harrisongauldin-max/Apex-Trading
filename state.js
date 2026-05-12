@@ -43,6 +43,10 @@ function defaultState() {
     tickerBlacklist:  [], // tickers blocked for today - clears on morning reset
     exitStats:        {}, // running tally per exit reason: { count, wins, totalPnl, avgPnl, winRate }
     agentAutoExitEnabled: false, // controlled by dashboard toggle
+    // V2.96: entry quality gates
+    _lastEntryAt:       null,   // Unix ms — timestamp of last confirmed fill (stagger gate)
+    _yesterdayGapPct:   null,   // % move of SPY yesterday close vs prior close
+    _gapReversalDay:    false,  // true on day-after-gap: stricter RSI required for calls
     _agentRescoreHour:   {}, // tracks last rescore hour per ticker (overnight)
     _agentRescoreMinute: {}, // tracks last rescore time per ticker (same-day)
     _avoidUntil:         null,  // timestamp until which entries are blocked after avoid signal
