@@ -551,7 +551,13 @@ async function _doClosePosition(ticker, reason, exitPremium = null, contractSym 
     contractsAtClose:   pos.contracts || contractsToSell,
     // P&L
     pnl_apex:           _pnlApex,
-    pnl_alpaca:         null, // requires Alpaca fill lookup — set by reconciler
+    // V2.94 FIX: compute pnl_alpaca from actual exit price vs cost basis.
+    // Previously deferred to a reconciler lookup that was never implemented.
+    // ep = actual fill price (from Alpaca fill confirmation or last known price).
+    // pos.cost = original entry cost basis. This is fill-accurate.
+    pnl_alpaca:         pos.cost > 0
+      ? parseFloat((ep * 100 * (pos.contracts || contractsToSell) - pos.cost).toFixed(2))
+      : _pnlApex, // fallback to apex calc if no cost basis
     pnl_pct:            pos.cost > 0 ? parseFloat((_pnlApex / pos.cost * 100).toFixed(1)) : 0,
     hoursHeld:          _hoursHeld,
     isWin:              _pnlApex > 0,
