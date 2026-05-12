@@ -529,26 +529,83 @@ async function checkExits(positions, posSnapshots, posQuotes, posNewsCache, ctx)
       //   Puts:  entryRSI >= 60 AND curRSI < 45 → reversal complete
       const _entryRSI  = pos.entryRSI || 50;
       const _curRSI    = pos._prevRSI || _entryRSI; // _prevRSI updated every scan at line ~339
-      const _callFulfilled = pos.optionType === "call" && _entryRSI <= 40 && _curRSI > 55;
-      const _putFulfilled  = pos.optionType === "put"  && _entryRSI >= 60 && _curRSI < 45;
+      const _callFulfilled = pos.optionType === "call" && _entryRSI <= 45 && _curRSI > 55; // widened: 40→45 captures RSI 41-45 MR entries
+      const _putFulfilled  = pos.optionType === "put"  && _entryRSI >= 55 && _curRSI < 45; // widened: 60→55 captures RSI 55-59 MR entries
       const _thesisFulfilled = _callFulfilled || _putFulfilled;
 
+      // ── THESIS COMPLETION AUTO-EXIT (V2.95) ──────────────────────────────
+      // Dependency chart: entryRSI ← _pendingOrder.rsi (fixed in execution.js)
+      //                   curRSI   ← pos._prevRSI (live bars, updated each scan)
+      //
+      // CASE A (chg >= +3%): RSI normalized AND position profitable → CLOSE NOW.
+      //   The MR bounce is complete. Don't wait for the trail to catch a reversal.
+      //   Real traders exit when the thesis resolves, not when price peaks.
+      //   Guard: hoursOpen >= 0.5 prevents misfires at open on stale RSI.
+      //   Guard: !pos._thesisAutoClose prevents double-fire across scans.
+      //
+      // CASE B (-5% < chg < +3%): RSI normalized but no meaningful gain yet.
+      //   Thesis is done but the option didn't move. Set a 4-hour countdown.
+      //   If still flat after 4h, close — the trade failed to capitalize on the bounce.
+      //   Trail tightened to 6% (not 3% — too tight for a position at/near entry).
+      //
+      // CASE C (chg < -5%): RSI normalized, position underwater.
+      //   Stop is still the active protection. Log divergence, don't interfere.
+      //   The stop will handle it; auto-closing a losing position here just
+      //   bypasses the stop and creates an unnecessary market order.
+      // ──────────────────────────────────────────────────────────────────────
+
       if (_thesisFulfilled && !pos._thesisFulfilled) {
-        pos._thesisFulfilled = true;
-        logEvent("scan", `[THESIS FULFILLED] ${pos.ticker} RSI ${_entryRSI}→${_curRSI.toFixed(0)} — entering profit protection mode`);
+        pos._thesisFulfilled    = true;
+        pos._thesisFulfilledAt  = Date.now(); // timestamp for Case B window
+        const _gainPct = (chg * 100).toFixed(1);
+        logEvent("scan", `[THESIS FULFILLED] ${pos.ticker} RSI ${_entryRSI}→${_curRSI.toFixed(0)} | gain: ${_gainPct >= 0 ? '+' : ''}${_gainPct}% — evaluating auto-exit`);
       }
 
-      if (pos._thesisFulfilled && chg > 0) {
-        // Phase 2: thesis fulfilled and position is profitable.
-        // Lock in current gain — TP becomes current gain (exit now or trail very tight).
+      if (pos._thesisFulfilled && !pos._thesisAutoClose && hoursOpen >= 0.5) {
+        if (chg >= 0.03) {
+          // ── CASE A: Profitable + thesis complete → immediate close ──────────
+          pos._thesisAutoClose = true;
+          logEvent("scan", `[THESIS COMPLETE] ${pos.ticker} RSI normalized (${_entryRSI}→${_curRSI.toFixed(0)}) | gain: +${(chg*100).toFixed(1)}% — closing position`);
+          decisions.push({ pi, ticker: pos.ticker, action: 'close', reason: 'thesis-complete', exitPremium: null, contractSym: null });
+          continue;
+
+        } else if (chg > -0.05) {
+          // ── CASE B: Flat (±5%) + thesis complete → 4h countdown then close ─
+          if (!pos._thesisFulfilledAt) pos._thesisFulfilledAt = Date.now();
+          const _hrsAfterFulfill = (Date.now() - pos._thesisFulfilledAt) / 3600000;
+          if (_hrsAfterFulfill >= 4) {
+            // 4 hours past thesis completion with no gain — exit
+            pos._thesisAutoClose = true;
+            logEvent("scan", `[THESIS COMPLETE] ${pos.ticker} RSI normalized ${_hrsAfterFulfill.toFixed(1)}h ago, position flat at ${(chg*100).toFixed(1)}% — closing (thesis resolved, no follow-through)`);
+            decisions.push({ pi, ticker: pos.ticker, action: 'close', reason: 'thesis-no-follow', exitPremium: null, contractSym: null });
+            continue;
+          } else {
+            // Still within 4h window — tighten trail, keep watching
+            if (pos.trailPct > 0.06) {
+              pos.trailPct = 0.06;
+              logEvent("scan", `[THESIS COMPLETE] ${pos.ticker} RSI normalized, flat position — trail tightened to 6%, ${(4 - _hrsAfterFulfill).toFixed(1)}h until auto-close if no gain`);
+            }
+          }
+
+        } else {
+          // ── CASE C: Underwater + thesis complete → log only, stop handles it ─
+          if (!pos._thesisCaseCLogged) {
+            pos._thesisCaseCLogged = true;
+            logEvent("warn", `[THESIS COMPLETE] ${pos.ticker} RSI normalized but position is ${(chg*100).toFixed(1)}% — stop ($${(pos.premium * (1 - (pos.fastStopPct || 0.35))).toFixed(2)}) active`);
+          }
+        }
+      }
+
+      if (pos._thesisFulfilled && chg > 0 && !pos._thesisAutoClose) {
+        // Standard phase 2 protection for positions still open after thesis fulfills
+        // (e.g. Case B position still in 4h window with some gain)
         activeTakeProfitPct = parseFloat(Math.max(chg - 0.01, currentExitParams.takeProfitPct * 0.70).toFixed(3));
-        // Tighten trail to 3% if not already tighter from profit lock
         if (!pos._trail4Active && pos.trailPct > 0.03) {
           pos.trailPct = 0.03;
           logEvent("scan", `[THESIS FULFILLED] ${pos.ticker} trail tightened to 3% — profit protection active`);
         }
         logEvent("scan", `[THESIS FULFILLED] ${pos.ticker} phase 2 TP: ${(activeTakeProfitPct*100).toFixed(0)}% | cur gain: ${(chg*100).toFixed(0)}%`);
-      } else {
+      } else if (!pos._thesisFulfilled) {
         activeTakeProfitPct = parseFloat((currentExitParams.takeProfitPct * dteMult).toFixed(3));
       }
 
@@ -797,25 +854,57 @@ async function checkExits(positions, posSnapshots, posQuotes, posNewsCache, ctx)
     // ── V2.92: HYBRID PROFIT LOCK (panel consensus 5/5/2026) ─────────────────
     // Fires ONCE when position first crosses +15% peak gain.
     // 2-contract path (Option B): partial close 1 contract, trail remaining at 6%.
-    // 1-contract path (Option C): tighten trail to 6% at +15%, further to 4% at +20%.
-    // Uses peakChg (not chg) so it latches permanently once +15% is ever reached.
-    // _profitLockActive flag prevents re-firing on subsequent scans.
+    // ── HYBRID PROFIT LOCK (V2.95) ──────────────────────────────────────────
+    // Problem: QQQ peaks at +10-12%, reverses to 0%, no exit triggered.
+    // Old logic: trail only activates at +15%, profit lock only fires at +15%.
+    // Below +15% the position had no protection against full mean-reversion.
+    //
+    // Fix: tiered early-gain trail tightening at +8%, +12%, +15%, +20%.
+    // Each tier latches (won't re-fire) and progressively narrows the trail,
+    // ensuring gains below +15% are protected, not given back entirely.
+    //
+    // Tier 1 (+8%):  trail tightened to 12% — modest protection, not too tight
+    // Tier 2 (+12%): trail tightened to 8%  — locks in meaningful gain at peak
+    // Tier 3 (+15%): existing profit lock (partial close on 2-contract, 6% trail)
+    // Tier 4 (+20%): trail tightened to 4%  — for strong runners
+    //
+    // All tiers use peakChg (not current chg) so they latch permanently.
     const contracts = pos.contracts || 1;
+
+    // Tier 1: +8% peak — tighten trail to 12%
+    if (!pos._trail12Active && peakChg >= 0.08) {
+      pos._trail12Active = true;
+      if (!pos._profitLockActive) { // don't loosen if tighter lock already active
+        pos.trailPct = Math.min(pos.trailPct || 0.15, 0.12);
+        logEvent("scan", `[PROFIT LOCK] ${pos.ticker} hit +${(peakChg*100).toFixed(0)}% peak — trail tightened to 12%`);
+      }
+    }
+
+    // Tier 2: +12% peak — tighten trail to 8%
+    if (!pos._trail8Active && peakChg >= 0.12) {
+      pos._trail8Active = true;
+      if (!pos._profitLockActive) {
+        pos.trailPct = Math.min(pos.trailPct || 0.15, 0.08);
+        logEvent("scan", `[PROFIT LOCK] ${pos.ticker} hit +${(peakChg*100).toFixed(0)}% peak — trail tightened to 8%`);
+      }
+    }
+
+    // Tier 3: +15% peak — existing profit lock logic
     if (!pos._profitLockActive && peakChg >= 0.15) {
       pos._profitLockActive = true; // latch — only fires once per position
       if (contracts >= 2) {
         // ── 2-CONTRACT PATH (B): partial close 1, trail remaining at 6% ────
         logEvent("scan", `[PROFIT LOCK] ${pos.ticker} hit +${(peakChg*100).toFixed(0)}% peak — closing 1/${contracts} contracts, tightening trail to 6%`);
-        pos.trailPct = 0.06; // tighten trail on remaining contract
+        pos.trailPct = 0.06;
         decisions.push({ pi, ticker: pos.ticker, action: 'partial', reason: 'partial-lock', exitPremium: null, contractSym: null });
-        // Trail floor will be computed below with the new 0.06 trailPct
       } else {
         // ── 1-CONTRACT PATH (C): tighten trail to 6%, no partial close ─────
         pos.trailPct = 0.06;
         logEvent("scan", `[PROFIT LOCK] ${pos.ticker} hit +${(peakChg*100).toFixed(0)}% peak — 1-contract, trail tightened to 6%`);
       }
     }
-    // 1-contract path only: further tighten to 4% if peak reaches +20%
+
+    // Tier 4: +20% peak — tighten to 4%
     if (contracts === 1 && pos._profitLockActive && !pos._trail4Active && peakChg >= 0.20) {
       pos._trail4Active = true;
       pos.trailPct = 0.04;
