@@ -1860,39 +1860,36 @@ async function runScan() {
       }
     }
 
-    // Per-stock gap gate flags (consumed in execution section)
-    liveStock._gapDayCallBlocked = false;
-    liveStock._gapDayPutBlocked  = false;
-    liveStock._gapCallBoost      = 0;
-    liveStock._gapPutBoost       = 0;
+    // Per-stock gap gate flags — computed here, assigned to liveStock AFTER it's declared below
+    // Using temp variables because liveStock doesn't exist yet at this point in the loop.
+    let _tmpGapCallBlocked  = false;
+    let _tmpGapPutBlocked   = false;
+    let _tmpGapCallBoost    = 0;
+    let _tmpGapPutBoost     = 0;
+    let _tmpGapCallStrictRSI = false;
 
     if (_gapPctForGate >= 2.0) {
       // Gap-UP day
       if (_priceAboveVWAP) {
-        // Price hasn't pulled back to VWAP — pure gap-digestion, block calls entirely
-        liveStock._gapDayCallBlocked = true;
+        _tmpGapCallBlocked = true;
         logEvent("filter", `[GAP-VWAP] ${stock.ticker} gap-up ${_gapPctForGate.toFixed(1)}% + price $${price.toFixed(2)} > VWAP $${vwap.toFixed(2)} — calls BLOCKED (gap not digested)`);
       } else {
-        // Price has pulled back below VWAP — partial signal, require stricter RSI
-        liveStock._gapCallStrictRSI = true; // RSI < 37 required instead of 38
-        logEvent("filter", `[GAP-VWAP] ${stock.ticker} gap-up ${_gapPctForGate.toFixed(1)}% but below VWAP — calls need RSI < 32 (strict gap mode)`);
+        _tmpGapCallStrictRSI = true;
+        logEvent("filter", `[GAP-VWAP] ${stock.ticker} gap-up ${_gapPctForGate.toFixed(1)}% but below VWAP — calls need RSI < 37 (strict gap mode)`);
       }
-      // Put boost: gap-up makes puts attractive (fading the extension)
-      liveStock._gapPutBoost = 10;
+      _tmpGapPutBoost = 10;
       logEvent("filter", `[GAP-PUT-BOOST] ${stock.ticker} gap-up ${_gapPctForGate.toFixed(1)}% — put score +10 (gap fade)`);
 
     } else if (_gapPctForGate <= -2.0) {
       // Gap-DOWN day (symmetric)
       if (_priceBelowVWAP) {
-        // Price hasn't recovered to VWAP — block puts (don't pile on gap-down)
-        liveStock._gapDayPutBlocked = true;
+        _tmpGapPutBlocked = true;
         logEvent("filter", `[GAP-VWAP] ${stock.ticker} gap-down ${_gapPctForGate.toFixed(1)}% + price < VWAP — puts BLOCKED (gap not digested)`);
       }
-      // Call boost: gap-down genuine oversold = buy the dip
-      liveStock._gapCallBoost = 10;
+      _tmpGapCallBoost = 10;
       logEvent("filter", `[GAP-CALL-BOOST] ${stock.ticker} gap-down ${_gapPctForGate.toFixed(1)}% — call score +10 (genuine oversold)`);
     }
-    // ── END GAP-DAY DIRECTIONAL GATE ─────────────────────────────────────────
+    // ── END GAP-DAY DIRECTIONAL GATE (flags assigned to liveStock below after declaration) ──
 
     // Short interest - computed from prefetched bars
     const shortSignal = { signal: "neutral", modifier: 0 }; // short interest disabled
@@ -1920,6 +1917,14 @@ async function runScan() {
       hasIntraday:   signals.hasIntraday || false,
       ivPercentile:  signals.ivPercentile || 50,
     };
+
+    // Assign gap gate flags computed before liveStock was available
+    liveStock._gapDayCallBlocked  = _tmpGapCallBlocked;
+    liveStock._gapDayPutBlocked   = _tmpGapPutBlocked;
+    liveStock._gapCallBoost       = _tmpGapCallBoost;
+    liveStock._gapPutBoost        = _tmpGapPutBoost;
+    liveStock._gapCallStrictRSI   = _tmpGapCallStrictRSI;
+
     // V2.87 FIX: When intraday bars are insufficient (first 5 min of session or API failure),
     // use the last known daily RSI from _rsiHistory as fallback instead of skipping or using 50.
     // Yesterday's daily RSI is real data — XLE at 26.5 or QQQ at 81 is directionally valid
