@@ -566,7 +566,7 @@ async function checkExits(positions, posSnapshots, posQuotes, posNewsCache, ctx)
           // ── CASE A: Profitable + thesis complete → immediate close ──────────
           pos._thesisAutoClose = true;
           logEvent("scan", `[THESIS COMPLETE] ${pos.ticker} RSI normalized (${_entryRSI}→${_curRSI.toFixed(0)}) | gain: +${(chg*100).toFixed(1)}% — closing position`);
-          decisions.push({ pi, ticker: pos.ticker, action: 'close', reason: 'thesis-complete', exitPremium: null, contractSym: null });
+          decisions.push({ pi, ticker: pos.ticker, action: 'close', reason: 'thesis-complete', exitPremium: null, contractSym: pos.contractSymbol || pos.buySymbol || null });
           continue;
 
         } else if (chg > -0.05) {
@@ -577,7 +577,7 @@ async function checkExits(positions, posSnapshots, posQuotes, posNewsCache, ctx)
             // 4 hours past thesis completion with no gain — exit
             pos._thesisAutoClose = true;
             logEvent("scan", `[THESIS COMPLETE] ${pos.ticker} RSI normalized ${_hrsAfterFulfill.toFixed(1)}h ago, position flat at ${(chg*100).toFixed(1)}% — closing (thesis resolved, no follow-through)`);
-            decisions.push({ pi, ticker: pos.ticker, action: 'close', reason: 'thesis-no-follow', exitPremium: null, contractSym: null });
+            decisions.push({ pi, ticker: pos.ticker, action: 'close', reason: 'thesis-no-follow', exitPremium: null, contractSym: pos.contractSymbol || pos.buySymbol || null });
             continue;
           } else {
             // Still within 4h window — tighten trail, keep watching
@@ -667,7 +667,7 @@ async function checkExits(positions, posSnapshots, posQuotes, posNewsCache, ctx)
       // Hard exit: thesis completely collapsed and not PDT protected
       if (integrity.score < 20 ) {
         logEvent("warn", `[THESIS] ${pos.ticker} integrity collapsed ${integrity.score}/100 - ${integrity.reasons.slice(0,2).join(", ")} - closing`);
-        decisions.push({ pi, ticker: pos.ticker, action: 'close', reason: "thesis-collapsed", exitPremium: null, contractSym: null }); continue;
+        decisions.push({ pi, ticker: pos.ticker, action: 'close', reason: "thesis-collapsed", exitPremium: null, contractSym: pos.contractSymbol || pos.buySymbol || null }); continue;
       } else if (integrity.score < 40) {
         logEvent("warn", `[THESIS] ${pos.ticker} integrity degraded ${integrity.score}/100 - ${integrity.reasons.slice(0,2).join(", ")}`);
         // INVALID score - tighten stop to 25% so a losing position exits sooner
@@ -682,7 +682,7 @@ async function checkExits(positions, posSnapshots, posQuotes, posNewsCache, ctx)
       const adjStop = getTimeAdjustedStop(pos);
       if (adjStop < STOP_LOSS_PCT && chg < -adjStop ) {
         logEvent("warn", `[THESIS] ${pos.ticker} time-adjusted stop ${(adjStop*100).toFixed(0)}% hit after ${daysOpen.toFixed(1)} days`);
-        decisions.push({ pi, ticker: pos.ticker, action: 'close', reason: "time-stop", exitPremium: null, contractSym: null }); continue;
+        decisions.push({ pi, ticker: pos.ticker, action: 'close', reason: "time-stop", exitPremium: null, contractSym: pos.contractSymbol || pos.buySymbol || null }); continue;
       }
     }
 
@@ -691,11 +691,11 @@ async function checkExits(positions, posSnapshots, posQuotes, posNewsCache, ctx)
     const dteDaysLeft = pos.expDate ? Math.max(0, Math.round((new Date(pos.expDate) - new Date()) / MS_PER_DAY)) : 30;
     if (pos.isSpread && dteDaysLeft <= 1) {
       logEvent("warn", `${pos.ticker} DTE=1 - closing spread to avoid pin/assignment risk`);
-      decisions.push({ pi, ticker: pos.ticker, action: 'close', reason: "expiry-close", exitPremium: null, contractSym: null }); continue;
+      decisions.push({ pi, ticker: pos.ticker, action: 'close', reason: "expiry-close", exitPremium: null, contractSym: pos.contractSymbol || pos.buySymbol || null }); continue;
     }
     if (dteDaysLeft <= 5 && dteDaysLeft > 0 && chg < -0.15 ) {
       logEvent("warn", `${pos.ticker} DTE urgency: ${dteDaysLeft}d remaining, ${(chg*100).toFixed(0)}% - closing`);
-      decisions.push({ pi, ticker: pos.ticker, action: 'close', reason: "dte-urgency", exitPremium: null, contractSym: null }); continue;
+      decisions.push({ pi, ticker: pos.ticker, action: 'close', reason: "dte-urgency", exitPremium: null, contractSym: pos.contractSymbol || pos.buySymbol || null }); continue;
     }
 
     // V2.87: PANEL ADDITIONS — Trading Desk recommendations implemented
@@ -708,7 +708,7 @@ async function checkExits(positions, posSnapshots, posQuotes, posNewsCache, ctx)
       const premiumFloor = pos.premium * 0.50;
       if (curP <= premiumFloor) {
         logEvent("scan", `${pos.ticker} 50% premium floor stop — entry $${pos.premium} floor $${premiumFloor.toFixed(2)} cur $${curP} — exiting (professional options rule)`);
-        decisions.push({ pi, ticker: pos.ticker, action: 'close', reason: "premium-floor", exitPremium: null, contractSym: null }); continue;
+        decisions.push({ pi, ticker: pos.ticker, action: 'close', reason: "premium-floor", exitPremium: null, contractSym: pos.contractSymbol || pos.buySymbol || null }); continue;
       }
     }
 
@@ -722,7 +722,7 @@ async function checkExits(positions, posSnapshots, posQuotes, posNewsCache, ctx)
         const liveDelta = Math.abs(parseFloat(liveSnap.greeks.delta || 0));
         if (liveDelta > 0 && liveDelta < 0.12 && chg <= -0.15) {
           logEvent("scan", `${pos.ticker} delta compression stop — live delta ${liveDelta.toFixed(3)} < 0.12 AND down ${(chg*100).toFixed(0)}% — option has lost leverage, exiting`);
-          decisions.push({ pi, ticker: pos.ticker, action: 'close', reason: "delta-compression", exitPremium: null, contractSym: null }); continue;
+          decisions.push({ pi, ticker: pos.ticker, action: 'close', reason: "delta-compression", exitPremium: null, contractSym: pos.contractSymbol || pos.buySymbol || null }); continue;
         }
       }
     }
@@ -755,7 +755,7 @@ async function checkExits(positions, posSnapshots, posQuotes, posNewsCache, ctx)
     const fastStopEligible = hoursOpen >= 2 && hoursOpen <= fastStopWindow;
     if (fastStopEligible && chg <= -activeFastStop) {
       logEvent("scan", `${pos.ticker} fast-stop ${(chg*100).toFixed(0)}% in ${hoursOpen.toFixed(1)}hrs (${isWeeklyPos ? 'weekly' : 'monthly'}, threshold ${(activeFastStop*100).toFixed(0)}%${_agentBearish && activeFastStop === 0.12 ? ' macro-tightened' : ''})`);
-      decisions.push({ pi, ticker: pos.ticker, action: 'close', reason: "fast-stop", exitPremium: null, contractSym: null }); continue;
+      decisions.push({ pi, ticker: pos.ticker, action: 'close', reason: "fast-stop", exitPremium: null, contractSym: pos.contractSymbol || pos.buySymbol || null }); continue;
     }
 
     // 1b. CREDIT SPREAD MAX LOSS STOP - panel unanimous: 50% of max loss OR 2x credit
@@ -769,7 +769,7 @@ async function checkExits(positions, posSnapshots, posQuotes, posNewsCache, ctx)
       const creditStopDollar = Math.min(halfMaxLoss, twiceCredit); // stricter of the two
       if (creditLossDollar >= creditStopDollar ) {
         logEvent("warn", `[CREDIT STOP] ${pos.ticker} credit spread stop triggered - loss $${creditLossDollar.toFixed(0)} exceeds ${(creditStopDollar===halfMaxLoss?'50% max loss':'2x credit')} ($${creditStopDollar.toFixed(0)}) - closing`);
-        decisions.push({ pi, ticker: pos.ticker, action: 'close', reason: "credit-stop", exitPremium: null, contractSym: null }); continue;
+        decisions.push({ pi, ticker: pos.ticker, action: 'close', reason: "credit-stop", exitPremium: null, contractSym: pos.contractSymbol || pos.buySymbol || null }); continue;
       }
     }
 
@@ -783,7 +783,7 @@ async function checkExits(positions, posSnapshots, posQuotes, posNewsCache, ctx)
       const ivDrop = (pos.entryIV - pos.iv) / pos.entryIV;
       if (ivDrop >= IV_COLLAPSE_PCT && chg > -0.20) {
         logEvent("warn", `${pos.ticker} IV collapse: entry ${(pos.entryIV*100).toFixed(0)}% → current ${(pos.iv*100).toFixed(0)}% (${(ivDrop*100).toFixed(0)}% drop) — exiting to prevent further vega bleed`);
-        decisions.push({ pi, ticker: pos.ticker, action: 'close', reason: "iv-collapse", exitPremium: null, contractSym: null }); continue;
+        decisions.push({ pi, ticker: pos.ticker, action: 'close', reason: "iv-collapse", exitPremium: null, contractSym: pos.contractSymbol || pos.buySymbol || null }); continue;
       }
     }
 
@@ -803,7 +803,7 @@ async function checkExits(positions, posSnapshots, posQuotes, posNewsCache, ctx)
       } else {
         const _stopLabel = _activeHardStop < STOP_LOSS_PCT ? `overnight-tightened-stop (${(_activeHardStop*100).toFixed(0)}%)` : `stop-loss`;
         logEvent("scan", `${pos.ticker} ${_stopLabel} ${(chg*100).toFixed(0)}%`);
-        decisions.push({ pi, ticker: pos.ticker, action: 'close', reason: "stop", exitPremium: null, contractSym: null }); continue;
+        decisions.push({ pi, ticker: pos.ticker, action: 'close', reason: "stop", exitPremium: null, contractSym: pos.contractSymbol || pos.buySymbol || null }); continue;
       }
     }
 
@@ -896,7 +896,7 @@ async function checkExits(positions, posSnapshots, posQuotes, posNewsCache, ctx)
         // ── 2-CONTRACT PATH (B): partial close 1, trail remaining at 6% ────
         logEvent("scan", `[PROFIT LOCK] ${pos.ticker} hit +${(peakChg*100).toFixed(0)}% peak — closing 1/${contracts} contracts, tightening trail to 6%`);
         pos.trailPct = 0.06;
-        decisions.push({ pi, ticker: pos.ticker, action: 'partial', reason: 'partial-lock', exitPremium: null, contractSym: null });
+        decisions.push({ pi, ticker: pos.ticker, action: 'partial', reason: 'partial-lock', exitPremium: null, contractSym: pos.contractSymbol || pos.buySymbol || null });
       } else {
         // ── 1-CONTRACT PATH (C): tighten trail to 6%, no partial close ─────
         pos.trailPct = 0.06;
@@ -942,7 +942,7 @@ async function checkExits(positions, posSnapshots, posQuotes, posNewsCache, ctx)
       pos.trailStop    = trailFloor;                        // store $ floor separately
       if (curP <= trailFloor) {
         logEvent("scan", `${pos.ticker} trail hit - peak $${pos.peakPremium.toFixed(2)} floor $${trailFloor.toFixed(2)} (${(trailPct*100).toFixed(0)}% trail)`);
-        decisions.push({ pi, ticker: pos.ticker, action: 'close', reason: "trail", exitPremium: null, contractSym: null }); continue;
+        decisions.push({ pi, ticker: pos.ticker, action: 'close', reason: "trail", exitPremium: null, contractSym: pos.contractSymbol || pos.buySymbol || null }); continue;
       }
     }
 
@@ -952,7 +952,7 @@ async function checkExits(positions, posSnapshots, posQuotes, posNewsCache, ctx)
     const trailAlreadyActive = chg >= (pos.trailActivate || TRAIL_ACTIVATE_PCT);
     if (!pos.partialClosed && !trailAlreadyActive && chg >= activePartialPct && chg < activeTakeProfitPct) {
       logEvent("scan", `${pos.ticker} partial close at +${(chg*100).toFixed(0)}% [${currentExitParams.label}] (partial threshold: +${(activePartialPct*100).toFixed(0)}%)`);
-      decisions.push({ pi, ticker: pos.ticker, action: 'partial', reason: 'partial', exitPremium: null, contractSym: null });
+      decisions.push({ pi, ticker: pos.ticker, action: 'partial', reason: 'partial', exitPremium: null, contractSym: pos.contractSymbol || pos.buySymbol || null });
       continue; // don't evaluate take profit in same scan as partial - wait for next cycle
     }
 
@@ -965,7 +965,7 @@ async function checkExits(positions, posSnapshots, posQuotes, posNewsCache, ctx)
            (pos.currentPrice - pos.premium) >= 0.88 * (pos.maxProfit / 100 / Math.max(pos.contracts || 1, 1)));
       if (nearMaxProfit) {
         logEvent("scan", `${pos.ticker} near max profit (chg:${(chg*100).toFixed(0)}%) - closing to lock in gains before gamma risk`);
-        decisions.push({ pi, ticker: pos.ticker, action: 'close', reason: "near-max-profit", exitPremium: null, contractSym: null }); continue;
+        decisions.push({ pi, ticker: pos.ticker, action: 'close', reason: "near-max-profit", exitPremium: null, contractSym: pos.contractSymbol || pos.buySymbol || null }); continue;
       }
     }
 
@@ -973,11 +973,11 @@ async function checkExits(positions, posSnapshots, posQuotes, posNewsCache, ctx)
     // After partial: remainder rides to 130% of target then closes
     if (pos.partialClosed && chg >= activeRidePct) {
       logEvent("scan", `${pos.ticker} remainder target +${(chg*100).toFixed(0)}% [${currentExitParams.label}]`);
-      decisions.push({ pi, ticker: pos.ticker, action: 'close', reason: "target", exitPremium: null, contractSym: null }); continue;
+      decisions.push({ pi, ticker: pos.ticker, action: 'close', reason: "target", exitPremium: null, contractSym: pos.contractSymbol || pos.buySymbol || null }); continue;
     }
     if (!pos.partialClosed && chg >= activeTakeProfitPct) {
       logEvent("scan", `${pos.ticker} take profit +${(chg*100).toFixed(0)}% [${currentExitParams.label}]`);
-      decisions.push({ pi, ticker: pos.ticker, action: 'close', reason: "target", exitPremium: null, contractSym: null }); continue;
+      decisions.push({ pi, ticker: pos.ticker, action: 'close', reason: "target", exitPremium: null, contractSym: pos.contractSymbol || pos.buySymbol || null }); continue;
     }
 
     // - F10: THESIS DEGRADATION - re-score entry conditions every hour -
@@ -1017,7 +1017,7 @@ async function checkExits(positions, posSnapshots, posQuotes, posNewsCache, ctx)
           const rsiReversed = pos.optionType === "put" && entryRSI >= 65 && curRSI < 50;
           if (rsiReversed && !pos.partialClosed && chg < 0.10) {
             logEvent("scan", `${pos.ticker} PUT thesis degradation — RSI ${entryRSI}→${curRSI.toFixed(0)}, partial close`);
-            decisions.push({ pi, ticker: pos.ticker, action: 'partial', reason: 'partial', exitPremium: null, contractSym: null });
+            decisions.push({ pi, ticker: pos.ticker, action: 'partial', reason: 'partial', exitPremium: null, contractSym: pos.contractSymbol || pos.buySymbol || null });
           }
 
           // ── CALL thesis degradation (v2.91 — much stricter) ─────────────────
@@ -1036,7 +1036,7 @@ async function checkExits(positions, posSnapshots, posQuotes, posNewsCache, ctx)
             } else if (chg < -0.10) {
               // Macro is bearish AND option is down 10%+ despite bounce = IV crush confirmed
               logEvent("scan", `${pos.ticker} CALL RSI recovered but option down ${(chg*100).toFixed(0)}% with bearish macro — IV crush likely, partial close`);
-              decisions.push({ pi, ticker: pos.ticker, action: 'partial', reason: 'partial', exitPremium: null, contractSym: null });
+              decisions.push({ pi, ticker: pos.ticker, action: 'partial', reason: 'partial', exitPremium: null, contractSym: pos.contractSymbol || pos.buySymbol || null });
             } else {
               // Macro bearish but option not deeply down — log and monitor
               logEvent("scan", `${pos.ticker} CALL RSI recovered ${entryRSI}→${curRSI.toFixed(0)}, chg ${(chg*100).toFixed(0)}%, bearish macro but not deeply underwater — monitoring`);
@@ -1049,7 +1049,7 @@ async function checkExits(positions, posSnapshots, posQuotes, posNewsCache, ctx)
     // 6. TIME STOP - 7 days with no meaningful move
     if (daysOpen >= TIME_STOP_DAYS && Math.abs(chg) < TIME_STOP_MOVE) {
       logEvent("scan", `${pos.ticker} time-stop - ${daysOpen.toFixed(0)}d, only ${(chg*100).toFixed(1)}% move`);
-      decisions.push({ pi, ticker: pos.ticker, action: 'close', reason: "time-stop", exitPremium: null, contractSym: null }); continue;
+      decisions.push({ pi, ticker: pos.ticker, action: 'close', reason: "time-stop", exitPremium: null, contractSym: pos.contractSymbol || pos.buySymbol || null }); continue;
     }
 
     // Agent rescore handled in parallel batch after scan loop (see runAgentRescore below)
@@ -1057,7 +1057,7 @@ async function checkExits(positions, posSnapshots, posQuotes, posNewsCache, ctx)
     // 7. EXPIRY ROLL - DTE <= 7, close winners (losers hit stop first)
     if (dte <= 7 && chg > 0) {
       logEvent("scan", `${pos.ticker} expiry-roll - ${dte}DTE with profit`);
-      decisions.push({ pi, ticker: pos.ticker, action: 'close', reason: "expiry-roll", exitPremium: null, contractSym: null }); continue;
+      decisions.push({ pi, ticker: pos.ticker, action: 'close', reason: "expiry-roll", exitPremium: null, contractSym: pos.contractSymbol || pos.buySymbol || null }); continue;
     }
 
     // 8. 50MA BREAK - thesis invalidated (real 50-day MA)
@@ -1076,7 +1076,7 @@ async function checkExits(positions, posSnapshots, posQuotes, posNewsCache, ctx)
             : price < ma50 * (1 - MA50_BUFFER); // call: stock broke below 50MA
           if (ma50Break) {
             logEvent("scan", `${pos.ticker} 50ma-break | price $${price.toFixed(2)} | 50MA $${ma50.toFixed(2)} | held ${hoursOpen.toFixed(1)}h`);
-            decisions.push({ pi, ticker: pos.ticker, action: 'close', reason: "50ma-break", exitPremium: null, contractSym: null }); continue;
+            decisions.push({ pi, ticker: pos.ticker, action: 'close', reason: "50ma-break", exitPremium: null, contractSym: pos.contractSymbol || pos.buySymbol || null }); continue;
           }
         }
       } catch(e) {}
@@ -1087,7 +1087,7 @@ async function checkExits(positions, posSnapshots, posQuotes, posNewsCache, ctx)
       const daysToE = Math.round((new Date(pos.earningsDate) - new Date()) / MS_PER_DAY);
       if (daysToE >= 0 && daysToE <= EARNINGS_SKIP_DAYS) {
         logEvent("scan", `${pos.ticker} earnings in ${daysToE}d - closing`);
-        decisions.push({ pi, ticker: pos.ticker, action: 'close', reason: "earnings-close", exitPremium: null, contractSym: null }); continue;
+        decisions.push({ pi, ticker: pos.ticker, action: 'close', reason: "earnings-close", exitPremium: null, contractSym: pos.contractSymbol || pos.buySymbol || null }); continue;
       }
     }
 
@@ -1097,11 +1097,11 @@ async function checkExits(positions, posSnapshots, posQuotes, posNewsCache, ctx)
     const newsSent = analyzeNews(newsArts);
     if (pos.optionType === "put" && newsSent.signal === "strongly bullish" && chg <= -0.15) {
       logEvent("scan", `${pos.ticker} news-exit - strongly bullish news vs losing put`);
-      decisions.push({ pi, ticker: pos.ticker, action: 'close', reason: "news-exit", exitPremium: null, contractSym: null }); continue;
+      decisions.push({ pi, ticker: pos.ticker, action: 'close', reason: "news-exit", exitPremium: null, contractSym: pos.contractSymbol || pos.buySymbol || null }); continue;
     }
     if (pos.optionType === "call" && newsSent.signal === "strongly bearish" && chg <= -0.15) {
       logEvent("scan", `${pos.ticker} news-exit - strongly bearish news vs losing call`);
-      decisions.push({ pi, ticker: pos.ticker, action: 'close', reason: "news-exit", exitPremium: null, contractSym: null }); continue;
+      decisions.push({ pi, ticker: pos.ticker, action: 'close', reason: "news-exit", exitPremium: null, contractSym: pos.contractSymbol || pos.buySymbol || null }); continue;
     }
 
     // 11. OVERNIGHT RISK - high VIX, losing position into close
@@ -1113,17 +1113,17 @@ async function checkExits(positions, posSnapshots, posQuotes, posNewsCache, ctx)
     // Tier 1: severe losses at 3pm - best liquidity window
     if (etHourNow >= 15.0 && state.vix >= 25 && chg <= -0.20) {
       logEvent("scan", `${pos.ticker} overnight-risk TIER1 - severely losing ${(chg*100).toFixed(0)}% at 3pm - closing at healthy liquidity | VIX ${state.vix}`);
-      decisions.push({ pi, ticker: pos.ticker, action: 'close', reason: "overnight-risk", exitPremium: null, contractSym: null }); continue;
+      decisions.push({ pi, ticker: pos.ticker, action: 'close', reason: "overnight-risk", exitPremium: null, contractSym: pos.contractSymbol || pos.buySymbol || null }); continue;
     }
     // Tier 2: moderate losses or short DTE at 3:30pm
     if (etHourNow >= 15.5 && state.vix >= 30) {
       if (chg <= -0.08) {
         logEvent("scan", `${pos.ticker} overnight-risk TIER2 - losing ${(chg*100).toFixed(0)}% into close VIX ${state.vix}`);
-        decisions.push({ pi, ticker: pos.ticker, action: 'close', reason: "overnight-risk", exitPremium: null, contractSym: null }); continue;
+        decisions.push({ pi, ticker: pos.ticker, action: 'close', reason: "overnight-risk", exitPremium: null, contractSym: pos.contractSymbol || pos.buySymbol || null }); continue;
       }
       if (dte <= 3) {
         logEvent("scan", `${pos.ticker} overnight-risk TIER2 - ${dte}DTE too short for overnight hold`);
-        decisions.push({ pi, ticker: pos.ticker, action: 'close', reason: "overnight-risk", exitPremium: null, contractSym: null }); continue;
+        decisions.push({ pi, ticker: pos.ticker, action: 'close', reason: "overnight-risk", exitPremium: null, contractSym: pos.contractSymbol || pos.buySymbol || null }); continue;
       }
       if (dte <= 7) {
         logEvent("scan", `${pos.ticker} overnight-risk TIER2 - ${dte}DTE elevated overnight theta risk - monitoring`);
