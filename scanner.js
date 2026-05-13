@@ -1486,13 +1486,19 @@ async function runScan() {
   const _sessionMinsNow   = etHourNow >= 9.5 ? (etHourNow - 9.5) * 60 : 0;
   const _msSinceLastEntry = Date.now() - (state._lastEntryAt || 0);
   const _minsSinceEntry   = _msSinceLastEntry / 60000;
-  const _staggerCooling   = state._lastEntryAt && _minsSinceEntry < 20;
+  // V2.97: Dynamic stagger cooldown — 45min on large gap-up days, 20min normally.
+  // Rationale: on a gap > 3% day, RSI distortion lasts the full first hour.
+  // Re-entering 20min after a loss into the same distorted AM conditions is wrong.
+  const _todayGapAbs      = Math.abs(state._todayMaxGap || 0);
+  const _staggerMins      = _todayGapAbs >= 3.0 ? 45 : 20; // 45min on big gap days
+  const _staggerCooling   = state._lastEntryAt && _minsSinceEntry < _staggerMins;
   const _tooEarlyToTrade  = _sessionMinsNow < 30;
 
   if (_tooEarlyToTrade) {
     logEvent("filter", `[STAGGER] Session only ${_sessionMinsNow.toFixed(0)}min old — no entries until 30min mark (VWAP/RSI need time to stabilize)`);
   } else if (_staggerCooling) {
-    logEvent("filter", `[STAGGER] Last entry ${_minsSinceEntry.toFixed(0)}min ago — cooling 20min before next entry (${(20 - _minsSinceEntry).toFixed(0)}min remaining)`);
+    const _remaining = (_staggerMins - _minsSinceEntry).toFixed(0);
+    logEvent("filter", `[STAGGER] Last entry ${_minsSinceEntry.toFixed(0)}min ago — cooling ${_staggerMins}min before next entry (${_remaining}min remaining)${_staggerMins === 45 ? ' [GAP DAY extended cooldown]' : ''}`);
   }
   // Flags consumed per-stock in entry gate below (~line 2960)
   state._tooEarlyToTrade = _tooEarlyToTrade;
@@ -1825,22 +1831,68 @@ async function runScan() {
     // the top of the intraday range. QQQ +7.7% May 11 → options lost -26%
     // overnight via IV crush even as underlying held. The MR thesis requires
     // entering into weakness — above VWAP on a gap day is the opposite of that.
-    // Put entries on gap-up days are unaffected (they're fading the gap).
-    // Call entries on gap-DOWN days are also unaffected (buying oversold dip).
+    // ── V2.97: GAP-DAY DIRECTIONAL GATE ──────────────────────────────────────
+    // Trading panel finding: AM entries on gap-up days lose because RSI appears
+    // oversold from gap-digestion, not genuine selling. Every AM loss in APEX
+    // history was on a gap-up day with RSI crushed by digestion, not real selloff.
     //
-    // Flag: _gapDayCallBlocked — read by score gate below to zero callScore.
-    // vwap already computed above (line ~1680). preMarket.gapPct from prefetch.
-    const _gapPctForGate = parseFloat(preMarket?.gapPct || 0);
+    // Rules:
+    //   Gap UP > 2%: calls require price < VWAP (price must have genuinely pulled back)
+    //                calls require RSI < 32 (stricter than normal 38 — gap artifact RSI 33-38 blocked)
+    //                puts get +10 score boost (gap-up extended = fade opportunity)
+    //   Gap DOWN > 2%: puts require price > VWAP (symmetric)
+    //                  calls get +10 score boost (genuine oversold from gap-down)
+    //
+    // Also updates state._todayMaxGap for stagger gate dynamic cooldown.
+    const _gapPctForGate  = parseFloat(preMarket?.gapPct || 0);
+    const _absGap         = Math.abs(_gapPctForGate);
     const _priceAboveVWAP = vwap > 0 && price > vwap;
-    if (_gapPctForGate > 1.5 && _priceAboveVWAP) {
-      // Gap-up day AND price still above VWAP — block call entries
-      liveStock._gapDayCallBlocked = true;
-      logEvent("filter", `[GAP-VWAP] ${stock.ticker} gap-up ${_gapPctForGate.toFixed(1)}% and price $${price.toFixed(2)} > VWAP $${vwap.toFixed(2)} — call entries blocked until pullback to VWAP`);
-    } else if (_gapPctForGate > 1.5 && !_priceAboveVWAP) {
-      // Gap-up day but price has pulled back below VWAP — call entry permitted
-      logEvent("filter", `[GAP-VWAP] ${stock.ticker} gap-up ${_gapPctForGate.toFixed(1)}% but price $${price.toFixed(2)} <= VWAP $${vwap.toFixed(2)} — intraday pullback confirmed, call entry permitted`);
+    const _priceBelowVWAP = vwap > 0 && price < vwap;
+
+    // Update today's max gap tracker (used by stagger gate below)
+    if (_absGap > Math.abs(state._todayMaxGap || 0)) {
+      state._todayMaxGap       = _gapPctForGate;
+      state._todayGapDirection = _gapPctForGate > 0 ? 'up' : 'down';
+      // Update gap-reversal day using TODAY's gap (not yesterday's close-to-close)
+      if (_absGap >= 2.0) {
+        state._gapReversalDay = true;
+        logEvent("filter", `[GAP-REVERSAL] Today's pre-market gap ${_gapPctForGate > 0 ? '+' : ''}${_gapPctForGate.toFixed(1)}% on ${stock.ticker} — gap-reversal mode ACTIVE. Calls require RSI < 32 + price < VWAP`);
+      }
     }
-    // ── END GAP-DAY VWAP GATE ─────────────────────────────────────────────
+
+    // Per-stock gap gate flags (consumed in execution section)
+    liveStock._gapDayCallBlocked = false;
+    liveStock._gapDayPutBlocked  = false;
+    liveStock._gapCallBoost      = 0;
+    liveStock._gapPutBoost       = 0;
+
+    if (_gapPctForGate >= 2.0) {
+      // Gap-UP day
+      if (_priceAboveVWAP) {
+        // Price hasn't pulled back to VWAP — pure gap-digestion, block calls entirely
+        liveStock._gapDayCallBlocked = true;
+        logEvent("filter", `[GAP-VWAP] ${stock.ticker} gap-up ${_gapPctForGate.toFixed(1)}% + price $${price.toFixed(2)} > VWAP $${vwap.toFixed(2)} — calls BLOCKED (gap not digested)`);
+      } else {
+        // Price has pulled back below VWAP — partial signal, require stricter RSI
+        liveStock._gapCallStrictRSI = true; // RSI < 37 required instead of 38
+        logEvent("filter", `[GAP-VWAP] ${stock.ticker} gap-up ${_gapPctForGate.toFixed(1)}% but below VWAP — calls need RSI < 32 (strict gap mode)`);
+      }
+      // Put boost: gap-up makes puts attractive (fading the extension)
+      liveStock._gapPutBoost = 10;
+      logEvent("filter", `[GAP-PUT-BOOST] ${stock.ticker} gap-up ${_gapPctForGate.toFixed(1)}% — put score +10 (gap fade)`);
+
+    } else if (_gapPctForGate <= -2.0) {
+      // Gap-DOWN day (symmetric)
+      if (_priceBelowVWAP) {
+        // Price hasn't recovered to VWAP — block puts (don't pile on gap-down)
+        liveStock._gapDayPutBlocked = true;
+        logEvent("filter", `[GAP-VWAP] ${stock.ticker} gap-down ${_gapPctForGate.toFixed(1)}% + price < VWAP — puts BLOCKED (gap not digested)`);
+      }
+      // Call boost: gap-down genuine oversold = buy the dip
+      liveStock._gapCallBoost = 10;
+      logEvent("filter", `[GAP-CALL-BOOST] ${stock.ticker} gap-down ${_gapPctForGate.toFixed(1)}% — call score +10 (genuine oversold)`);
+    }
+    // ── END GAP-DAY DIRECTIONAL GATE ─────────────────────────────────────────
 
     // Short interest - computed from prefetched bars
     const shortSignal = { signal: "neutral", modifier: 0 }; // short interest disabled
@@ -2082,6 +2134,25 @@ async function runScan() {
         // Lowered to 75 - consistent with other instruments. Gates still require RSI >68 for puts.
         if (callSetup.score > 0 && callSetup.score < 75) { callSetup.score = 0; logEvent("filter", `GLD call score ${callSetup.score} below 75 minimum - hedge instrument requires high conviction`); }
         if (putSetup.score > 0  && putSetup.score  < 75) { putSetup.score  = 0; logEvent("filter", `GLD put score ${putSetup.score} below 75 minimum`); }
+
+        // V2.97: GLD DAILY TREND GATE
+        // Trading panel finding: dailyRSI 28.4 looks bullish for a call (deeply oversold)
+        // but in practice it means GLD is in a sustained multi-day downtrend.
+        // The thesis-complete exit fires in ~55 minutes — not long enough for the daily
+        // trend to reverse. On a downtrending daily, intraday bounces fail quickly.
+        // Rule: block calls when GLD is confirmed in daily downtrend (dailyRSI < 35
+        //       AND price below 20MA). Both conditions required to avoid over-filtering.
+        const _gldDailyRsi  = parseFloat(liveStock.dailyRsi || 50);
+        const _gldBelowMA20 = gldMA20Live > 0 && (liveStock.price || price) < gldMA20Live;
+        const _gldAboveMA20 = gldMA20Live > 0 && (liveStock.price || price) > gldMA20Live;
+        if (callSetup.score > 0 && _gldDailyRsi < 35 && _gldBelowMA20) {
+          callSetup.score = 0;
+          logEvent("filter", `GLD call blocked — dailyRSI ${_gldDailyRsi.toFixed(1)} < 35 AND price below 20MA ($${gldMA20Live.toFixed(2)}) — daily downtrend intact, intraday bounces fail quickly`);
+        }
+        if (putSetup.score > 0 && _gldDailyRsi > 65 && _gldAboveMA20) {
+          putSetup.score = 0;
+          logEvent("filter", `GLD put blocked — dailyRSI ${_gldDailyRsi.toFixed(1)} > 65 AND price above 20MA ($${gldMA20Live.toFixed(2)}) — daily uptrend intact, intraday pullbacks reverse quickly`);
+        }
       }
 
       // - TLT entry gate - SPY 50MA + TLT own signals -
@@ -2511,6 +2582,81 @@ async function runScan() {
     }
     // ── END V2.95/V2.96 SCORE ADJUSTMENTS ────────────────────────────────
 
+    // ── V2.97: GAP BOOST APPLICATION ──────────────────────────────────────
+    // Apply directional gap boosts set in gap gate above.
+    // Gap-up: puts get +10 (fade the extension), calls get strict RSI requirement.
+    // Gap-down: calls get +10 (genuine oversold), puts get no additional boost.
+    if (liveStock._gapPutBoost > 0 && putSetup.score > 0) {
+      putSetup.score += liveStock._gapPutBoost;
+      putSetup.reasons.push(`Gap-up ${parseFloat(preMarket?.gapPct||0).toFixed(1)}% put fade boost (+${liveStock._gapPutBoost})`);
+      logEvent("filter", `[GAP-BOOST] ${stock.ticker} put score +${liveStock._gapPutBoost} (gap-up fade)`);
+    }
+    if (liveStock._gapCallBoost > 0 && callSetup.score > 0) {
+      callSetup.score += liveStock._gapCallBoost;
+      callSetup.reasons.push(`Gap-down ${parseFloat(preMarket?.gapPct||0).toFixed(1)}% call boost (+${liveStock._gapCallBoost})`);
+      logEvent("filter", `[GAP-BOOST] ${stock.ticker} call score +${liveStock._gapCallBoost} (gap-down genuine oversold)`);
+    }
+    // Stricter RSI requirement when gap-up but below VWAP (partial signal)
+    if (liveStock._gapCallStrictRSI && callSetup.score > 0) {
+      const _strictRSI = liveStock.rsi || signals.rsi || 50;
+      if (_strictRSI >= 37) {
+        callSetup.score = 0;
+        callSetup.reasons.push(`Gap-up strict RSI: RSI ${_strictRSI.toFixed(0)} >= 35 (need < 37 when gap-up + below VWAP)`);
+        logEvent("filter", `[GAP-STRICT-RSI] ${stock.ticker} call blocked — gap-up day, below VWAP but RSI ${_strictRSI.toFixed(0)} >= 35 (need RSI < 37)`);
+      }
+    }
+    // ── END GAP BOOST APPLICATION ─────────────────────────────────────────
+
+    // ── V2.97: MOMENTUM SCORING MODIFIER ──────────────────────────────────
+    // Momentum confirmation for call entries. Trading panel finding:
+    // a call entry with MOM:bearish in the RSI 25-38 zone is low quality —
+    // RSI appears oversold but price is still declining actively.
+    // MOM:recovering in same zone is high quality — bounce is starting.
+    // Extreme oversold (RSI < 25) overrides bearish momentum (too far down to ignore).
+    const _liveRSIForMom  = liveStock.rsi || signals.rsi || 50;
+    const _liveMomentum   = liveStock.momentum || signals.momentum || 'steady';
+    if (callSetup.score > 0) {
+      if (_liveMomentum === 'recovering' && _liveRSIForMom < 45) {
+        callSetup.score += 5;
+        callSetup.reasons.push('MOM:recovering confirmation (+5)');
+        logEvent("filter", `[MOM] ${stock.ticker} MOM:recovering + RSI ${_liveRSIForMom.toFixed(0)} — call quality confirmed (+5)`);
+      } else if (_liveMomentum === 'bearish' && _liveRSIForMom >= 25 && _liveRSIForMom <= 38) {
+        callSetup.score -= 10;
+        callSetup.reasons.push('MOM:bearish in RSI 25-38 zone — still declining (-10)');
+        logEvent("filter", `[MOM] ${stock.ticker} MOM:bearish + RSI ${_liveRSIForMom.toFixed(0)} — entry into active decline, score -10`);
+      }
+    }
+    if (putSetup.score > 0 && _liveMomentum === 'recovering' && _liveRSIForMom > 55) {
+      // Put entries on recovering momentum from overbought = quality fade signal
+      putSetup.score += 5;
+      putSetup.reasons.push('MOM:recovering from overbought — put quality confirmed (+5)');
+    }
+    // ── END MOMENTUM MODIFIER ─────────────────────────────────────────────
+
+    // ── V2.97: _premarketBoost CONSUMED ───────────────────────────────────
+    // _premarketBoost was previously set in risk.js but never used (cosmetic flag).
+    // Now wired: gap-up boost is directionally anti-call, pro-put.
+    // Note: _gapPutBoost above already handles this via preMarket.gapPct.
+    // _premarketBoost is an additional penalty for calls on strong gap-up days
+    // that didn't get caught by the 2% threshold (covers 1.5-2% range).
+    if (stock._premarketBoost && callSetup.score > 0) {
+      const _pmGap = parseFloat(preMarket?.gapPct || 0);
+      if (_pmGap > 0 && _pmGap < 2.0) {
+        // Sub-2% gap: apply softer penalty (-5) since hard block didn't fire
+        callSetup.score = Math.max(0, callSetup.score - 5);
+        callSetup.reasons.push(`Pre-market gap-up ${_pmGap.toFixed(1)}% call penalty (-5)`);
+        logEvent("filter", `[PM-BOOST] ${stock.ticker} pre-market gap-up ${_pmGap.toFixed(1)}% — call score -5 (gap-up is anti-call signal)`);
+      }
+    }
+    if (stock._premarketBoost && putSetup.score > 0) {
+      const _pmGap = parseFloat(preMarket?.gapPct || 0);
+      if (_pmGap > 0 && _pmGap < 2.0) {
+        putSetup.score += 5;
+        putSetup.reasons.push(`Pre-market gap-up ${_pmGap.toFixed(1)}% put bonus (+5)`);
+      }
+    }
+    // ── END _premarketBoost CONSUMPTION ──────────────────────────────────
+
     // Apply gap direction constraint
     let callScore = callSetup.score;
     let putScore  = putSetup.score;
@@ -2839,6 +2985,18 @@ async function runScan() {
       }
       if (rsidelta < 10) {
         logEvent("filter", `${stock.ticker} re-entry blocked — RSI only moved ${rsidelta.toFixed(0)}pts since loss (need 10pt shift for new thesis)`);
+        continue;
+      }
+      // V2.97: Direction check — RSI shift must be consistent with the new thesis.
+      // A call re-entry requires RSI to have DROPPED further (more oversold than at loss).
+      // A put re-entry requires RSI to have RISEN further (more overbought than at loss).
+      // This blocks the gap-digestion pattern where RSI swings 50→21→50→21 repeatedly
+      // (RSI moved 29pts but it's the same gap-artifact oscillation, not a new thesis).
+      const _rsiDirectionOk = optionType === "call"
+        ? currentRSI <= lossRSI   // for calls: RSI must have dropped (more oversold)
+        : currentRSI >= lossRSI;  // for puts: RSI must have risen (more overbought)
+      if (!_rsiDirectionOk) {
+        logEvent("filter", `${stock.ticker} re-entry blocked — RSI moved ${rsidelta.toFixed(0)}pts but wrong direction (${optionType} thesis requires RSI ${optionType === 'call' ? '<=' : '>='} ${lossRSI.toFixed(0)}, currently ${currentRSI.toFixed(0)})`);
         continue;
       }
       logEvent("filter", `${stock.ticker} re-entry allowed — loss ${hoursSinceLoss}h ago, score ${bestScore} >= ${instrMin75}, RSI moved ${rsidelta.toFixed(0)}pts`);
