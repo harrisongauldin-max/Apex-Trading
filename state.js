@@ -46,7 +46,9 @@ function defaultState() {
     // V2.96: entry quality gates
     _lastEntryAt:       null,   // Unix ms — timestamp of last confirmed fill (stagger gate)
     _yesterdayGapPct:   null,   // % move of SPY yesterday close vs prior close
-    _gapReversalDay:    false,  // true on day-after-gap: stricter RSI required for calls
+    _gapReversalDay:    false,  // true when TODAY's pre-market gap > 2%: stricter RSI + VWAP required
+    _todayMaxGap:       0,      // largest |pre-market gap %| seen today across all watchlist instruments
+    _todayGapDirection: null,   // 'up' | 'down' | null — direction of today's largest gap
     _agentRescoreHour:   {}, // tracks last rescore hour per ticker (overnight)
     _agentRescoreMinute: {}, // tracks last rescore time per ticker (same-day)
     _avoidUntil:         null,  // timestamp until which entries are blocked after avoid signal
