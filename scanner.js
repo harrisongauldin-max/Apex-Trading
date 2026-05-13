@@ -3131,7 +3131,7 @@ async function runScan() {
     // Evidence: May 12 — AM losses had RSI 46-50 (blocked), PM wins had RSI 33-36 (pass).
     // At VIX >= 30: calls fully blocked regardless of RSI.
     // Puts are never blocked by this gate.
-    const _entryRSI_now = liveStock.rsi || signals.rsi || 50;
+    const _entryRSI_now = stock.rsi || stock.liveRSI || 50;
     // RSI gate: at VIX >= 25, only allow calls when RSI is deeply oversold (< 38).
     // Score threshold handled upstream. This gate is RSI-only.
     // May 12 evidence: AM losses RSI 46-50 blocked, PM wins RSI 33-36 pass.
