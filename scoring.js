@@ -205,27 +205,60 @@ async function checkSectorETF(stock) {
   return { pass: true, reason: null, putBoost: 0 };
 }
 
-function isGLDEntryAllowed(optionType, dxy, spyReturn5d, vix, gldRSI, gldPrice, gldMA20) {
+function isGLDEntryAllowed(optionType, dxy, spyReturn5d, vix, gldRSI, gldPrice, gldMA20,
+                           sessionMins, momentum, gld5dReturn, gldDailyRSI) {
   if (optionType === "call") {
-    // Panel decision (8/8): remove SPY 5d momentum gate - too restrictive
-    // Gold rallies on dollar weakness + uncertainty, not only equity stress
-    // Replacement: GLD above its own 20MA (Quant + Technical Analyst, 3/8)
-    const dxyStrengthening = dxy && dxy.change > 0.8;  // dollar up >0.8% in 5d
-    // VIX gate restored to 20 - backtest data showed lowering to 16 admitted losing trades
-    // GLD 2023: 8-13 trades but WR dropped 37%-23% with extra entries - gate was right at 20
-    const vixTooLow        = vix < 20;                 // restored to 20
-    const gldDowntrend     = gldMA20 > 0 && gldPrice > 0 && gldPrice < gldMA20; // gold below 20MA = downtrend
-    // V2.87 FIX 1: Minimum daily RSI gate for GLD calls.
-    // GLD $445C was entered at dailyRSI 49.5, score 99. Neutral daily momentum on a hedge
-    // instrument is insufficient conviction for a naked call. Daily RSI must show either:
-    //   (a) oversold setup (dailyRSI ≤ 40) for MR call, OR
-    //   (b) confirmed bullish momentum (dailyRSI ≥ 55) for trend call.
-    // The 40-55 neutral zone is a NO-TRADE zone for GLD calls — no directional edge.
-    const gldRSINeutralZone = gldRSI !== null && gldRSI > 40 && gldRSI < 55;
-    if (dxyStrengthening) return { allowed: false, reason: `GLD call blocked - DXY strengthening (+${dxy.change.toFixed(2)}% 5d, dollar headwind for gold)` };
-    if (vixTooLow)        return { allowed: false, reason: `GLD call blocked - VIX ${vix.toFixed(1)} below 20, insufficient uncertainty for gold catalyst` };
-    if (gldDowntrend)     return { allowed: false, reason: `GLD call blocked - GLD $${gldPrice.toFixed(2)} below 20MA $${gldMA20.toFixed(2)}, don't buy calls in downtrend` };
-    if (gldRSINeutralZone) return { allowed: false, reason: `GLD call blocked - dailyRSI ${gldRSI?.toFixed(1)} in neutral zone (40-55), no directional edge (need ≤40 oversold or ≥55 bullish)` };
+    // ── V2.97: COMPLETE GLD CALL GATE REWRITE ─────────────────────────────
+    // Trading panel findings after 4 entries, net -$280:
+    //   - GLD is NOT an intraday MR instrument like QQQ/SPY
+    //   - GLD moves on macro flows (dollar, yields, risk-off) — takes hours, not minutes
+    //   - All losses entered with MOM:steady (still declining), wrong timing
+    //   - All losses were AM entries before macro flows settled
+    //   - DailyRSI 28 + MACD bullish crossover IS a real signal — but multi-day, not intraday
+    //   - The MA20 downtrend gate was blocking valid entries (price below MA20 is fine
+    //     when dailyRSI < 32 + MACD crossover — that's the washed-out-and-turning setup)
+    //
+    // 8 GATES — ALL must pass:
+    // GATE 1: DXY macro tailwind (not strengthening)
+    const dxyStrengthening = dxy && dxy.change > 0.8;
+    if (dxyStrengthening) return { allowed: false, reason: `GLD call blocked — DXY +${dxy.change.toFixed(2)}% 5d (dollar strengthening = gold headwind)` };
+
+    // GATE 2: VIX ≥ 20 (need uncertainty for gold catalyst)
+    const vixTooLow = vix < 20;
+    if (vixTooLow) return { allowed: false, reason: `GLD call blocked — VIX ${vix?.toFixed(1)} < 20 (need elevated uncertainty for gold)` };
+
+    // GATE 3: GLD daily RSI — must be genuinely oversold (< 32) OR strongly bullish (≥ 55)
+    // The 32-55 zone is NO-TRADE for GLD calls.
+    // < 32: deeply washed out, daily MR thesis valid
+    // ≥ 55: confirmed daily bullish momentum, trend call valid
+    // 32-55: neutral — no directional conviction on daily timeframe
+    const _dailyRSI = gldDailyRSI ?? gldRSI ?? 50; // prefer dailyRSI, fall back to intraday
+    const gldRSINeutralZone = _dailyRSI > 32 && _dailyRSI < 55;
+    if (gldRSINeutralZone) return { allowed: false, reason: `GLD call blocked — dailyRSI ${_dailyRSI.toFixed(1)} in no-trade zone (32-55), need < 32 oversold or ≥ 55 bullish` };
+
+    // GATE 4: Not in freefall — GLD 5-day price change must be > -4%
+    // If GLD is down > 4% in 5 days, the downtrend is too strong to fade with a 30-min thesis
+    // Daily MR on a 43 DTE option needs 3-10 days — but not in an accelerating decline
+    if (gld5dReturn !== null && gld5dReturn !== undefined) {
+      const gldFreefalling = gld5dReturn < -0.04; // down > 4% in 5 days
+      if (gldFreefalling) return { allowed: false, reason: `GLD call blocked — 5-day price change ${(gld5dReturn*100).toFixed(1)}% < -4% (accelerating downtrend, too steep to fade)` };
+    }
+
+    // GATE 5: Session age ≥ 60 minutes
+    // GLD AM entries fail because macro flows (dollar, yields) haven't settled.
+    // QQQ/SPY snap back in 25 min — GLD needs the full first hour to stabilize.
+    if (sessionMins !== null && sessionMins !== undefined) {
+      const tooEarly = sessionMins < 60;
+      if (tooEarly) return { allowed: false, reason: `GLD call blocked — session only ${sessionMins.toFixed(0)}min old (need 60min for macro flows to settle)` };
+    }
+
+    // GATE 6: Momentum not bearish
+    // MOM:bearish means GLD price is actively declining — entering a call into active decline
+    // is the single biggest mistake in all GLD losses. MOM:steady is acceptable (sideways).
+    // MOM:recovering is ideal (price starting to lift). MOM:bearish is a hard block.
+    if (momentum === 'bearish') return { allowed: false, reason: `GLD call blocked — MOM:bearish (price actively declining, wait for stabilization before call entry)` };
+
+    // All gates passed
     return { allowed: true };
   } else {
     // GLD puts  -- two paths by trade type:
