@@ -2116,11 +2116,29 @@ async function runScan() {
       if (stock.ticker === "GLD") {
         const dxy5d       = marketContext.dxy || { trend: "neutral", change: 0 };
         const spy5dReturn = spyBars.length >= 5 ? (spyBars[spyBars.length-1].c - spyBars[0].c) / spyBars[0].c : 0;
-        // Compute GLD 20MA for trend gate (needs recent GLD bars - use cached price as fallback)
-        const gldMA20Live = (state._gldBars && state._gldBars.length >= 20)
-          ? state._gldBars.slice(-20).reduce((s,b) => s + b.c, 0) / 20
+
+        // V2.97: gldMA20Live — fallback to intraday bars if state._gldBars not populated
+        const _gldBarsForMA = (state._gldBars?.length >= 20) ? state._gldBars
+                            : (bars?.length >= 20) ? bars : null;
+        const gldMA20Live   = _gldBarsForMA
+          ? _gldBarsForMA.slice(-20).reduce((s,b) => s + b.c, 0) / 20
           : 0;
-        const gldCallGate = isGLDEntryAllowed("call", dxy5d, spy5dReturn, state.vix, liveStock.rsi, liveStock.price || 0, gldMA20Live);
+
+        // V2.97: GLD 5-day price change — freefall gate (> -4% required)
+        const _gldBarsFor5d = (state._gldBars?.length >= 5) ? state._gldBars
+                            : (bars?.length >= 5) ? bars : null;
+        const gld5dReturn   = _gldBarsFor5d
+          ? (_gldBarsFor5d[_gldBarsFor5d.length-1].c - _gldBarsFor5d[_gldBarsFor5d.length-5].c)
+            / _gldBarsFor5d[_gldBarsFor5d.length-5].c
+          : null;
+
+        // V2.97: New args for isGLDEntryAllowed — session age, momentum, 5d return, dailyRSI
+        const _gldSessionMins = _sessionMinsNow;
+        const _gldMomentum    = liveStock.momentum || signals.momentum || 'steady';
+        const _gldDailyRSI    = parseFloat(liveStock.dailyRsi || liveStock.dailyRSI || 0) || null;
+
+        const gldCallGate = isGLDEntryAllowed("call", dxy5d, spy5dReturn, state.vix, liveStock.rsi, liveStock.price || 0, gldMA20Live,
+                                              _gldSessionMins, _gldMomentum, gld5dReturn, _gldDailyRSI);
         // Pass tradeIntent type so GLD gate can bypass RSI check for credit puts
         // In bear regime, credit mode routes to credit_call (sell calls above market)
         // In choppy/bull, credit mode routes to credit_put (sell puts below market)
@@ -2132,31 +2150,27 @@ async function runScan() {
         // Bug12 FIX: was using MIN_SCORE (70) — GLD credit puts at score 65-69 were misclassified as debit_put
         // and blocked by DXY gate unnecessarily. Use MIN_SCORE_CREDIT (65) for correct classification.
         const _gldIntentType  = (_gldCreditMode && _gldBestScore >= MIN_SCORE_CREDIT) ? _gldCreditType : "debit_put";
-        const gldPutGate  = isGLDEntryAllowed("put",  dxy5d, spy5dReturn, state.vix, liveStock.rsi, liveStock.price || 0, gldMA20Live, _gldIntentType);
+        const gldPutGate  = isGLDEntryAllowed("put",  dxy5d, spy5dReturn, state.vix, liveStock.rsi, liveStock.price || 0, gldMA20Live,
+                                              _gldSessionMins, _gldMomentum, gld5dReturn, _gldDailyRSI);
         if (!gldCallGate.allowed) { callSetup.score = 0; logEvent("filter", gldCallGate.reason); }
         if (!gldPutGate.allowed)  { putSetup.score  = 0; logEvent("filter", gldPutGate.reason);  }
         // GLD min score 75 (panel decision: 80 was triple-locking with DXY + RSI gates)
         // Lowered to 75 - consistent with other instruments. Gates still require RSI >68 for puts.
-        if (callSetup.score > 0 && callSetup.score < 75) { callSetup.score = 0; logEvent("filter", `GLD call score ${callSetup.score} below 75 minimum - hedge instrument requires high conviction`); }
+        if (callSetup.score > 0 && callSetup.score < 85) { callSetup.score = 0; logEvent("filter", `GLD call score ${callSetup.score} below 85 minimum - hedge instrument requires high conviction (raised from 75 after pattern analysis)`); }
         if (putSetup.score > 0  && putSetup.score  < 75) { putSetup.score  = 0; logEvent("filter", `GLD put score ${putSetup.score} below 75 minimum`); }
 
-        // V2.97: GLD DAILY TREND GATE
-        // Trading panel finding: dailyRSI 28.4 looks bullish for a call (deeply oversold)
-        // but in practice it means GLD is in a sustained multi-day downtrend.
-        // The thesis-complete exit fires in ~55 minutes — not long enough for the daily
-        // trend to reverse. On a downtrending daily, intraday bounces fail quickly.
-        // Rule: block calls when GLD is confirmed in daily downtrend (dailyRSI < 35
-        //       AND price below 20MA). Both conditions required to avoid over-filtering.
-        const _gldDailyRsi  = parseFloat(liveStock.dailyRsi || 50);
-        const _gldBelowMA20 = gldMA20Live > 0 && (liveStock.price || price) < gldMA20Live;
+        // V2.97 NOTE: old daily trend gate removed — was blocking valid oversold entries.
+        // DailyRSI < 35 + below MA20 IS the correct GLD call setup (washed out and turning).
+        // The isGLDEntryAllowed() now handles this correctly:
+        //   - freefall gate: blocks when 5d trend < -4% (accelerating decline)
+        //   - dailyRSI gate: blocks neutral zone 32-55, allows < 32 (oversold) or >= 55 (bullish)
+        //   - momentum gate: blocks MOM:bearish (active decline)
+        // GLD put uptrend block still valid — keep:
         const _gldAboveMA20 = gldMA20Live > 0 && (liveStock.price || price) > gldMA20Live;
-        if (callSetup.score > 0 && _gldDailyRsi < 35 && _gldBelowMA20) {
-          callSetup.score = 0;
-          logEvent("filter", `GLD call blocked — dailyRSI ${_gldDailyRsi.toFixed(1)} < 35 AND price below 20MA ($${gldMA20Live.toFixed(2)}) — daily downtrend intact, intraday bounces fail quickly`);
-        }
+        const _gldDailyRsi  = _gldDailyRSI || parseFloat(liveStock.dailyRsi || 50);
         if (putSetup.score > 0 && _gldDailyRsi > 65 && _gldAboveMA20) {
           putSetup.score = 0;
-          logEvent("filter", `GLD put blocked — dailyRSI ${_gldDailyRsi.toFixed(1)} > 65 AND price above 20MA ($${gldMA20Live.toFixed(2)}) — daily uptrend intact, intraday pullbacks reverse quickly`);
+          logEvent("filter", `GLD put blocked — dailyRSI ${_gldDailyRsi.toFixed(1)} > 65 AND above 20MA — daily uptrend intact`);
         }
       }
 
