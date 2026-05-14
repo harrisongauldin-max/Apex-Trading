@@ -527,9 +527,51 @@ async function checkExits(positions, posSnapshots, posQuotes, posNewsCache, ctx)
       // RSI normalization thresholds:
       //   Calls: entryRSI <= 40 AND curRSI > 55 → bounce complete
       //   Puts:  entryRSI >= 60 AND curRSI < 45 → reversal complete
+      // ── V2.97: GLD CALL SPECIFIC EXIT LOGIC ─────────────────────────────
+      // GLD does NOT mean-revert intraday like QQQ/SPY. The thesis is daily-timeframe:
+      // dailyRSI recovery + DXY weakening playing out over days, not minutes.
+      // Standard thesis-complete (intraday RSI → 55) never fires for GLD because
+      // intraday RSI barely moves when the catalyst is macro-driven.
+      //
+      // GLD-specific exits (calls only):
+      //   EXIT A: Option gains +20% from entry (price target — take the win)
+      //   EXIT B: DailyRSI recovers to ≥ 45 (daily thesis fulfilled)
+      //   EXIT C: 5 trading days elapsed without target or stop (time backstop)
+      //   UNCHANGED: fast-stop at 20% loss (handled by stop logic below)
+      if (pos.ticker === "GLD" && pos.optionType === "call") {
+        const _gldChgPct   = (ep - pos.premium) / pos.premium; // current gain/loss %
+        const _gldDailyRSI = parseFloat(pos._curDailyRSI || pos.dailyRSI || 0) || null;
+        const _gldDaysOpen = hoursOpen / 6.5; // approximate trading days (6.5hr session)
+
+        // EXIT A: +20% gain target
+        if (_gldChgPct >= 0.20 && !pos._gldExitFired) {
+          pos._gldExitFired = true;
+          logEvent("scan", `[GLD EXIT A] ${pos.ticker} +${(_gldChgPct*100).toFixed(1)}% gain target hit — closing (daily thesis playing out)`);
+          decisions.push({ pi, ticker: pos.ticker, action: 'close', reason: 'gld-target', exitPremium: null, contractSym: pos.contractSymbol || pos.buySymbol || null });
+        }
+        // EXIT B: DailyRSI recovered to 45+ (daily MR thesis complete)
+        else if (_gldDailyRSI && _gldDailyRSI >= 45 && !pos._gldExitFired && hoursOpen >= 4) {
+          pos._gldExitFired = true;
+          logEvent("scan", `[GLD EXIT B] ${pos.ticker} dailyRSI recovered to ${_gldDailyRSI.toFixed(1)} (≥45) after ${hoursOpen.toFixed(1)}h — daily thesis fulfilled`);
+          decisions.push({ pi, ticker: pos.ticker, action: 'close', reason: 'gld-daily-rsi', exitPremium: null, contractSym: pos.contractSymbol || pos.buySymbol || null });
+        }
+        // EXIT C: 5 trading days elapsed (time backstop)
+        else if (_gldDaysOpen >= 5 && !pos._gldExitFired) {
+          pos._gldExitFired = true;
+          logEvent("scan", `[GLD EXIT C] ${pos.ticker} ${_gldDaysOpen.toFixed(1)} trading days elapsed — time backstop, closing position`);
+          decisions.push({ pi, ticker: pos.ticker, action: 'close', reason: 'gld-time-limit', exitPremium: null, contractSym: pos.contractSymbol || pos.buySymbol || null });
+        }
+        else {
+          logEvent("scan", `[GLD HOLD] ${pos.ticker} ${(_gldChgPct*100).toFixed(1)}% | dailyRSI ${_gldDailyRSI?.toFixed(1)||'?'} | ${_gldDaysOpen.toFixed(1)}d open — waiting for daily thesis`);
+        }
+        // Skip standard thesis-complete for GLD calls — handled above
+        // Fast-stop still applies (handled by stop block later in this loop)
+      }
+      // ── END GLD CALL SPECIFIC EXIT ────────────────────────────────────────
+
       const _entryRSI  = pos.entryRSI || 50;
       const _curRSI    = pos._prevRSI || _entryRSI; // _prevRSI updated every scan at line ~339
-      const _callFulfilled = pos.optionType === "call" && _entryRSI <= 45 && _curRSI > 55; // widened: 40→45 captures RSI 41-45 MR entries
+      const _callFulfilled = pos.ticker !== "GLD" && pos.optionType === "call" && _entryRSI <= 45 && _curRSI > 55; // GLD handled above
       const _putFulfilled  = pos.optionType === "put"  && _entryRSI >= 55 && _curRSI < 45; // widened: 60→55 captures RSI 55-59 MR entries
       const _thesisFulfilled = _callFulfilled || _putFulfilled;
 
