@@ -2132,13 +2132,32 @@ async function runScan() {
             / _gldBarsFor5d[_gldBarsFor5d.length-5].c
           : null;
 
-        // V2.97: New args for isGLDEntryAllowed — session age, momentum, 5d return, dailyRSI
+        // V2.98: args for isGLDEntryAllowed
         const _gldSessionMins = _sessionMinsNow;
         const _gldMomentum    = liveStock.momentum || signals.momentum || 'steady';
         const _gldDailyRSI    = parseFloat(liveStock.dailyRsi || liveStock.dailyRSI || 0) || null;
+        const _gldVolPace     = liveStock.volPaceRatio || signals.volPaceRatio || 1.0;
+        const _gldMacdNow     = (liveStock.macd || signals.macd || '').toLowerCase();
+        const _gldVWAP        = signals.intradayVWAP || 0;
+
+        // V2.98 GATE 7: Track MACD crossover timestamp
+        // When GLD MACD transitions TO bullish crossover, stamp the time.
+        // Reset if MACD is no longer bullish (crossed back bearish).
+        if (_gldMacdNow.includes('bullish') && !state._gldMacdWasBullish) {
+          state._gldMacdCrossoverAt  = Date.now();
+          state._gldMacdWasBullish   = true;
+          logEvent('filter', `[GLD MACD] Bullish crossover detected — stamping recency timer`);
+        } else if (!_gldMacdNow.includes('bullish')) {
+          state._gldMacdWasBullish   = false;
+          // Don't reset _gldMacdCrossoverAt — keep it so we can measure staleness
+        }
+        const _gldMacdCrossoverDays = state._gldMacdCrossoverAt
+          ? (Date.now() - state._gldMacdCrossoverAt) / 86400000
+          : null; // null = never tracked = no block
 
         const gldCallGate = isGLDEntryAllowed("call", dxy5d, spy5dReturn, state.vix, liveStock.rsi, liveStock.price || 0, gldMA20Live,
-                                              _gldSessionMins, _gldMomentum, gld5dReturn, _gldDailyRSI);
+                                              _gldSessionMins, _gldMomentum, gld5dReturn, _gldDailyRSI,
+                                              _gldMacdCrossoverDays, _gldVolPace, _gldVWAP, gldMA20Live);
         // Pass tradeIntent type so GLD gate can bypass RSI check for credit puts
         // In bear regime, credit mode routes to credit_call (sell calls above market)
         // In choppy/bull, credit mode routes to credit_put (sell puts below market)
@@ -2151,11 +2170,31 @@ async function runScan() {
         // and blocked by DXY gate unnecessarily. Use MIN_SCORE_CREDIT (65) for correct classification.
         const _gldIntentType  = (_gldCreditMode && _gldBestScore >= MIN_SCORE_CREDIT) ? _gldCreditType : "debit_put";
         const gldPutGate  = isGLDEntryAllowed("put",  dxy5d, spy5dReturn, state.vix, liveStock.rsi, liveStock.price || 0, gldMA20Live,
-                                              _gldSessionMins, _gldMomentum, gld5dReturn, _gldDailyRSI);
+                                              _gldSessionMins, _gldMomentum, gld5dReturn, _gldDailyRSI,
+                                              _gldMacdCrossoverDays, _gldVolPace, _gldVWAP, gldMA20Live);
         if (!gldCallGate.allowed) { callSetup.score = 0; logEvent("filter", gldCallGate.reason); }
         if (!gldPutGate.allowed)  { putSetup.score  = 0; logEvent("filter", gldPutGate.reason);  }
-        // GLD min score 75 (panel decision: 80 was triple-locking with DXY + RSI gates)
-        // Lowered to 75 - consistent with other instruments. Gates still require RSI >68 for puts.
+
+        // V2.98 GATE 2 soft: VIX > 32 = IV too expensive, penalize call score
+        if (callSetup.score > 0 && state.vix > 32) {
+          callSetup.score = Math.max(0, callSetup.score - 10);
+          callSetup.reasons.push(`VIX ${state.vix.toFixed(1)} > 32 — IV expensive, call premium inflated (-10)`);
+          logEvent('filter', `[GLD VIX-HIGH] VIX ${state.vix.toFixed(1)} > 32 — call score -10 (buying inflated premium)`);
+        }
+
+        // V2.98 GATE 8 soft: VolPace modifier — institutional buying signal
+        if (callSetup.score > 0) {
+          if (_gldVolPace < 0.7) {
+            callSetup.score = Math.max(0, callSetup.score - 10);
+            callSetup.reasons.push(`VolPace ${_gldVolPace.toFixed(1)}x < 0.7 — no institutional buying (-10)`);
+            logEvent('filter', `[GLD VOL] VolPace ${_gldVolPace.toFixed(1)}x — below 0.7, institutions not stepping in, score -10`);
+          } else if (_gldVolPace > 1.2) {
+            callSetup.score += 10;
+            callSetup.reasons.push(`VolPace ${_gldVolPace.toFixed(1)}x > 1.2 — institutional accumulation (+10)`);
+            logEvent('filter', `[GLD VOL] VolPace ${_gldVolPace.toFixed(1)}x — above 1.2, institutional buying confirmed, score +10`);
+          }
+        }
+
         if (callSetup.score > 0 && callSetup.score < 85) { callSetup.score = 0; logEvent("filter", `GLD call score ${callSetup.score} below 85 minimum - hedge instrument requires high conviction (raised from 75 after pattern analysis)`); }
         if (putSetup.score > 0  && putSetup.score  < 75) { putSetup.score  = 0; logEvent("filter", `GLD put score ${putSetup.score} below 75 minimum`); }
 
