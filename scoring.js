@@ -206,57 +206,83 @@ async function checkSectorETF(stock) {
 }
 
 function isGLDEntryAllowed(optionType, dxy, spyReturn5d, vix, gldRSI, gldPrice, gldMA20,
-                           sessionMins, momentum, gld5dReturn, gldDailyRSI) {
+                           sessionMins, momentum, gld5dReturn, gldDailyRSI,
+                           macdCrossoverDays, volPaceRatio, gldVWAP, gldMA20live) {
   if (optionType === "call") {
-    // ── V2.97: COMPLETE GLD CALL GATE REWRITE ─────────────────────────────
-    // Trading panel findings after 4 entries, net -$280:
-    //   - GLD is NOT an intraday MR instrument like QQQ/SPY
-    //   - GLD moves on macro flows (dollar, yields, risk-off) — takes hours, not minutes
-    //   - All losses entered with MOM:steady (still declining), wrong timing
-    //   - All losses were AM entries before macro flows settled
-    //   - DailyRSI 28 + MACD bullish crossover IS a real signal — but multi-day, not intraday
-    //   - The MA20 downtrend gate was blocking valid entries (price below MA20 is fine
-    //     when dailyRSI < 32 + MACD crossover — that's the washed-out-and-turning setup)
-    //
-    // 8 GATES — ALL must pass:
-    // GATE 1: DXY macro tailwind (not strengthening)
-    const dxyStrengthening = dxy && dxy.change > 0.8;
-    if (dxyStrengthening) return { allowed: false, reason: `GLD call blocked — DXY +${dxy.change.toFixed(2)}% 5d (dollar strengthening = gold headwind)` };
+    // ── V2.98: GLD CALL GATE REFINEMENTS (panel debate May 15) ────────────
+    // Historical replay: all 4 losses blocked by ≥ 2 gates each.
+    // Key changes from V2.97:
+    //   GATE 1: DXY now requires trend===strengthening AND change>0.5 (not just magnitude)
+    //   GATE 3: bifurcated — oversold path vs momentum path, each with own confirmers
+    //   GATE 4: threshold loosened to -5%, suspended when DXY weakening (macro reversal)
+    //   GATE 6: MOM:steady now BLOCKED — only MOM:recovering passes
+    //   GATE 7: MACD crossover recency (new)
+    //   VIX>32 and VolPace modifiers handled in scanner.js (score penalties, not hard blocks)
 
-    // GATE 2: VIX ≥ 20 (need uncertainty for gold catalyst)
-    const vixTooLow = vix < 20;
-    if (vixTooLow) return { allowed: false, reason: `GLD call blocked — VIX ${vix?.toFixed(1)} < 20 (need elevated uncertainty for gold)` };
+    // GATE 1: DXY macro tailwind
+    // V2.98: both trend AND magnitude must confirm strengthening.
+    // If DXY trend has reversed to neutral/weakening, the gate lifts even if
+    // 5d change is still slightly positive (lag from prior days).
+    const _dxyTrend = dxy?.trend || 'neutral';
+    const _dxyChange = dxy?.change || 0;
+    const dxyStrengthening = _dxyTrend === 'strengthening' && _dxyChange > 0.5;
+    if (dxyStrengthening) return { allowed: false, reason: `GLD call blocked — DXY trend:strengthening +${_dxyChange.toFixed(2)}% 5d (dollar headwind for gold)` };
 
-    // GATE 3: GLD daily RSI — must be genuinely oversold (< 32) OR strongly bullish (≥ 55)
-    // The 32-55 zone is NO-TRADE for GLD calls.
-    // < 32: deeply washed out, daily MR thesis valid
-    // ≥ 55: confirmed daily bullish momentum, trend call valid
-    // 32-55: neutral — no directional conviction on daily timeframe
-    const _dailyRSI = gldDailyRSI ?? gldRSI ?? 50; // prefer dailyRSI, fall back to intraday
-    const gldRSINeutralZone = _dailyRSI > 32 && _dailyRSI < 55;
-    if (gldRSINeutralZone) return { allowed: false, reason: `GLD call blocked — dailyRSI ${_dailyRSI.toFixed(1)} in no-trade zone (32-55), need < 32 oversold or ≥ 55 bullish` };
+    // GATE 2: VIX ≥ 20 (hard block only — soft VIX>32 penalty applied in scanner.js)
+    if (vix < 20) return { allowed: false, reason: `GLD call blocked — VIX ${vix?.toFixed(1)} < 20 (need macro uncertainty for gold catalyst)` };
 
-    // GATE 4: Not in freefall — GLD 5-day price change must be > -4%
-    // If GLD is down > 4% in 5 days, the downtrend is too strong to fade with a 30-min thesis
-    // Daily MR on a 43 DTE option needs 3-10 days — but not in an accelerating decline
+    // GATE 3: DailyRSI bifurcated paths
+    // OVERSOLD path (dailyRSI < 32): washed-out daily + momentum turning
+    //   Additional confirmers: MOM:recovering required (price stabilizing)
+    // MOMENTUM path (dailyRSI ≥ 55): confirmed daily bullish trend
+    //   Additional confirmers: price above VWAP + above 20MA + MACD bullish
+    // NO-TRADE zone: 32 ≤ dailyRSI < 55 — no directional conviction
+    const _dailyRSI = gldDailyRSI ?? gldRSI ?? 50;
+    const _inNoTradeZone = _dailyRSI >= 32 && _dailyRSI < 55;
+    if (_inNoTradeZone) return { allowed: false, reason: `GLD call blocked — dailyRSI ${_dailyRSI.toFixed(1)} in no-trade zone (32-55), need < 32 oversold or ≥ 55 bullish` };
+
+    if (_dailyRSI < 32) {
+      // OVERSOLD PATH — must have MOM:recovering (price beginning to lift)
+      // MOM:steady means still drifting lower — too early, the low isn't confirmed
+      if (momentum !== 'recovering') return { allowed: false, reason: `GLD call blocked — oversold path (dailyRSI ${_dailyRSI.toFixed(1)}) requires MOM:recovering, got MOM:${momentum} (wait for price to stabilize)` };
+    } else {
+      // MOMENTUM PATH (dailyRSI ≥ 55) — must have trend confirmation
+      const _aboveVWAP  = gldVWAP > 0 && gldPrice > gldVWAP;
+      const _aboveMA20  = gldMA20live > 0 && gldPrice > gldMA20live;
+      if (!_aboveVWAP)  return { allowed: false, reason: `GLD call blocked — momentum path (dailyRSI ${_dailyRSI.toFixed(1)}) requires price above VWAP (intraday trend not intact)` };
+      if (!_aboveMA20)  return { allowed: false, reason: `GLD call blocked — momentum path (dailyRSI ${_dailyRSI.toFixed(1)}) requires price above 20MA (daily trend not intact)` };
+    }
+
+    // GATE 4: Not in freefall — 5-day trend must be > -5%
+    // V2.98: threshold loosened -4% → -5% (43 DTE option can survive moderate decline)
+    // Suspended if DXY is now weakening (dollar reversal = macro catalyst present)
     if (gld5dReturn !== null && gld5dReturn !== undefined) {
-      const gldFreefalling = gld5dReturn < -0.04; // down > 4% in 5 days
-      if (gldFreefalling) return { allowed: false, reason: `GLD call blocked — 5-day price change ${(gld5dReturn*100).toFixed(1)}% < -4% (accelerating downtrend, too steep to fade)` };
+      const _freefalling   = gld5dReturn < -0.05;
+      const _dxyReversal   = _dxyTrend === 'weakening'; // macro catalyst overrides freefall
+      if (_freefalling && !_dxyReversal) return { allowed: false, reason: `GLD call blocked — 5-day return ${(gld5dReturn*100).toFixed(1)}% < -5% with no DXY reversal (accelerating decline, no catalyst)` };
+      if (_freefalling && _dxyReversal)  logEvent && logEvent('filter', `[GLD FREEFALL SUSPENDED] 5d return ${(gld5dReturn*100).toFixed(1)}% < -5% but DXY weakening — macro reversal catalyst present, gate suspended`);
     }
 
-    // GATE 5: Session age ≥ 60 minutes
-    // GLD AM entries fail because macro flows (dollar, yields) haven't settled.
-    // QQQ/SPY snap back in 25 min — GLD needs the full first hour to stabilize.
-    if (sessionMins !== null && sessionMins !== undefined) {
-      const tooEarly = sessionMins < 60;
-      if (tooEarly) return { allowed: false, reason: `GLD call blocked — session only ${sessionMins.toFixed(0)}min old (need 60min for macro flows to settle)` };
+    // GATE 5: Session age ≥ 60 minutes (unchanged — data was definitive)
+    if (sessionMins !== null && sessionMins !== undefined && sessionMins < 60) {
+      return { allowed: false, reason: `GLD call blocked — session only ${sessionMins.toFixed(0)}min old (need 60min for macro flows to settle)` };
     }
 
-    // GATE 6: Momentum not bearish
-    // MOM:bearish means GLD price is actively declining — entering a call into active decline
-    // is the single biggest mistake in all GLD losses. MOM:steady is acceptable (sideways).
-    // MOM:recovering is ideal (price starting to lift). MOM:bearish is a hard block.
-    if (momentum === 'bearish') return { allowed: false, reason: `GLD call blocked — MOM:bearish (price actively declining, wait for stabilization before call entry)` };
+    // GATE 6: Momentum = recovering ONLY
+    // V2.98 TIGHTENED: MOM:steady removed as acceptable — only recovering passes.
+    // Every single GLD loss entered with MOM:steady. That's the data.
+    // MOM:steady = price still drifting lower. MOM:recovering = price lifting from the low.
+    // Paying slightly higher entry for confirmed stabilization is worth it.
+    if (momentum !== 'recovering') return { allowed: false, reason: `GLD call blocked — MOM:${momentum} (only MOM:recovering allowed — need confirmed price stabilization before entry)` };
+
+    // GATE 7: MACD crossover recency
+    // A bullish MACD crossover more than 3 days old without a confirming rally is a stale signal.
+    // Fresh crossover (≤ 3 days): momentum genuinely turning → pass
+    // Stale crossover (> 3 days): signal failed to follow through → block
+    // No data (null): never tracked → no block (benefit of doubt on first scan)
+    if (macdCrossoverDays !== null && macdCrossoverDays !== undefined) {
+      if (macdCrossoverDays > 3) return { allowed: false, reason: `GLD call blocked — MACD bullish crossover ${macdCrossoverDays.toFixed(1)} days old (> 3d stale, no confirming rally — signal may have failed)` };
+    }
 
     // All gates passed
     return { allowed: true };
