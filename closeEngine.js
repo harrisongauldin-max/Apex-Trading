@@ -283,18 +283,17 @@ async function _doClosePosition(ticker, reason, exitPremium = null, contractSym 
           // Mark position as permissionBlocked — stop infinite retry loop and alert.
           // Manual resolution: fix paper account options permissions on Alpaca dashboard.
           if (closeResp && closeResp.code === 40310000) {
-            // V2.88 FIX: Do NOT set alpacaCloseOk=true here. Previous behavior wiped the position
-            // from APEX state but left it in Alpaca → reconciler reconstructed it as an orphan
-            // every scan → 40310000 loop repeated indefinitely.
-            // Fix: leave position in state with _permissionBlocked=true. Suppress close retries
-            // by checking this flag before attempting close. Position stays visible in dashboard
-            // until paper account options permissions are fixed on Alpaca.
+            // V2.98 FIX: 40310000 treated as timed cooldown (15min) not permanent block.
+            // Evidence: APEX opened a new option position on same account that received 40310000,
+            // proving the account CAN trade options. Error was transient (wrong order format,
+            // stale Alpaca session, or rate limit). Permanent block prevented recovery entirely.
+            // Fix: set cooldown timestamp. exitEngine clears flag after 15min and retries.
             pos._permissionBlocked = true;
             pos._permissionBlockedAt = new Date().toISOString();
-            pos._permBlockReason = "account not eligible to trade uncovered option contracts";
-            logEvent("warn", `[PERM BLOCK] ${ticker} ${closeSym} PERMANENTLY BLOCKED (40310000) — position retained in state. Fix paper account options tier on Alpaca dashboard. All further close attempts suppressed.`);
-            // alpacaCloseOk stays false — state NOT wiped, position visible until manually resolved
-            return; // exit closePosition, don't update state, don't retry
+            pos._permBlockReason = "40310000 transient reject — 15min cooldown then auto-retry";
+            logEvent("warn", `[PERM BLOCK] ${ticker} ${closeSym} blocked (40310000) — 15min cooldown, will auto-retry. If persists after retry, check Alpaca options tier.`);
+            // alpacaCloseOk stays false — state preserved, exitEngine retries after cooldown
+            return; // exit closePosition, exitEngine will retry after cooldown
           }
         }
       } catch(e) {
