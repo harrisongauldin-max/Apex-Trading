@@ -1925,8 +1925,14 @@ app.post("/api/close/:tkr", requireSecret,  async (req,res) => {
     ? state.positions.find(p => p.contractSymbol === contractId || p.buySymbol === contractId)
     : state.positions.find(p => p.ticker === t);
   if (pos) {
-    // Manual close always executes - bypasses PDT scan hold
-    // (PDT hold is scan-loop logic, manual close is user intent)
+    // Manual close always executes - bypasses PDT scan hold and permissionBlocked flag
+    // User is explicitly requesting close — clear any stale permission block first
+    if (pos._permissionBlocked) {
+      logEvent("warn", `[MANUAL CLOSE] Clearing stale _permissionBlocked on ${pos.ticker} — user-initiated close overrides`);
+      delete pos._permissionBlocked;
+      delete pos._permissionBlockedAt;
+      delete pos._permBlockReason;
+    }
     await closePosition(pos.ticker, "manual", null, pos.contractSymbol || pos.buySymbol);
     return res.json({ ok: true });
   }
