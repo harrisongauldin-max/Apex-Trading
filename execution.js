@@ -24,6 +24,7 @@ const { CAPITAL_FLOOR, MIN_OPTION_PREMIUM, MIN_OI,
         MAX_HEAT, STOP_LOSS_PCT, TAKE_PROFIT_PCT,
 }                                          = require('./constants');
 const { confirmPendingOrder } = require('./closeEngine');
+const { writeJournalEntry } = require('./state');
 const { getDTEExitParams } = require('./exitEngine');
 
 // ─── Injected dependencies ───────────────────────────────────────
@@ -638,6 +639,58 @@ async function executeTrade(stock, price, score, scoreReasons, vix, optionType =
   }
 
   await saveStateNow(); // critical - persist trade immediately
+
+  // V2.98: Write OPEN journal entry at fill time with full entry data.
+  // Previously journal was written only at CLOSE (standalone exit record)
+  // which lacked strike, expDate, entryRSI, entryDelta etc → showed $undefined.
+  // Now we write the OPEN entry here while all data is in scope.
+  writeJournalEntry({
+    id:             `${contract.symbol}_${Date.now()}`,
+    contractSymbol: contract.symbol,
+    ticker:         stock.ticker,
+    optionType,
+    strike:         contract.strike,
+    expDate:        contract.expDate || contract.exp,
+    tradeType:      'naked',
+    isMeanReversion: isMeanReversion || false,
+    openDate:       new Date().toISOString(),
+    openDateET:     new Date().toLocaleString('en-US', {timeZone:'America/New_York'}),
+    entryPrice:     contract.premium,
+    entryContracts: contracts,
+    entryCost:      finalCost,
+    entryScore:     score,
+    entryReasons:   scoreReasons || [],
+    entryRSI:       stock.rsi || stock.liveRSI || null,
+    entryDailyRSI:  stock.dailyRsi || null,
+    entryDelta:     contract.greeks?.delta || contract.delta || null,
+    entryIV:        contract.iv || null,
+    entryVIX:       vix || null,
+    entryIVR:       state._ivRank || null,
+    entryMACD:      stock.macd || null,
+    entryMomentum:  stock.momentum || null,
+    macroSignal:    (state._agentMacro || {}).signal || 'neutral',
+    regimeAtEntry:  (state._marketRegime || {}).regime || 'unknown',
+    peakPrice:      contract.premium,
+    peakPct:        0,
+    peakTime:       new Date().toISOString(),
+    minsToPeak:     0,
+    maxAdverseMove: 0,
+    _thesisFulfilled: false,
+    _thesisFailure:   false,
+    closeDate:      null,
+    closeDateET:    null,
+    exitPrice:      null,
+    exitReason:     null,
+    exitRSI:        null,
+    exitVIX:        null,
+    pnl_apex:       null,
+    pnl_alpaca:     null,
+    pnl_pct:        null,
+    hoursHeld:      null,
+    isWin:          null,
+    status:         'OPEN',
+  }).catch(e => {}); // non-blocking — position is already in state
+
   logEvent("trade",
     `BUY ${stock.ticker} $${contract.strike}${typeLabel} exp ${contract.expDate} | ${contracts}x @ $${contract.premium} | ` +
     `cost ${fmt(finalCost)} | score ${score} | delta ${contract.greeks.delta} | ${isMeanReversion ? "MEAN-REV" : exitParams.label} | [${dataLabel}] | ` +
