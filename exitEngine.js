@@ -183,11 +183,26 @@ async function checkExits(positions, posSnapshots, posQuotes, posNewsCache, ctx)
     const price = posQuotes[pi];
     if (!price) continue;
     if (pos._dryRunWouldClose) continue; // already flagged for close this scan - skip
-    // V2.88: Skip permissionBlocked positions — 40310000 error means Alpaca will always reject.
-    // These need manual fix on Alpaca dashboard (enable options tier 2+).
+    // V2.88: permissionBlocked cooldown — 40310000 was treated as permanent but can be transient.
+    // Evidence: APEX opened a new option position on the same account that got the 40310000,
+    // proving the account CAN trade options. The block may have been a momentary reject
+    // (wrong order format, stale session, Alpaca rate limit).
+    // Fix: 15-minute cooldown, then retry. If it fails again, cooldown resets.
+    // NOT permanent — position can still be closed after cooldown expires.
     if (pos._permissionBlocked) {
-      logEvent("warn", `${pos.ticker} exit skipped — permission blocked (40310000, fix Alpaca options tier). Stuck at ${pos.currentPrice || pos.premium}`);
-      continue;
+      const _blockedMins = pos._permissionBlockedAt
+        ? (Date.now() - new Date(pos._permissionBlockedAt).getTime()) / 60000
+        : 999;
+      if (_blockedMins < 15) {
+        logEvent("warn", `${pos.ticker} exit skipped — permission blocked (40310000), retrying in ${(15 - _blockedMins).toFixed(0)}min`);
+        continue;
+      }
+      // Cooldown expired — clear block and retry
+      logEvent("warn", `${pos.ticker} permission block cooldown expired (${_blockedMins.toFixed(0)}min) — clearing flag and retrying close`);
+      delete pos._permissionBlocked;
+      delete pos._permissionBlockedAt;
+      delete pos._permBlockReason;
+      // Fall through to normal exit evaluation
     }
     try { // wrap each position in try/catch - one bad position can't crash the whole scan
 
@@ -539,12 +554,23 @@ async function checkExits(positions, posSnapshots, posQuotes, posNewsCache, ctx)
       //   EXIT C: 5 trading days elapsed without target or stop (time backstop)
       //   UNCHANGED: fast-stop at 20% loss (handled by stop logic below)
       if (pos.ticker === "GLD" && pos.optionType === "call") {
-        const _gldChgPct   = (ep - pos.premium) / pos.premium; // current gain/loss %
+        // chg is already computed above (line ~316) using full curP resolution chain
+        const _gldChgPct   = chg; // use the same chg that fast-stop uses — consistent
         const _gldDailyRSI = parseFloat(pos._curDailyRSI || pos.dailyRSI || 0) || null;
         const _gldDaysOpen = hoursOpen / 6.5; // approximate trading days (6.5hr session)
 
+        // EMERGENCY STOP: if position is down > 35% and fast-stop hasn't fired
+        // (handles case where curP snapshot is stale but loss is clearly catastrophic)
+        // Uses Alpaca position data if available via pos._alpacaUnrealizedPct
+        const _alpacaLoss = pos._alpacaUnrealizedPct ? pos._alpacaUnrealizedPct : null;
+        const _emergencyStop = (_gldChgPct <= -0.35) || (_alpacaLoss && _alpacaLoss <= -0.35);
+        if (_emergencyStop && !pos._gldExitFired) {
+          pos._gldExitFired = true;
+          logEvent("warn", `[GLD EMERGENCY STOP] ${pos.ticker} down ${(_gldChgPct*100).toFixed(1)}% — fast-stop may have failed (snapshot issue), forcing close`);
+          decisions.push({ pi, ticker: pos.ticker, action: 'close', reason: 'gld-emergency-stop', exitPremium: null, contractSym: pos.contractSymbol || pos.buySymbol || null });
+        }
         // EXIT A: +20% gain target
-        if (_gldChgPct >= 0.20 && !pos._gldExitFired) {
+        else if (_gldChgPct >= 0.20 && !pos._gldExitFired) {
           pos._gldExitFired = true;
           logEvent("scan", `[GLD EXIT A] ${pos.ticker} +${(_gldChgPct*100).toFixed(1)}% gain target hit — closing (daily thesis playing out)`);
           decisions.push({ pi, ticker: pos.ticker, action: 'close', reason: 'gld-target', exitPremium: null, contractSym: pos.contractSymbol || pos.buySymbol || null });
@@ -564,7 +590,6 @@ async function checkExits(positions, posSnapshots, posQuotes, posNewsCache, ctx)
         else {
           logEvent("scan", `[GLD HOLD] ${pos.ticker} ${(_gldChgPct*100).toFixed(1)}% | dailyRSI ${_gldDailyRSI?.toFixed(1)||'?'} | ${_gldDaysOpen.toFixed(1)}d open — waiting for daily thesis`);
         }
-        // Skip standard thesis-complete for GLD calls — handled above
         // Fast-stop still applies (handled by stop block later in this loop)
       }
       // ── END GLD CALL SPECIFIC EXIT ────────────────────────────────────────
