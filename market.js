@@ -1074,8 +1074,17 @@ async function getPreMarketData(ticker) {
     const preMarket   = snap.minuteBar     ? snap.minuteBar.c     : null;
     const dailyOpen   = snap.dailyBar      ? snap.dailyBar.o      : null;
     if (!prevClose || !preMarket) return null;
-    const gapPct      = (preMarket - prevClose) / prevClose * 100;
-    return setCache('premarket:' + ticker, { prevClose, preMarket, gapPct: parseFloat(gapPct.toFixed(2)) });
+    // V2.98 FIX: Use dailyBar.o (today's official open) as the gap reference after market open.
+    // Before: used minuteBar.c (live intraday price) which drifts every scan.
+    // Problem: QQQ gaps +2% at open, sells off to +0.1% by 9:24 AM.
+    //          minuteBar.c shows 0.1% → gate reads 0.1% → gate does NOT fire.
+    //          But the gap was real — it distorted RSI at open and that distortion persists.
+    // Fix: dailyBar.o is the official 9:30 AM opening price. Immutable after open.
+    //      If dailyBar.o unavailable (pre-market), fall back to minuteBar.c.
+    // This ensures the gap gate stays active all day on a gap-up day regardless of pullbacks.
+    const gapRef  = dailyOpen || preMarket; // prefer open price; fall back to current PM price
+    const gapPct  = (gapRef - prevClose) / prevClose * 100;
+    return setCache('premarket:' + ticker, { prevClose, preMarket, dailyOpen, gapPct: parseFloat(gapPct.toFixed(2)) });
   } catch(e) { return null; }
 }
 
