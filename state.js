@@ -49,6 +49,7 @@ function defaultState() {
     _gapReversalDay:    false,  // true when TODAY's pre-market gap > 2%: stricter RSI + VWAP required
     _todayMaxGap:       0,      // largest |pre-market gap %| seen today across all watchlist instruments
     _todayGapDirection: null,   // 'up' | 'down' | null — direction of today's largest gap
+    _dailyThesisComplete: {},   // V2.98 Gate A: {ticker: {entryRSI, closedAt}} — tracks thesis-complete exits per day
     _gldMacdCrossoverAt: null,  // Unix ms when GLD MACD last transitioned to bullish crossover
     _agentRescoreHour:   {}, // tracks last rescore hour per ticker (overnight)
     _agentRescoreMinute: {}, // tracks last rescore time per ticker (same-day)
