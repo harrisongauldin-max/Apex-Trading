@@ -1035,6 +1035,18 @@ cron.schedule("15 19,20 * * 1-5", async () => {
     const _thesisFailed = pos._thesisFailure;
     const _stuckLoser   = hoursOpen > 4 && chg < -0.05 && peakChg < 0.10;
 
+    // V2.98 Tier 3: exempt swing positions from EOD sweep unless below emergency stop threshold.
+    // A Tier 3 position that is down 10% after one afternoon is not a thesis failure —
+    // it needs time. Only sweep Tier 3 positions that breach the 25% emergency stop.
+    if (pos.isTier3) {
+      const _t3EmergencyBreached = chg <= -0.25;
+      if (!_t3EmergencyBreached) {
+        logEvent("scan", `[OVERNIGHT CUT] Tier 3 position ${pos.ticker} exempt from EOD sweep (chg:${(chg*100).toFixed(0)}% — above -25% emergency threshold). Holding overnight.`);
+        continue;
+      }
+      logEvent("scan", `[OVERNIGHT CUT] Tier 3 position ${pos.ticker} breached -25% emergency stop — closing despite swing classification`);
+    }
+
     if (_thesisFailed || _stuckLoser) {
       const reason = _thesisFailed ? "thesis-failure-eod" : "stuck-loser-eod";
       logEvent("scan",
