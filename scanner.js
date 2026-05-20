@@ -155,7 +155,14 @@ async function runScan() {
     state._intradayOversoldScans = {}; // Reset bounce counters — new session
     state._sessionLowRSI         = {}; // Reset session low RSI — new session
     state._sessionLowRSIAt       = {}; // Reset timestamps
-    logEvent("scan", `[DAILY RESET] New trading day ${todayScanDate} — circuit reset, P&L zeroed (was $${_prevDayPnL.toFixed(0)})`);
+    // V2.98 FIX (Bug 3): Reset gap state at start of each new trading day.
+    // _gapReversalDay, _todayMaxGap, _todayGapDirection are intraday state.
+    // Without reset, yesterday's gap-up day could suppress calls on a flat open day.
+    state._gapReversalDay   = false;
+    state._todayMaxGap      = 0;
+    state._todayGapDirection = null;
+    state._dailyThesisComplete = {}; // V2.98 Gate A: clear same-day thesis exhaustion records
+    logEvent("scan", `[DAILY RESET] New trading day ${todayScanDate} — circuit reset, P&L zeroed (was $${_prevDayPnL.toFixed(0)}), gap + thesis state cleared`);
     markDirty();
   }
 
@@ -1474,6 +1481,26 @@ async function runScan() {
   }
   // ── END REGIME RULEBOOK ───────────────────────────────────────────────────
 
+  // ── GATE C: PM CALL GATE ON GAP-UP DAYS (V2.98) ──────────────────────────
+  // Panel finding (May 19, 2026): On gap-up catalyst days, RSI oversold reads
+  // after 1 PM are NOT mean-reversion signals — they are PM fades after a
+  // completed morning squeeze. The morning catalyst is exhausted. RSI 30 at
+  // 1:57 PM after a 2%+ gap-up day is directional distribution, not a bounce.
+  // Gate: after 1 PM on any day where _todayMaxGap >= 2%, require RSI < 28
+  // for new call entries (vs normal 38). Tighter bar prevents PM re-entry
+  // into exhausted setups. 28 = genuine capitulation only, not AM-equivalent dip.
+  const _etHourForGateC   = etHourNow; // already computed above
+  const _isPMWindow       = _etHourForGateC >= 13.0; // 1:00 PM ET or later
+  const _isGapUpDay       = Math.abs(state._todayMaxGap || 0) >= 2.0 &&
+                            (state._todayGapDirection || 'up') === 'up';
+  const _gateCActive      = _isPMWindow && _isGapUpDay;
+  const GATE_C_RSI_FLOOR  = 28; // tighter than normal VIX regime 38
+
+  if (_gateCActive) {
+    logEvent("filter", `[GATE-C] PM gap-up day — calls require RSI < ${GATE_C_RSI_FLOOR} after 1PM (session high gap: +${(state._todayMaxGap||0).toFixed(1)}%)`);
+  }
+  // ── END GATE C ────────────────────────────────────────────────────────────
+
   // ── FIX 1: SAME-SESSION ENTRY STAGGER (V2.96) ───────────────────────────
   // Problem: 3 positions opened in 6 minutes on May 12 → -$555 when market reversed.
   // Rule 1: No entries in the first 30 minutes of the session.
@@ -1849,7 +1876,7 @@ async function runScan() {
     const _priceAboveVWAP = vwap > 0 && price > vwap;
     const _priceBelowVWAP = vwap > 0 && price < vwap;
 
-    // Update today's max gap tracker (used by stagger gate below)
+    // Update today's max gap tracker (used by stagger gate and gate enforcement below)
     if (_absGap > Math.abs(state._todayMaxGap || 0)) {
       state._todayMaxGap       = _gapPctForGate;
       state._todayGapDirection = _gapPctForGate > 0 ? 'up' : 'down';
@@ -1860,6 +1887,20 @@ async function runScan() {
       }
     }
 
+    // V2.98 FIX (Bug 2): Use the MAX of live gap and today's recorded max for gate enforcement.
+    // Scenario: QQQ gaps +2.1% at open (recorded in _todayMaxGap = 2.1).
+    //           By 9:24 AM, price pulls back — live gapPct reads +0.1%.
+    //           Without this fix: gate uses 0.1% → below threshold → gate silent.
+    //           With this fix: gate uses max(0.1, 2.1) = 2.1% → threshold exceeded → gate fires.
+    // Direction: preserve the direction of the max gap, not the live reading.
+    const _todayMaxGapAbs  = Math.abs(state._todayMaxGap || 0);
+    const _todayMaxGapDir  = state._todayGapDirection || 'up';
+    const _effectiveGapAbs = Math.max(_absGap, _todayMaxGapAbs);
+    // If effective gap comes from _todayMaxGap (not live), reconstruct signed value
+    const _effectiveGapPct = _effectiveGapAbs > _absGap
+      ? (_todayMaxGapDir === 'up' ? _effectiveGapAbs : -_effectiveGapAbs)
+      : _gapPctForGate;
+
     // Per-stock gap gate flags — computed here, assigned to liveStock AFTER it's declared below
     // Using temp variables because liveStock doesn't exist yet at this point in the loop.
     let _tmpGapCallBlocked  = false;
@@ -1868,26 +1909,28 @@ async function runScan() {
     let _tmpGapPutBoost     = 0;
     let _tmpGapCallStrictRSI = false;
 
-    if (_gapPctForGate >= 2.0) {
-      // Gap-UP day
+    if (_effectiveGapPct >= 2.0) {
+      // Gap-UP day — use effective gap (max of live and today's recorded max)
+      const _gapSource = _effectiveGapAbs > _absGap ? `session-high ${_effectiveGapAbs.toFixed(1)}%` : `live ${_gapPctForGate.toFixed(1)}%`;
       if (_priceAboveVWAP) {
         _tmpGapCallBlocked = true;
-        logEvent("filter", `[GAP-VWAP] ${stock.ticker} gap-up ${_gapPctForGate.toFixed(1)}% + price $${price.toFixed(2)} > VWAP $${vwap.toFixed(2)} — calls BLOCKED (gap not digested)`);
+        logEvent("filter", `[GAP-VWAP] ${stock.ticker} gap-up (${_gapSource}) + price $${price.toFixed(2)} > VWAP $${vwap.toFixed(2)} — calls BLOCKED (gap not digested)`);
       } else {
         _tmpGapCallStrictRSI = true;
-        logEvent("filter", `[GAP-VWAP] ${stock.ticker} gap-up ${_gapPctForGate.toFixed(1)}% but below VWAP — calls need RSI < 37 (strict gap mode)`);
+        logEvent("filter", `[GAP-VWAP] ${stock.ticker} gap-up (${_gapSource}) but below VWAP — calls need RSI < 37 (strict gap mode)`);
       }
       _tmpGapPutBoost = 10;
-      logEvent("filter", `[GAP-PUT-BOOST] ${stock.ticker} gap-up ${_gapPctForGate.toFixed(1)}% — put score +10 (gap fade)`);
+      logEvent("filter", `[GAP-PUT-BOOST] ${stock.ticker} gap-up (${_gapSource}) — put score +10 (gap fade)`);
 
-    } else if (_gapPctForGate <= -2.0) {
+    } else if (_effectiveGapPct <= -2.0) {
       // Gap-DOWN day (symmetric)
+      const _gapSource = _effectiveGapAbs > _absGap ? `session-low ${_effectiveGapAbs.toFixed(1)}%` : `live ${_gapPctForGate.toFixed(1)}%`;
       if (_priceBelowVWAP) {
         _tmpGapPutBlocked = true;
-        logEvent("filter", `[GAP-VWAP] ${stock.ticker} gap-down ${_gapPctForGate.toFixed(1)}% + price < VWAP — puts BLOCKED (gap not digested)`);
+        logEvent("filter", `[GAP-VWAP] ${stock.ticker} gap-down (${_gapSource}) + price < VWAP — puts BLOCKED (gap not digested)`);
       }
       _tmpGapCallBoost = 10;
-      logEvent("filter", `[GAP-CALL-BOOST] ${stock.ticker} gap-down ${_gapPctForGate.toFixed(1)}% — call score +10 (genuine oversold)`);
+      logEvent("filter", `[GAP-CALL-BOOST] ${stock.ticker} gap-down (${_gapSource}) — call score +10 (genuine oversold)`);
     }
     // ── END GAP-DAY DIRECTIONAL GATE (flags assigned to liveStock below after declaration) ──
 
@@ -2618,6 +2661,43 @@ async function runScan() {
       callSetup.reasons.push('Gap-day VWAP block: price above VWAP on gap-up day');
     }
 
+    // ── GATE A: SAME-DAY THESIS RE-ENTRY BLOCK (V2.98) ──────────────────────
+    // Panel finding (May 19): APEX re-entered QQQ at 1:57 PM with RSI 30.6,
+    // only 1.1pts below the entry RSI of the thesis-complete that closed at 12:52 PM.
+    // The thesis was already extracted — the afternoon dip was PM distribution not bounce.
+    // Gate: if ticker had a thesis-complete close today, block call re-entry unless
+    // RSI has dropped at least 15pts below the closed position's entry RSI.
+    // Resets at daily reset. Only applies to same optionType (call→call).
+    const _gateARecord = (state._dailyThesisComplete || {})[stock.ticker];
+    if (_gateARecord && _gateARecord.optionType === 'call' && callSetup.score > 0) {
+      const _gateARSIFloor  = (_gateARecord.entryRSI || 50) - 15;
+      const _gateARSICurrent = liveStock.rsi || signals.rsi || 50;
+      if (_gateARSICurrent > _gateARSIFloor) {
+        callSetup.score = 0;
+        callSetup.reasons.push(`Gate A: thesis-complete closed today (entry RSI ${(_gateARecord.entryRSI||50).toFixed(0)}) — need RSI < ${_gateARSIFloor.toFixed(0)}, currently ${_gateARSICurrent.toFixed(0)}`);
+        logEvent("filter", `[GATE-A] ${stock.ticker} call blocked — thesis extracted today at RSI ${(_gateARecord.entryRSI||50).toFixed(0)}, need RSI < ${_gateARSIFloor.toFixed(0)} (currently ${_gateARSICurrent.toFixed(0)})`);
+      } else {
+        logEvent("filter", `[GATE-A] ${stock.ticker} call PERMITTED — RSI ${_gateARSICurrent.toFixed(0)} < ${_gateARSIFloor.toFixed(0)} (new thesis level after thesis-complete close)`);
+      }
+    }
+    // ── END GATE A ────────────────────────────────────────────────────────
+
+    // ── GATE C ENFORCEMENT (V2.98) ─────────────────────────────────────────
+    // PM call gate on gap-up days — requires RSI < 28 after 1PM when session gap >= 2%
+    // Applied AFTER gap-day VWAP block so it only fires if price is below VWAP
+    // (above VWAP already blocked by gap gate above)
+    if (_gateCActive && callSetup.score > 0) {
+      const _gateCRSI = liveStock.rsi || signals.rsi || 50;
+      if (_gateCRSI >= GATE_C_RSI_FLOOR) {
+        callSetup.score = 0;
+        callSetup.reasons.push(`Gate C: PM gap-up day RSI ${_gateCRSI.toFixed(0)} >= ${GATE_C_RSI_FLOOR} — need RSI < ${GATE_C_RSI_FLOOR} after 1PM on gap days`);
+        logEvent("filter", `[GATE-C] ${stock.ticker} call blocked — PM gap-up day, RSI ${_gateCRSI.toFixed(0)} (need < ${GATE_C_RSI_FLOOR})`);
+      } else {
+        logEvent("filter", `[GATE-C] ${stock.ticker} call PERMITTED — RSI ${_gateCRSI.toFixed(0)} < ${GATE_C_RSI_FLOOR} (genuine PM capitulation on gap day)`);
+      }
+    }
+    // ── END GATE C ENFORCEMENT ────────────────────────────────────────────
+
     // ── FIX 3b: GAP-REVERSAL DAY GATE ────────────────────────────────────
     // Day after a 3%+ SPY move: require RSI < 35 AND price < VWAP for call entries.
     // Standard RSI threshold is 45 — this tightens to 35 on hangover days.
@@ -2659,8 +2739,8 @@ async function runScan() {
       const _strictRSI = liveStock.rsi || signals.rsi || 50;
       if (_strictRSI >= 37) {
         callSetup.score = 0;
-        callSetup.reasons.push(`Gap-up strict RSI: RSI ${_strictRSI.toFixed(0)} >= 35 (need < 37 when gap-up + below VWAP)`);
-        logEvent("filter", `[GAP-STRICT-RSI] ${stock.ticker} call blocked — gap-up day, below VWAP but RSI ${_strictRSI.toFixed(0)} >= 35 (need RSI < 37)`);
+        callSetup.reasons.push(`Gap-up strict RSI: RSI ${_strictRSI.toFixed(0)} >= 37 (need RSI < 37 when gap-up + below VWAP)`);
+        logEvent("filter", `[GAP-STRICT-RSI] ${stock.ticker} call blocked — gap-up day, below VWAP but RSI ${_strictRSI.toFixed(0)} >= 37 (need RSI < 37)`);
       }
     }
     // ── END GAP BOOST APPLICATION ─────────────────────────────────────────
