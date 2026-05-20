@@ -598,6 +598,55 @@ async function checkExits(positions, posSnapshots, posQuotes, posNewsCache, ctx)
       const _curRSI    = pos._prevRSI || _entryRSI; // _prevRSI updated every scan at line ~339
       const _callFulfilled = pos.ticker !== "GLD" && pos.optionType === "call" && _entryRSI <= 45 && _curRSI > 55; // GLD handled above
       const _putFulfilled  = pos.optionType === "put"  && _entryRSI >= 55 && _curRSI < 45; // widened: 60→55 captures RSI 55-59 MR entries
+      // ── TIER 3 EXIT FRAMEWORK (V2.98) ──────────────────────────────────────
+      // Positions with DTE > 45 at entry (isTier3=true) are swing instruments.
+      // Standard intraday thesis-complete and fast-stop logic does not apply.
+      // Tier 3 uses: dailyRSI normalization, wider stop (25%), 24h minimum hold.
+      // With DTE cap of 45 in findContract, new Tier 3 entries are blocked.
+      // This framework handles any existing or edge-case Tier 3 positions.
+      if (pos.isTier3) {
+        const _t3DTE      = pos.expDays || Math.round((new Date(pos.expDate || Date.now()) - new Date()) / 86400000);
+        const _t3HrsOpen  = hoursOpen;
+        const _t3Chg      = chg;
+        const _t3DailyRSI = pos.dailyRsi || pos.entryDailyRSI || 50;
+        const _t3FastStop = -0.25; // 25% stop for Tier 3 (vs 15-20% Tier 2)
+        const _t3MinHold  = 24;    // 24h minimum before any non-emergency exit
+        const _t3DailyRSITarget = 55; // dailyRSI normalization target for Tier 3 exits
+
+        // Emergency stop only before 24h hold — deeper threshold than Tier 2
+        if (_t3Chg <= _t3FastStop) {
+          logEvent("scan", `${pos.ticker} [TIER3] emergency stop ${(_t3Chg*100).toFixed(0)}% <= ${(_t3FastStop*100).toFixed(0)}% — closing`);
+          decisions.push({ pi, ticker: pos.ticker, action: 'close', reason: 'tier3-emergency-stop', exitPremium: null, contractSym: pos.contractSymbol || pos.buySymbol || null });
+          continue;
+        }
+
+        // Before 24h minimum — hold unless emergency stop
+        if (_t3HrsOpen < _t3MinHold) {
+          logEvent("scan", `${pos.ticker} [TIER3] holding — ${_t3HrsOpen.toFixed(1)}h open (min ${_t3MinHold}h), chg ${(_t3Chg*100).toFixed(0)}%`);
+          continue;
+        }
+
+        // After 24h: exit when dailyRSI normalizes to 55+ (swing thesis complete)
+        if (_t3DailyRSI >= _t3DailyRSITarget && _t3Chg > 0) {
+          logEvent("scan", `${pos.ticker} [TIER3] swing thesis complete — dailyRSI ${_t3DailyRSI.toFixed(0)} >= ${_t3DailyRSITarget}, chg +${(_t3Chg*100).toFixed(0)}%`);
+          decisions.push({ pi, ticker: pos.ticker, action: 'close', reason: 'tier3-thesis-complete', exitPremium: null, contractSym: pos.contractSymbol || pos.buySymbol || null });
+          continue;
+        }
+
+        // After 24h: exit if position is a stuck loser (down > 15% with no recovery)
+        const _t3Peak = pos.premium > 0 ? (pos.peakPremium - pos.premium) / pos.premium : 0;
+        if (_t3Chg < -0.15 && _t3Peak < 0.05) {
+          logEvent("scan", `${pos.ticker} [TIER3] stuck loser after ${_t3HrsOpen.toFixed(0)}h — closing`);
+          decisions.push({ pi, ticker: pos.ticker, action: 'close', reason: 'tier3-stuck-loser', exitPremium: null, contractSym: pos.contractSymbol || pos.buySymbol || null });
+          continue;
+        }
+
+        // Otherwise hold — swing position needs time
+        logEvent("scan", `${pos.ticker} [TIER3] holding swing position — dailyRSI ${_t3DailyRSI.toFixed(0)} (target ${_t3DailyRSITarget}), chg ${(_t3Chg*100).toFixed(0)}%`);
+        continue;
+      }
+      // ── END TIER 3 EXIT FRAMEWORK ───────────────────────────────────────
+
       const _thesisFulfilled = _callFulfilled || _putFulfilled;
 
       // ── THESIS COMPLETION AUTO-EXIT (V2.95) ──────────────────────────────
@@ -634,6 +683,16 @@ async function checkExits(positions, posSnapshots, posQuotes, posNewsCache, ctx)
           pos._thesisAutoClose = true;
           logEvent("scan", `[THESIS COMPLETE] ${pos.ticker} RSI normalized (${_entryRSI}→${_curRSI.toFixed(0)}) | gain: +${(chg*100).toFixed(1)}% — closing position`);
           decisions.push({ pi, ticker: pos.ticker, action: 'close', reason: 'thesis-complete', exitPremium: null, contractSym: pos.contractSymbol || pos.buySymbol || null });
+          // V2.98 Gate A: record thesis-complete exit for same-day re-entry block
+          // Stores entryRSI so scanner can require RSI 15pts deeper before re-entry
+          if (!state._dailyThesisComplete) state._dailyThesisComplete = {};
+          state._dailyThesisComplete[pos.ticker] = {
+            entryRSI:  pos.entryRSI || 50,
+            closedAt:  new Date().toISOString(),
+            optionType: pos.optionType,
+          };
+          markDirty();
+          logEvent("scan", `[GATE-A] ${pos.ticker} thesis-complete recorded — re-entry requires RSI < ${((pos.entryRSI||50) - 15).toFixed(0)} (entry was ${(pos.entryRSI||50).toFixed(0)})`);
           continue;
 
         } else if (chg > -0.05) {
