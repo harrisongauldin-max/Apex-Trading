@@ -153,6 +153,18 @@ async function findContract(ticker, optionType, targetDelta, targetDTE, vix, sto
       const strike = parseFloat(c.strike_price);
       const expDTE = Math.round((new Date(c.expiration_date) - today) / 86400000);
       const otm    = Math.abs((targetStrike - strike) / targetStrike * 100);
+      // V2.98: Hard DTE cap at 45 days. Contracts above this threshold are swing
+      // instruments with different theta/vega profile. APEX's entry/exit logic is
+      // calibrated for 21-45 DTE intraday-to-2day holds. A 58 DTE entry managed
+      // with intraday thesis-complete exits misuses the instrument. Until a full
+      // Tier 3 swing framework is built, reject contracts > 45 DTE at entry.
+      // The selector will continue iterating and either find a shorter-dated
+      // contract or return null (skip instrument) — preventing accidental swing entries.
+      const DTE_ENTRY_CAP = 45;
+      if (expDTE > DTE_ENTRY_CAP) {
+        logEvent("filter", `${ticker} findContract: skipping $${strike} ${expDTE}DTE — exceeds ${DTE_ENTRY_CAP}DTE entry cap (Tier 3 framework not yet implemented)`);
+        continue;
+      }
       logEvent("filter", `${ticker} findContract: ${optionType} $${strike} | ${expDTE}DTE | delta${delta.toFixed(3)} | $${mid.toFixed(2)} | target delta${targetDelta} strike $${targetStrike}`);
       return {
         symbol:  c.symbol,
@@ -547,6 +559,7 @@ async function executeTrade(stock, price, score, scoreReasons, vix, optionType =
     fastStopPct:    exitParams.fastStopPct,
     dteLabel:       exitParams.label,
     isMeanReversion: isMeanReversion,
+    isTier3:        (contract.expDays || contract.dte || 0) > 45, // V2.98: swing position flag
     entryVIX:       vix,
     partialClosed:  false,
     openDate:       new Date().toISOString(),
