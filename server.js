@@ -1011,61 +1011,44 @@ cron.schedule("30 13-21 * * 1-5", async () => {
   await saveDailyLogToRedis(false); // isEOD=false — retains buffer
 });
 
-// SPRINT-06: 3:15pm ET overnight cut gate
-// Evaluates open positions 15 minutes before close and exits any position where:
-//   - Thesis has failed (_thesisFailure flag) OR
-//   - Position has been open > 4 hours AND is down > 5% with no recovery
-// Intent: prevent holding underwater positions overnight into FOMC, earnings, etc.
-// Toggle: set state._overnightCutDisabled = true via dashboard to skip for a session.
+// V2.99 PURE INTRADAY: 3:15pm ET hard close — ALL positions close every session.
+// APEX is a pure intraday mean reversion system. No overnight holds. No exceptions.
+// Rationale: mean reversion thesis has intraday half-life. RSI dislocation signals
+// resolve within hours — holding overnight is directional exposure with no edge.
+// The -$150 loss on SPY $770 (May 21) vs +$70 thesis-complete intraday confirms this.
+// All positions close at 3:15 PM regardless of P&L, DTE, or thesis state.
+// Toggle: state._overnightCutDisabled still respected for emergency manual override.
 cron.schedule("15 19,20 * * 1-5", async () => {
   const et = getETTime();
   if (!(et.getHours() === 15 && et.getMinutes() === 15)) return;
   if (state._overnightCutDisabled) {
-    logEvent("scan", "[OVERNIGHT CUT] Disabled for this session — skipping 3:15pm evaluation");
+    logEvent("scan", "[EOD CLOSE] Disabled for this session — skipping 3:15pm hard close");
     return;
   }
   const positions = state.positions || [];
   if (positions.length === 0) return;
-  logEvent("scan", `[OVERNIGHT CUT] 3:15pm evaluation — ${positions.length} open position(s)`);
+  logEvent("scan", `[EOD CLOSE] 3:15pm — closing ALL ${positions.length} position(s). Pure intraday: no overnight holds.`);
 
   for (const pos of [...positions]) {
-    const hoursOpen     = (Date.now() - new Date(pos.openDate || Date.now()).getTime()) / 3600000;
-    const chg           = pos.premium > 0 ? (pos.currentPrice - pos.premium) / pos.premium : 0;
-    const peakChg       = pos.premium > 0 ? (pos.peakPremium - pos.premium) / pos.premium : 0;
-    const _thesisFailed = pos._thesisFailure;
-    const _stuckLoser   = hoursOpen > 4 && chg < -0.05 && peakChg < 0.10;
-
-    // V2.98 Tier 3: exempt swing positions from EOD sweep unless below emergency stop threshold.
-    // A Tier 3 position that is down 10% after one afternoon is not a thesis failure —
-    // it needs time. Only sweep Tier 3 positions that breach the 25% emergency stop.
-    if (pos.isTier3) {
-      const _t3EmergencyBreached = chg <= -0.25;
-      if (!_t3EmergencyBreached) {
-        logEvent("scan", `[OVERNIGHT CUT] Tier 3 position ${pos.ticker} exempt from EOD sweep (chg:${(chg*100).toFixed(0)}% — above -25% emergency threshold). Holding overnight.`);
-        continue;
-      }
-      logEvent("scan", `[OVERNIGHT CUT] Tier 3 position ${pos.ticker} breached -25% emergency stop — closing despite swing classification`);
+    // Strict currentPrice validity: must be a positive number, not null/undefined/zero.
+    // Fallback to premium (chg=0) when price is stale or missing — treated as flat.
+    // chg > 0 (strict): flat and unknown positions get eod-close, not eod-profit-close.
+    // This prevents a position with missing price data showing as a false profit close.
+    const _curPrice = (pos.currentPrice != null && !isNaN(pos.currentPrice) && pos.currentPrice > 0)
+      ? pos.currentPrice : pos.premium;
+    const chg    = pos.premium > 0 ? (_curPrice - pos.premium) / pos.premium : 0;
+    const reason = chg > 0 ? "eod-profit-close" : "eod-close"; // strict: flat = eod-close
+    logEvent("scan",
+      `[EOD CLOSE] Closing ${pos.ticker} — reason:${reason} chg:${(chg*100).toFixed(0)}% ` +
+      `premium:$${pos.premium} current:$${_curPrice.toFixed(2)}`
+    );
+    try {
+      await closePosition(pos.ticker, reason, null, pos.contractSymbol || pos.buySymbol);
+    } catch(e) {
+      logEvent("error", `[EOD CLOSE] Failed to close ${pos.ticker}: ${e.message}`);
     }
-
-    if (_thesisFailed || _stuckLoser) {
-      const reason = _thesisFailed ? "thesis-failure-eod" : "stuck-loser-eod";
-      logEvent("scan",
-        `[OVERNIGHT CUT] Closing ${pos.ticker} before overnight — ` +
-        `reason:${reason} chg:${(chg*100).toFixed(0)}% hoursOpen:${hoursOpen.toFixed(1)}h`
-      );
-      try {
-        await closePosition(pos.ticker, reason, null, pos.contractSymbol || pos.buySymbol);
-      } catch(e) {
-        logEvent("error", `[OVERNIGHT CUT] Failed to close ${pos.ticker}: ${e.message}`);
-      }
-      // Small delay between closes to avoid rate limiting
-      await new Promise(r => setTimeout(r, 1000));
-    } else {
-      logEvent("scan",
-        `[OVERNIGHT CUT] Holding ${pos.ticker} overnight — ` +
-        `chg:${(chg*100).toFixed(0)}% peak:${(peakChg*100).toFixed(0)}% hours:${hoursOpen.toFixed(1)}h`
-      );
-    }
+    // Small delay between closes to avoid rate limiting
+    await new Promise(r => setTimeout(r, 1000));
   }
 });
 
@@ -2095,12 +2078,33 @@ app.post("/api/reset-circuit", requireSecret, async (req, res) => {
 // GET /api/journal?from=YYYY-MM-DD&to=YYYY-MM-DD — date range
 // GET /api/journal/summary               — aggregated P&L stats
 // GET /api/journal/today                 — today's journal
+// V2.99 FIX: Normalize journal entry timestamps before sending to frontend.
+// openDate is stored as UTC ISO string (e.g. 2026-05-21T14:09:32Z).
+// Frontend renders this in browser local time — causes +1/-1 hour offset.
+// Fix: recompute openDateET from openDate server-side so frontend always gets
+// a pre-formatted ET string regardless of browser timezone.
+function normalizeJournalTimestamps(entries) {
+  return entries.map(e => {
+    if (!e.openDate) return e;
+    try {
+      const d = new Date(e.openDate);
+      const etStr = d.toLocaleString('en-US', {
+        timeZone: 'America/New_York',
+        year: 'numeric', month: 'numeric', day: 'numeric',
+        hour: 'numeric', minute: '2-digit', second: '2-digit',
+        hour12: true
+      });
+      return { ...e, openDateET: etStr };
+    } catch(_) { return e; }
+  });
+}
+
 app.get("/api/journal/today", async (req, res) => {
   try {
     const dateStr = new Date().toLocaleString('en-US', {timeZone:'America/New_York'}).split(',')[0].split('/').map((v,i) => i<2 ? v.padStart(2,'0') : v).reverse().join('-');
     const etDate  = new Date().toLocaleDateString('en-US', {timeZone:'America/New_York', year:'numeric', month:'2-digit', day:'2-digit'}).split('/');
     const today   = `${etDate[2]}-${etDate[0]}-${etDate[1]}`;
-    const entries = await loadJournalDay(today);
+    const entries = normalizeJournalTimestamps(await loadJournalDay(today));
     res.json({ date: today, count: entries.length, entries });
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
@@ -2119,7 +2123,7 @@ app.get("/api/journal", async (req, res) => {
     // Default: today
     const today = new Date().toLocaleDateString('en-US', {timeZone:'America/New_York', year:'numeric', month:'2-digit', day:'2-digit'}).split('/');
     const todayStr = `${today[2]}-${today[0]}-${today[1]}`;
-    const entries  = await loadJournalDay(todayStr);
+    const entries  = normalizeJournalTimestamps(await loadJournalDay(todayStr));
     res.json({ date: todayStr, count: entries.length, entries });
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
