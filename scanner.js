@@ -755,6 +755,8 @@ async function runScan() {
 
   // Individual stock positions disabled - SPY/QQQ only
 
+  let _liveDailyRsiMap = {};
+
   // 1. Exit checks for open positions
   // Pre-compute ctx values for exitEngine
   const alpacaBalance = state.alpacaCash || state.cash || 0;
