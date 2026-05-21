@@ -619,6 +619,17 @@ async function partialClose(ticker) {
   const pos = state.positions.find(p => p.ticker === ticker);
   if (!pos || pos.partialClosed) return;
 
+  // V2.98 FIX: Guard against partial close executing when full close is in-flight.
+  // Race condition: profit-lock-partial and thesis-complete both queue in same scan.
+  // If closePosition already submitted for this position, Alpaca infers sell_to_open
+  // (no existing position) → 42210000 intent mismatch error.
+  // _closingInFlight is set true by closePosition before order submission and cleared
+  // on completion. If it's true here, the position is mid-close — skip partial.
+  if (pos._closingInFlight) {
+    logEvent("partial", `${ticker} partial close skipped — full close in-flight (_closingInFlight=true)`);
+    return;
+  }
+
   // 1-contract positions can't be split - full close
   if ((pos.contracts || 1) === 1) {
     logEvent("partial", `${ticker} 1-contract - escalating to full close`);
