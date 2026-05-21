@@ -246,14 +246,44 @@ async function runReconciliation() {
               _log("info", `[SPRINT-02] ${pos.ticker} dashboard-close P&L resolved from Alpaca fill: $${_ghostPnl}`);
             // V2.94 JOURNAL: Update pnl_alpaca on the journal entry with the real fill proceeds
             const _ghostProceeds = parseFloat((parseFloat(sellFill.price || 0) * 100 * (pos.contracts || 1)).toFixed(2));
-            updateJournalExit(sym, {
+            // V2.99 FIX Bug 2: If updateJournalExit can't find the OPEN entry
+            // (e.g. date boundary, missing contractSymbol, stale key), write a
+            // standalone CLOSED entry so the trade is never lost from the journal.
+            const _ghostExitFields = {
               actualFillProceeds: _ghostProceeds,
               pnl_alpaca:         parseFloat((_ghostProceeds - (pos.premium * 100 * (pos.contracts || 1))).toFixed(2)),
               exitPrice:          _ghostEp,
               exitReason:         'reconcile-removed',
               closeDate:          new Date().toISOString(),
+              closeDateET:        new Date().toLocaleString('en-US', {timeZone:'America/New_York'}),
               isWin:              _ghostPnl > 0,
               status:             'CLOSED',
+            };
+            updateJournalExit(sym, _ghostExitFields).then(found => {
+              if (!found) {
+                // OPEN entry not found — write standalone closed record
+                _log('warn', `[JOURNAL] reconciler could not find OPEN entry for ${pos.ticker} (${sym}) — writing standalone exit`);
+                writeJournalEntry({
+                  id:             `${sym}_reconcile_${Date.now()}`,
+                  contractSymbol: sym,
+                  ticker:         pos.ticker,
+                  optionType:     pos.optionType,
+                  strike:         pos.strike,
+                  expDate:        pos.expDate,
+                  tradeType:      'naked',
+                  openDate:       pos.openDate || new Date().toISOString(),
+                  openDateET:     pos.openDate
+                    ? new Date(pos.openDate).toLocaleString('en-US', {timeZone:'America/New_York'})
+                    : new Date().toLocaleString('en-US', {timeZone:'America/New_York'}),
+                  entryPrice:     pos.premium,
+                  entryContracts: pos.contracts || 1,
+                  entryCost:      pos.cost || 0,
+                  entryScore:     pos.score || 0,
+                  entryRSI:       pos.entryRSI || null,
+                  _reconstructed: true,
+                  ..._ghostExitFields,
+                }).catch(e => _log('warn', `[JOURNAL] standalone exit write failed: ${e.message}`));
+              }
             }).catch(e => _log('warn', `[JOURNAL] reconciler exit update failed: ${e.message}`));
             }
           }
