@@ -603,7 +603,18 @@ async function checkExits(positions, posSnapshots, posQuotes, posNewsCache, ctx)
       const _entryRSI  = pos.entryRSI || 50;
       const _curRSI    = pos._prevRSI || _entryRSI; // _prevRSI updated every scan at line ~339
       const _callFulfilled = pos.ticker !== "GLD" && pos.optionType === "call" && _entryRSI <= 45 && _curRSI > 55; // GLD handled above
-      const _putFulfilled  = pos.optionType === "put"  && _entryRSI >= 55 && _curRSI < 45; // widened: 60→55 captures RSI 55-59 MR entries
+      // V2.98 PUT FIX: _putFulfilled must use dailyRSI — the RSI that drove put scoring.
+      // Bug: previously used pos.entryRSI (intraday) and pos._prevRSI (intraday).
+      // Put thesis: entered because dailyRSI was overbought (>=65), exits when
+      // dailyRSI normalizes below 50. Intraday RSI is noise for this thesis.
+      // entryDailyRSI: stored at fill time from stock.dailyRsi (execution.js V2.98).
+      // pos.dailyRsi: updated each scan from Alpaca snapshot (live daily RSI).
+      // Falls back to intraday if dailyRsi not available (reconciled/old positions).
+      const _entryDailyRSI = pos.entryDailyRSI || pos.entryRSI || 50;
+      const _curDailyRSI   = pos.dailyRsi || _curRSI; // dailyRsi on pos updated by scanner
+      const _putFulfilled  = pos.optionType === "put"
+        && _entryDailyRSI >= 65   // was genuinely overbought on daily when entered
+        && _curDailyRSI   < 50;   // daily RSI has normalized — put thesis complete
       // ── TIER 3 EXIT FRAMEWORK (V2.98) ──────────────────────────────────────
       // Positions with DTE > 45 at entry (isTier3=true) are swing instruments.
       // Standard intraday thesis-complete and fast-stop logic does not apply.
