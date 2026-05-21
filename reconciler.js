@@ -448,6 +448,45 @@ async function runReconciliation() {
           });
           used.add(i);
           _log("warn", `[RECONCILE] Reconstructed leg: ${p.ticker} ${p.optType.toUpperCase()} \$${p.strike} exp ${p.expDate} | ${Math.abs(p.qty)}x @ \$${p.avgEntry}`);
+
+          // V2.98: Write OPEN journal entry for reconstructed orphan positions.
+          // Previously reconciler wrote to state only — no journal entry existed.
+          // When position closed, updateJournalExit found no OPEN entry and wrote
+          // a standalone exit record with placeholder values (entryRSI:50, etc.).
+          // Fix: write OPEN journal entry here with whatever data Alpaca gives us.
+          // Fields will be partial (no RSI, no delta at entry time) but at least the
+          // contract, strike, expDate, entry price, and open date will be correct.
+          // This prevents the $undefined / exp? display in the journal.
+          const _reconPos = newPositions[newPositions.length - 1]; // just pushed
+          if (_reconPos && writeJournalEntry) {
+            writeJournalEntry({
+              id:             `${p.symbol}_recon_${Date.now()}`,
+              contractSymbol: p.symbol,
+              ticker:         p.ticker,
+              optionType:     p.optType,
+              strike:         _reconPos.strike,
+              expDate:        _reconPos.expDate,
+              tradeType:      'naked',
+              openDate:       _reconPos.openDate,
+              openDateET:     new Date(_reconPos.openDate).toLocaleString('en-US', {timeZone:'America/New_York'}),
+              entryPrice:     p.avgEntry,
+              entryContracts: Math.abs(p.qty),
+              entryCost:      _reconPos.cost,
+              entryScore:     75,
+              entryReasons:   ['Reconstructed from Alpaca reconciliation'],
+              entryRSI:       null, // not available from Alpaca
+              entryDelta:     null,
+              entryIV:        null,
+              entryVIX:       _state.vix || null,
+              entryIVR:       null,
+              entryMACD:      null,
+              entryMomentum:  null,
+              macroSignal:    'unknown',
+              regimeAtEntry:  'unknown',
+              status:         'OPEN',
+              _reconstructed: true,
+            }).catch(e => _log('warn', `[RECONCILE] Journal write failed for ${p.ticker}: ${e.message}`));
+          }
         }
       }
     }
