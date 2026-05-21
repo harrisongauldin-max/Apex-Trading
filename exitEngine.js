@@ -66,7 +66,7 @@ function getTimeAdjustedStop(pos) {
   return stopPct;
 }
 
-function getDTEExitParams(dte, daysOpen = 0) {
+function getDTEExitParams(dte, daysOpen = 0, optionType = "call") {
   const { countRecentDayTrades } = require('./risk'); // lazy to break circular dep
   // PDT_RULE_ACTIVE=false (FINRA PDT rule sunset April 2026) — day trades not enforced.
   // Force pdtLocked/pdtTight to false so exit params use standard values.
@@ -88,14 +88,22 @@ function getDTEExitParams(dte, daysOpen = 0) {
 
   // V2.88 VIX-ADJUSTED TP: At elevated VIX, options cost 40-60% more than VIX 18 baseline.
   // The same underlying price move produces proportionally less % gain on premium.
-  // Lower TP in high-VIX = take profits faster when they appear rather than waiting for full target.
-  // This improves realized win rate in choppy/volatile environments.
-  //   VIX 18-24: normal targets (40% MONTHLY, 55% LEAPS, 20% SHORT-DTE)
-  //   VIX 25-29: reduce TP 20% (32% MONTHLY, 44% LEAPS, 16% SHORT-DTE) — options 35-50% expensive
-  //   VIX 30+:   reduce TP 35% (26% MONTHLY, 36% LEAPS, 13% SHORT-DTE) — options 65%+ expensive
+  // CALLS: Lower TP in high-VIX = take profits faster (options expensive, likely to mean-revert).
+  // PUTS:  V2.98 FIX A — vixTPMult is INVERTED for puts. Elevated VIX means underlying is
+  //        falling and puts are performing. Reducing TP exits winning puts early on exactly
+  //        the days when they have the most room to run. Puts get a HIGHER TP at elevated VIX.
+  //   Calls VIX 25-29: 0.80x (32% MONTHLY) — take faster, options expensive
+  //   Calls VIX 30+:   0.65x (26% MONTHLY) — take much faster
+  //   Puts  VIX 25-29: 1.20x (48% MONTHLY) — give more room, thesis intact in volatile env
+  //   Puts  VIX 30+:   1.30x (52% MONTHLY) — most room, strong directional move underway
   const vix = state.vix || 22;
-  const vixTPMult = vix >= 30 ? 0.65 : vix >= 25 ? 0.80 : 1.0;
-  const vixLabel  = vix >= 30 ? " VIX30+" : vix >= 25 ? " VIX25+" : "";
+  const isPut      = optionType === "put";
+  const vixTPMult  = vix >= 30 ? (isPut ? 1.30 : 0.65)
+                   : vix >= 25 ? (isPut ? 1.20 : 0.80)
+                   : 1.0;
+  const vixLabel   = vix >= 30 ? (isPut ? " VIX30+P" : " VIX30+")
+                   : vix >= 25 ? (isPut ? " VIX25+P" : " VIX25+")
+                   : "";
 
   if (dte <= 21) {
     const base = 0.20; // SPRINT-04: PDT_RULE_ACTIVE=false, pdtLocked/pdtTight always false
@@ -372,13 +380,19 @@ async function checkExits(positions, posSnapshots, posQuotes, posNewsCache, ctx)
           if (!_posBarCache.has(pos.ticker) && rsiB.length) _posBarCache.set(pos.ticker, rsiB); // OPT7
           if (rsiB.length >= 14) {
             const liveRSI   = calcRSI(rsiB);
-            const entryRSI  = pos.entryRSI || 70;
+            // V2.98 FIX F: puts score on dailyRSI — use entryDailyRSI for consistency
+            const entryRSI  = pos.optionType === "put"
+              ? (pos.entryDailyRSI || pos.entryRSI || 70)
+              : (pos.entryRSI || 70);
             const prevRSI   = pos._prevRSI || liveRSI;
             pos._prevRSI    = liveRSI;
-            // Put thesis: entered when RSI was high (overbought)
-            // Trigger if RSI has recovered significantly from entry level
+            // V2.98 FIX D: putThesisDegrading was BACKWARDS.
+            // Old condition: liveRSI < 45 && prevRSI >= 50 (RSI FALLING = put WINNING).
+            // Thesis DEGRADES when RSI RISES (underlying recovering = put losing ground).
+            // New condition: liveRSI > 60 && prevRSI <= 55 (RSI recovering toward overbought).
+            // This triggers rescore when the put is LOSING, not when it's winning.
             const putThesisDegrading = pos.optionType === "put" &&
-              entryRSI >= 65 && liveRSI < 45 && prevRSI >= 50;
+              entryRSI >= 65 && liveRSI > 60 && prevRSI <= 55;
             // Call thesis degradation checks:
             // 1. RSI reversal: entered oversold, now overbought (mean reversion played out)
             const callRSIDegrading = pos.optionType === "call" &&
@@ -706,13 +720,19 @@ async function checkExits(positions, posSnapshots, posQuotes, posNewsCache, ctx)
           // V2.98 Gate A: record thesis-complete exit for same-day re-entry block
           // Stores entryRSI so scanner can require RSI 15pts deeper before re-entry
           if (!state._dailyThesisComplete) state._dailyThesisComplete = {};
+          // V2.98 FIX C: Gate A re-entry floor uses dailyRSI for puts (matches scoring basis).
+          // Put entries score on dailyRSI — the floor for blocking re-entry should too.
+          // Calls use intraday entryRSI (unchanged).
+          const _gateAEntryRSI = pos.optionType === "put"
+            ? (pos.entryDailyRSI || pos.entryRSI || 50)
+            : (pos.entryRSI || 50);
           state._dailyThesisComplete[pos.ticker] = {
-            entryRSI:  pos.entryRSI || 50,
+            entryRSI:  _gateAEntryRSI,
             closedAt:  new Date().toISOString(),
             optionType: pos.optionType,
           };
           markDirty();
-          logEvent("scan", `[GATE-A] ${pos.ticker} thesis-complete recorded — re-entry requires RSI < ${((pos.entryRSI||50) - 15).toFixed(0)} (entry was ${(pos.entryRSI||50).toFixed(0)})`);
+          logEvent("scan", `[GATE-A] ${pos.ticker} thesis-complete recorded — re-entry requires RSI < ${(_gateAEntryRSI - 15).toFixed(0)} (entry was ${_gateAEntryRSI.toFixed(0)})`);
           continue;
 
         } else if (chg > -0.05) {
@@ -930,7 +950,14 @@ async function checkExits(positions, posSnapshots, posQuotes, posNewsCache, ctx)
     // Don't fire if already down 20%+ (stop will handle it) — this is for IV-specific exits
     if (!pos.isSpread && pos.entryIV && pos.iv && pos.iv > 0) {
       const ivDrop = (pos.entryIV - pos.iv) / pos.entryIV;
-      if (ivDrop >= IV_COLLAPSE_PCT && chg > -0.20) {
+      // V2.98 FIX B: IV collapse exit is direction-unaware. A PUT can be profitable
+      // (underlying falling) while IV compresses (VIX falling). Exiting a winning put
+      // because IV dropped destroys value — the delta gain far outweighs vega loss.
+      // Skip iv-collapse exit entirely for puts where position is profitable (chg > 0).
+      const _ivCollapseSkip = pos.optionType === "put" && chg > 0;
+      if (_ivCollapseSkip) {
+        logEvent("scan", `${pos.ticker} iv-collapse skipped — put is profitable (+${(chg*100).toFixed(0)}%), IV drop ${(ivDrop*100).toFixed(0)}% irrelevant while thesis intact`);
+      } else if (ivDrop >= IV_COLLAPSE_PCT && chg > -0.20) {
         logEvent("warn", `${pos.ticker} IV collapse: entry ${(pos.entryIV*100).toFixed(0)}% → current ${(pos.iv*100).toFixed(0)}% (${(ivDrop*100).toFixed(0)}% drop) — exiting to prevent further vega bleed`);
         decisions.push({ pi, ticker: pos.ticker, action: 'close', reason: "iv-collapse", exitPremium: null, contractSym: pos.contractSymbol || pos.buySymbol || null }); continue;
       }
