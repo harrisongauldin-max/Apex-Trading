@@ -581,7 +581,11 @@ async function executeTrade(stock, price, score, scoreReasons, vix, optionType =
     bid:             contract.bid,
     ask:             contract.ask,
     realData:        !!contract.symbol,
-    entryRSI:        stock.rsi || 52,        // capture entry signal for decay detection
+    entryRSI:        stock.rsi || 52,        // intraday RSI at entry (call thesis-complete)
+    // V2.98 PUT FIX: puts score on dailyRSI not intradayRSI.
+    // _putFulfilled must check dailyRSI was overbought at entry, not intraday.
+    // entryDailyRSI stored separately so exitEngine can use the correct value.
+    entryDailyRSI:   stock.dailyRsi || stock.rsi || 52, // daily RSI at entry (put thesis-complete)
     entryMomentum:   stock.momentum || "steady",
     entryMACD:       stock.macd || "neutral",
     entryMacro:      (state._agentMacro || {}).signal || "neutral",
@@ -673,7 +677,12 @@ async function executeTrade(stock, price, score, scoreReasons, vix, optionType =
     entryCost:      finalCost,
     entryScore:     score,
     entryReasons:   scoreReasons || [],
-    entryRSI:       stock.rsi || stock.liveRSI || null,
+    // V2.98 PUT FIX: journal shows the RSI that actually drove the score.
+    // Put scoring uses dailyRSI — journal should reflect that for accurate post-mortem.
+    // Call scoring uses intraday RSI — keep that for calls.
+    entryRSI:       optionType === 'put'
+                      ? (stock.dailyRsi || stock.rsi || null)   // put: daily RSI scored
+                      : (stock.rsi || stock.liveRSI || null),   // call: intraday RSI scored
     entryDailyRSI:  stock.dailyRsi || null,
     entryDelta:     contract.greeks?.delta || contract.delta || null,
     entryIV:        contract.iv || null,
