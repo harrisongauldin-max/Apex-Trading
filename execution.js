@@ -561,7 +561,7 @@ async function executeTrade(stock, price, score, scoreReasons, vix, optionType =
     fastStopPct:    exitParams.fastStopPct,
     dteLabel:       exitParams.label,
     isMeanReversion: isMeanReversion,
-    isTier3:        (contract.expDays || contract.dte || 0) > 45, // V2.98: swing position flag
+    isTier3:        (contract.expDays || contract.dte || 0) > 45 && !isMeanReversion,
     entryVIX:       vix,
     partialClosed:  false,
     openDate:       new Date().toISOString(),
