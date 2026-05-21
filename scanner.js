@@ -763,6 +763,18 @@ async function runScan() {
   // Fetch live prices + news for all open positions (parallel, non-blocking)
   const { posSnapshots, posQuotes, posNewsCache } = await fetchPositionData(state.positions);
 
+  // V2.98 FIX E: Inject live daily RSI into open positions before exit evaluation.
+  // pos.dailyRsi is never updated after entry — exitEngine's _putFulfilled falls back
+  // to intraday RSI without this injection. Stamping here ensures every scan cycle
+  // gives exitEngine the current daily RSI to check against the put thesis-complete
+  // condition (entryDailyRSI >= 65 && curDailyRSI < 50).
+  for (const pos of state.positions) {
+    const _liveDR = _liveDailyRsiMap[pos.ticker];
+    if (_liveDR != null) {
+      pos.dailyRsi = _liveDR;
+    }
+  }
+
   // Evaluate all exit conditions — pure function, returns decisions, never mutates state
   const exitDecisions = await checkExits(
     state.positions, posSnapshots, posQuotes, posNewsCache,
@@ -1559,6 +1571,11 @@ async function runScan() {
   logEvent("scan", `Prefetching data for ${WATCHLIST.length} instruments in parallel...`);
   // OPT-4: declare before prefetch loop -- used in aggregate log after prefetch completes
   const scored = []; // moved here to avoid TDZ with the OPT-4 log
+  // V2.98 FIX E: live daily RSI map — populated during stockData loop, used to
+  // inject pos.dailyRsi before checkExits so _putFulfilled uses current daily RSI.
+  // Without this, pos.dailyRsi is never updated after entry and Fix 2 falls back
+  // to intraday RSI, making _putFulfilled structurally broken for puts.
+  const _liveDailyRsiMap = {}; // {ticker: dailyRsi} — freshest reading from this scan
   let _zeroScoreCount = 0;
 
   const prefetchStart = Date.now();
@@ -1967,6 +1984,11 @@ async function runScan() {
     liveStock._gapCallBoost       = _tmpGapCallBoost;
     liveStock._gapPutBoost        = _tmpGapPutBoost;
     liveStock._gapCallStrictRSI   = _tmpGapCallStrictRSI;
+
+    // V2.98 FIX E: record live daily RSI for position injection before checkExits
+    if (liveStock.dailyRsi != null) {
+      _liveDailyRsiMap[stock.ticker] = liveStock.dailyRsi;
+    }
 
     // V2.87 FIX: When intraday bars are insufficient (first 5 min of session or API failure),
     // use the last known daily RSI from _rsiHistory as fallback instead of skipping or using 50.
