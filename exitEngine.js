@@ -635,7 +635,7 @@ async function checkExits(positions, posSnapshots, posQuotes, posNewsCache, ctx)
       // Tier 3 uses: dailyRSI normalization, wider stop (25%), 24h minimum hold.
       // With DTE cap of 45 in findContract, new Tier 3 entries are blocked.
       // This framework handles any existing or edge-case Tier 3 positions.
-      if (pos.isTier3) {
+      if (pos.isTier3 && !pos.isMeanReversion) {
         const _t3DTE      = pos.expDays || Math.round((new Date(pos.expDate || Date.now()) - new Date()) / 86400000);
         const _t3HrsOpen  = hoursOpen;
         const _t3Chg      = chg;
