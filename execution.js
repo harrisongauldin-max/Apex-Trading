@@ -500,7 +500,9 @@ async function executeTrade(stock, price, score, scoreReasons, vix, optionType =
   // Recalculate cost/target/stop using final premium (may have been updated by fill)
   const finalCost     = parseFloat((contract.premium * 100 * contracts).toFixed(2));
   // Use DTE-tiered exit params - short-dated options need faster exits
-  const exitParams    = getDTEExitParams(contract.expDays || 30, 0); // 0 days open - fresh entry
+  // V2.98 FIX A: pass optionType so getDTEExitParams applies direction-correct vixTPMult.
+  // Puts get higher TP at elevated VIX (more room to run); calls get lower TP (take faster).
+  const exitParams    = getDTEExitParams(contract.expDays || 30, 0, optionType); // 0 days open - fresh entry
   const finalTarget   = parseFloat((contract.premium * (1 + exitParams.takeProfitPct)).toFixed(2));
   const finalStop     = parseFloat((contract.premium * (1 - exitParams.stopLossPct)).toFixed(2));
   const finalBreakeven = optionType === "put"
