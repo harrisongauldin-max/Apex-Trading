@@ -2126,6 +2126,9 @@ async function runScan() {
       if (stock.ticker === "QQQ") {
         const spyPutOpen  = state.positions.some(p => p.ticker === "SPY" && p.optionType === "put");
         const spyCallOpen = state.positions.some(p => p.ticker === "SPY" && p.optionType === "call");
+        // V2.98 PUT AUDIT: log raw put/call scores BEFORE correlation suppression.
+        // Previously these were silently suppressed to 30 — total blind spot on put scoring.
+        logEvent("filter", `[PUT-AUDIT] QQQ pre-corr scores: put=${putSetup.score} call=${callSetup.score} | dailyRSI:${(liveStock.dailyRsi||0).toFixed(0)} MACD:${liveStock.macd||'?'}`);
         // Only suppress if score is below 80 - high conviction entries allowed through
         // Same-direction suppression threshold lowered: 80 → MIN_SCORE_CREDIT (65).
         // Old threshold (80) was correlation-cap thinking — raise the bar on the second position.
@@ -2141,6 +2144,8 @@ async function runScan() {
       if (stock.ticker === "SPY") {
         const qqqPutOpen  = state.positions.some(p => p.ticker === "QQQ" && p.optionType === "put");
         const qqqCallOpen = state.positions.some(p => p.ticker === "QQQ" && p.optionType === "call");
+        // V2.98 PUT AUDIT: log raw scores before suppression
+        logEvent("filter", `[PUT-AUDIT] SPY pre-corr scores: put=${putSetup.score} call=${callSetup.score} | dailyRSI:${(liveStock.dailyRsi||0).toFixed(0)} MACD:${liveStock.macd||'?'}`);
         if (qqqPutOpen  && putSetup.score  < MIN_SCORE_CREDIT) { putSetup.score  = Math.min(putSetup.score,  30); logEvent("filter", `SPY corr-block: QQQ put open, SPY put score below minimum — suppressed`); }
         if (qqqCallOpen && callSetup.score < MIN_SCORE_CREDIT) { callSetup.score = Math.min(callSetup.score, 30); logEvent("filter", `SPY corr-block: QQQ call open, SPY call score below minimum — suppressed`); }
         if (qqqPutOpen  && callSetup.score > 0) { callSetup.score = Math.min(callSetup.score, 30); }
