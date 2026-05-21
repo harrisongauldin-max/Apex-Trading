@@ -177,6 +177,12 @@ async function checkExits(positions, posSnapshots, posQuotes, posNewsCache, ctx)
   } = ctx;
 
   const decisions = [];
+  // V2.98 FIX: Per-cycle close dedup set.
+  // Prevents profit-lock-partial AND thesis-complete both queuing for the same
+  // position in the same scan cycle — which caused the 42210000 intent mismatch.
+  // Once a 'close' is queued for pi, all further decisions for that pi are skipped.
+  const _closedThisCycle  = new Set(); // tracks pi indices that got a close decision
+  const _partialThisCycle = new Set(); // tracks pi indices that got a partial decision
 
   for (let pi = 0; pi < positions.length; pi++) {
     const pos   = positions[pi];
@@ -682,7 +688,10 @@ async function checkExits(positions, posSnapshots, posQuotes, posNewsCache, ctx)
           // ── CASE A: Profitable + thesis complete → immediate close ──────────
           pos._thesisAutoClose = true;
           logEvent("scan", `[THESIS COMPLETE] ${pos.ticker} RSI normalized (${_entryRSI}→${_curRSI.toFixed(0)}) | gain: +${(chg*100).toFixed(1)}% — closing position`);
-          decisions.push({ pi, ticker: pos.ticker, action: 'close', reason: 'thesis-complete', exitPremium: null, contractSym: pos.contractSymbol || pos.buySymbol || null });
+          if (!_closedThisCycle.has(pi)) {
+            _closedThisCycle.add(pi);
+            decisions.push({ pi, ticker: pos.ticker, action: 'close', reason: 'thesis-complete', exitPremium: null, contractSym: pos.contractSymbol || pos.buySymbol || null });
+          }
           // V2.98 Gate A: record thesis-complete exit for same-day re-entry block
           // Stores entryRSI so scanner can require RSI 15pts deeper before re-entry
           if (!state._dailyThesisComplete) state._dailyThesisComplete = {};
@@ -703,7 +712,10 @@ async function checkExits(positions, posSnapshots, posQuotes, posNewsCache, ctx)
             // 4 hours past thesis completion with no gain — exit
             pos._thesisAutoClose = true;
             logEvent("scan", `[THESIS COMPLETE] ${pos.ticker} RSI normalized ${_hrsAfterFulfill.toFixed(1)}h ago, position flat at ${(chg*100).toFixed(1)}% — closing (thesis resolved, no follow-through)`);
-            decisions.push({ pi, ticker: pos.ticker, action: 'close', reason: 'thesis-no-follow', exitPremium: null, contractSym: pos.contractSymbol || pos.buySymbol || null });
+            if (!_closedThisCycle.has(pi)) {
+              _closedThisCycle.add(pi);
+              decisions.push({ pi, ticker: pos.ticker, action: 'close', reason: 'thesis-no-follow', exitPremium: null, contractSym: pos.contractSymbol || pos.buySymbol || null });
+            }
             continue;
           } else {
             // Still within 4h window — tighten trail, keep watching
@@ -1022,7 +1034,12 @@ async function checkExits(positions, posSnapshots, posQuotes, posNewsCache, ctx)
         // ── 2-CONTRACT PATH (B): partial close 1, trail remaining at 6% ────
         logEvent("scan", `[PROFIT LOCK] ${pos.ticker} hit +${(peakChg*100).toFixed(0)}% peak — closing 1/${contracts} contracts, tightening trail to 6%`);
         pos.trailPct = 0.06;
-        decisions.push({ pi, ticker: pos.ticker, action: 'partial', reason: 'partial-lock', exitPremium: null, contractSym: pos.contractSymbol || pos.buySymbol || null });
+        if (!_closedThisCycle.has(pi) && !_partialThisCycle.has(pi)) {
+          _partialThisCycle.add(pi);
+          decisions.push({ pi, ticker: pos.ticker, action: 'partial', reason: 'partial-lock', exitPremium: null, contractSym: pos.contractSymbol || pos.buySymbol || null });
+        } else if (_closedThisCycle.has(pi)) {
+          logEvent("scan", `[DEDUP] ${pos.ticker} partial-lock skipped — close already queued this cycle`);
+        }
       } else {
         // ── 1-CONTRACT PATH (C): tighten trail to 6%, no partial close ─────
         pos.trailPct = 0.06;
@@ -1078,7 +1095,12 @@ async function checkExits(positions, posSnapshots, posQuotes, posNewsCache, ctx)
     const trailAlreadyActive = chg >= (pos.trailActivate || TRAIL_ACTIVATE_PCT);
     if (!pos.partialClosed && !trailAlreadyActive && chg >= activePartialPct && chg < activeTakeProfitPct) {
       logEvent("scan", `${pos.ticker} partial close at +${(chg*100).toFixed(0)}% [${currentExitParams.label}] (partial threshold: +${(activePartialPct*100).toFixed(0)}%)`);
-      decisions.push({ pi, ticker: pos.ticker, action: 'partial', reason: 'partial', exitPremium: null, contractSym: pos.contractSymbol || pos.buySymbol || null });
+      if (!_closedThisCycle.has(pi) && !_partialThisCycle.has(pi)) {
+        _partialThisCycle.add(pi);
+        decisions.push({ pi, ticker: pos.ticker, action: 'partial', reason: 'partial', exitPremium: null, contractSym: pos.contractSymbol || pos.buySymbol || null });
+      } else if (_closedThisCycle.has(pi)) {
+        logEvent("scan", `[DEDUP] ${pos.ticker} partial skipped — close already queued this cycle`);
+      }
       continue; // don't evaluate take profit in same scan as partial - wait for next cycle
     }
 
