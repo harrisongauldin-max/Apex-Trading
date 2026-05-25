@@ -4,7 +4,7 @@
 'use strict';
 
 const { alpacaGet } = require('./broker');
-const { updateJournalExit, writeJournalEntry } = require('./state');
+const { updateJournalExit, writeJournalEntry, loadJournalDay } = require('./state');
 const { WATCHLIST ,
   ALPACA_KEY, INDIVIDUAL_STOCKS_ENABLED, MS_PER_DAY, STOP_LOSS_PCT, TAKE_PROFIT_PCT
 }  = require('./constants');
@@ -429,6 +429,33 @@ async function runReconciliation() {
         }
         if (!paired) {
           const p = a;
+
+          // V2.99 FIX: Duplicate journal entry prevention.
+          // Problem: when APEX places a sell order (thesis-complete), it removes the
+          // position from state immediately. If the sell order takes >10 seconds to fill
+          // (limit order on low-liquidity options), the next reconciler run sees the
+          // position in Alpaca but not in APEX state → orphan → reconstructs → new OPEN
+          // journal entry. When sell eventually fills, ghost detection writes a second
+          // CLOSED entry. Result: two journal entries for one trade.
+          // Fix: before reconstructing, check if a CLOSED journal entry already exists
+          // today for this contractSymbol. If yes, the position was properly closed by
+          // APEX with a pending fill — skip reconstruction entirely.
+          const _today = new Date().toLocaleDateString('en-US', {timeZone:'America/New_York', year:'numeric', month:'2-digit', day:'2-digit'}).split('/');
+          const _todayStr = `${_today[2]}-${_today[0]}-${_today[1]}`;
+          let _alreadyClosed = false;
+          try {
+            const _todayEntries = await loadJournalDay(_todayStr);
+            _alreadyClosed = _todayEntries.some(e =>
+              e.contractSymbol === p.sym && e.status === 'CLOSED'
+            );
+          } catch(_) { /* journal unavailable — proceed with reconstruction */ }
+
+          if (_alreadyClosed) {
+            _log('warn', `[RECONCILE] Skipping orphan reconstruction for ${p.ticker} (${p.sym}) — CLOSED journal entry exists today. Sell order likely pending fill.`);
+            used.add(Array.from({length: parsed.length}, (_,i)=>i).find(i => parsed[i] === p) ?? -1);
+            continue;
+          }
+
           const curP = p.mktVal > 0 ? p.mktVal / (Math.abs(p.qty) * 100) : p.avgEntry;
           _state.positions.push({
             ticker: p.ticker, optionType: p.optType, isSpread: false,
