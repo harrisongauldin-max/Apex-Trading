@@ -492,8 +492,21 @@ function calcCreditSpreadTP(entryVix) {
 }
 
 function getETTime(date) {
-  const str = (date || new Date()).toLocaleString("en-US", { timeZone: "America/New_York" });
-  return new Date(str);
+  // V2.99 FIX: toLocaleString() → new Date(string) is fragile — the string is parsed
+  // in LOCAL server timezone, not ET. Works on UTC Railway by coincidence (UTC offset=0
+  // so hour digits match), but breaks on any non-UTC server.
+  // Correct approach: use Intl.DateTimeFormat to extract ET components, then build a
+  // Date with those values so .getHours()/.getMinutes() return ET time on any server.
+  const d = date || new Date();
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'America/New_York',
+    year: 'numeric', month: '2-digit', day: '2-digit',
+    hour: '2-digit', minute: '2-digit', second: '2-digit',
+    hour12: false
+  }).formatToParts(d);
+  const get = type => parseInt(parts.find(p => p.type === type).value, 10);
+  // Build a Date whose .getHours()/.getMinutes() return ET values on any server
+  return new Date(get('year'), get('month') - 1, get('day'), get('hour'), get('minute'), get('second'));
 }
 
 function isDST(date) {
