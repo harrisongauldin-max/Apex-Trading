@@ -616,7 +616,21 @@ async function checkExits(positions, posSnapshots, posQuotes, posNewsCache, ctx)
 
       const _entryRSI  = pos.entryRSI || 50;
       const _curRSI    = pos._prevRSI || _entryRSI; // _prevRSI updated every scan at line ~339
-      const _callFulfilled = pos.ticker !== "GLD" && pos.optionType === "call" && _entryRSI <= 45 && _curRSI > 55; // GLD handled above
+      // V2.99 FIX: Reconciled positions get entryRSI=50 by default (reconciler has no RSI data).
+      // entryRSI=50 fails the _callFulfilled check (_entryRSI <= 45) so thesis-complete never fires.
+      // Fix: for positions flagged _reconstructed=true, use a chg-based fallback instead.
+      // A reconstructed call is thesis-complete if up >= 8% and RSI has normalized above 52.
+      // This captures the "+9% on a reconciled position" scenario the panel identified.
+      const _isReconstructed = pos._reconstructed === true;
+      const _reconCallFulfilled = _isReconstructed
+        && pos.optionType === "call"
+        && pos.ticker !== "GLD"
+        && chg >= 0.08              // up 8%+ — meaningful gain, thesis realized in price
+        && _curRSI > 52;            // RSI has normalized from oversold — bounce confirmed
+      const _callFulfilled = pos.ticker !== "GLD" && pos.optionType === "call" && (
+        (!_isReconstructed && _entryRSI <= 45 && _curRSI > 55) || // normal path
+        _reconCallFulfilled                                          // reconciled fallback
+      ); // GLD handled above
       // V2.98 PUT FIX: _putFulfilled must use dailyRSI — the RSI that drove put scoring.
       // Bug: previously used pos.entryRSI (intraday) and pos._prevRSI (intraday).
       // Put thesis: entered because dailyRSI was overbought (>=65), exits when
@@ -629,12 +643,13 @@ async function checkExits(positions, posSnapshots, posQuotes, posNewsCache, ctx)
       const _putFulfilled  = pos.optionType === "put"
         && _entryDailyRSI >= 65   // was genuinely overbought on daily when entered
         && _curDailyRSI   < 50;   // daily RSI has normalized — put thesis complete
-      // ── TIER 3 EXIT FRAMEWORK (V2.98) ──────────────────────────────────────
-      // Positions with DTE > 45 at entry (isTier3=true) are swing instruments.
-      // Standard intraday thesis-complete and fast-stop logic does not apply.
-      // Tier 3 uses: dailyRSI normalization, wider stop (25%), 24h minimum hold.
-      // With DTE cap of 45 in findContract, new Tier 3 entries are blocked.
-      // This framework handles any existing or edge-case Tier 3 positions.
+      // ── TIER 3 EXIT FRAMEWORK (V2.99) ──────────────────────────────────────
+      // V2.99 PURE INTRADAY: Tier 3 exit framework is DISABLED for mean reversion
+      // positions. APEX is a pure intraday system — isMeanReversion=true positions
+      // always use intraday exit logic regardless of DTE. A 57 DTE contract entered
+      // on an intraday RSI thesis is still an intraday trade. The Tier 3 overnight
+      // hold on SPY $770 (May 21) cost -$150 vs +$70 if closed intraday.
+      // Tier 3 framework preserved for future deliberate swing mode (isMeanReversion=false).
       if (pos.isTier3 && !pos.isMeanReversion) {
         const _t3DTE      = pos.expDays || Math.round((new Date(pos.expDate || Date.now()) - new Date()) / 86400000);
         const _t3HrsOpen  = hoursOpen;
