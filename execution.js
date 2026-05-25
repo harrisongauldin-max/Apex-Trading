@@ -6,7 +6,13 @@
 let dryRunMode = false; // set by scanner via setDryRunMode()
 function setDryRunMode(v) { dryRunMode = v; }
 const fmt = (n) => '$' + (n||0).toFixed(2);
-const MAX_LOSS_PER_TRADE = 500;
+// V2.99 FIX: MAX_LOSS_PER_TRADE raised from 500 to 900.
+// At 500: riskCap = 500/0.35 = $1,428 → QQQ at $763/contract gives floor(1428/763) = 1 contract always.
+// At 900: riskCap = 900/0.35 = $2,571 → QQQ at $763/contract gives floor(2571/763) = 3 contracts.
+// QQQ options are inherently more expensive than SPY — the old cap was treating QQQ
+// as if it were too risky to size properly, when the real issue was the dollar threshold.
+// 900 aligns QQQ sizing with SPY (both get 3 contracts at typical premiums and Kelly).
+const MAX_LOSS_PER_TRADE = 900;
 const VIX_REDUCE50 = 35;
 const VIX_REDUCE25 = 28;
 
@@ -561,6 +567,9 @@ async function executeTrade(stock, price, score, scoreReasons, vix, optionType =
     fastStopPct:    exitParams.fastStopPct,
     dteLabel:       exitParams.label,
     isMeanReversion: isMeanReversion,
+    // V2.99 PURE INTRADAY: isTier3 requires both DTE > 45 AND !isMeanReversion.
+    // A mean reversion entry is always intraday regardless of contract DTE.
+    // isTier3=true only for future deliberate swing mode entries (isMeanReversion=false).
     isTier3:        (contract.expDays || contract.dte || 0) > 45 && !isMeanReversion,
     entryVIX:       vix,
     partialClosed:  false,
