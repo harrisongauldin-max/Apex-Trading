@@ -37,7 +37,8 @@ const FAST_PROFIT_PCT = 0.65;
 
 const { alpacaGet, alpacaPost, alpacaDelete } = require('./broker');
 const { state, logEvent, markDirty, saveStateNow,
-        writeJournalEntry, updateJournalExit } = require('./state');
+        writeJournalEntry, updateJournalExit,
+        loadJournalDay, saveJournalDay } = require('./state');
 const { calcCreditSpreadTP, realizedPnL ,
   openRisk, totalCap
 }     = require('./signals');
@@ -765,6 +766,130 @@ async function partialClose(ticker) {
   await saveStateNow();
 }
 
+// V2.99 TIERED EXITS: closeNContracts(ticker, n, reason)
+// Closes exactly N contracts from a position — used by T1 (+8%), T2 (thesis-complete partial).
+// Unlike partialClose() which always closes Math.floor(contracts/2),
+// this function closes precisely the requested count.
+// Guards: _closingInFlight (full close in flight), _closingSubmitted (dedup).
+// Writes a PARTIAL journal entry so partial closes appear in the trade journal.
+async function closeNContracts(ticker, n, reason, exitPremium = null) {
+  const pos = state.positions.find(p => p.ticker === ticker);
+  if (!pos) { logEvent("warn", `closeNContracts: no position found for ${ticker}`); return; }
+
+  // Guard: full close already in flight
+  if (pos._closingInFlight) {
+    logEvent("partial", `${ticker} closeNContracts skipped — full close in-flight`);
+    return;
+  }
+
+  // Guard: already closing this cycle (dedup)
+  if (pos._closingSubmitted) {
+    logEvent("partial", `${ticker} closeNContracts skipped — _closingSubmitted`);
+    return;
+  }
+
+  const remaining = pos.contracts || 1;
+  if (remaining <= 1) {
+    // 1 contract left — escalate to full close
+    logEvent("partial", `${ticker} closeNContracts: 1 contract remaining — escalating to full close`);
+    await closePosition(ticker, reason, exitPremium, pos.contractSymbol || null);
+    return;
+  }
+
+  const closeQty = Math.min(n, remaining - 1); // always leave at least 1 runner
+  if (closeQty <= 0) {
+    logEvent("warn", `${ticker} closeNContracts: closeQty ${closeQty} invalid — skipping`);
+    return;
+  }
+
+  // Get live exit price
+  let ep = exitPremium || pos.currentPrice || pos.premium;
+  if (!exitPremium && pos.contractSymbol) {
+    const realP = await _getOptionsPrice(pos.contractSymbol);
+    if (realP && realP > 0) ep = realP;
+  }
+  ep = parseFloat(ep.toFixed(2));
+
+  const pnl     = parseFloat(((ep - pos.premium) * 100 * closeQty).toFixed(2));
+  const ev      = parseFloat((ep * 100 * closeQty).toFixed(2));
+  const bidPrice = parseFloat((pos.bid > 0 ? pos.bid : ep * 0.98).toFixed(2));
+
+  // Submit to Alpaca
+  let orderConfirmed = false;
+  if (pos.contractSymbol && !_dryRunMode) {
+    try {
+      const body = {
+        symbol:          pos.contractSymbol,
+        qty:             closeQty,
+        side:            "sell",
+        type:            "limit",
+        time_in_force:   "day",
+        limit_price:     bidPrice,
+        position_intent: "sell_to_close",
+      };
+      const resp = await alpacaPost("/orders", body);
+      if (resp && resp.id) {
+        orderConfirmed = true;
+        logEvent("partial", `[TIERED] Alpaca close ${closeQty}x ${pos.contractSymbol} | orderId:${resp.id} | reason:${reason}`);
+        if (resp.filled_avg_price && parseFloat(resp.filled_avg_price) > 0) {
+          ep = parseFloat(parseFloat(resp.filled_avg_price).toFixed(2));
+        }
+      } else {
+        logEvent("warn", `[TIERED] Alpaca order rejected for ${ticker} closeNContracts — state NOT mutated`);
+        return;
+      }
+    } catch(e) {
+      logEvent("error", `[TIERED] closeNContracts Alpaca error: ${e.message}`);
+      return;
+    }
+  } else if (_dryRunMode) {
+    orderConfirmed = true;
+    logEvent("dryrun", `WOULD CLOSE ${closeQty}x ${ticker} @ $${ep} | reason:${reason} | P&L:${pnl>=0?"+":""}$${pnl.toFixed(2)}`);
+  }
+
+  if (!orderConfirmed) return;
+
+  // Update state
+  state.cash          = parseFloat((state.cash + ev).toFixed(2));
+  state.monthlyProfit = parseFloat((state.monthlyProfit + pnl).toFixed(2));
+  pos.contracts       = Math.max(0, pos.contracts - closeQty);
+  pos.cost            = parseFloat((pos.premium * 100 * pos.contracts).toFixed(2));
+  pos.contractsClosed = (pos.contractsClosed || 0) + closeQty;
+
+  // Push to closedTrades for Kelly/streak tracking
+  state.closedTrades.push({
+    ticker, pnl,
+    pct:        ((pnl / (pos.premium * 100 * closeQty)) * 100).toFixed(1),
+    date:       new Date().toLocaleDateString(),
+    reason,
+    tradeType:  "naked",
+    optionType: pos.optionType,
+    closeTime:  Date.now(),
+  });
+
+  // Write PARTIAL journal entry so it appears in journal UI
+  const nowET   = new Date().toLocaleString("en-US", { timeZone: "America/New_York" });
+  const _todayStr = new Date().toLocaleDateString('en-US', {timeZone:'America/New_York'}).replace(/\//g,'-');
+  const journal = await loadJournalDay(_todayStr);
+  const entry   = journal.find(e => e.contractSymbol === pos.contractSymbol || e.ticker === ticker);
+  if (entry) {
+    if (!entry.partialCloses) entry.partialCloses = [];
+    entry.partialCloses.push({
+      reason,
+      contracts:  closeQty,
+      remaining:  pos.contracts,
+      exitPrice:  ep,
+      pnl,
+      pct:        ((pnl / (pos.premium * 100 * closeQty)) * 100).toFixed(1),
+      timeET:     nowET,
+    });
+    await saveJournalDay(_todayStr, journal);
+  }
+
+  logEvent("partial", `[TIERED] ${ticker} ${reason} — closed ${closeQty}x @ $${ep} | P&L:${pnl>=0?"+":""}$${_fmt(pnl)} | ${pos.contracts}x remaining | cash $${_fmt(state.cash)}`);
+  await saveStateNow();
+}
+
 async function confirmPendingOrder() {
   // NAKED OPTIONS: confirm single-leg long option fill
   const pending = state._pendingOrder;
@@ -944,7 +1069,6 @@ async function confirmPendingOrder() {
 
 
 module.exports = {
-  closePosition, partialClose, confirmPendingOrder, syncCashFromAlpaca,
-  initCloseEngine,
-
+  closePosition, partialClose, closeNContracts, confirmPendingOrder,
+  syncCashFromAlpaca, initCloseEngine,
 };
