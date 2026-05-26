@@ -51,7 +51,8 @@ const {
 } = require('./execution');
 
 const {
-  closePosition, partialClose, confirmPendingOrder, syncCashFromAlpaca,
+  closePosition, partialClose, closeNContracts, confirmPendingOrder,
+  syncCashFromAlpaca,
 } = require('./closeEngine');
 
 const {
@@ -755,6 +756,10 @@ async function runScan() {
 
   // Individual stock positions disabled - SPY/QQQ only
 
+  // V2.98 FIX E (HOISTED): _liveDailyRsiMap must be declared before the injection
+  // block at line ~772 which runs before the stockData loop on some scan paths.
+  // Populated by the stockData loop below; empty map on first scan is safe —
+  // pos.dailyRsi injection simply skips (no matching ticker = no update).
   let _liveDailyRsiMap = {};
 
   // 1. Exit checks for open positions
@@ -783,12 +788,15 @@ async function runScan() {
     { dryRunMode, scanET, alpacaBalance, pdtCount, marketContext }
   );
 
-  // Apply decisions — closePosition/partialClose are the only side effects
+  // Apply decisions — closePosition/partialClose/closeNContracts are the only side effects
   for (const d of exitDecisions) {
     if (d.action === 'close')
       await closePosition(d.ticker, d.reason, d.exitPremium, d.contractSym);
     else if (d.action === 'partial')
       await partialClose(d.ticker);
+    else if (d.action === 'partial-n')
+      // V2.99 TIERED EXITS: close exactly d.contractsToClose contracts (T1=1, T2=1)
+      await closeNContracts(d.ticker, d.contractsToClose || 1, d.reason, d.exitPremium);
   }
   if (exitDecisions.length > 0) markDirty();
 
@@ -1575,9 +1583,9 @@ async function runScan() {
   const scored = []; // moved here to avoid TDZ with the OPT-4 log
   // V2.98 FIX E: live daily RSI map — populated during stockData loop, used to
   // inject pos.dailyRsi before checkExits so _putFulfilled uses current daily RSI.
-  // Without this, pos.dailyRsi is never updated after entry and Fix 2 falls back
-  // to intraday RSI, making _putFulfilled structurally broken for puts.
-  const _liveDailyRsiMap = {}; // {ticker: dailyRsi} — freshest reading from this scan
+  // NOTE: _liveDailyRsiMap is declared early (near top of runScan) so the injection
+  // at line ~772 never crashes on early-scan paths before the stockData loop runs.
+  // This re-assignment is intentional — stockData loop will populate it below.
   let _zeroScoreCount = 0;
 
   const prefetchStart = Date.now();
@@ -2753,7 +2761,11 @@ async function runScan() {
     // Apply directional gap boosts set in gap gate above.
     // Gap-up: puts get +10 (fade the extension), calls get strict RSI requirement.
     // Gap-down: calls get +10 (genuine oversold), puts get no additional boost.
-    if (liveStock._gapPutBoost > 0 && putSetup.score > 0) {
+    // V2.99 FIX: Remove putSetup.score > 0 guard — under Regime A put scoring,
+    // scores were always ≤ 0, so this condition silently nullified the gap-up put boost
+    // every single time it was set. The boost is already gated by gap detection upstream
+    // (_gapPutBoost only > 0 on genuine gap-up days ≥ 1.5%). Safe to apply unconditionally.
+    if (liveStock._gapPutBoost > 0) {
       putSetup.score += liveStock._gapPutBoost;
       putSetup.reasons.push(`Gap-up ${parseFloat(preMarket?.gapPct||0).toFixed(1)}% put fade boost (+${liveStock._gapPutBoost})`);
       logEvent("filter", `[GAP-BOOST] ${stock.ticker} put score +${liveStock._gapPutBoost} (gap-up fade)`);
