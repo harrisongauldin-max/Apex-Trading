@@ -13,6 +13,13 @@ const fmt = (n) => '$' + (n||0).toFixed(2);
 // as if it were too risky to size properly, when the real issue was the dollar threshold.
 // 900 aligns QQQ sizing with SPY (both get 3 contracts at typical premiums and Kelly).
 const MAX_LOSS_PER_TRADE = 900;
+// V2.99: Hard contract ceiling independent of premium price.
+// Dollar-based riskCap alone produces wildly different contract counts:
+//   SPY $4/contract → 6 contracts, QQQ $9/contract → 2 contracts (same risk cap).
+// MAX_CONTRACTS ensures consistent sizing across all instruments regardless of premium.
+// Panel decision: 3 contracts max — enough size to matter, not so much that a fast-stop
+// is catastrophic. SPY fast-stop at 3x = $420 max loss vs $575 at 4x.
+const MAX_CONTRACTS = 3;
 const VIX_REDUCE50 = 35;
 const VIX_REDUCE25 = 28;
 
@@ -258,7 +265,8 @@ function calcPositionSize(premium, score, vix) {
     MAX_LOSS_PER_TRADE / STOP_LOSS_PCT     // risk-based cap
   );
 
-  const contracts = Math.max(1, Math.min(Math.min(5, preCalibCap), Math.floor(maxCost / (premium * 100))));
+  // V2.99: Use MAX_CONTRACTS (3) as hard ceiling — replaces the old hardcoded 5.
+  const contracts = Math.max(1, Math.min(Math.min(MAX_CONTRACTS, preCalibCap), Math.floor(maxCost / (premium * 100))));
 
   // If even 1 contract exceeds the risk-based cap, return 0 to signal skip
   // Exception: high-conviction (score >= 85) always gets 1 contract if premium is under $25
