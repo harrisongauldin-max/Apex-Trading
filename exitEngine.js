@@ -725,12 +725,27 @@ async function checkExits(positions, posSnapshots, posQuotes, posNewsCache, ctx)
 
       if (pos._thesisFulfilled && !pos._thesisAutoClose && hoursOpen >= 0.5) {
         if (chg >= 0.03) {
-          // ── CASE A: Profitable + thesis complete → immediate close ──────────
+          // ── CASE A: Profitable + thesis complete ─────────────────────────────
+          // V2.99 TIERED EXIT T2: If T1 already fired and contracts > 1, partial close 1.
+          // Leave the runner (last contract) for T3 (+20%) or EOD sweep.
+          // If T1 never fired (position went straight to thesis-complete), full close all.
+          // If only 1 contract remains (after T1), full close as normal.
           pos._thesisAutoClose = true;
-          logEvent("scan", `[THESIS COMPLETE] ${pos.ticker} RSI normalized (${_entryRSI}→${_curRSI.toFixed(0)}) | gain: +${(chg*100).toFixed(1)}% — closing position`);
-          if (!_closedThisCycle.has(pi)) {
-            _closedThisCycle.add(pi);
-            decisions.push({ pi, ticker: pos.ticker, action: 'close', reason: 'thesis-complete', exitPremium: null, contractSym: pos.contractSymbol || pos.buySymbol || null });
+          const _t2Contracts = pos.contracts || 1;
+          const _t2UsePartial = pos._tier1Closed && _t2Contracts > 1;
+          if (_t2UsePartial) {
+            logEvent("scan", `[THESIS COMPLETE T2] ${pos.ticker} RSI normalized (${_entryRSI}→${_curRSI.toFixed(0)}) | gain: +${(chg*100).toFixed(1)}% | T1 fired — closing 1/${_t2Contracts} contracts, leaving runner`);
+            pos._tier2Closed = true;
+            if (!_closedThisCycle.has(pi) && !_partialThisCycle.has(pi)) {
+              _partialThisCycle.add(pi);
+              decisions.push({ pi, ticker: pos.ticker, action: 'partial-n', contractsToClose: 1, reason: 'partial-profit-t2', exitPremium: null, contractSym: pos.contractSymbol || pos.buySymbol || null });
+            }
+          } else {
+            logEvent("scan", `[THESIS COMPLETE] ${pos.ticker} RSI normalized (${_entryRSI}→${_curRSI.toFixed(0)}) | gain: +${(chg*100).toFixed(1)}% — closing all ${_t2Contracts} contract(s)`);
+            if (!_closedThisCycle.has(pi)) {
+              _closedThisCycle.add(pi);
+              decisions.push({ pi, ticker: pos.ticker, action: 'close', reason: 'thesis-complete', exitPremium: null, contractSym: pos.contractSymbol || pos.buySymbol || null });
+            }
           }
           // V2.98 Gate A: record thesis-complete exit for same-day re-entry block
           // Stores entryRSI so scanner can require RSI 15pts deeper before re-entry
@@ -1080,8 +1095,35 @@ async function checkExits(positions, posSnapshots, posQuotes, posNewsCache, ctx)
       }
     }
 
+    // ── V2.99 TIERED EXITS ───────────────────────────────────────────────────
+    // T1: +8% gain — close 1 contract, lock in first profit.
+    // Only fires on 2+ contract positions where T1 hasn't fired yet.
+    // Uses chg (current) not peakChg — requires position to currently be +8%, not just peak.
+    if (!pos._tier1Closed && chg >= 0.08 && (pos.contracts || 1) >= 2) {
+      pos._tier1Closed = true;
+      logEvent("scan", `[TIER1] ${pos.ticker} hit +${(chg*100).toFixed(0)}% — closing 1/${pos.contracts} contracts (T1 profit lock)`);
+      if (!_closedThisCycle.has(pi) && !_partialThisCycle.has(pi)) {
+        _partialThisCycle.add(pi);
+        decisions.push({ pi, ticker: pos.ticker, action: 'partial-n', contractsToClose: 1, reason: 'partial-profit-t1', exitPremium: null, contractSym: pos.contractSymbol || pos.buySymbol || null });
+      }
+    }
+
+    // T3: +20% gain — close ALL remaining contracts.
+    // Only fires after T1 (runner management). If T1 never fired, let thesis-complete handle it.
+    // Fast-stop still closes all immediately regardless of tier state.
+    if (pos._tier1Closed && !pos._tier3Closed && chg >= 0.20) {
+      pos._tier3Closed = true;
+      logEvent("scan", `[TIER3] ${pos.ticker} hit +${(chg*100).toFixed(0)}% — closing all remaining ${pos.contracts} contract(s) (T3 runner close)`);
+      if (!_closedThisCycle.has(pi)) {
+        _closedThisCycle.add(pi);
+        decisions.push({ pi, ticker: pos.ticker, action: 'close', reason: 'partial-profit-t3', exitPremium: null, contractSym: pos.contractSymbol || pos.buySymbol || null });
+      }
+    }
+    // ── END TIERED EXITS ─────────────────────────────────────────────────────
+
     // Tier 3: +15% peak — existing profit lock logic
-    if (!pos._profitLockActive && peakChg >= 0.15) {
+    // V2.99: Only applies to 1-contract positions — tiered exits handle 2-3 contract positions.
+    if (!pos._profitLockActive && peakChg >= 0.15 && (pos.contracts || 1) === 1) {
       pos._profitLockActive = true; // latch — only fires once per position
       if (contracts >= 2) {
         // ── 2-CONTRACT PATH (B): partial close 1, trail remaining at 6% ────
