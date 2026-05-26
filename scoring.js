@@ -708,8 +708,31 @@ function scoreIndexSetup(stock, optionType, spyRSI, spyMACD, spyMomentum, breadt
     if (signal) reasons.push(`Agent signal: ${signal} (${confidence}) — scoring impact removed, threshold-only`);
 
     // - Regime confirmation -
+    // V2.99 PUT FIX: Overbought mean reversion puts in Regime A.
+    // The -25 penalty was blanket-applied to ALL puts in trending_bull — making puts
+    // structurally impossible (max score 33 vs 70 minimum) in Regime A which has been
+    // the regime since APEX launch. Zero puts entered in 50+ trades as a result.
+    //
+    // Fix: differentiate two put cases in Regime A:
+    //   1. Trend-following puts (RSI < 65 or dailyRSI < 75): wrong for bull regime → -25
+    //   2. Overbought MR puts (intraday RSI >= 65 AND dailyRSI >= 75): valid fade signal → -5
+    //      This matches the call MR thesis but in reverse: overbought bounce deserves a put,
+    //      just as oversold dip deserves a call. Both are mean reversion, not trend trades.
+    //
+    // The -5 reduced penalty still disadvantages puts in bull regime but allows other
+    // signals (MACD bearish crossover, RSI 70+, low breadth, PCR fear) to push score ≥ 70.
+    // This is NOT a free pass — puts still need bearish MACD + multiple confirming signals.
+    const _dailyRsiForPut   = stock.dailyRsi || spyRSI || 50;
+    const _isOverboughtMRPut = ["trending_bull","recovery"].includes(regime)
+      && spyRSI >= 65
+      && _dailyRsiForPut >= 75;
+
     if (["trending_bear","breakdown"].includes(regime))                           { score += 20; reasons.push(`Regime: ${regime} (+20)`); }
     else if (regime === "choppy")                                                  { score -= 10; reasons.push("Choppy regime - puts risky (-10)"); }
+    else if (_isOverboughtMRPut) {
+      // Overbought MR put in bull regime — reduced penalty, not full block
+      score -= 5; reasons.push(`Regime: ${regime} - overbought MR put, reduced penalty (-5)`);
+    }
     else if (["trending_bull","recovery"].includes(regime))                       { score -= 25; reasons.push(`Regime: ${regime} - wrong for puts (-25)`); }
 
     // V2.84: Regime B duration boost (panel fix -- Stat Arb + Quant Strategist)
@@ -753,6 +776,11 @@ function scoreIndexSetup(stock, optionType, spyRSI, spyMACD, spyMomentum, breadt
         score += 25; reasons.push(`${stock.ticker} RSI ${spyRSI} overbought + IVP ${ivpNow}% cheap puts - ideal debit put entry (+25)`);
       } else if (inBearOrChoppy) {
         score += 20; reasons.push(`${stock.ticker} RSI ${spyRSI} overbought in bear/choppy regime (+20)`);
+      } else if (_isOverboughtMRPut) {
+        // V2.99 FIX: Overbought MR put in bull regime — RSI 70+ is the core signal.
+        // Give full +20 bonus (same as bear regime) when dailyRSI >= 75 confirms overbought.
+        // Without this, RSI 72 only adds +5 — the primary put signal is nearly worthless.
+        score += 20; reasons.push(`${stock.ticker} RSI ${spyRSI} overbought MR put in bull regime - dailyRSI ${_dailyRsiForPut.toFixed(0)} confirms (+20)`);
       } else {
         score += 5;  reasons.push(`${stock.ticker} RSI ${spyRSI} overbought in bull regime - trend may continue, reduced bonus (+5)`);
       }
@@ -1234,13 +1262,17 @@ function scoreIndexSetup(stock, optionType, spyRSI, spyMACD, spyMomentum, breadt
     if (state._creditStress) { score -= 8; reasons.push("Credit stress: HYG+TLT falling - calls risky in liquidation (-8)"); }
   }
 
-  // Apply supplementary signals - capped at +15 total to prevent domination
+  // Apply supplementary signals - capped to prevent domination
   // FIX F: Supplementary cap at 15 — prevents weak primary + max supp reaching minimum.
-  // Prevents weak primary (40) + max supplementary (25) = 65 reaching minimum.
-  // With cap at 15: weak primary (40) + max supp (15) = 55 < 65 minimum.
-  // Supplementary confirms — it doesn't carry.
+  // V2.99 FIX: Overbought MR puts in bull regime get cap of 25 — their primary signals
+  // are penalized by regime (-5) so supplementary must be allowed to contribute more.
+  // The higher cap is safe because primary signals (RSI 70+, MACD bearish crossover,
+  // breadth <30%) must all fire for the overbought MR put path to activate.
+  // Normal cap: 15. Overbought MR put in bull cap: 25.
+  const _isOverboughtMRPutForCap = typeof _isOverboughtMRPut !== 'undefined' && _isOverboughtMRPut;
+  const _suppCap = _isOverboughtMRPutForCap ? 25 : 15;
   if (supplementScore > 0) {
-    const cappedSupp = Math.min(15, supplementScore);
+    const cappedSupp = Math.min(_suppCap, supplementScore);
     score += cappedSupp;
     if (cappedSupp < supplementScore) {
       reasons.push(`Supplementary signals capped at +${cappedSupp} (raw: +${supplementScore})`);
