@@ -2148,7 +2148,8 @@ async function runScan() {
 
       // NAKED OPTIONS: use scoreIndexSetup directly for put and call.
       // No spread-specific scoring — tradeType is always 'put' or 'call'.
-      putSetup  = { score: putResult.score,  reasons: putResult.reasons,  tradeType: "put",  isMeanReversion: false };
+      putSetup  = { score: putResult.score,  reasons: putResult.reasons,  tradeType: "put",  isMeanReversion: false,
+                   _isOverboughtMRPut: !!putResult._isOverboughtMRPut };  // V2.99: propagate for gate exemptions
       callSetup = { score: callResult.score, reasons: callResult.reasons, tradeType: "call", isMeanReversion: false };
       // Correlation suppression: QQQ correlated to SPY (0.90+)
       // Panel decision (7/8): allow both simultaneously at score -80 same direction
@@ -2168,9 +2169,12 @@ async function runScan() {
         // Opposite-direction suppression kept — SPY put + QQQ call is a contradictory thesis.
         if (spyPutOpen  && putSetup.score  < MIN_SCORE_CREDIT) { putSetup.score  = Math.min(putSetup.score,  30); logEvent("filter", `QQQ corr-block: SPY put open, QQQ put score below minimum — suppressed`); }
         if (spyCallOpen && callSetup.score < MIN_SCORE_CREDIT) { callSetup.score = Math.min(callSetup.score, 30); logEvent("filter", `QQQ corr-block: SPY call open, QQQ call score below minimum — suppressed`); }
-        // Opposite directions — contradictory thesis, keep blocking
-        if (spyPutOpen  && callSetup.score > 0) { callSetup.score = Math.min(callSetup.score, 30); logEvent("filter", `QQQ corr-block: SPY put open, QQQ call contradicts direction`); }
-        if (spyCallOpen && putSetup.score  > 0) { putSetup.score  = Math.min(putSetup.score,  30); logEvent("filter", `QQQ corr-block: SPY call open, QQQ put contradicts direction`); }
+        // V2.99 PUT AUDIT: Opposite-direction suppression REMOVED.
+        // SPY call + QQQ put is a hedge, not a contradiction — overbought MR puts
+        // are specifically designed to fade a rally while a call holds a different thesis.
+        // Same-direction suppression above stays — two calls on correlated instruments
+        // is concentration risk. Opposite direction is a legitimate hedge.
+        // Lines removed: spyPutOpen→callSetup cap, spyCallOpen→putSetup cap
       }
       // Symmetric: suppress SPY at <80 when QQQ is open in same direction
       if (stock.ticker === "SPY") {
@@ -2180,8 +2184,8 @@ async function runScan() {
         logEvent("filter", `[PUT-AUDIT] SPY pre-corr scores: put=${putSetup.score} call=${callSetup.score} | dailyRSI:${(liveStock.dailyRsi||0).toFixed(0)} MACD:${liveStock.macd||'?'}`);
         if (qqqPutOpen  && putSetup.score  < MIN_SCORE_CREDIT) { putSetup.score  = Math.min(putSetup.score,  30); logEvent("filter", `SPY corr-block: QQQ put open, SPY put score below minimum — suppressed`); }
         if (qqqCallOpen && callSetup.score < MIN_SCORE_CREDIT) { callSetup.score = Math.min(callSetup.score, 30); logEvent("filter", `SPY corr-block: QQQ call open, SPY call score below minimum — suppressed`); }
-        if (qqqPutOpen  && callSetup.score > 0) { callSetup.score = Math.min(callSetup.score, 30); }
-        if (qqqCallOpen && putSetup.score  > 0) { putSetup.score  = Math.min(putSetup.score,  30); }
+        // V2.99 PUT AUDIT: Opposite-direction suppression removed (see QQQ block above).
+        // qqqPutOpen→callSetup and qqqCallOpen→putSetup caps removed — hedge, not contradiction.
         // Update scoreDebug after correlation suppression so tab shows actual scores
         if (state._scoreDebug?.[stock.ticker]) {
           state._scoreDebug[stock.ticker].putScore  = putSetup.score;
@@ -2844,7 +2848,19 @@ async function runScan() {
     const inBearRegimeForGap = rb.isBearRegime; // from entryEngine rulebook
     const agentWantsPutsOnBounce = (state._agentMacro || {}).entryBias === "puts_on_bounces";
     if (marketGapDirection === "down" && !inBearRegimeForGap) { callScore = 0; recordGateBlock(stock.ticker, "gap_direction_down", authRegimeName, callScore); }
-    if (marketGapDirection === "up"   && !inBearRegimeForGap && !agentWantsPutsOnBounce) { putScore = 0; recordGateBlock(stock.ticker, "gap_direction_up", authRegimeName, putScore); }
+    // V2.99 PUT AUDIT FIX 1 — CRITICAL: Gap-up direction gate exempts overbought MR puts.
+    // The gap direction filter was designed to block trend-following puts on gap-up days.
+    // But overbought MR puts ARE the fade-the-gap thesis — zeroing putScore kills the
+    // primary put use case. Exempt when _isOverboughtMRPut is set (RSI≥65 + dailyRSI≥75).
+    // The gap-up put boost (+10 from _gapPutBoost) correctly fires before this gate —
+    // without this exemption that boost was immediately discarded by putScore = 0.
+    const _gapExemptMRPut = putSetup._isOverboughtMRPut;
+    if (marketGapDirection === "up" && !inBearRegimeForGap && !agentWantsPutsOnBounce && !_gapExemptMRPut) {
+      putScore = 0;
+      recordGateBlock(stock.ticker, "gap_direction_up", authRegimeName, putScore);
+    } else if (marketGapDirection === "up" && _gapExemptMRPut) {
+      logEvent("filter", `[GAP-MR-PUT] ${stock.ticker} gap-up direction gate EXEMPTED — overbought MR put (RSI≥65 dailyRSI≥75)`);
+    }
     // Apply entry window constraint
     if (!callsAllowed) { callScore = 0; recordGateBlock(stock.ticker, "calls_not_allowed", authRegimeName, callScore); }
     // APEX: simple — puts blocked only when putsAllowed is false
@@ -3059,9 +3075,15 @@ async function runScan() {
         const pctAbove  = ((putPrice - putVWAP) / putVWAP) * 100;
         // Block put entries when price is >1.5% above VWAP with strong intraday momentum
         // <1.5% above VWAP is within normal noise — don't over-filter
-        if (aboveVWAP && pctAbove > 1.5 && liveStock.momentum === "recovering") {
+        // V2.99 PUT AUDIT FIX 3: Exempt overbought MR puts from VWAP timing gate.
+        // On gap-up days price is above VWAP for the first hour — this gate would block
+        // overbought MR puts during exactly when they should enter. The overbought MR
+        // put thesis requires price to be elevated (above VWAP) — that's the condition.
+        if (aboveVWAP && pctAbove > 1.5 && liveStock.momentum === "recovering" && !putSetup._isOverboughtMRPut) {
           logEvent("filter", `${stock.ticker} VWAP timing: ${pctAbove.toFixed(1)}% above VWAP ($${putVWAP.toFixed(2)}) with recovering momentum — wait for rejection`);
           continue;
+        } else if (aboveVWAP && pctAbove > 1.5 && putSetup._isOverboughtMRPut) {
+          logEvent("filter", `${stock.ticker} VWAP timing: above VWAP EXEMPTED — overbought MR put (price above VWAP is the condition, not a block)`);
         }
       }
     }
