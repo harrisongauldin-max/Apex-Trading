@@ -77,20 +77,10 @@ async function syncCashFromAlpaca() {
     const alpacaEquity    = parseFloat(acct.equity || acct.portfolio_value || alpacaCash);
     if (alpacaEquity > 0) state.alpacaEquity = alpacaEquity;
 
-    // Alpaca tracks day trades authoritatively — use their count as source of truth
-    // acct.daytrade_count = rolling 5-day day trade count (resets as old trades age out)
-    // acct.pattern_day_trader = true if account has been flagged as PDT
-    if (acct.daytrade_count !== undefined) {
-      const alpacaDTCount = parseInt(acct.daytrade_count, 10);
-      if (!isNaN(alpacaDTCount)) {
-        const dtLeft = Math.max(0, PDT_LIMIT - alpacaDTCount);
-        if (alpacaDTCount !== (state._alpacaDayTradeCount || 0)) {
-          logEvent("scan", `[PDT] Alpaca count: ${alpacaDTCount}/3 — ${dtLeft} day trade${dtLeft===1?'':'s'} remaining (rolling 5-day window)`);
-        }
-        state._alpacaDayTradeCount = alpacaDTCount;
-        state._alpacaDayTradesLeft = dtLeft;
-      }
-    }
+    // V2.99: PDT tracking removed — FINRA sunset the PDT rule (April 21 2026).
+    // Alpaca implementing ~June 5 2026. PDT_RULE_ACTIVE = false in constants.js.
+    // The [PDT] log line was firing every hour from daytrade_count sync — removed.
+    // Keeping pattern_day_trader flag for Alpaca account status awareness only.
     if (acct.pattern_day_trader !== undefined) {
       state._patternDayTrader = acct.pattern_day_trader;
     }
