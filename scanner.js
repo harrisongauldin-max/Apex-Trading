@@ -1541,16 +1541,27 @@ async function runScan() {
   const _todayGapAbs      = Math.abs(state._todayMaxGap || 0);
   const _staggerMins      = _todayGapAbs >= 3.0 ? 45 : 20; // 45min on big gap days
   const _staggerCooling   = state._lastEntryAt && _minsSinceEntry < _staggerMins;
-  const _tooEarlyToTrade  = _sessionMinsNow < 30;
+  // V3.00: TWO-TIER STAGGER GATE
+  // Tier 1 (0-15 min): Hard block. Spreads wide, VWAP meaningless, IV bleeding.
+  // Tier 2 (15-30 min): Soft block. Score >= 85 can bypass. Still 0.75x sizing.
+  // Panel decision 5/27/2026: 9:45 AM is the practical stabilization point.
+  // Score 85 requires RSI deeply oversold + MACD + breadth + regime — rare before 9:45.
+  const _hardBlock        = _sessionMinsNow < 15;  // 9:30-9:45 AM: hard block always
+  const _softBlock        = _sessionMinsNow >= 15 && _sessionMinsNow < 30; // 9:45-10:00 AM: score-gated
+  const _tooEarlyToTrade  = _hardBlock; // backward compat — consumed in per-stock gate
 
-  if (_tooEarlyToTrade) {
-    logEvent("filter", `[STAGGER] Session only ${_sessionMinsNow.toFixed(0)}min old — no entries until 30min mark (VWAP/RSI need time to stabilize)`);
+  if (_hardBlock) {
+    logEvent("filter", `[STAGGER] Session only ${_sessionMinsNow.toFixed(0)}min old — hard block until 9:45 AM (VWAP/IV not yet stable)`);
+  } else if (_softBlock) {
+    logEvent("filter", `[STAGGER] Session ${_sessionMinsNow.toFixed(0)}min old — soft block (9:45-10:00 AM window, score >= 85 can bypass)`);
   } else if (_staggerCooling) {
     const _remaining = (_staggerMins - _minsSinceEntry).toFixed(0);
     logEvent("filter", `[STAGGER] Last entry ${_minsSinceEntry.toFixed(0)}min ago — cooling ${_staggerMins}min before next entry (${_remaining}min remaining)${_staggerMins === 45 ? ' [GAP DAY extended cooldown]' : ''}`);
   }
-  // Flags consumed per-stock in entry gate below (~line 2960)
+  // Flags consumed per-stock in entry gate below
   state._tooEarlyToTrade = _tooEarlyToTrade;
+  state._hardBlock       = _hardBlock;
+  state._softBlock       = _softBlock;
   state._staggerCooling  = _staggerCooling;
 
   // Legacy burst log (kept for reference)
@@ -2665,6 +2676,26 @@ async function runScan() {
     let macroCallMod = agentAlignsBear ? alignedModifier : agentAlignsBull ? Math.round(alignedModifier * 0.5) : 0;
     let macroPutMod  = agentAlignsBear ? alignedModifier : putsOnBouncesFade ? 0 : 0;
 
+    // V3.00: STRONGLY BEARISH headwind in Regime A
+    // Design intent: don't suppress MR oversold calls with mild bearish noise.
+    // Gap: "strongly bearish" with real triggers (downgrade, war) = macro headwind
+    //      even in bull regime. Zero penalty was leaving calls fully unpenalized.
+    // Fix: "strongly bearish" → -10 call penalty in ANY regime.
+    //      "bearish" (plain) → -8 call penalty in any regime.
+    //      "mild bearish" → 0 (noise, no change — original intent preserved).
+    // These are score reductions, not blocks. High-conviction entries still pass.
+    if (!agentAlignsBear) { // only apply if the aligned-bear path didn't already fire
+      const _agentTriggers = (state._agentMacro || {}).triggers || [];
+      const _hasRealTrigger = _agentTriggers.length > 0;
+      if (agentMacroForScoring === "strongly bearish") {
+        macroCallMod -= 10;
+        if (macroCallMod !== 0 || -10 !== 0) logEvent("filter", `[MACRO-HEADWIND] ${stock.ticker} strongly bearish macro in Regime A — call penalty -10`);
+      } else if (agentMacroForScoring === "bearish" && _hasRealTrigger) {
+        macroCallMod -= 8;
+        logEvent("filter", `[MACRO-HEADWIND] ${stock.ticker} bearish macro with triggers in Regime A — call penalty -8`);
+      }
+    }
+
     // Extra sector-specific adjustment (kept — aggregate signal, not directional noise)
     if (_macroSectorBearish.includes(stock.sector)) { macroCallMod -= 10; macroPutMod += 10; }
     if (_macroSectorBullish.includes(stock.sector)) { macroCallMod += 8;  macroPutMod -= 8; }
@@ -2775,9 +2806,19 @@ async function runScan() {
       logEvent("filter", `[GAP-BOOST] ${stock.ticker} put score +${liveStock._gapPutBoost} (gap-up fade)`);
     }
     if (liveStock._gapCallBoost > 0 && callSetup.score > 0) {
-      callSetup.score += liveStock._gapCallBoost;
-      callSetup.reasons.push(`Gap-down ${parseFloat(preMarket?.gapPct||0).toFixed(1)}% call boost (+${liveStock._gapCallBoost})`);
-      logEvent("filter", `[GAP-BOOST] ${stock.ticker} call score +${liveStock._gapCallBoost} (gap-down genuine oversold)`);
+      // V3.00: Suppress gap-down call boost when market breadth confirms broad weakness.
+      // Breadth < 30% means >70% of stocks are declining — the gap-down is market-wide
+      // selling, not an instrument-specific dip ripe for mean reversion.
+      // Boosting calls into a broad sell-off adds conviction against the tape.
+      const _breadthNow = marketContext?.breadth ?? 50;
+      const _broadWeakness = _breadthNow < 30;
+      if (_broadWeakness) {
+        logEvent("filter", `[GAP-BOOST-SUPPRESSED] ${stock.ticker} gap-down call boost suppressed — breadth ${_breadthNow}% < 30% (broad market weakness)`);
+      } else {
+        callSetup.score += liveStock._gapCallBoost;
+        callSetup.reasons.push(`Gap-down ${parseFloat(preMarket?.gapPct||0).toFixed(1)}% call boost (+${liveStock._gapCallBoost})`);
+        logEvent("filter", `[GAP-BOOST] ${stock.ticker} call score +${liveStock._gapCallBoost} (gap-down genuine oversold)`);
+      }
     }
     // Stricter RSI requirement when gap-up but below VWAP (partial signal)
     if (liveStock._gapCallStrictRSI && callSetup.score > 0) {
@@ -3420,10 +3461,33 @@ async function runScan() {
       logEvent("filter", `${stock.ticker} call blocked — VIX ${state.vix?.toFixed(1)} >= 28 + bearish macro (high-cost call environment)`);
       continue;
     }
-    // V2.96: Stagger gate — enforced per-stock after all circuit/VIX gates
-    if (state._tooEarlyToTrade) {
-      logEvent("filter", `${stock.ticker} entry blocked — session < 30min old, waiting for VWAP/RSI to stabilize`);
+    // V3.00: EOD ENTRY CUTOFF — no new entries at or after 3:00 PM ET
+    // EOD hard close fires at 3:15 PM and closes all existing positions.
+    // Entering after 3:00 PM creates a position that cannot be EOD-closed
+    // and will hold overnight — violating the no-overnight-holds rule.
+    // SPY entered at 3:26 PM on 5/27 after EOD close already fired → gap identified.
+    // Buffer: 15 minutes before EOD close gives the close time to execute cleanly.
+    if (isLastHour) {
+      logEvent("filter", `[EOD-BLOCK] ${stock.ticker} entry blocked — past 3:00 PM ET cutoff (EOD close at 3:15 PM, no new entries)`);
       continue;
+    }
+
+    // V3.00: TWO-TIER STAGGER GATE — per-stock enforcement
+    // Hard block (0-15 min): no exceptions, always skip
+    if (state._hardBlock) {
+      logEvent("filter", `[STAGGER] ${stock.ticker} entry blocked — hard block (session < 15min, VWAP/IV unstable)`);
+      continue;
+    }
+    // Soft block (15-30 min): score >= 85 bypasses, anything below is blocked
+    if (state._softBlock) {
+      const _earlyBypassScore = 85;
+      if (score >= _earlyBypassScore) {
+        logEvent("filter", `[STAGGER-BYPASS] ${stock.ticker} score ${score} >= ${_earlyBypassScore} — early entry allowed (9:45-10:00 AM window, 0.75x sizing applies)`);
+        // fall through — entry proceeds with openingMult 0.75x in execution.js
+      } else {
+        logEvent("filter", `[STAGGER] ${stock.ticker} entry blocked — soft block (score ${score} < ${_earlyBypassScore} needed for 9:45-10:00 AM entry)`);
+        continue;
+      }
     }
     if (state._staggerCooling) {
       logEvent("filter", `${stock.ticker} entry blocked — stagger cooldown active (last entry ${((Date.now() - (state._lastEntryAt||0))/60000).toFixed(0)}min ago, need 20min)`);
