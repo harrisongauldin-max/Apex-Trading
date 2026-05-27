@@ -1075,7 +1075,13 @@ function scoreIndexSetup(stock, optionType, spyRSI, spyMACD, spyMomentum, breadt
     }
     else if (spyRSI <= 42)                                                        { score += 10; reasons.push(`${stock.ticker} RSI ${spyRSI} oversold (+10)`); }
     else if (spyRSI >= 45 && spyRSI <= 58 && ["trending_bull","recovery"].includes(regime)) {
-      score += 12; reasons.push(`${stock.ticker} RSI ${spyRSI} healthy dip in bull trend - ideal call entry (+12)`);
+      // V3.00 REMOVED: "healthy dip" +12 call bonus at RSI 45-58.
+      // APEX is a mean-reversion system. RSI 45-58 is mid-range — not oversold.
+      // Trend-continuation entries at RSI 54 contradict the MR thesis and perform
+      // poorly when macro turns bearish intraday (e.g. 5/27 QQQ: RSI 54.4, -$103).
+      // All call entries now require RSI < 45 for genuine oversold confirmation.
+      // Mid-range RSI gets 0 bonus — neutral, no penalization, no reward.
+      // (no score change — falls through to 0)
     }
     else if (spyRSI >= 70) {
       // FIX C: Naked calls only — overbought RSI is wrong direction for long calls.
