@@ -1286,10 +1286,11 @@ function scoreIndexSetup(stock, optionType, spyRSI, spyMACD, spyMomentum, breadt
   // mrCapitulation flag is computed but not read downstream — kept for potential future use.
   // V2.99 PUT AUDIT: export _isOverboughtMRPut flag so scanner.js gates can exempt
   // overbought MR puts from gap-direction zeroing and VWAP timing blocks.
-  // These gates were designed for trend-following puts — overbought MR puts are the
-  // specific scenario where fading the gap-up is the thesis and must be exempted.
+  // _isOverboughtMRPut is only declared inside the put+bull-regime branch (line ~726).
+  // Use typeof guard so call paths and bear-regime put paths safely return false.
+  const _isMRPutExport = (typeof _isOverboughtMRPut !== 'undefined') && !!_isOverboughtMRPut;
   return { score, reasons, tradeType: "naked", mrCapitulation: _mrCapitulationFlag,
-           _isOverboughtMRPut: !!_isOverboughtMRPut };
+           _isOverboughtMRPut: _isMRPutExport };
 }
 
 
