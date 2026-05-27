@@ -1284,7 +1284,12 @@ function scoreIndexSetup(stock, optionType, spyRSI, spyMACD, spyMomentum, breadt
   const _mrCapitulationFlag = optionType === "call" && spyRSI <= 30 && !["trending_bull","recovery"].includes(regime);
   // tradeType is always null in APEX (no credit/spread routing). Return "naked" not "spread".
   // mrCapitulation flag is computed but not read downstream — kept for potential future use.
-  return { score, reasons, tradeType: "naked", mrCapitulation: _mrCapitulationFlag };
+  // V2.99 PUT AUDIT: export _isOverboughtMRPut flag so scanner.js gates can exempt
+  // overbought MR puts from gap-direction zeroing and VWAP timing blocks.
+  // These gates were designed for trend-following puts — overbought MR puts are the
+  // specific scenario where fading the gap-up is the thesis and must be exempted.
+  return { score, reasons, tradeType: "naked", mrCapitulation: _mrCapitulationFlag,
+           _isOverboughtMRPut: !!_isOverboughtMRPut };
 }
 
 
