@@ -1021,134 +1021,107 @@ async function checkExits(positions, posSnapshots, posQuotes, posNewsCache, ctx)
     const trailActivated = chg >= (pos.trailActivate || TRAIL_ACTIVATE_PCT)
                         || peakChg >= (pos.trailActivate || TRAIL_ACTIVATE_PCT);
 
-    // ── V2.94: THESIS FAILURE DETECTION ──────────────────────────────────────
-    // Detects positions where the MR bounce never materialized:
-    //   - Position peaked within 30 minutes of entry (no real appreciation)
-    //   - Peak has been decaying for > 60 minutes (not a temporary dip)
-    //   - Peak decay > 10% from peak (meaningful deterioration confirmed)
+    // ── V3.01: PROGRESS CHECK (replaces thesis failure detection) ──────────────
+    // Panel decision 5/28/2026: complex thesis failure (earlyPeak+sustainedDecay)
+    // was firing too late and inconsistently. Replace with a simple time-based check:
     //
-    // This catches GLD-type failures: entered on RSI 20 oversold, option peaked at
-    // entry premium (vega already compressed), declined steadily as thesis failed.
-    // Normal exit logic (stop at -35%, fast-stop at -20%) lets these bleed too long.
+    // At checkMins post-entry: if peakChg < 5%, the thesis hasn't gained traction.
+    // Exit at market rather than holding all day through theta decay.
     //
-    // Action: mark _thesisFailure, tighten trail to 4% from CURRENT price (not peak).
-    // Unlike thesis-fulfilled (winners), this protects against further loss on losers.
-    if (!pos._thesisFailure && !pos._profitLockActive && chg < 0.05) {
-      const _entryTime     = new Date(pos.openDate || pos.entryTime || Date.now()).getTime();
-      const _peakAge       = (Date.now() - (pos._peakTime || _entryTime)) / 60000; // minutes since last peak
-      const _timeSinceEntry = (Date.now() - _entryTime) / 60000;
-      const _peakDecay     = pos.peakPremium > 0 ? (pos.peakPremium - curP) / pos.peakPremium : 0;
-      const _earlyPeak     = (pos._peakTime || _entryTime) - _entryTime < 30 * 60 * 1000; // peaked within 30min of entry
-      const _sustainedDecay = _peakAge > 60;  // peak has been falling for >60min
-      const _significantDecay = _peakDecay > 0.10; // >10% below peak
+    // checkMins tuning:
+    //   90 min (base):  standard MR setup — 40% resolve in 60-90min empirically
+    //   120 min: entryRSI < 20 (genuine capitulation needs more time to bounce)
+    //   60 min:  macro bearish OR gap-day entry (tighter window, more headwinds)
+    //
+    // Today's trades that would have been saved:
+    //   SPY 12:39 PM: peaked +3.8%, check at 2:09 PM → exit ~flat vs -$39 actual
+    //   QQQ 11:47 AM: peaked +1.7%, check at 1:17 PM → exit ~flat vs -$13 actual
+    if (!pos._progressCheckFired) {
+      const _entryTime      = new Date(pos.openDate || pos.entryTime || Date.now()).getTime();
+      const _minsOpen       = (Date.now() - _entryTime) / 60000;
+      const _entryRSI       = pos.entryRSI || 50;
+      const _macroIsBearish = (pos._macroSignal || '').includes('bearish');
+      const _isGapDayEntry  = pos._isGapDayEntry || false;
 
-      if (_earlyPeak && _sustainedDecay && _significantDecay && _timeSinceEntry > 90) {
-        pos._thesisFailure = true;
-        // Tighten trail to 4% from CURRENT price — not peak (peak is too far above)
-        // This creates a tight floor at current level to stop further bleeding
-        if (!pos.trailPct || pos.trailPct > 0.04) pos.trailPct = 0.04;
-        // Override peakPremium to current price so trail fires near here
-        pos.peakPremium = curP;
+      // Determine check window
+      let _checkMins = 90;
+      if (_entryRSI < 20) _checkMins = 120;              // capitulation needs time
+      else if (_macroIsBearish || _isGapDayEntry) _checkMins = 60; // tighter window
+
+      if (_minsOpen >= _checkMins && peakChg < 0.05) {
+        pos._progressCheckFired = true;
         logEvent("scan",
-          `[THESIS FAILURE] ${pos.ticker} — peaked $${(pos.premium * (1+peakChg)).toFixed(2)} within ${(_peakAge + _timeSinceEntry).toFixed(0)}min of entry, ` +
-          `now $${curP} (${(_peakDecay*100).toFixed(0)}% below peak, held ${_timeSinceEntry.toFixed(0)}min). ` +
-          `Trail tightened to 4% from current. Stop: $${(curP * 0.96).toFixed(2)}`
+          `[PROGRESS-CHECK] ${pos.ticker} — held ${_minsOpen.toFixed(0)}min, peak only +${(peakChg*100).toFixed(1)}% ` +
+          `(threshold: ${_checkMins}min / +5%). Thesis not gaining traction — exiting.`
         );
-      }
-    }
-
-    // ── V2.92: HYBRID PROFIT LOCK (panel consensus 5/5/2026) ─────────────────
-    // Fires ONCE when position first crosses +15% peak gain.
-    // 2-contract path (Option B): partial close 1 contract, trail remaining at 6%.
-    // ── HYBRID PROFIT LOCK (V2.95) ──────────────────────────────────────────
-    // Problem: QQQ peaks at +10-12%, reverses to 0%, no exit triggered.
-    // Old logic: trail only activates at +15%, profit lock only fires at +15%.
-    // Below +15% the position had no protection against full mean-reversion.
-    //
-    // Fix: tiered early-gain trail tightening at +8%, +12%, +15%, +20%.
-    // Each tier latches (won't re-fire) and progressively narrows the trail,
-    // ensuring gains below +15% are protected, not given back entirely.
-    //
-    // Tier 1 (+8%):  trail tightened to 12% — modest protection, not too tight
-    // Tier 2 (+12%): trail tightened to 8%  — locks in meaningful gain at peak
-    // Tier 3 (+15%): existing profit lock (partial close on 2-contract, 6% trail)
-    // Tier 4 (+20%): trail tightened to 4%  — for strong runners
-    //
-    // All tiers use peakChg (not current chg) so they latch permanently.
-    const contracts = pos.contracts || 1;
-
-    // Tier 1: +8% peak — tighten trail to 12%
-    if (!pos._trail12Active && peakChg >= 0.08) {
-      pos._trail12Active = true;
-      if (!pos._profitLockActive) { // don't loosen if tighter lock already active
-        pos.trailPct = Math.min(pos.trailPct || 0.15, 0.12);
-        logEvent("scan", `[PROFIT LOCK] ${pos.ticker} hit +${(peakChg*100).toFixed(0)}% peak — trail tightened to 12%`);
-      }
-    }
-
-    // Tier 2: +12% peak — tighten trail to 8%
-    if (!pos._trail8Active && peakChg >= 0.12) {
-      pos._trail8Active = true;
-      if (!pos._profitLockActive) {
-        pos.trailPct = Math.min(pos.trailPct || 0.15, 0.08);
-        logEvent("scan", `[PROFIT LOCK] ${pos.ticker} hit +${(peakChg*100).toFixed(0)}% peak — trail tightened to 8%`);
-      }
-    }
-
-    // ── V2.99 TIERED EXITS ───────────────────────────────────────────────────
-    // T1: +8% gain — close 1 contract, lock in first profit.
-    // Only fires on 2+ contract positions where T1 hasn't fired yet.
-    // Uses chg (current) not peakChg — requires position to currently be +8%, not just peak.
-    if (!pos._tier1Closed && chg >= 0.08 && (pos.contracts || 1) >= 2) {
-      pos._tier1Closed = true;
-      logEvent("scan", `[TIER1] ${pos.ticker} hit +${(chg*100).toFixed(0)}% — closing 1/${pos.contracts} contracts (T1 profit lock)`);
-      if (!_closedThisCycle.has(pi) && !_partialThisCycle.has(pi)) {
-        _partialThisCycle.add(pi);
-        decisions.push({ pi, ticker: pos.ticker, action: 'partial-n', contractsToClose: 1, reason: 'partial-profit-t1', exitPremium: null, contractSym: pos.contractSymbol || pos.buySymbol || null });
-      }
-    }
-
-    // T3: +20% gain — close ALL remaining contracts.
-    // Only fires after T1 (runner management). If T1 never fired, let thesis-complete handle it.
-    // Fast-stop still closes all immediately regardless of tier state.
-    if (pos._tier1Closed && !pos._tier3Closed && chg >= 0.20) {
-      pos._tier3Closed = true;
-      logEvent("scan", `[TIER3] ${pos.ticker} hit +${(chg*100).toFixed(0)}% — closing all remaining ${pos.contracts} contract(s) (T3 runner close)`);
-      if (!_closedThisCycle.has(pi)) {
-        _closedThisCycle.add(pi);
-        decisions.push({ pi, ticker: pos.ticker, action: 'close', reason: 'partial-profit-t3', exitPremium: null, contractSym: pos.contractSymbol || pos.buySymbol || null });
-      }
-    }
-    // ── END TIERED EXITS ─────────────────────────────────────────────────────
-
-    // Tier 3: +15% peak — existing profit lock logic
-    // V2.99: Only applies to 1-contract positions — tiered exits handle 2-3 contract positions.
-    if (!pos._profitLockActive && peakChg >= 0.15 && (pos.contracts || 1) === 1) {
-      pos._profitLockActive = true; // latch — only fires once per position
-      if (contracts >= 2) {
-        // ── 2-CONTRACT PATH (B): partial close 1, trail remaining at 6% ────
-        logEvent("scan", `[PROFIT LOCK] ${pos.ticker} hit +${(peakChg*100).toFixed(0)}% peak — closing 1/${contracts} contracts, tightening trail to 6%`);
-        pos.trailPct = 0.06;
-        if (!_closedThisCycle.has(pi) && !_partialThisCycle.has(pi)) {
-          _partialThisCycle.add(pi);
-          decisions.push({ pi, ticker: pos.ticker, action: 'partial', reason: 'partial-lock', exitPremium: null, contractSym: pos.contractSymbol || pos.buySymbol || null });
-        } else if (_closedThisCycle.has(pi)) {
-          logEvent("scan", `[DEDUP] ${pos.ticker} partial-lock skipped — close already queued this cycle`);
+        if (!_closedThisCycle.has(pi)) {
+          _closedThisCycle.add(pi);
+          decisions.push({ pi, ticker: pos.ticker, action: 'close', reason: 'progress-check',
+            exitPremium: null, contractSym: pos.contractSymbol || pos.buySymbol || null });
+          continue;
         }
-      } else {
-        // ── 1-CONTRACT PATH (C): tighten trail to 6%, no partial close ─────
-        pos.trailPct = 0.06;
-        logEvent("scan", `[PROFIT LOCK] ${pos.ticker} hit +${(peakChg*100).toFixed(0)}% peak — 1-contract, trail tightened to 6%`);
       }
     }
 
-    // Tier 4: +20% peak — tighten to 4%
-    if (contracts === 1 && pos._profitLockActive && !pos._trail4Active && peakChg >= 0.20) {
-      pos._trail4Active = true;
-      pos.trailPct = 0.04;
-      logEvent("scan", `[PROFIT LOCK] ${pos.ticker} hit +${(peakChg*100).toFixed(0)}% peak — trail tightened to 4%`);
+    // ── V3.01: FLOOR-BASED TRAILING STOP (replaces tier system) ────────────────
+    // Panel decision 5/28/2026: T1/T2/T3 partials are dead at 1 contract.
+    // The old trail% system (trailPct) requires peakPremium tracking but doesn't
+    // protect gains that haven't reached the +15% profit lock threshold.
+    // Today: SPY peaked +10%, fell back to -1%, no exit fired. -$39 loss.
+    //
+    // New system: floor-based. As peakChg rises, a hard dollar floor rises with it.
+    // If current price falls BELOW the floor, exit immediately.
+    // Works at 1 contract. Simple. Auditable.
+    //
+    // Floor schedule:
+    //   peakChg 0-5%:   no floor (hard stop governs at entry × 0.65)
+    //   peakChg 5-10%:  floor = entry × 1.00 (breakeven — can't lose money now)
+    //   peakChg 10-15%: floor = entry × 1.05 (locked in +5%)
+    //   peakChg 15-20%: floor = entry × 1.08 (locked in +8%)
+    //   peakChg 20%+:   floor = entry × 1.12 (locked in +12%)
+    //
+    // Simulation vs today:
+    //   SPY peaked +10% → floor = entry (breakeven). Fell back → EXIT at breakeven.
+    //   QQQ peaked +1.7% → no floor. Progress check handles it at 90min.
+    const contracts = pos.contracts || 1;
+    const _entryPremium = pos.premium || curP;
+
+    // Calculate floor based on peak gain
+    let _trailFloor = null;
+    let _trailLabel = null;
+    if (peakChg >= 0.20) {
+      _trailFloor = _entryPremium * 1.12;
+      _trailLabel = '+12% lock (peak 20%+)';
+    } else if (peakChg >= 0.15) {
+      _trailFloor = _entryPremium * 1.08;
+      _trailLabel = '+8% lock (peak 15-20%)';
+    } else if (peakChg >= 0.10) {
+      _trailFloor = _entryPremium * 1.05;
+      _trailLabel = '+5% lock (peak 10-15%)';
+    } else if (peakChg >= 0.05) {
+      _trailFloor = _entryPremium * 1.00;
+      _trailLabel = 'breakeven lock (peak 5-10%)';
     }
-    // ── END HYBRID PROFIT LOCK ────────────────────────────────────────────────
+    // peakChg < 5%: no floor — hard stop governs
+
+    // Log when floor level changes (new peak tier reached)
+    if (_trailFloor && !pos[`_floorLogged_${_trailLabel}`]) {
+      pos[`_floorLogged_${_trailLabel}`] = true;
+      logEvent("scan", `[TRAIL-FLOOR] ${pos.ticker} peak +${(peakChg*100).toFixed(1)}% — floor set at $${_trailFloor.toFixed(2)} (${_trailLabel})`);
+    }
+
+    // Fire trail exit if current price drops below floor
+    if (_trailFloor && curP <= _trailFloor && !_closedThisCycle.has(pi)) {
+      logEvent("scan",
+        `[TRAIL-EXIT] ${pos.ticker} cur $${curP.toFixed(2)} <= floor $${_trailFloor.toFixed(2)} ` +
+        `(${_trailLabel}) — peak was +${(peakChg*100).toFixed(1)}%, exiting to protect gain`
+      );
+      _closedThisCycle.add(pi);
+      decisions.push({ pi, ticker: pos.ticker, action: 'close', reason: 'trail-floor',
+        exitPremium: null, contractSym: pos.contractSymbol || pos.buySymbol || null });
+      continue;
+    }
+    // ── END FLOOR-BASED TRAILING STOP ────────────────────────────────────────
 
     if (trailActivated) {
       // pos.trailPct stores the % width (0.15 = 15%), pos.trailStop stores the $ floor
