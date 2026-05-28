@@ -1040,7 +1040,7 @@ async function checkExits(positions, posSnapshots, posQuotes, posNewsCache, ctx)
       const _entryTime      = new Date(pos.openDate || pos.entryTime || Date.now()).getTime();
       const _minsOpen       = (Date.now() - _entryTime) / 60000;
       const _entryRSI       = pos.entryRSI || 50;
-      const _macroIsBearish = (pos._macroSignal || '').includes('bearish');
+      const _macroIsBearish = (pos.macroSignal || '').includes('bearish'); // V3.01 FIX: field is macroSignal not _macroSignal
       const _isGapDayEntry  = pos._isGapDayEntry || false;
 
       // Determine check window
@@ -1123,39 +1123,9 @@ async function checkExits(positions, posSnapshots, posQuotes, posNewsCache, ctx)
     }
     // ── END FLOOR-BASED TRAILING STOP ────────────────────────────────────────
 
-    if (trailActivated) {
-      // pos.trailPct stores the % width (0.15 = 15%), pos.trailStop stores the $ floor
-      // These are separate fields - reading pos.trailStop as % was the bug
-      let trailPct = pos.trailPct || TRAIL_STOP_PCT; // always a percentage
-      // Signal decay: tighten trail if entry thesis has reversed
-      let liveRSI = pos.entryRSI || 55;
-      try {
-        const posBars = _posBarCache.get(pos.ticker) || await getStockBars(pos.ticker, 20); // OPT7: reuse cached bars
-        if (!_posBarCache.has(pos.ticker) && posBars.length) _posBarCache.set(pos.ticker, posBars);
-        if (posBars.length >= 15) liveRSI = calcRSI(posBars);
-      } catch(e) {}
-      if (pos.optionType === "call" && liveRSI < 45 && (pos.entryRSI || 55) >= 50) {
-        // Only apply signal decay tightening if profit lock hasn't already tightened further
-        if (!pos._profitLockActive) {
-          trailPct = TRAIL_STOP_PCT * 0.6;
-          pos.trailPct = trailPct; // persist tightened % for next scan
-          logEvent("scan", `${pos.ticker} signal decay - RSI ${liveRSI} - tightening trail to ${(trailPct*100).toFixed(0)}%`);
-        }
-      }
-      if (pos.optionType === "put" && liveRSI > 55 && (pos.entryRSI || 55) <= 50) {
-        if (!pos._profitLockActive) {
-          trailPct = TRAIL_STOP_PCT * 0.6;
-          pos.trailPct = trailPct;
-          logEvent("scan", `${pos.ticker} signal decay (put) - RSI ${liveRSI} - tightening trail to ${(trailPct*100).toFixed(0)}%`);
-        }
-      }
-      const trailFloor = pos.peakPremium * (1 - trailPct); // $ floor value
-      pos.trailStop    = trailFloor;                        // store $ floor separately
-      if (curP <= trailFloor) {
-        logEvent("scan", `${pos.ticker} trail hit - peak $${pos.peakPremium.toFixed(2)} floor $${trailFloor.toFixed(2)} (${(trailPct*100).toFixed(0)}% trail)`);
-        decisions.push({ pi, ticker: pos.ticker, action: 'close', reason: "trail", exitPremium: null, contractSym: pos.contractSymbol || pos.buySymbol || null }); continue;
-      }
-    }
+    // V3.01: Old trail% system REMOVED. Replaced by floor-based trailing stop above.
+    // The old system (peakPremium × (1-trailPct)) was redundant and masked trail-floor exits.
+    // Floor-based system handles all trailing stop logic — no fallthrough needed.
 
     // 4. PARTIAL CLOSE - at 60% of active take profit target
     // Uses live overnight-adjusted params - tighter targets on older positions
