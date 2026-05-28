@@ -1539,7 +1539,7 @@ async function runScan() {
   // Rationale: on a gap > 3% day, RSI distortion lasts the full first hour.
   // Re-entering 20min after a loss into the same distorted AM conditions is wrong.
   const _todayGapAbs      = Math.abs(state._todayMaxGap || 0);
-  const _staggerMins      = _todayGapAbs >= 3.0 ? 45 : 20; // 45min on big gap days
+  const _staggerMins      = _todayGapAbs >= 3.0 ? 25 : 20; // V3.01: reduced gap-day from 45→25min (gap days = best MR setups, don't over-restrict)
   const _staggerCooling   = state._lastEntryAt && _minsSinceEntry < _staggerMins;
   // V3.00: TWO-TIER STAGGER GATE
   // Tier 1 (0-15 min): Hard block. Spreads wide, VWAP meaningless, IV bleeding.
@@ -3200,10 +3200,13 @@ async function runScan() {
     const recentCloseSameDir = recentClose && (!recentClose.optionType || recentClose.optionType === optionType);
     if (recentCloseSameDir) {
       const minsSinceClose = (Date.now() - recentClose.closedAt) / 60000;
-      const CLOSE_COOLDOWN_MINS = 30;
+      const _closePnl = parseFloat(recentClose.pnl) || 0;
+      // V3.01: Split cooldown — wins cool 10min (thesis complete, fresh setups valid soon)
+      //        losses cool 20min (let market settle before reconsidering same direction)
+      //        Previously flat 30min for all closes regardless of outcome.
+      const CLOSE_COOLDOWN_MINS = _closePnl > 0 ? 10 : 20;
       if (minsSinceClose < CLOSE_COOLDOWN_MINS) {
-        const _pnl = parseFloat(recentClose.pnl) || 0;
-        const wasWin = _pnl > 0 ? `win (+$${_pnl.toFixed(0)})` : _pnl < 0 ? `loss (-$${Math.abs(_pnl).toFixed(0)})` : 'cooldown';
+        const wasWin = _closePnl > 0 ? `win (+$${_closePnl.toFixed(0)})` : _closePnl < 0 ? `loss (-$${Math.abs(_closePnl).toFixed(0)})` : 'cooldown';
         logEvent("filter", `${stock.ticker} re-entry cooldown — ${wasWin} closed ${minsSinceClose.toFixed(0)}min ago, need ${CLOSE_COOLDOWN_MINS}min`);
         continue;
       }
@@ -3211,7 +3214,7 @@ async function runScan() {
 
     // recentLoss.optionType !== optionType = opposite direction → don't block (different thesis)
     const recentLossSameDir = recentLoss && (!recentLoss.optionType || recentLoss.optionType === optionType);
-    if (recentLossSameDir && (Date.now() - recentLoss.closedAt) < 24 * 3600 * 1000) {
+    if (recentLossSameDir && (Date.now() - recentLoss.closedAt) < 4 * 3600 * 1000) { // V3.01: reduced from 24h → 4h (score>=75 + RSI delta gates already prevent bad re-entries)
       const hoursSinceLoss = ((Date.now() - recentLoss.closedAt) / 3600000).toFixed(1);
       // SPRINT-08: Use exitRSI (RSI when position closed) not entryRSI.
       // Re-entry gate asks: has RSI moved 10pts since we CLOSED the position?
