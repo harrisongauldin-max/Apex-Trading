@@ -710,6 +710,7 @@ async function executeTrade(stock, price, score, scoreReasons, vix, optionType =
     entryMACD:      stock.macd || null,
     entryMomentum:  stock.momentum || null,
     macroSignal:    (state._agentMacro || {}).signal || 'neutral',
+    _isGapDayEntry: (state._todayGapAbs || 0) >= 1.5, // V3.01: stamp gap-day flag for progress check timing
     regimeAtEntry:  (state._marketRegime || {}).regime || 'unknown',
     peakPrice:      contract.premium,
     peakPct:        0,
