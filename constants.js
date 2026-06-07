@@ -57,7 +57,7 @@ const MIN_OPEN_INTEREST   = 100;
 const MIN_STOCK_PRICE     = 20;
 const MIN_OPTION_PREMIUM  = 0.50;
 const MIN_OI              = 5;
-const MAX_SPREAD_PCT      = 0.30;
+const MAX_SPREAD_PCT      = 0.10; // C1-E Sunday 6/8: tightened from 0.30 → 0.10
 
 // ── VIX CALL QUALITY GATE (V2.96) ────────────────────────────────────────
 // At VIX >= 25, naked call entries require RSI < 38 (deeply oversold).
@@ -269,6 +269,35 @@ const RESISTANCE_BUFFER        = 0.02;  // 2% below resistance = safe call entry
 // ─── Fast profit ─────────────────────────────────────────────────────────────
 const FAST_PROFIT_PCT          = 0.40;  // 40% gain in <4hrs triggers fast exit
 
+// ─── SUNDAY C1 FEATURE FLAGS (6/8/2026) ──────────────────────────────────────
+// All 8 changes flag-controlled. Set false to revert without code deploy.
+const SUNDAY_C1_FEATURE_FLAGS = {
+  C1_A_DAILY_LOSS_LOCK:       true,  // Daily -$300 soft lock → minScore 85
+  C1_B_INSTRUMENT_LOSS_LOCK:  true,  // Per-instrument 2 losses → minScore 90
+  C1_C_HIGH_RISK_MIN_SCORE:   true,  // Day plan HIGH RISK raises minScore 70→85
+  C1_D_STAGGER_BYPASS_GATE:   true,  // Stagger bypass disabled on HIGH RISK days
+  C1_E_WIDE_SPREAD_TIGHTENED: true,  // Wide-spread block 30%→10% (MAX_SPREAD_PCT)
+  C1_G_WEEKLY_MONTHLY_HALTS:  true,  // Weekly -$700 / Monthly -$1500 hard halts
+  C1_J_JOURNAL_ENRICHMENT:    true,  // Trade journal completeness enhancement
+  C1_N_MORNING_RESET_CLEANUP: true,  // Morning reset clears all daily blockers
+};
+
+// C1-A thresholds
+const DAILY_LOSS_LOCK_THRESHOLD = -300;  // todayRealizedPnL floor before soft lock
+const DAILY_LOSS_LOCK_MIN_SCORE =  85;   // minScore when daily lock is active
+
+// C1-B thresholds
+const INSTRUMENT_LOSS_LIMIT     =   2;   // losses on same ticker before per-instrument lock
+const INSTRUMENT_LOSS_MIN_SCORE =  90;   // minScore when per-instrument lock is active
+const LOSS_THRESHOLD_FOR_COUNTER = -10;  // pnl must be < -$10 to count toward C1-B
+
+// C1-C threshold
+const HIGH_RISK_MIN_SCORE       =  85;   // minScore on HIGH RISK day plan days
+
+// C1-G thresholds
+const WEEKLY_LOSS_LIMIT         = -700;  // weeklyRealizedPnL floor → hard halt
+const MONTHLY_LOSS_LIMIT        = -1500; // monthlyRealizedPnL floor → hard halt
+
 // ─── State ───────────────────────────────────────────────────────────────────
 const BACKUP_FILE              = 'state_backup.json';
 module.exports = {
@@ -289,5 +318,13 @@ module.exports = {
   PDT_PROFIT_EXIT, PDT_STOP_LOSS, MS_PER_DAY, TRIGGER_COOLDOWN_MS,
   SAME_DAY_INTERVAL, OVERNIGHT_INTERVAL, SLOW_CACHE_TTL, BARS_CACHE_TTL,
   INDIVIDUAL_STOCKS_ENABLED, INDIVIDUAL_STOCK_WATCHLIST, STATE_FILE, WATCHLIST,
-  AGENT_MACRO_CACHE_MS, VIX_PAUSE, VIX_REDUCE25, VIX_REDUCE50, MAX_LOSS_PER_TRADE, WEEKLY_DD_LIMIT, PDT_DAYS, PREMARKET_NEGATIVE, PREMARKET_STRONG_MOVE, SUPPORT_BUFFER, RESISTANCE_BUFFER, FAST_PROFIT_PCT,
+  AGENT_MACRO_CACHE_MS, VIX_PAUSE, VIX_REDUCE25, VIX_REDUCE50, MAX_LOSS_PER_TRADE,
+  WEEKLY_DD_LIMIT, PDT_DAYS, PREMARKET_NEGATIVE, PREMARKET_STRONG_MOVE,
+  SUPPORT_BUFFER, RESISTANCE_BUFFER, FAST_PROFIT_PCT,
+  // C1 Sunday 6/8
+  SUNDAY_C1_FEATURE_FLAGS,
+  DAILY_LOSS_LOCK_THRESHOLD, DAILY_LOSS_LOCK_MIN_SCORE,
+  INSTRUMENT_LOSS_LIMIT, INSTRUMENT_LOSS_MIN_SCORE, LOSS_THRESHOLD_FOR_COUNTER,
+  HIGH_RISK_MIN_SCORE,
+  WEEKLY_LOSS_LIMIT, MONTHLY_LOSS_LIMIT,
 };
