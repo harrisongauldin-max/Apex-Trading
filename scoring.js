@@ -46,21 +46,17 @@ async function detectMarketRegime() {
     const highs   = bars.map(b => b.h);
     const lows    = bars.map(b => b.l);
 
-    // Calculate key indicators
     const sma20   = closes.slice(-20).reduce((s, c) => s + c, 0) / 20;
     const sma50   = closes.slice(-50).reduce((s, c) => s + c, 0) / 50;
     const current = closes[closes.length - 1];
     const adx     = calcADX(bars);
 
-    // 20-day volatility (annualized)
     const returns  = closes.slice(-20).map((c, i) => i > 0 ? Math.log(c / closes[closes.length - 21 + i]) : 0).slice(1);
     const stdDev   = Math.sqrt(returns.reduce((s, r) => s + r * r, 0) / returns.length) * Math.sqrt(252) * 100;
 
-    // Recent momentum
     const mom5   = (current - closes[closes.length - 5])  / closes[closes.length - 5]  * 100;
     const mom20  = (current - closes[closes.length - 20]) / closes[closes.length - 20] * 100;
 
-    // Determine regime
     let regime, confidence, action;
 
     if (current > sma20 && sma20 > sma50 && adx > 25 && mom20 > 2) {
@@ -98,18 +94,9 @@ function applyIntradayRegimeOverride(newMacro) {
   const intradayRegime = (newMacro || {}).regime           || "neutral";
   const confidence     = (newMacro || {}).confidence       || "low";
 
-  // Only override if intraday signal is HIGH confidence AND meaningfully different
   const dayPlanBias = (state._dayPlan || {}).entryBias || "neutral";
-  // Require BOTH regime AND bias to change for non-extreme shifts
-  // Prevents spurious overrides when only confidence level changes
   const regimeChanged = dayPlanRegime !== intradayRegime;
   const biasChanged   = dayPlanBias   !== newMacro.entryBias;
-  // V2.89 FIX: Lower override threshold for bias changes.
-  // Old: required confidence=high AND both regime AND bias changed.
-  // This meant medium-confidence "mild bearish" all day never overrode morning "calls_on_dips."
-  // Result: stale morning bias contributed +12 to every call entry all session.
-  // Fix: directional bias flip (calls_on_dips ↔ puts_on_bounces) overrides regardless of confidence.
-  // Regime changes still require high confidence (slower-moving, higher stakes).
   const biasFliped    = biasChanged &&
                         ((dayPlanBias === "calls_on_dips" && newMacro.entryBias === "puts_on_bounces") ||
                          (dayPlanBias === "puts_on_bounces" && newMacro.entryBias === "calls_on_dips") ||
@@ -117,10 +104,9 @@ function applyIntradayRegimeOverride(newMacro) {
   const strongShift   = (confidence === "high" && regimeChanged && biasChanged) || biasFliped;
   const extremeShift = ["strongly bearish","strongly bullish"].includes(intradaySignal);
 
-  // Check if previous override should expire (2-hour cooldown)
   const prevOverrideAt = state._dayPlan?._overrideAt;
   const overrideAge = prevOverrideAt ? (Date.now() - new Date(prevOverrideAt).getTime()) / 3600000 : 99;
-  const overrideExpired = overrideAge >= 2.0; // expire override after 2 hours
+  const overrideExpired = overrideAge >= 2.0;
 
   if ((strongShift || extremeShift) && overrideExpired) {
     state._dayPlan = {
@@ -141,16 +127,14 @@ function applyIntradayRegimeOverride(newMacro) {
 function updateOversoldTracker(ticker, dailyRsi) {
   if (!state._oversoldCount) state._oversoldCount = {};
   if (!state._oversoldDate)  state._oversoldDate  = {};
-  const today = getETTime().toISOString().slice(0, 10); // YYYY-MM-DD
+  const today = getETTime().toISOString().slice(0, 10);
   const lastDate = state._oversoldDate[ticker] || '';
   if (dailyRsi <= 35) {
-    // Only increment once per trading day -- prevent scan-level inflation
     if (lastDate !== today) {
       state._oversoldCount[ticker] = (state._oversoldCount[ticker] || 0) + 1;
       state._oversoldDate[ticker]  = today;
     }
   } else {
-    // Daily RSI recovered -- reset both counter and date
     state._oversoldCount[ticker] = 0;
     state._oversoldDate[ticker]  = '';
   }
@@ -169,11 +153,9 @@ function checkMacroShift(newSignal) {
   const newTier  = MACRO_TIERS[newSignal] ?? 3;
   const shift    = Math.abs(newTier - prevTier);
   if (shift >= 2) {
-    // Significant macro shift - rescore all positions
     const direction = newTier < prevTier ? "bearish shift" : "bullish shift";
     logEvent("warn", `[MACRO] Signal shift: ${_prevMacroSignal} - ${newSignal} (${direction}) - triggering position rescores`);
     const positions = state.positions || [];
-    // Fire in parallel - non-blocking
     Promise.allSettled(
       positions.map(pos => _triggerRescore(pos, `macro-shift: ${_prevMacroSignal}-${newSignal}`))
     );
@@ -189,7 +171,6 @@ async function checkSectorETF(stock) {
   if (SEMIS.includes(stock.ticker)) etfs.push("SMH");
   if (!etfs.length) return { pass: true, reason: null, putBoost: 0 };
 
-  // Fetch all sector ETFs in parallel
   const allEtfBars = await Promise.all(etfs.map(etf => getStockBars(etf, 5)));
   for (let i = 0; i < etfs.length; i++) {
     const etf  = etfs[i];
@@ -209,101 +190,49 @@ function isGLDEntryAllowed(optionType, dxy, spyReturn5d, vix, gldRSI, gldPrice, 
                            sessionMins, momentum, gld5dReturn, gldDailyRSI,
                            macdCrossoverDays, volPaceRatio, gldVWAP, gldMA20live) {
   if (optionType === "call") {
-    // ── V2.98: GLD CALL GATE REFINEMENTS (panel debate May 15) ────────────
-    // Historical replay: all 4 losses blocked by ≥ 2 gates each.
-    // Key changes from V2.97:
-    //   GATE 1: DXY now requires trend===strengthening AND change>0.5 (not just magnitude)
-    //   GATE 3: bifurcated — oversold path vs momentum path, each with own confirmers
-    //   GATE 4: threshold loosened to -5%, suspended when DXY weakening (macro reversal)
-    //   GATE 6: MOM:steady now BLOCKED — only MOM:recovering passes
-    //   GATE 7: MACD crossover recency (new)
-    //   VIX>32 and VolPace modifiers handled in scanner.js (score penalties, not hard blocks)
-
-    // GATE 1: DXY macro tailwind
-    // V2.98: both trend AND magnitude must confirm strengthening.
-    // If DXY trend has reversed to neutral/weakening, the gate lifts even if
-    // 5d change is still slightly positive (lag from prior days).
     const _dxyTrend = dxy?.trend || 'neutral';
     const _dxyChange = dxy?.change || 0;
     const dxyStrengthening = _dxyTrend === 'strengthening' && _dxyChange > 0.5;
     if (dxyStrengthening) return { allowed: false, reason: `GLD call blocked — DXY trend:strengthening +${_dxyChange.toFixed(2)}% 5d (dollar headwind for gold)` };
 
-    // GATE 2: VIX ≥ 20 (hard block only — soft VIX>32 penalty applied in scanner.js)
     if (vix < 20) return { allowed: false, reason: `GLD call blocked — VIX ${vix?.toFixed(1)} < 20 (need macro uncertainty for gold catalyst)` };
 
-    // GATE 3: DailyRSI bifurcated paths
-    // OVERSOLD path (dailyRSI < 32): washed-out daily + momentum turning
-    //   Additional confirmers: MOM:recovering required (price stabilizing)
-    // MOMENTUM path (dailyRSI ≥ 55): confirmed daily bullish trend
-    //   Additional confirmers: price above VWAP + above 20MA + MACD bullish
-    // NO-TRADE zone: 32 ≤ dailyRSI < 55 — no directional conviction
     const _dailyRSI = gldDailyRSI ?? gldRSI ?? 50;
     const _inNoTradeZone = _dailyRSI >= 32 && _dailyRSI < 55;
-    if (_inNoTradeZone) return { allowed: false, reason: `GLD call blocked — dailyRSI ${_dailyRSI.toFixed(1)} in no-trade zone (32-55), need < 32 oversold or ≥ 55 bullish` };
+    if (_inNoTradeZone) return { allowed: false, reason: `GLD call blocked — dailyRSI ${_dailyRSI.toFixed(1)} in no-trade zone (32-55), need < 32 oversold or >= 55 bullish` };
 
     if (_dailyRSI < 32) {
-      // OVERSOLD PATH — must have MOM:recovering (price beginning to lift)
-      // MOM:steady means still drifting lower — too early, the low isn't confirmed
       if (momentum !== 'recovering') return { allowed: false, reason: `GLD call blocked — oversold path (dailyRSI ${_dailyRSI.toFixed(1)}) requires MOM:recovering, got MOM:${momentum} (wait for price to stabilize)` };
     } else {
-      // MOMENTUM PATH (dailyRSI ≥ 55) — must have trend confirmation
       const _aboveVWAP  = gldVWAP > 0 && gldPrice > gldVWAP;
       const _aboveMA20  = gldMA20live > 0 && gldPrice > gldMA20live;
       if (!_aboveVWAP)  return { allowed: false, reason: `GLD call blocked — momentum path (dailyRSI ${_dailyRSI.toFixed(1)}) requires price above VWAP (intraday trend not intact)` };
       if (!_aboveMA20)  return { allowed: false, reason: `GLD call blocked — momentum path (dailyRSI ${_dailyRSI.toFixed(1)}) requires price above 20MA (daily trend not intact)` };
     }
 
-    // GATE 4: Not in freefall — 5-day trend must be > -5%
-    // V2.98: threshold loosened -4% → -5% (43 DTE option can survive moderate decline)
-    // Suspended if DXY is now weakening (dollar reversal = macro catalyst present)
     if (gld5dReturn !== null && gld5dReturn !== undefined) {
       const _freefalling   = gld5dReturn < -0.05;
-      const _dxyReversal   = _dxyTrend === 'weakening'; // macro catalyst overrides freefall
+      const _dxyReversal   = _dxyTrend === 'weakening';
       if (_freefalling && !_dxyReversal) return { allowed: false, reason: `GLD call blocked — 5-day return ${(gld5dReturn*100).toFixed(1)}% < -5% with no DXY reversal (accelerating decline, no catalyst)` };
       if (_freefalling && _dxyReversal)  logEvent && logEvent('filter', `[GLD FREEFALL SUSPENDED] 5d return ${(gld5dReturn*100).toFixed(1)}% < -5% but DXY weakening — macro reversal catalyst present, gate suspended`);
     }
 
-    // GATE 5: Session age ≥ 60 minutes (unchanged — data was definitive)
     if (sessionMins !== null && sessionMins !== undefined && sessionMins < 60) {
       return { allowed: false, reason: `GLD call blocked — session only ${sessionMins.toFixed(0)}min old (need 60min for macro flows to settle)` };
     }
 
-    // GATE 6: Momentum = recovering ONLY
-    // V2.98 TIGHTENED: MOM:steady removed as acceptable — only recovering passes.
-    // Every single GLD loss entered with MOM:steady. That's the data.
-    // MOM:steady = price still drifting lower. MOM:recovering = price lifting from the low.
-    // Paying slightly higher entry for confirmed stabilization is worth it.
     if (momentum !== 'recovering') return { allowed: false, reason: `GLD call blocked — MOM:${momentum} (only MOM:recovering allowed — need confirmed price stabilization before entry)` };
 
-    // GATE 7: MACD crossover recency
-    // A bullish MACD crossover more than 3 days old without a confirming rally is a stale signal.
-    // Fresh crossover (≤ 3 days): momentum genuinely turning → pass
-    // Stale crossover (> 3 days): signal failed to follow through → block
-    // No data (null): never tracked → no block (benefit of doubt on first scan)
     if (macdCrossoverDays !== null && macdCrossoverDays !== undefined) {
       if (macdCrossoverDays > 3) return { allowed: false, reason: `GLD call blocked — MACD bullish crossover ${macdCrossoverDays.toFixed(1)} days old (> 3d stale, no confirming rally — signal may have failed)` };
     }
 
-    // All gates passed
     return { allowed: true };
   } else {
-    // GLD puts  -- two paths by trade type:
-    // Debit puts: RSI >= 68 required (directional bet  -- gold must fall to profit)
-    // Credit puts: RSI irrelevant  -- selling premium above current price, not predicting direction
-    // [Regime A] RSI gate applies fully
-    // [Regime B credit] bypass RSI overbought  -- IV level is what matters for premium collection
-    const gldOverbought  = gldRSI >= 65;  // overbought reversal path
-    const gldFalling     = gldRSI !== null && gldRSI < 50 && gldMA20 > 0 && gldPrice < gldMA20; // GLD below 20MA + RSI neutral = falling trend
+    const gldOverbought  = gldRSI >= 65;
+    const gldFalling     = gldRSI !== null && gldRSI < 50 && gldMA20 > 0 && gldPrice < gldMA20;
     const dxyRising      = dxy && dxy.change > 0;
-    // isGLDCreditPut: legacy path for credit put routing — always false in APEX (naked only)
-    // Kept as passthrough so GLD put gate doesn't block on edge cases
-    const isGLDCreditPut = false; // APEX: no credit puts
-    // Fix 1: GLD puts have TWO valid theses:
-    // Path A — Overbought reversal: RSI >= 65, gold extended, mean reversion put
-    // Path B — Falling trend: GLD below 20MA + DXY strengthening (dollar up = gold down)
-    // OLD gate required RSI overbought ALWAYS — blocked Path B entirely (inverted for trend puts)
-    // dxyRising alone is not enough — also require GLD in downtrend (below 20MA) to confirm thesis
-    // dxyRising && gldFalling is a subset of gldFalling — redundant condition removed
+    const isGLDCreditPut = false;
     const gldPutAllowed = gldOverbought || gldFalling || isGLDCreditPut;
     if (!gldPutAllowed) return { allowed: false, reason: `GLD put blocked - RSI ${gldRSI?.toFixed(0)||'?'} not overbought and GLD not in downtrend (need RSI>65 or GLD below 20MA)` };
     return { allowed: true };
@@ -311,28 +240,16 @@ function isGLDEntryAllowed(optionType, dxy, spyReturn5d, vix, gldRSI, gldPrice, 
 }
 
 function isXLEEntryAllowed(optionType, xleRSI, xleMomentum, vix, xlePrice, xleMA20, xleDailyRSI) {
-  // XLE puts: need RSI elevated (not deeply oversold - that's a call, not put, setup)
-  // Panel C3/M4: XLE RSI hard block now requires BOTH intraday RSI <= 35 AND dailyRSI <= 40.
-  // During energy sector selloffs, intraday RSI can hit 25-30 while dailyRSI stays 55+.
-  // If dailyRSI >= 40, the intraday crash is noise within a valid daily trend — allow entry.
-  // If dailyRSI <= 40, the selloff is a genuine trend move — block debit put (already crashed).
   if (optionType === "put") {
-    // Block if dailyRSI <= 35 — stock has already crashed on a daily basis, put has no edge
-    // Don't require intraday RSI to confirm — daily trend exhaustion is sufficient alone
     if (xleDailyRSI && xleDailyRSI <= 35) return { allowed: false, reason: `XLE put blocked - dailyRSI ${xleDailyRSI?.toFixed(0)} deeply oversold (stock already crashed, put thesis gone)` };
-    const dailyRsiOversold = !xleDailyRSI || xleDailyRSI <= 40; // conservative: block if unknown
+    const dailyRsiOversold = !xleDailyRSI || xleDailyRSI <= 40;
     if (xleRSI && xleRSI <= 35 && dailyRsiOversold) return { allowed: false, reason: `XLE put blocked - RSI ${xleRSI?.toFixed(0)} intraday oversold + dailyRSI ${xleDailyRSI?.toFixed(0)||"?"} confirms trend exhaustion` };
     if (xleRSI && xleRSI <= 35 && !dailyRsiOversold) { logEvent("filter", `XLE intraday RSI ${xleRSI?.toFixed(0)} oversold but dailyRSI ${xleDailyRSI?.toFixed(0)} valid — intraday noise, allowing put entry`); }
-    // Oil confirmed uptrend (XLE above 20MA by >3%) - puts into strong uptrend discouraged
     const xleAbove20MA = xleMA20 > 0 && xlePrice > xleMA20 * 1.03;
     if (xleAbove20MA) return { allowed: false, reason: `XLE put blocked - price $${xlePrice?.toFixed(2)} >3% above 20MA $${xleMA20?.toFixed(2)} (oil uptrend - don't fade)` };
     return { allowed: true };
   } else {
-    // XLE calls: need RSI not deeply overbought (chasing energy run)
-    // Fix 2: Lower overbought threshold 78→72. Entries were happening at RSI 73-76 before gate fired.
-    // RSI 72+ on a gap-up energy day is already extended — don't wait for RSI 78.
     if (xleRSI && xleRSI >= 72) return { allowed: false, reason: `XLE call blocked - RSI ${xleRSI?.toFixed(0)} overbought (energy extended - wrong for calls)` };
-    // Oil confirmed downtrend (XLE >3% below 20MA) - calls into strong downtrend discouraged
     const xleBelow20MA = xleMA20 > 0 && xlePrice < xleMA20 * 0.97;
     if (xleBelow20MA) return { allowed: false, reason: `XLE call blocked - price $${xlePrice?.toFixed(2)} >3% below 20MA $${xleMA20?.toFixed(2)} (oil downtrend - don't catch falling knife)` };
     return { allowed: true };
@@ -340,10 +257,7 @@ function isXLEEntryAllowed(optionType, xleRSI, xleMomentum, vix, xlePrice, xleMA
 }
 
 function isTLTEntryAllowed(optionType, spyPrice, spyMA50, spyReturn5d, spyMA200, tltRSI, tltMomentum) {
-  if (!spyMA50 || spyMA50 === 0) return { allowed: true }; // no data, don't block
-  // Panel decision (5/8): SPY below 50MA OR below 200MA allows TLT calls
-  // In 2022, bonds fell while SPY was still above 50MA (both fell on rate hikes)
-  // Adding 200MA catch handles sustained bear market where SPY/bonds decorrelate differently
+  if (!spyMA50 || spyMA50 === 0) return { allowed: true };
   const spyBelow50MA  = spyPrice < spyMA50;
   const spyBelow200MA = spyMA200 && spyMA200 > 0 && spyPrice < spyMA200;
   const spyWeak       = spyBelow50MA || spyBelow200MA;
@@ -352,16 +266,9 @@ function isTLTEntryAllowed(optionType, spyPrice, spyMA50, spyReturn5d, spyMA200,
     const maLabel = spyBelow200MA ? "200MA" : "50MA";
     return { allowed: true, reason: `TLT call allowed - SPY below ${maLabel}` };
   } else {
-    // TLT puts: bonds falling = rates rising
-    // Panel fix: pure SPY-MA gate blocks ALL Regime B - bonds can fall on rate/inflation
-    // fears even while equities are weak. Refine to check TLT's own signals:
-    // Allow TLT put when TLT itself is overbought (RSI > 65) OR SPY is recovering
     const tltOverbought = tltRSI && tltRSI >= 65;
     const tltMomentumWeak = tltMomentum && ["recovering", "steady"].includes(tltMomentum);
     const spyRecovering = !spyWeak || spyReturn5d >= 0.01;
-
-    // Block if: SPY still weak AND TLT not overbought on its own signals
-    // Allow if: TLT RSI is elevated (bond overvaluation) regardless of SPY, OR SPY recovering
     if (spyWeak && !tltOverbought) {
       return { allowed: false, reason: `TLT put blocked - SPY below MA and TLT RSI ${tltRSI || "?"}  not overbought (need RSI >65 for bond-specific put thesis)` };
     }
@@ -376,31 +283,22 @@ function scorePutSetup(stock, relStrength, adx, volume, avgVolume, vix = 20) {
   let score = 0;
   const reasons = [];
 
-  // Momentum - weak is good for puts (20pts)
-  // Steady momentum = no directional signal = 0 points (not a put catalyst)
   if (stock.momentum === "recovering")       { score += 20; reasons.push("Weak momentum - bearish (+20)"); }
   else if (stock.momentum === "steady")      { score += 0;  reasons.push("Momentum steady - neutral for put (+0)"); }
   else                                       { score += 0;  reasons.push("Strong momentum - bad for put (+0)"); }
 
-  // RSI - RAISED to 20pts (more reliable signal, especially in trending markets)
-  // RSI - 35 = stock already crashed - put thesis is GONE, not a valid entry
-  // RSI 36-45 = oversold, apply meaningful penalty not a bonus
   if (stock.rsi >= 72)                       { score += 20; reasons.push(`RSI ${stock.rsi} - overbought (+20)`); }
   else if (stock.rsi >= 65 && stock.rsi < 72){ score += 12; reasons.push(`RSI ${stock.rsi} - elevated (+12)`); }
   else if (stock.rsi <= 35)                  { score -= 30; reasons.push(`RSI ${stock.rsi} - stock already crashed, put thesis gone (-30)`); }
   else if (stock.rsi <= 45)                  { score -= 10; reasons.push(`RSI ${stock.rsi} - oversold, put thesis weak (-10)`); }
   else                                       { reasons.push(`RSI ${stock.rsi} neutral for put (+0)`); }
 
-  // MACD - confirms direction. Bullish MACD on a put = contradicting signal = PENALTY
   if (stock.macd.includes("bearish crossover")) { score += 10; reasons.push("MACD bearish crossover (+10)"); }
   else if (stock.macd.includes("bearish"))      { score += 7;  reasons.push("MACD bearish (+7)"); }
   else if (stock.macd.includes("neutral"))      { score += 3;  reasons.push("MACD neutral (+3)"); }
   else if (stock.macd.includes("bullish crossover")) { score -= 12; reasons.push("MACD bullish crossover - contradicts put (-12)"); }
   else                                          { score -= 8;  reasons.push("MACD bullish - contradicts put (-8)"); }
 
-  // IV Percentile - ADJUSTED for VIX environment
-  // High VIX: high IVP is expected and acceptable - options are expensive but moves are big
-  // Low VIX: penalize high IVP more - no reason to buy expensive puts in calm market
   const ivpP = stock.ivPercentile || 50;
   const highVIX = vix > 30;
   if (ivpP < 30)       { score += 15; reasons.push(`IVP ${ivpP}% - cheap options (+15)`); }
@@ -408,28 +306,24 @@ function scorePutSetup(stock, relStrength, adx, volume, avgVolume, vix = 20) {
   else if (ivpP < 70)  { score += highVIX ? 8 : 5; reasons.push(`IVP ${ivpP}% - elevated (${highVIX ? "+8 high VIX" : "+5"})`); }
   else                 { score += highVIX ? 5 : 0; reasons.push(`IVP ${ivpP}% - expensive (${highVIX ? "+5 high VIX justified" : "+0"})`); }
 
-  // News sentiment (15pts) - replaces static bearishCatalyst
-  // Live bearish news is much more meaningful than a hardcoded string
   const newsMod = stock.newsSentiment === "bearish" ? 15
                 : stock.newsSentiment === "mild bearish" ? 8
                 : stock.newsSentiment === "neutral" ? 3
-                : 0; // bullish news = bad for puts
+                : 0;
   if (newsMod > 0) reasons.push(`News ${stock.newsSentiment} (+${newsMod})`);
   else if (stock.momentum === "recovering" && stock.hasIntraday) {
     score += 8; reasons.push("Intraday confirmed bearish move (+8)");
   }
   score += newsMod;
 
-  // Volume confirmation - DIRECTIONAL: below VWAP + high vol = stronger put signal
   const belowVWAP = stock.intradayVWAP > 0 && (stock.price || 0) < stock.intradayVWAP;
   if (volume && avgVolume && volume > avgVolume * 1.2) {
-    const volPts = belowVWAP ? 12 : 8; // directional bonus when below VWAP
+    const volPts = belowVWAP ? 12 : 8;
     score += volPts; reasons.push(`Above-avg volume ${belowVWAP ? "+ below VWAP" : ""} (+${volPts})`);
   } else if (volume && avgVolume && volume > avgVolume) {
     score += 5; reasons.push("Average volume (+5)");
   } else { reasons.push("Low volume (+0)"); }
 
-  // Relative weakness vs SPY - capped at 15pts, tracked for group cap
   let spyWeakPts = 0;
   if (relStrength < 0.93)      { spyWeakPts = 15; reasons.push(`Weak vs SPY: ${((relStrength-1)*100).toFixed(1)}% (+15)`); }
   else if (relStrength < 0.97) { spyWeakPts = 8;  reasons.push(`Weak vs SPY: ${((relStrength-1)*100).toFixed(1)}% (+8)`); }
@@ -437,17 +331,12 @@ function scorePutSetup(stock, relStrength, adx, volume, avgVolume, vix = 20) {
   else                         { reasons.push(`Outperforming SPY - bad for put (+0)`); }
   score += spyWeakPts;
 
-  // ADX - RAISED to 15pts max (strong downtrend is a top-tier confirmation)
   if (adx && adx > 35)      { score += 15; reasons.push(`ADX ${adx} - very strong downtrend (+15)`); }
   else if (adx && adx > 25) { score += 10; reasons.push(`ADX ${adx} - strong trend (+10)`); }
   else if (adx && adx > 18) { score += 5;  reasons.push(`ADX ${adx} - emerging trend (+5)`); }
 
-  // - F6: Signal consensus gate -
-  // 90+ score requires at least 3 independent bullish signals
-  // Prevents weak setups from hitting 100 on environmental factors alone
-  // Hard block: RSI - 35 means stock already crashed - force score to 0, never enters
   if (stock.rsi <= 35) {
-    return { score: 0, reasons }; // hard zero - RSI crashed stocks never get put entries
+    return { score: 0, reasons };
   }
 
   const bullishSignals = [
@@ -459,13 +348,10 @@ function scorePutSetup(stock, relStrength, adx, volume, avgVolume, vix = 20) {
     (volume > avgVolume * 1.2),
   ].filter(Boolean).length;
   if (score >= 90 && bullishSignals < 3) {
-    score = 80; // cap at 80 - not enough independent signals
+    score = 80;
     reasons.push(`Score capped at 80 - only ${bullishSignals}/3 required signals agree`);
   }
 
-  // - F11: Entry quality gate - RSI and MACD must agree -
-  // If RSI says overbought (bearish for stock) but MACD says bullish,
-  // the two primary signals conflict. Flag it.
   const rsiPutSignal  = stock.rsi >= 65;
   const macdPutSignal = stock.macd.includes("bearish");
   if (!rsiPutSignal && !macdPutSignal) {
@@ -473,10 +359,7 @@ function scorePutSetup(stock, relStrength, adx, volume, avgVolume, vix = 20) {
     reasons.push("Neither RSI nor MACD confirm put direction (-15)");
   }
 
-  // Hard cap at 95 - a 100/100 is now mathematically impossible
-  // Forces discrimination between setups even in broad selloffs
   const _sigResult = { score: Math.min(Math.max(score, 0), 95), reasons };
-  setCache(sigKey, _sigResult);
   return _sigResult;
 }
 
@@ -484,32 +367,21 @@ function scoreMeanReversionCall(stock, relStrength, adx, bars, vix) {
   let score = 0;
   const reasons = [];
 
-  // Only applies when VIX is elevated (high fear = cheap relative calls)
-  // Recovery regime exemption: VIX compressing 35→20 over weeks means mean reversion
-  // calls are still valid (RSI 30 + quality stock + VIX 22 = genuine oversold opportunity)
-  // Without this exemption, ARGO goes silent exactly when win rates are highest post-crisis
-  // P4 FIX: Use price-based regime (state._regimeClass) not agent regime.
-  // "recovery" state detected when: previously Regime B, now returning toward A (VIX falling + SPY rising)
-  // Proxy: _regimeClass = A AND VIX declining from recent elevated levels
   const inRecoveryRegime = (state._regimeClass === "A") && (state._vixSustained || 0) >= 22;
-  const vixFloorMR = inRecoveryRegime ? 20 : 25; // lower bar in recovery — VIX compressing is ok
+  const vixFloorMR = inRecoveryRegime ? 20 : 25;
   if (vix < vixFloorMR) return { score: 0, reasons: [`VIX ${vix} too low for mean reversion${inRecoveryRegime ? " (recovery: floor 20)" : " (floor 25)"} (+0)`] };
 
-  // Stock must be a quality name - use beta as proxy for quality/liquidity
   if ((stock.beta || 1) < 1.0) return { score: 0, reasons: ["Low beta - not a mean reversion candidate (+0)"] };
 
-  // RSI oversold - stock is beaten down (20pts)
   if (stock.rsi <= 35)                        { score += 20; reasons.push(`RSI ${stock.rsi} - deeply oversold (+20)`); }
   else if (stock.rsi <= 42)                   { score += 12; reasons.push(`RSI ${stock.rsi} - oversold (+12)`); }
   else if (stock.rsi <= 48)                   { score += 5;  reasons.push(`RSI ${stock.rsi} - near oversold (+5)`); }
   else return { score: 0, reasons: [`RSI ${stock.rsi} not oversold - skip mean reversion`] };
 
-  // Multi-scan oversold bonus - RSI - 35 for 2+ consecutive scans = genuine capitulation
   const oversoldScans = state._oversoldCount ? (state._oversoldCount[stock.ticker] || 0) : 0;
   if (oversoldScans >= 3)      { score += 15; reasons.push(`Oversold ${oversoldScans} consecutive scans - capitulation (+15)`); }
   else if (oversoldScans >= 2) { score += 8;  reasons.push(`Oversold ${oversoldScans} consecutive scans (+8)`); }
 
-  // Drawdown from recent high - how cheap is the stock? (25pts)
   if (bars && bars.length >= 20) {
     const recentHigh = Math.max(...bars.slice(-20).map(b => b.h));
     const currentPrice = bars[bars.length - 1].c;
@@ -520,66 +392,41 @@ function scoreMeanReversionCall(stock, relStrength, adx, bars, vix) {
     else                       { score += 0;  reasons.push(`Only down ${(drawdown*100).toFixed(0)}% - not enough discount (+0)`); }
   }
 
-  // MACD forming base or bullish crossover = possible reversal (15pts)
   if (stock.macd.includes("bullish crossover")) { score += 15; reasons.push("MACD bullish crossover - reversal signal (+15)"); }
   else if (stock.macd.includes("forming"))      { score += 10; reasons.push("MACD forming base - bottom building (+10)"); }
   else if (stock.macd.includes("bullish"))      { score += 5;  reasons.push("MACD bullish (+5)"); }
   else                                          { reasons.push("MACD bearish - wait for base (+0)"); }
 
-  // VIX level bonus - higher VIX = cheaper calls relative to intrinsic move potential (15pts)
   if (vix >= 35)      { score += 15; reasons.push(`VIX ${vix} - extreme fear, calls historically cheap (+15)`); }
   else if (vix >= 30) { score += 10; reasons.push(`VIX ${vix} - elevated fear (+10)`); }
   else if (vix >= 25) { score += 5;  reasons.push(`VIX ${vix} - moderate fear (+5)`); }
 
-  // Quality / catalyst (15pts)
   if (stock.catalyst)  { score += 10; reasons.push(`Recovery catalyst: ${stock.catalyst} (+10)`); }
 
-  // ADX - low ADX means trend is weakening (good for reversal) (10pts)
   if (adx && adx < 20) { score += 10; reasons.push(`ADX ${adx} - weak trend, reversal likely (+10)`); }
   else if (adx && adx < 30) { score += 5; reasons.push(`ADX ${adx} - trend weakening (+5)`); }
 
   return { score: Math.min(score, 100), reasons, isMeanReversion: true };
 }
 
-
-// ============================================================
-// scoreCreditSpread — purpose-built credit spread scorer
-// Called for: credit_call (bear call spread) and credit_put (bull put spread)
-// Replaces the patched isCreditCallMode inversions inside scoreIndexSetup.
-//
-// Credit spreads profit from TIME DECAY + TREND ALIGNMENT, not direction alone.
-// The short strike staying OTM is the thesis — not predicting a big move.
-// Six primary signals, supplementary capped at +15.
-// ============================================================
-
 // scoreCreditSpread removed — APEX uses naked options, not credit spreads
-
 
 function scoreIndexSetup(stock, optionType, spyRSI, spyMACD, spyMomentum, breadth, vix, agentMacro) {
   let score = 0;
   const reasons = [];
-  // V2.89: Agent accuracy gate — when 30min accuracy drops below 25%, treat agent as neutral.
-  // At 8.5% accuracy (logged today), the agent is directionally wrong 91.5% of the time.
-  // Allowing it to add/subtract score at that accuracy level makes entries worse not better.
-  // Threshold: < 25% accuracy at 30min over ≥ 30 calls → degrade to neutral for scoring.
-  const _agentAcc30  = state._agentAccuracy?.acc30  ?? 50; // default 50 = unknown
+
+  const _agentAcc30  = state._agentAccuracy?.acc30  ?? 50;
   const _agentAccN   = state._agentAccuracy?.calls   ?? 0;
   const _agentDegraded = _agentAccN >= 30 && _agentAcc30 < 25;
   const signal     = _agentDegraded ? "neutral" : ((agentMacro || {}).signal     || "neutral");
   const confidence = _agentDegraded ? "low"     : ((agentMacro || {}).confidence || "low");
-  // FIX A: Regime source — use price-based regime (deterministic) not agent regime (9.6% accurate).
-  // state._regimeClass: "A" = bull (SPY above 200MA), "B" = bear, "C" = breakdown.
-  // Agent regime field kept for context only — not used for scoring gates.
+
   const priceRegimeClass = state._regimeClass || "A";
   const regime = priceRegimeClass === "B" ? "trending_bear"
                : priceRegimeClass === "C" ? "breakdown"
-               : "trending_bull";  // Regime A = bull
+               : "trending_bull";
   const entryBias  = (agentMacro || {}).entryBias  || "neutral";
-  // FIX A cont: tradeType from agent is "spread" always — APEX trades naked options.
-  // Hardcode to null so all isCreditMode / isCreditCallMode checks are false.
-  const tradeType  = null; // APEX: no credit/spread routing — always naked puts/calls
-  // Derive vixOutlook deterministically when agent returns unknown/missing
-  // Agent is often right but can omit this field — VIX level is objective
+  const tradeType  = null;
   const rawVixOutlook = (agentMacro || {}).vixOutlook || "unknown";
   const vixOutlook = rawVixOutlook !== "unknown" ? rawVixOutlook
     : vix >= 32 ? "spiking"
@@ -587,32 +434,10 @@ function scoreIndexSetup(stock, optionType, spyRSI, spyMACD, spyMomentum, breadt
     : vix >= 20 ? "mean_reverting"
     : "falling";
 
-  // Supplementary signals - capped at +25 total, declared at function scope
-  // so both put and call branches can use it
-  // - QS-W1: Macro correlation discount (diminishing returns) -
-  // When multiple primary signals all share one macro driver (e.g. all bearish because
-  // SPY sold off today), adding them independently creates false precision.
-  // Rule: count how many primary signals fired in the SAME direction as the entry.
-  // 1-2 signals: full weight. 3rd signal: 70%. 4th+: 50%.
-  // Primary signals = agent, regime, RSI, MACD, breadth. Supplementary are separate.
-  // Count the number of primary pro-entry reasons already in the score
-  // FIX E: Correlation discount removed.
-  // Was a no-op — 'reasons' is empty at this point (fires before scoring).
-  // Also unnecessary: agent scoring removed, leaving only 3-4 primary signals
-  // (regime, RSI, MACD, breadth). These are genuinely independent angles — no
-  // false correlation inflation to discount. Supplementary cap (now 15) prevents
-  // domination without needing a percentage-based discount.
-
   let supplementScore = 0;
-  // Supplementary signal staleness - max age for each signal type
-  // PCR/SKEW update every 15 minutes, AAII weekly, term structure every 15 min
-  const SUPP_MAX_AGE_MS = 60 * 60 * 1000; // 1 hour - stale beyond this, ignore
+  const SUPP_MAX_AGE_MS = 60 * 60 * 1000;
   const isDataFresh = (data) => data && data.updatedAt && (Date.now() - data.updatedAt) < SUPP_MAX_AGE_MS;
 
-  // - Supplementary signals — direction-aware, run for BOTH puts and calls -
-  // Bug fix: these were all inside if(optionType==="put") making call-specific blocks dead code.
-  // PCR fear, AAII bearishness, vol contango, Zweig thrust were never applied to calls.
-  // Now hoisted above the put/call branch split so each direction gets the right signals.
   {
     const pcrData = isDataFresh(state._pcr) ? state._pcr : null;
     if (pcrData) {
@@ -622,9 +447,6 @@ function scoreIndexSetup(stock, optionType, spyRSI, spyMACD, spyMomentum, breadt
         else if (pcrData.signal === "extreme_greed") { score -= 12; reasons.push(`PCR ${pcrData.pcr} - extreme greed, puts risky (-12)`); }
         else if (pcrData.signal === "greed")         { score -= 6;  reasons.push(`PCR ${pcrData.pcr} - greed, puts less favorable (-6)`); }
       } else {
-        // V2.89: PCR contrarian call signal only valid when VIX is normalizing.
-        // High PCR in VIX 27+ is rational put-buying, not a contrarian opportunity.
-        // Only interpret PCR as contrarian call when VIX is falling or stable at lower levels.
         const vixFalling = (state._agentMacro?.vixOutlook || "") === "mean_reverting" ||
                            (state._agentMacro?.vixOutlook || "") === "falling";
         const pcrCallOk  = vix < 25 || (vix < 28 && vixFalling);
@@ -636,7 +458,6 @@ function scoreIndexSetup(stock, optionType, spyRSI, spyMACD, spyMomentum, breadt
             reasons.push(`PCR ${pcrData.pcr} - elevated fear but VIX ${vix} too high for contrarian call (+0)`);
           }
         }
-        // Greed/complacency is always a call penalty regardless of VIX
         if (pcrData.signal === "extreme_greed") { score -= 10; reasons.push(`PCR ${pcrData.pcr} - extreme greed, calls overextended (-10)`); }
       }
     }
@@ -644,13 +465,9 @@ function scoreIndexSetup(stock, optionType, spyRSI, spyMACD, spyMomentum, breadt
     const ts = isDataFresh(state._termStructure) ? state._termStructure : null;
     if (ts) {
       if (optionType === "put"  && ts.creditFavorable) { supplementScore += 8; reasons.push(`Vol backwardation (${ts.ratio}) - near-term fear premium elevated (+8)`); }
-      // V2.89: Vol contango only signals cheap calls when VIX < 24.
-      // At VIX 25+, mild contango is normal market structure — calls are expensive regardless.
-      // Giving +8 "calls cheap" at VIX 27 with ratio 0.92 is misleading — it's just the normal curve.
       if (optionType === "call" && ts.callFavorable && (vix || 25) < 24) {
         supplementScore += 8; reasons.push(`Vol contango (${ts.ratio}) - calls relatively cheap at VIX ${vix} (+8)`);
       } else if (optionType === "call" && ts.callFavorable) {
-        // Contango present but VIX too high for it to matter
         reasons.push(`Vol contango (${ts.ratio}) - calls not cheap at VIX ${vix} (+0)`);
       }
     }
@@ -684,44 +501,17 @@ function scoreIndexSetup(stock, optionType, spyRSI, spyMACD, spyMomentum, breadt
     const bMomVal = state._breadthMomentum || 0;
     if (optionType === "put"  && bMom === "falling") { supplementScore += 8; reasons.push(`Breadth falling (${bMomVal.toFixed(1)}pts) - distribution (+8)`); }
     if (optionType === "call" && bMom === "rising")  { supplementScore += 8; reasons.push(`Breadth rising (${bMomVal.toFixed(1)}pts) - accumulation (+8)`); }
-    // V2.89: Breadth recovery signal requires current breadth to still be strong (>=50%)
-    // Previously: fired for 2 days regardless of current breadth.
-    // A stale recovery during a down day with 15% breadth is not a call signal.
     const _currentBreadth = state._breadth || 50;
     if (optionType === "call" && state._zweigThrust?.detected && _currentBreadth >= 50) {
       supplementScore += 10; reasons.push(`Breadth recovery signal — breadth still strong at ${_currentBreadth}% (+10)`);
     } else if (optionType === "call" && state._zweigThrust?.detected) {
-      // Signal fired historically but breadth is now weak — not actionable
       reasons.push(`Breadth recovery signal stale — current breadth ${_currentBreadth}% too weak (+0)`);
     }
   }
 
   if (optionType === "put") {
-    // - Agent macro signal - primary gate -
-    // Panel fix: mild bullish in bear regime = bounce read, not regime change.
-    // -20 penalty only fires when agent is genuinely bullish AND regime confirms it.
-    // entryBias "puts_on_bounces" means the bounce IS the put entry signal - treat as neutral.
-    const bearRegimeForPuts = ["trending_bear","breakdown"].includes(regime);
-    const putsBiasOk = entryBias === "puts_on_bounces";
-    // Agent signal removed from debit put scoring — threshold-only in evaluateEntry.
-    // ±35/±25 swings on a 10.1% accurate signal boosted/blocked more than they helped.
     if (signal) reasons.push(`Agent signal: ${signal} (${confidence}) — scoring impact removed, threshold-only`);
 
-    // - Regime confirmation -
-    // V2.99 PUT FIX: Overbought mean reversion puts in Regime A.
-    // The -25 penalty was blanket-applied to ALL puts in trending_bull — making puts
-    // structurally impossible (max score 33 vs 70 minimum) in Regime A which has been
-    // the regime since APEX launch. Zero puts entered in 50+ trades as a result.
-    //
-    // Fix: differentiate two put cases in Regime A:
-    //   1. Trend-following puts (RSI < 65 or dailyRSI < 75): wrong for bull regime → -25
-    //   2. Overbought MR puts (intraday RSI >= 65 AND dailyRSI >= 75): valid fade signal → -5
-    //      This matches the call MR thesis but in reverse: overbought bounce deserves a put,
-    //      just as oversold dip deserves a call. Both are mean reversion, not trend trades.
-    //
-    // The -5 reduced penalty still disadvantages puts in bull regime but allows other
-    // signals (MACD bearish crossover, RSI 70+, low breadth, PCR fear) to push score ≥ 70.
-    // This is NOT a free pass — puts still need bearish MACD + multiple confirming signals.
     const _dailyRsiForPut   = stock.dailyRsi || spyRSI || 50;
     const _isOverboughtMRPut = ["trending_bull","recovery"].includes(regime)
       && spyRSI >= 65
@@ -730,26 +520,14 @@ function scoreIndexSetup(stock, optionType, spyRSI, spyMACD, spyMomentum, breadt
     if (["trending_bear","breakdown"].includes(regime))                           { score += 20; reasons.push(`Regime: ${regime} (+20)`); }
     else if (regime === "choppy")                                                  { score -= 10; reasons.push("Choppy regime - puts risky (-10)"); }
     else if (_isOverboughtMRPut) {
-      // Overbought MR put in bull regime — reduced penalty, not full block
       score -= 5; reasons.push(`Regime: ${regime} - overbought MR put, reduced penalty (-5)`);
     }
     else if (["trending_bull","recovery"].includes(regime))                       { score -= 25; reasons.push(`Regime: ${regime} - wrong for puts (-25)`); }
 
-    // V2.84: Regime B duration boost (panel fix -- Stat Arb + Quant Strategist)
-    // The longer the bear trend is confirmed, the higher confidence puts are the right trade
-    // Research: sustained regime (3+ days below 200MA) has higher directional accuracy than intraday regime calls
-    // _regimeDuration tracks days SPY has been below 200MA (incremented daily in regime classifier)
-    // Regime duration bonus — two paths:
-    // 1. SPY below 200MA for N days (classic bear regime duration, tracked by _regimeDuration)
-    // 2. VIX 5-day rolling average >= 25 (sustained fear — Regime B can exist above 200MA)
-    // _vixHistory is a 5-entry intraday window (not days). Use _vixSustained (actual 5-day avg).
-    // _vixSustained is computed once per scan: avg of _vixHistory entries. Already maintained.
     const regimeDuration    = state._regimeDuration || 0;
-    const vixSustainedAvg   = state._vixSustained   || 0;  // actual 5-day rolling average
-    const vixSustainedBonus = vixSustainedAvg >= 28 ? 5    // sustained elevated fear
-                            : vixSustainedAvg >= 25 ? 3    // moderate sustained fear
-                            : 0;
-    const effectiveDuration = regimeDuration; // 200MA days remains the primary metric
+    const vixSustainedAvg   = state._vixSustained   || 0;
+    const vixSustainedBonus = vixSustainedAvg >= 28 ? 5 : vixSustainedAvg >= 25 ? 3 : 0;
+    const effectiveDuration = regimeDuration;
     if (["trending_bear","breakdown"].includes(regime) && effectiveDuration >= 5) {
       score += 15; reasons.push(`Bear trend ${effectiveDuration}d below 200MA - high confidence (+15)`);
     } else if (["trending_bear","breakdown"].includes(regime) && effectiveDuration >= 3) {
@@ -757,29 +535,18 @@ function scoreIndexSetup(stock, optionType, spyRSI, spyMACD, spyMomentum, breadt
     } else if (["trending_bear","breakdown"].includes(regime) && effectiveDuration >= 1) {
       score += 5; reasons.push(`Bear trend ${effectiveDuration}d below 200MA - regime establishing (+5)`);
     }
-    // Separate VIX sustained bonus — additive but capped independently
     if (["trending_bear","breakdown"].includes(regime) && vixSustainedBonus > 0) {
       score += vixSustainedBonus; reasons.push(`VIX 5d avg ${vixSustainedAvg.toFixed(1)} sustained elevated (+${vixSustainedBonus})`);
     }
 
-    // - SPY technicals (V2.81 - all thresholds now use daily RSI) -
-    // V2.81 change 1: Regime-gate overbought put bonus
-    // RSI >=70 in Regime A (bull trend) = healthy trend, not a fade signal (+5 only)
-    // RSI >=70 in Regime B/C (bear/choppy) = extended bounce, genuine fade signal (+20)
     const inBearOrChoppy = ["trending_bear","breakdown","choppy"].includes(regime);
     if (spyRSI >= 70) {
-      // V2.81 change 2: Joint RSI+IVR scoring
-      // RSI >=70 (overbought) + IVR <=30 (cheap options) = ideal debit put entry
-      // RSI >=70 + IVR >=70 (expensive options) = move may be priced in, reduce bonus
       const ivpNow = stock.ivPercentile || 50;
       if (ivpNow <= 30 && inBearOrChoppy) {
         score += 25; reasons.push(`${stock.ticker} RSI ${spyRSI} overbought + IVP ${ivpNow}% cheap puts - ideal debit put entry (+25)`);
       } else if (inBearOrChoppy) {
         score += 20; reasons.push(`${stock.ticker} RSI ${spyRSI} overbought in bear/choppy regime (+20)`);
       } else if (_isOverboughtMRPut) {
-        // V2.99 FIX: Overbought MR put in bull regime — RSI 70+ is the core signal.
-        // Give full +20 bonus (same as bear regime) when dailyRSI >= 75 confirms overbought.
-        // Without this, RSI 72 only adds +5 — the primary put signal is nearly worthless.
         score += 20; reasons.push(`${stock.ticker} RSI ${spyRSI} overbought MR put in bull regime - dailyRSI ${_dailyRsiForPut.toFixed(0)} confirms (+20)`);
       } else {
         score += 5;  reasons.push(`${stock.ticker} RSI ${spyRSI} overbought in bull regime - trend may continue, reduced bonus (+5)`);
@@ -787,36 +554,42 @@ function scoreIndexSetup(stock, optionType, spyRSI, spyMACD, spyMomentum, breadt
     }
     else if (spyRSI >= 60)                                                        { score += 10; reasons.push(`${stock.ticker} RSI ${spyRSI} elevated (+10)`); }
     else if (spyRSI >= 45 && spyRSI < 60 && inBearOrChoppy && entryBias === "puts_on_bounces") {
-      // RSI 45-60 in Regime B bounce-fade = mild overbought recovery — valid put entry zone
       score += 8; reasons.push(`${stock.ticker} RSI ${spyRSI} in bounce zone - puts_on_bounces Regime B (+8)`);
     }
     else if (spyRSI <= 35) {
-      // FIX B: RSI ≤ 35 for PUTS — regime-aware, not a hard zero.
-      // Regime B (bear trend): RSI 34 is a brief bounce in a downtrend — valid put entry.
-      //   The stock hasn't "already crashed" — it's in a sustained bear move with a brief relief.
-      // Regime A (bull): RSI ≤ 35 = genuine crash from elevated levels. Put thesis exhausted.
-      //   Overbought → capitulation → buying the crash isn't a put trade. Hard zero correct here.
+      // ── C2 FIX: Index instrument path — RSI <= 35 in bull regime ──────────────
+      // BEFORE: hard return { score: 0 } for ALL instruments in Regime A.
+      // Problem: On macro catalyst days (NFP, CPI, FOMC surprise), RSI <=35 on SPY/QQQ
+      // means the move has JUST STARTED, not that it's exhausted. Hard-zeroing put scores
+      // eliminated all put entries on June 5 NFP day despite 7 losing calls being taken.
+      //
+      // Fix: Index instruments (stock.isIndex === true) skip the hard-zero and take a
+      // regime penalty instead. Individual stocks retain the hard-zero — stock-specific
+      // crashes in a bull market ARE exhausted moves. Index crashes can be catalysts.
+      //
+      // The -10 penalty + -25 regime penalty still produces a negative base score,
+      // so puts won't fire on normal dip days. They can only score above 70 when
+      // other signals (bearish MACD, low breadth, VIX elevated, credit stress) pile on.
       const inBearRegimeForPuts = ["trending_bear","breakdown"].includes(regime);
       if (inBearRegimeForPuts) {
-        // Bear trend: brief bounce/recovery — RSI oversold is actually ideal for puts
-        // Don't penalize. Treat like RSI 45-60 in bear trend: thesis intact, trend continues.
         score += 5; reasons.push(`${stock.ticker} RSI ${spyRSI} oversold in bear trend — brief bounce, put thesis intact (+5)`);
+      } else if (stock.isIndex) {
+        // C2 FIX: Index macro catalyst path — no hard zero
+        score -= 10;
+        reasons.push(`${stock.ticker} RSI ${spyRSI} oversold in bull regime — index catalyst path, other signals decide (-10)`);
+        logEvent("filter", `[C2-PUT] ${stock.ticker} RSI ${spyRSI} oversold in Regime A — index path, no hard zero. Scoring continues.`);
       } else {
-        // Bull regime: stock crashed from high RSI — the move is done, put thesis exhausted.
-        score = 0; reasons.push(`${stock.ticker} RSI ${spyRSI} oversold in bull regime — debit put hard block, stock already crashed`);
+        // Individual stocks: hard zero retained — stock crash in bull market = thesis exhausted
+        score = 0;
+        reasons.push(`${stock.ticker} RSI ${spyRSI} oversold in bull regime — debit put hard block, stock already crashed`);
         return { score: 0, reasons, tradeType: "put" };
       }
     }
     else if (spyRSI <= 45) {
-      // V2.84: Regime-aware RSI penalty (panel fix -- Technical Analyst + Stat Arb)
-      // Regime A (bull): RSI <=45 means stock already sold off -- put thesis weak (-15)
-      // Regime B (bear trend): RSI <=45 means downtrend intact -- neutral for puts (0)
-      // Regime B + RSI <=40: valid but elevated overnight gap risk -- apply 0.75x sizing via _rsiBearOversold flag
       const inBearTrend = ["trending_bear","breakdown"].includes(regime);
       if (inBearTrend) {
         if (spyRSI <= 40) {
           score += 0; reasons.push(`${stock.ticker} RSI ${spyRSI} oversold in bear trend - trend intact, no penalty but size reduced (+0)`);
-          // Note: 0.75x sizing applied at execution via regimeBOversoldMod check
           reasons.push(`[OVERSOLD-BEAR] RSI ${spyRSI} <=40 in Regime B - 0.75x sizing applied at execution`);
         } else {
           score += 0; reasons.push(`${stock.ticker} RSI ${spyRSI} oversold in bear trend - downtrend intact, no penalty (+0)`);
@@ -826,11 +599,6 @@ function scoreIndexSetup(stock, optionType, spyRSI, spyMACD, spyMomentum, breadt
       }
     }
 
-    // V2.81 change 4: RSI velocity penalty
-    // Fast RSI moves are statistically less reliable than sustained readings
-    // If daily RSI moved 20+ points in recent sessions, the signal is a fast bounce/crash not a regime condition
-    // RSI velocity penalty — exempt Regime B: wide RSI swings are normal in bear trends
-    // This penalty was designed for Regime A (bull) where fast RSI moves indicate chasing
     const rsiHistRaw = state._rsiHistory?.[stock.ticker] || [];
     const rsiHistory = rsiHistRaw.map(r => typeof r === 'object' ? (r?.rsi || 50) : r);
     const inBearForVelocity = ["trending_bear","breakdown"].includes(regime);
@@ -841,12 +609,11 @@ function scoreIndexSetup(stock, optionType, spyRSI, spyMACD, spyMomentum, breadt
       }
     } else if (rsiHistory.length >= 3 && inBearForVelocity) {
       const rsiChange = Math.abs(spyRSI - rsiHistory[rsiHistory.length - 3]);
-      if (rsiChange >= 30) { // higher threshold in bear regime - wide swings are normal
+      if (rsiChange >= 30) {
         score -= 4; reasons.push(`RSI velocity: ${rsiChange.toFixed(0)}pt swing - extreme even for bear trend (-4)`);
       }
     }
 
-    // TA-C1: Dampen MACD when RSI is extreme opposite (intraday RSI more current than daily MACD)
     const macdRSIConflictPut = spyRSI >= 70 && spyMACD && spyMACD.includes("bullish");
     const macdMultPut = macdRSIConflictPut ? 0.4 : 1.0;
     if (macdRSIConflictPut) reasons.push(`MACD/RSI conflict - RSI ${spyRSI} overbought, bullish MACD dampened`);
@@ -855,7 +622,6 @@ function scoreIndexSetup(stock, optionType, spyRSI, spyMACD, spyMomentum, breadt
     else if (spyMACD && spyMACD.includes("bullish crossover")) { score -= Math.round(15*macdMultPut); reasons.push(`SPY MACD bullish crossover (-${Math.round(15*macdMultPut)})`); }
     else if (spyMACD && spyMACD.includes("bullish"))           { score -= Math.round(8*macdMultPut);  reasons.push(`SPY MACD bullish (-${Math.round(8*macdMultPut)})`); }
 
-    // - Breadth confirmation -
     if (breadth <= 30)       { score += 15; reasons.push(`Breadth ${breadth}% - severe weakness (+15)`); }
     else if (breadth <= 45)  { score += 8;  reasons.push(`Breadth ${breadth}% - weak (+8)`); }
     else if (breadth <= 65 && inBearOrChoppy) { score += 4; reasons.push(`Breadth ${breadth}% - below neutral in bear regime (+4)`); }
@@ -868,23 +634,16 @@ function scoreIndexSetup(stock, optionType, spyRSI, spyMACD, spyMomentum, breadt
       }
     }
 
-    // - VIX context -
     if (vixOutlook === "spiking")          { score += 10; reasons.push("VIX spiking - put premium expanding (+10)"); }
     else if (vixOutlook === "elevated_stable") { score += 5; reasons.push("VIX elevated stable (+5)"); }
     else if (vixOutlook === "falling")     { score -= 10; reasons.push("VIX falling - puts losing value (-10)"); }
     if (vix >= 25)                         { score += 5;  reasons.push(`VIX ${vix.toFixed(1)} elevated (+5)`); }
 
-    // - Entry bias alignment -
-    // Bounce quality scoring - best put entries are on relief bounces not crashes
     if (entryBias === "puts_on_bounces") {
-      // FIX G: Bounce quality assessment — not all bounces are equal fade targets.
-      // High volume bounce = institutional participation = real momentum = harder fade.
-      // Low volume bounce = retail-driven, thin = classic fade candidate = higher bonus.
-      // volPaceRatio: 1.0 = average volume. >1.2 = above average. <0.8 = thin.
       const volPace         = stock.volPaceRatio || 1.0;
-      const thinBounce      = volPace < 0.8;   // low vol = weak bounce = ideal fade
-      const heavyBounce     = volPace >= 1.3;  // high vol = real momentum = reduce bonus
-      const qualityMult     = thinBounce ? 1.3 : heavyBounce ? 0.6 : 1.0; // scale bonus
+      const thinBounce      = volPace < 0.8;
+      const heavyBounce     = volPace >= 1.3;
+      const qualityMult     = thinBounce ? 1.3 : heavyBounce ? 0.6 : 1.0;
       const agentAlreadyBearish = ["strongly bearish","bearish","mild bearish"].includes(signal);
 
       if (spyMomentum === "steady" && spyRSI >= 45 && spyRSI <= 65) {
@@ -897,14 +656,13 @@ function scoreIndexSetup(stock, optionType, spyRSI, spyMACD, spyMomentum, breadt
         const biasBonus     = Math.round(baseBiasBonus * qualityMult);
         score += biasBonus; reasons.push(`Entry bias: puts on bounces vol ${volPace.toFixed(1)}x (+${biasBonus})`);
       } else if (spyMomentum === "recovering" && spyRSI >= 40) {
-        const biasBonus = heavyBounce ? 0 : 3; // skip bonus entirely if heavy vol recovery
+        const biasBonus = heavyBounce ? 0 : 3;
         if (biasBonus > 0) score += biasBonus;
         reasons.push(`Entry bias: momentum recovering${heavyBounce ? " - heavy vol, skip bonus" : " - timing not ideal"} (+${biasBonus})`);
       }
     }
     if (entryBias === "avoid") { score = Math.min(score, 0); reasons.push("Agent says avoid - blocked"); }
 
-    // - VWAP for puts (TA-C2) -
     const putVWAP  = stock.intradayVWAP || 0;
     const putPrice = stock.price || 0;
     if (putVWAP > 0 && putPrice > 0) {
@@ -913,31 +671,11 @@ function scoreIndexSetup(stock, optionType, spyRSI, spyMACD, spyMomentum, breadt
       else if (vwapDiffPut > 0.02) { score -= 6; reasons.push(`Extended above VWAP ${(vwapDiffPut*100).toFixed(1)}% - overbought vs today (+6 short)`); }
     }
 
-    // - IV Percentile for puts - high IVR is partially favorable (richer premium)
-    // but very high IVR means move already happened (less upside)
     const ivpPut = stock.ivPercentile || 50;
     if (ivpPut < 25)        { score += 8;  reasons.push(`IVP ${ivpPut}% - cheap puts, favorable entry (+8)`); }
-    else if (ivpPut >= 90)  {
-      // FIX D: IVP 90%+ for NAKED LONG puts.
-      // Buying expensive options (high IVP) into a vol spike: premium cost is real.
-      // If direction is strong the trade is still valid but size should reflect cost.
-      // -3 nudges scorer toward lower-IV entries when all else is equal.
-      score -= 3; reasons.push(`IVP ${ivpPut}% - buying expensive premium, cost drag (-3)`);
-    }
-    else if (ivpPut >= 70)  {
-      // FIX D: IVP 70-90% for naked longs — elevated but not extreme.
-      // Small supplement: high IV can mean rapid further moves are expected.
-      // Not the credit spread "+10 for selling rich premium" — just +3 for "vol is active".
-      supplementScore += 3;
-      reasons.push(`IVP ${ivpPut}% - elevated IV, active market (+3)`);
-    }
+    else if (ivpPut >= 90)  { score -= 3; reasons.push(`IVP ${ivpPut}% - buying expensive premium, cost drag (-3)`); }
+    else if (ivpPut >= 70)  { supplementScore += 3; reasons.push(`IVP ${ivpPut}% - elevated IV, active market (+3)`); }
 
-    // - QQQ secondary - only when tech thesis clear -
-    // Panel fix: in Regime B/C with only 4 instruments, agent.bearishTickers is
-    // almost never populated with FAANG names - gate fires on every scan.
-    // QQQ put in a macro bear regime IS the thesis - no additional tech confirmation needed.
-    // Gate only applies in Regime A (bull) or when individual stocks are enabled
-    // (where SPY vs QQQ distinction matters more).
     if (stock.ticker === "QQQ") {
       const qqqGateApplies = !["trending_bear","breakdown"].includes(regime) || INDIVIDUAL_STOCKS_ENABLED;
       if (qqqGateApplies) {
@@ -949,9 +687,6 @@ function scoreIndexSetup(stock, optionType, spyRSI, spyMACD, spyMomentum, breadt
       }
     }
 
-    // FIX 9: Weekly trend confirmation for puts — mirrors call scoring section
-    // confirmed_bear weekly trend = higher conviction puts (trend is on your side)
-    // aligned_bull weekly trend = fighting the trend with puts (penalty)
     {
       const weeklyTrend = stock._weeklyTrend || {};
       const trendCtx    = weeklyTrend.trendContext;
@@ -963,26 +698,8 @@ function scoreIndexSetup(stock, optionType, spyRSI, spyMACD, spyMomentum, breadt
     }
 
   } else {
-    // - CALL SCORING - two distinct theses handled separately -
-    // Thesis A: Mean Reversion Call - RSI crash + high VIX + capitulation
-    // Thesis B: Trending Bull Call  - VIX compression + breadth thrust + momentum
-    // Both share this path but scoring weights differ by regime/RSI context
-    // Hoisted to call branch scope so RSI and MACD blocks can reference it
-    // FIX C: isCreditCallMode removed — APEX trades naked calls only. tradeType is null.
-
-    // - Agent macro signal - primary gate -
-    // Capitulation bypass: RSI <= 30 means the crash IS the thesis for MR calls.
-    // Strongly bearish agent + deeply oversold RSI = textbook mean reversion entry.
-    // Apply bypass for agent penalty only — regime bonus still applies below.
-    // V2.89: Tighter capitulation bypass.
-    // Old: RSI <= 30 bypassed the bearish agent. Fired on every downtrend (XLE RSI 17 for 2 hours).
-    // New: bypass requires session low RSI <= 22 AND current RSI is AT the session low
-    //      (not recovering yet — that's handled by mrStabilized/mrBouncing in RSI section).
-    // This reserves the bypass for genuine single-session panic, not sustained downtrends.
     const sessionLowRSIForBypass = state._sessionLowRSI?.[stock.ticker] ?? 100;
-    // capitulationActive: true panic (RSI session low <=22 and currently at/near that low)
     const mrCapitulationActive = sessionLowRSIForBypass <= 22 && spyRSI <= 28;
-    // Mild capitulation: RSI hit 23-30 at some point, currently oversold (25-35)
     const mrMildCapitulation   = sessionLowRSIForBypass <= 30 && spyRSI <= 35 && !mrCapitulationActive;
 
     if (["strongly bullish","bullish"].includes(signal) && confidence === "high") { score += 35; reasons.push(`Agent ${signal} high confidence (+35)`); }
@@ -991,25 +708,14 @@ function scoreIndexSetup(stock, optionType, spyRSI, spyMACD, spyMomentum, breadt
     else if (signal === "neutral" && spyRSI <= 35)                                { score += 20; reasons.push("Mean reversion call - SPY oversold on neutral macro (+20)"); }
     else if (signal === "neutral")                                                 { score += 0;  reasons.push("Agent neutral (+0)"); }
     else if (mrCapitulationActive) {
-      // True panic capitulation — bypass bearish agent
       score += 5; reasons.push(`Agent ${signal} bypassed — session panic RSI ${sessionLowRSIForBypass.toFixed(0)}, confirming MR capitulation entry (+5)`);
     } else if (mrMildCapitulation) {
-      // Mild oversold — don't fully bypass but soften the penalty
       score += 0; reasons.push(`Agent ${signal} — mild oversold (session low ${sessionLowRSIForBypass.toFixed(0)}), impact softened (+0)`);
     }
     else if (["mild bearish","bearish","strongly bearish"].includes(signal)) {
-      // Agent signal removed from call scoring — threshold-only in evaluateEntry.
       reasons.push(`Agent signal: ${signal} — scoring impact removed, threshold-only`);
     }
 
-    // - Regime confirmation - V2.89: conditional on intraday alignment -
-    // Weekly Regime A (trending_bull) is the macro backdrop, not a per-entry signal.
-    // Giving flat +20 on every call regardless of the day's intraday action inflated
-    // scores 20 points even when every instrument was declining on macro-bearish days.
-    // Fix: scale regime bonus by intraday alignment (VWAP position + breadth).
-    // Full +20: regime bull AND instrument above VWAP AND breadth >= 40%
-    // Partial +10: regime bull AND (above VWAP OR breadth >= 30%)
-    // Minimal +3: regime bull but intraday is bearish (stale weekly signal, not actionable)
     if (["trending_bull","recovery"].includes(regime)) {
       const _breadthNow  = state._breadth || 50;
       const _aboveVWAP   = (stock.lastPrice || stock.price || 0) >= (stock.vwap || 0) * 0.995;
@@ -1023,20 +729,13 @@ function scoreIndexSetup(stock, optionType, spyRSI, spyMACD, spyMomentum, breadt
     }
     else if (regime === "choppy")                                                  { score -= 10; reasons.push("Choppy regime - calls risky (-10)"); }
     else if (["trending_bear","breakdown"].includes(regime)) {
-      // Credit calls (bear call spreads) in Regime B: legitimate directional premium trade
-      // Debit calls in bear regime: wrong — fighting the trend
-      // tradeType === "credit" when creditModeActive (scoringMacro has tradeType:"credit")
-      // FIX C: isCreditCallMode removed — naked calls only. Bear call spread path gone.
       if (mrCapitulationActive) {
-        // APEX: RSI <= 30 = genuine capitulation — bypass regime penalty entirely regardless of oversoldDays.
-        // Fast intraday crashes (day 1) are valid MR entries — requiring 2-day history misses the best entry.
         const oversoldDays = state._oversoldCount?.[stock.ticker] || 0;
         score += 10; reasons.push(`Regime: ${regime} - MR call capitulation bypass (RSI ${spyRSI}, ${oversoldDays}d oversold) - regime is the entry signal (+10 vs normal -25)`);
       } else if (spyRSI <= 35) {
-        // RSI 31-35, not extreme enough for full mrCapitulationActive but still oversold
         const oversoldDays = state._oversoldCount?.[stock.ticker] || 0;
         const vixNotSpiking = (state._agentMacro?.vixOutlook || "") !== "spiking";
-        const capitulationConfirmed = oversoldDays >= 1 && vixNotSpiking; // 1 day threshold (was 2)
+        const capitulationConfirmed = oversoldDays >= 1 && vixNotSpiking;
         if (capitulationConfirmed) {
           score -= 10; reasons.push(`Regime: ${regime} - oversold bypass (RSI ${spyRSI} for ${oversoldDays}d + VIX stable) (-10 vs normal -25)`);
         } else {
@@ -1047,21 +746,9 @@ function scoreIndexSetup(stock, optionType, spyRSI, spyMACD, spyMomentum, breadt
       }
     }
 
-    // - RSI - context-aware for two theses (V2.81 - now uses daily RSI) -
-    // Mean reversion: deeply oversold RSI = ideal call entry
-    // Trending bull: healthy RSI (45-60) on a dip = ideal call entry
-    // Overbought RSI (70+) = wrong entry point for both theses
-    // V2.81 change 5 continued: RSI stabilization gate for mean reversion calls
-    // Require 3 consecutive intraday scans of RSI <=35 before MR call entry fires
-    // Prevents entering at the exact moment of maximum spread width and worst fills
-    // V2.89: mrStabilized now means "bounced FROM oversold" not "continued oversold"
-    // _intradayOversoldScans = scans since RSI bounced from session low above 38
-    // _sessionLowRSI = lowest RSI seen this session (set in scanner.js)
     const intradayOversoldScans = state._intradayOversoldScans?.[stock.ticker] || 0;
     const sessionLowRSI         = state._sessionLowRSI?.[stock.ticker] ?? 100;
-    // mrStabilized: session was oversold (low <=30) AND current RSI has bounced (>=38) AND held 3+ scans
     const mrStabilized = sessionLowRSI <= 30 && (spyRSI || 50) >= 38 && intradayOversoldScans >= 3;
-    // mrBouncing: session was oversold but bounce not yet confirmed (1-2 scans above 38)
     const mrBouncing   = sessionLowRSI <= 30 && (spyRSI || 50) >= 38 && intradayOversoldScans >= 1;
     if (spyRSI <= 25) {
       if (mrStabilized) { score += 25; reasons.push(`${stock.ticker} RSI bounced from session low ${sessionLowRSI.toFixed(0)} to ${spyRSI} - mean reversion confirmed (+25)`); }
@@ -1075,27 +762,15 @@ function scoreIndexSetup(stock, optionType, spyRSI, spyMACD, spyMomentum, breadt
     }
     else if (spyRSI <= 42)                                                        { score += 10; reasons.push(`${stock.ticker} RSI ${spyRSI} oversold (+10)`); }
     else if (spyRSI >= 45 && spyRSI <= 58 && ["trending_bull","recovery"].includes(regime)) {
-      // V3.00 REMOVED: "healthy dip" +12 call bonus at RSI 45-58.
-      // APEX is a mean-reversion system. RSI 45-58 is mid-range — not oversold.
-      // Trend-continuation entries at RSI 54 contradict the MR thesis and perform
-      // poorly when macro turns bearish intraday (e.g. 5/27 QQQ: RSI 54.4, -$103).
-      // All call entries now require RSI < 45 for genuine oversold confirmation.
-      // Mid-range RSI gets 0 bonus — neutral, no penalization, no reward.
-      // (no score change — falls through to 0)
+      // V3.00: "healthy dip" bonus removed — MR system requires RSI < 45
     }
     else if (spyRSI >= 70) {
-      // FIX C: Naked calls only — overbought RSI is wrong direction for long calls.
       score -= 15; reasons.push(`${stock.ticker} RSI ${spyRSI} overbought — wrong entry for naked calls (-15)`);
     }
 
-    // V2.81 change 4 (call side): RSI velocity penalty
-    // Bug fix: _rsiHistory stores dailyRsi values (one per day).
-    // spyRSI for calls is now intradayRSI — comparing intraday vs daily history gives
-    // false velocity penalties (e.g. intraday 35 vs daily history 90 = 55pt "velocity").
-    // Fix: use stock.dailyRsi for the velocity comparison so both sides are daily values.
     const rsiHistoryCallRaw = state._rsiHistory?.[stock.ticker] || [];
     const rsiHistoryCall = rsiHistoryCallRaw.map(r => typeof r === 'object' ? (r?.rsi || 50) : r);
-    const dailyRsiForVelocity = stock.dailyRsi || spyRSI; // use daily for apples-to-apples comparison
+    const dailyRsiForVelocity = stock.dailyRsi || spyRSI;
     if (rsiHistoryCall.length >= 3) {
       const rsiChangeCall = Math.abs(dailyRsiForVelocity - rsiHistoryCall[rsiHistoryCall.length - 3]);
       if (rsiChangeCall >= 20) {
@@ -1103,28 +778,19 @@ function scoreIndexSetup(stock, optionType, spyRSI, spyMACD, spyMomentum, breadt
       }
     }
 
-    // - MACD (with RSI contradiction dampening) -
-    // TA-C1: Intraday RSI (responsive) and daily MACD (slow) can conflict on fast-moving days
-    // When RSI is deeply oversold (<35) but MACD is bearish - RSI signal is more current
-    // Dampen MACD penalty when it contradicts an extreme RSI reading
     const macdRSIConflict = spyRSI <= 35 && spyMACD && spyMACD.includes("bearish");
-    const macdMult = macdRSIConflict ? 0.4 : 1.0; // reduce MACD weight when RSI is extreme opposite
+    const macdMult = macdRSIConflict ? 0.4 : 1.0;
     if (macdRSIConflict) reasons.push(`MACD/RSI conflict - intraday RSI ${spyRSI} oversold, MACD dampened`);
-    // FIX C: Naked calls only — straightforward MACD direction scoring.
     if (spyMACD && spyMACD.includes("bullish crossover"))  { score += Math.round(15*macdMult); reasons.push(`SPY MACD bullish crossover (+${Math.round(15*macdMult)})`); }
     else if (spyMACD && spyMACD.includes("bullish"))       { score += Math.round(8*macdMult);  reasons.push(`SPY MACD bullish (+${Math.round(8*macdMult)})`); }
     else if (spyMACD && spyMACD.includes("bearish crossover")) { score -= Math.round(15*macdMult); reasons.push(`SPY MACD bearish crossover (-${Math.round(15*macdMult)})`); }
     else if (spyMACD && spyMACD.includes("bearish"))       { score -= Math.round(5*macdMult);  reasons.push(`SPY MACD bearish (-${Math.round(5*macdMult)})`); }
 
-    // - Breadth - normalized to recent history -
-    // Raw 80% means nothing without context - normalized reading is more meaningful
-    // Compare current breadth to recent 10-reading range
     const bHist10 = (state._breadthHistory || []).map(b => b.v);
     const bMin = bHist10.length >= 3 ? Math.min(...bHist10) : 0;
     const bMax = bHist10.length >= 3 ? Math.max(...bHist10) : 100;
     const bRange = bMax - bMin;
-    // Normalized breadth: 0-100 within recent range (above/below recent midpoint)
-    const bNorm = bRange > 5 ? ((breadth - bMin) / bRange) * 100 : 50; // 50 = neutral if no range
+    const bNorm = bRange > 5 ? ((breadth - bMin) / bRange) * 100 : 50;
     if (bNorm >= 75 && breadth >= 60)      { score += 10; reasons.push(`Breadth ${breadth}% (${bNorm.toFixed(0)}th pctile) - strong relative to recent (+10)`); }
     else if (bNorm >= 60)                  { score += 6;  reasons.push(`Breadth ${breadth}% (${bNorm.toFixed(0)}th pctile) - recovering (+6)`); }
     else if (bNorm <= 30 && ["trending_bull","recovery"].includes(regime)) {
@@ -1133,13 +799,7 @@ function scoreIndexSetup(stock, optionType, spyRSI, spyMACD, spyMomentum, breadt
     else if (bNorm <= 20 && !mrCapitulationActive) { score -= 8; reasons.push(`Breadth ${breadth}% (${bNorm.toFixed(0)}th pctile) - very weak relative to recent (-8)`); }
     else if (bNorm <= 20 && mrCapitulationActive)  { score += 5;  reasons.push(`Breadth ${breadth}% (${bNorm.toFixed(0)}th pctile) - capitulation breadth, MR setup confirmed (+5)`); }
 
-    // - VIX - absolute level matters for calls, not just direction -
-    // Low VIX = cheap call premium = historically excellent call entry cost
-    // High VIX = expensive calls + wrong macro environment for bull thesis
-    // MR capitulation bypass: VIX spiking IS the entry signal for MR calls — don't penalize it
     if (mrCapitulationActive) {
-      // Mean reversion in fear: high VIX = cheap calls relative to future implied move
-      // scoreMeanReversionCall handles this correctly — replicate logic for index MR
       if (vix >= 35)      { score += 15; reasons.push(`VIX ${vix} - extreme fear, MR calls historically cheap at capitulation (+15)`); }
       else if (vix >= 25) { score += 8;  reasons.push(`VIX ${vix} - elevated fear, MR call entry (+8)`); }
       if (vixOutlook === "spiking")       { score += 8;  reasons.push("VIX spiking - fear at peak, MR call entry signal (+8)"); }
@@ -1148,14 +808,11 @@ function scoreIndexSetup(stock, optionType, spyRSI, spyMACD, spyMomentum, breadt
       if (vix <= 18)            { score += 12; reasons.push(`VIX ${vix} - calls historically cheap, low premium (+12)`); }
       else if (vix <= 22)       { score += 8;  reasons.push(`VIX ${vix} - moderate, calls reasonably priced (+8)`); }
       else if (vix >= 35)       { score -= 10; reasons.push(`VIX ${vix} - calls expensive in fear environment (-10)`); }
-      // VIX direction (falling = calls gaining value, spiking = calls losing)
       if (vixOutlook === "falling")      { score += 12; reasons.push("VIX compressing - call premium expanding (+12)"); }
       else if (vixOutlook === "mean_reverting") { score += 6; reasons.push("VIX mean reverting - calls improving (+6)"); }
       else if (vixOutlook === "spiking") { score -= 12; reasons.push("VIX spiking - calls losing value fast (-12)"); }
     }
 
-    // - VWAP (TA-C2: now used for index instruments) -
-    // VWAP is calculated but was discarded for index instruments - fixed here
     const callVWAP = stock.intradayVWAP || 0;
     const callPrice = stock.price || 0;
     if (callVWAP > 0 && callPrice > 0) {
@@ -1164,11 +821,6 @@ function scoreIndexSetup(stock, optionType, spyRSI, spyMACD, spyMomentum, breadt
       else if (vwapDiff > 0.015)  { score -= 5; reasons.push(`Extended above VWAP ${(vwapDiff*100).toFixed(1)}% - chasing (+-5)`); }
     }
 
-    // - IV Percentile - cost of entry matters for spreads -
-    // High IVR = expensive spreads = worse risk/reward even with same directional thesis
-    // Low IVR = cheap spreads = same expected move costs less
-    // Note: debit spreads partially offset high IV by selling the short leg
-    // so penalty is softer than for naked options
     const ivpCall = stock.ivPercentile || 50;
     const highVIXNow = vix >= 30;
     if (ivpCall < 25)      { score += 10; reasons.push(`IVP ${ivpCall}% - cheap call spreads, favorable entry (+10)`); }
@@ -1176,8 +828,6 @@ function scoreIndexSetup(stock, optionType, spyRSI, spyMACD, spyMomentum, breadt
     else if (ivpCall >= 75 && !highVIXNow) { score -= 8; reasons.push(`IVP ${ivpCall}% - expensive calls in calm VIX (-8)`); }
     else if (ivpCall >= 75)  { score -= 3; reasons.push(`IVP ${ivpCall}% - expensive but VIX elevated, partial offset (-3)`); }
 
-    // - Weekly trend alignment (slope-aware) -
-    // TA-W3: MA slope matters more than price position
     const weeklyTrend    = stock._weeklyTrend || {};
     const trendCtx       = weeklyTrend.trendContext;
     if (trendCtx === 'aligned_bull')   { score += 10; reasons.push(`10-wk MA aligned bull (${weeklyTrend.maSlopeDir}) (+10)`); }
@@ -1186,21 +836,13 @@ function scoreIndexSetup(stock, optionType, spyRSI, spyMACD, spyMomentum, breadt
     else if (weeklyTrend.above10wk === true)  { score += 5; reasons.push("Above 10-wk MA (+5)"); }
     else if (weeklyTrend.above10wk === false) { score -= 5; reasons.push("Below 10-wk MA (-5)"); }
 
-    // - Momentum -
-    // Recovering momentum in bull regime = dip is done, resuming uptrend
     if (spyMomentum === "recovering" && ["trending_bull","recovery"].includes(regime)) {
       score += 10; reasons.push("Momentum recovering in bull regime - resuming uptrend (+10)");
     } else if (spyMomentum === "steady") {
       score += 3; reasons.push("Momentum steady (+3)");
     }
 
-    // - Entry bias -
-    // Market maker fix: halve bonus when agent already scored bullish to avoid double-counting
-    // Agent signal + regime already capture the macro view - bias refines TIMING not direction
     const agentAlreadyBullish = ["strongly bullish","bullish","mild bullish"].includes(signal);
-    // V2.89: Entry bias calls_on_dips requires intraday confirmation.
-    // If the instrument is below VWAP (down day not just a dip), the morning bias is stale.
-    // Only apply bonus when we have evidence the dip is actually a dip within an uptrend.
     if (entryBias === "calls_on_dips") {
       const _aboveVWAPNow = (stock.lastPrice || stock.price || 0) >= (stock.vwap || 0) * 0.995;
       const _dipConfirmed = _aboveVWAPNow && (spyMomentum === "recovering" || spyRSI <= 45);
@@ -1216,8 +858,6 @@ function scoreIndexSetup(stock, optionType, spyRSI, spyMACD, spyMomentum, breadt
     }
     if (entryBias === "avoid") { score = Math.min(score, 0); reasons.push("Agent says avoid - blocked"); }
 
-    // - QQQ - requires tech bullish confirmation -
-    // Relaxed: QQQ can lead in tech rallies - only penalize if NO bullish thesis
     if (stock.ticker === "QQQ") {
       const techBullish = (agentMacro || {}).bullishTickers &&
         agentMacro.bullishTickers.some(t => ["NVDA","MSFT","AAPL","META","GOOGL","AMD"].includes(t));
@@ -1228,36 +868,26 @@ function scoreIndexSetup(stock, optionType, spyRSI, spyMACD, spyMomentum, breadt
       }
     }
 
-    // - IWM - small caps confirm broad market strength -
     if (stock.ticker === "IWM" && ["trending_bull","recovery"].includes(regime)) {
       score += 8; reasons.push("IWM in bull/recovery regime - small cap confirmation (+8)");
     }
   }
 
-  // TODO #9: Wire data ETF sector signals into scoring
-  // XLF: financial sector health → SPY put signal
-  // SMH: semiconductor leading indicator → QQQ put signal
-  // IWM: market breadth quality → put/call modifier
-  // HYG credit stress: both HYG+TLT falling → bear regime confidence boost
   const sectorData = state._sectorRelStr || {};
   if (optionType === "put") {
     const xlfRelStr = sectorData.XLF?.relStr || 0;
     const smhRelStr = sectorData.SMH?.relStr || 0;
     const iwmRelStr = sectorData.IWM?.relStr || 0;
-    // XLF underperforming SPY = financial stress = bearish signal for SPY puts
     if (xlfRelStr < -2.0) { score += 8; reasons.push(`XLF underperforming SPY by ${Math.abs(xlfRelStr).toFixed(1)}% - financial stress (+8)`); }
     else if (xlfRelStr < -1.0) { score += 4; reasons.push(`XLF lagging SPY by ${Math.abs(xlfRelStr).toFixed(1)}% (+4)`); }
     else if (xlfRelStr > 2.0)  { score -= 5; reasons.push(`XLF outperforming SPY by ${xlfRelStr.toFixed(1)}% - financials strong (-5)`); }
-    // SMH underperforming QQQ = tech weakness is broad, QQQ puts more valid
     if (stock.ticker === "QQQ" || stock.ticker === "SPY") {
       if (smhRelStr < -3.0) { score += 10; reasons.push(`SMH underperforming by ${Math.abs(smhRelStr).toFixed(1)}% - semi weakness leading QQQ down (+10)`); }
       else if (smhRelStr < -1.5) { score += 5; reasons.push(`SMH lagging ${Math.abs(smhRelStr).toFixed(1)}% - tech breadth narrowing (+5)`); }
       else if (smhRelStr > 3.0)  { score -= 5; reasons.push(`SMH outperforming - semis strong, QQQ puts less valid (-5)`); }
     }
-    // IWM underperforming = narrow market = puts more valid
     if (iwmRelStr < -2.0)  { score += 5; reasons.push(`IWM lagging SPY ${Math.abs(iwmRelStr).toFixed(1)}% - narrow rally, puts valid (+5)`); }
     else if (iwmRelStr > 2.0) { score -= 5; reasons.push(`IWM outperforming - broad participation, puts less valid (-5)`); }
-    // Credit stress flag — HYG + TLT both falling = forced liquidation
     if (state._creditStress) { score += 8; reasons.push("Credit stress: HYG+TLT both falling - forced liquidation, bear regime confirmed (+8)"); }
   }
   if (optionType === "call") {
@@ -1268,13 +898,6 @@ function scoreIndexSetup(stock, optionType, spyRSI, spyMACD, spyMomentum, breadt
     if (state._creditStress) { score -= 8; reasons.push("Credit stress: HYG+TLT falling - calls risky in liquidation (-8)"); }
   }
 
-  // Apply supplementary signals - capped to prevent domination
-  // FIX F: Supplementary cap at 15 — prevents weak primary + max supp reaching minimum.
-  // V2.99 FIX: Overbought MR puts in bull regime get cap of 25 — their primary signals
-  // are penalized by regime (-5) so supplementary must be allowed to contribute more.
-  // The higher cap is safe because primary signals (RSI 70+, MACD bearish crossover,
-  // breadth <30%) must all fire for the overbought MR put path to activate.
-  // Normal cap: 15. Overbought MR put in bull cap: 25.
   const _isOverboughtMRPutForCap = typeof _isOverboughtMRPut !== 'undefined' && _isOverboughtMRPut;
   const _suppCap = _isOverboughtMRPutForCap ? 25 : 15;
   if (supplementScore > 0) {
@@ -1284,50 +907,25 @@ function scoreIndexSetup(stock, optionType, spyRSI, spyMACD, spyMomentum, breadt
       reasons.push(`Supplementary signals capped at +${cappedSupp} (raw: +${supplementScore})`);
     }
   }
-  // Full 100-point scale - cap at 100 not 95 to preserve resolution at high conviction
   score = Math.max(0, Math.min(100, score));
-  // Surface mrCapitulation flag so evaluateEntry can apply correct minScore
   const _mrCapitulationFlag = optionType === "call" && spyRSI <= 30 && !["trending_bull","recovery"].includes(regime);
-  // tradeType is always null in APEX (no credit/spread routing). Return "naked" not "spread".
-  // mrCapitulation flag is computed but not read downstream — kept for potential future use.
-  // V2.99 PUT AUDIT: export _isOverboughtMRPut flag so scanner.js gates can exempt
-  // overbought MR puts from gap-direction zeroing and VWAP timing blocks.
-  // _isOverboughtMRPut is only declared inside the put+bull-regime branch (line ~726).
-  // Use typeof guard so call paths and bear-regime put paths safely return false.
   const _isMRPutExport = (typeof _isOverboughtMRPut !== 'undefined') && !!_isOverboughtMRPut;
   return { score, reasons, tradeType: "naked", mrCapitulation: _mrCapitulationFlag,
            _isOverboughtMRPut: _isMRPutExport };
 }
 
-
-
-// ── estimateCreditRR — analytical R/R estimate without hitting options chain ──
-// Used in score debug to show whether a spread is actually executable
-// Formula: simplified B-S approximation using delta and IV
-// Accuracy: ±5% of actual market R/R — sufficient for viability check
-// Returns: { estimatedRR, netCredit, maxLoss, viable, reason }
-
 // estimateCreditRR removed — no credit spreads in APEX
 
-
-
-// ── isIYREntryAllowed — Real Estate ETF (rate-sensitive) ──────────────────────
-// IYR profits from falling rates (call) or rising rates (put).
-// Key signal: _yieldEnv from state (steepening = rising long rates = IYR falls)
-// Panel (Macro Strategist + Options Specialist): rate direction gates entries.
 function isIYREntryAllowed(optionType, yieldEnv, iyrRSI) {
   if (optionType === "call") {
-    // IYR calls need falling or flat rates — steepening yield curve kills REITs
     if (yieldEnv === "steepening") {
       return { allowed: false, reason: `IYR call blocked — yield curve steepening (rising long rates = REIT headwind)` };
     }
-    // RSI gate: don't buy calls on deeply overbought IYR (overextended)
     if (iyrRSI && iyrRSI >= 72) {
       return { allowed: false, reason: `IYR call blocked — RSI ${iyrRSI.toFixed(0)} overbought (extended, wrong entry)` };
     }
     return { allowed: true };
   } else {
-    // IYR puts: need rising rates OR overbought RSI signal
     const ratesRising  = yieldEnv === "steepening";
     const rsiOverbought = iyrRSI && iyrRSI >= 65;
     if (!ratesRising && !rsiOverbought) {
@@ -1337,27 +935,19 @@ function isIYREntryAllowed(optionType, yieldEnv, iyrRSI) {
   }
 }
 
-// ── isHYGEntryAllowed — High Yield Bond ETF (credit stress signal) ────────────
-// HYG calls: credit spreads tightening = risk-on = HYG rallies
-// HYG puts: credit spreads widening = credit stress = HYG falls
-// Key signals: _creditStress (HYG+TLT both falling), _sectorRelStr.HYG
 function isHYGEntryAllowed(optionType, creditStress, hygRelStr, hygRSI) {
   if (optionType === "call") {
-    // HYG calls need credit spreads tightening — if credit stress active, calls are wrong
     if (creditStress) {
       return { allowed: false, reason: "HYG call blocked — credit stress active (HYG+TLT both falling = spreads widening)" };
     }
-    // HYG RSI: overbought bonds = credit already priced in
     if (hygRSI && hygRSI >= 70) {
       return { allowed: false, reason: `HYG call blocked — RSI ${hygRSI.toFixed(0)} overbought (credit rally extended)` };
     }
-    // HYG underperforming SPY = credit diverging = wrong for calls
     if (hygRelStr && hygRelStr < -1.5) {
       return { allowed: false, reason: `HYG call blocked — HYG underperforming by ${Math.abs(hygRelStr).toFixed(1)}% (credit diverging from equities)` };
     }
     return { allowed: true };
   } else {
-    // HYG puts: want credit stress building OR HYG overbought
     const stressBuilding = creditStress || (hygRelStr && hygRelStr < -0.5);
     const overbought     = hygRSI && hygRSI >= 68;
     if (!stressBuilding && !overbought) {
@@ -1375,15 +965,5 @@ module.exports = {
   isIYREntryAllowed, isHYGEntryAllowed,
   initScoring,
 };
-
-// ============================================================
-// scoreDebitCallSpread — purpose-built debit call spread scorer
-// Panel consensus 4/22/2026:
-// Thesis: buy OTM calls, sell further OTM calls to reduce cost.
-// Profit from confirmed bullish momentum. Theta works AGAINST you.
-// You need directional accuracy + magnitude + timing.
-// Min score 75 (higher bar than credit spreads — needs actual move).
-// Seven primary signals + supplementary capped at +15.
-// ============================================================
 
 // scoreDebitCallSpread removed — APEX uses naked options only
