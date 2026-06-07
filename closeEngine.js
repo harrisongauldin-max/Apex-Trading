@@ -22,9 +22,8 @@ function recordDayTrade(pos, reason) {
     openTime:  pos.openDate,
     closeTime: new Date().toISOString(),
     reason,
-    pnl:       0, // will be updated by closePosition
+    pnl:       0,
   });
-  // Keep only last 20 day trade records
   if (state.dayTrades.length > 20) state.dayTrades = state.dayTrades.slice(-20);
   const count = countRecentDayTrades();
   logEvent("warn", `PDT: Day trade recorded for ${pos.ticker} — ${count}/${PDT_LIMIT} in rolling 5-day window`);
@@ -45,7 +44,11 @@ const { calcCreditSpreadTP, realizedPnL ,
 const { STOP_LOSS_PCT, TAKE_PROFIT_PCT, PDT_PROFIT_EXIT,
         PDT_STOP_LOSS, FAST_STOP_PCT, MONTHLY_BUDGET,
   ALPACA_KEY, BONUS_AMOUNT, MS_PER_DAY, PDT_LIMIT, PDT_RULE_ACTIVE, REVENUE_THRESHOLD, WATCHLIST,
-  TRAIL_ACTIVATE_PCT
+  TRAIL_ACTIVATE_PCT,
+  // C1 Sunday 6/8
+  DAILY_LOSS_LOCK_THRESHOLD, DAILY_LOSS_LOCK_MIN_SCORE,
+  INSTRUMENT_LOSS_LIMIT, INSTRUMENT_LOSS_MIN_SCORE, LOSS_THRESHOLD_FOR_COUNTER,
+  WEEKLY_LOSS_LIMIT, MONTHLY_LOSS_LIMIT,
 }  = require('./constants');
 const { countRecentDayTrades } = require('./risk');
 
@@ -72,53 +75,35 @@ async function syncCashFromAlpaca() {
     const alpacaOptBP     = parseFloat(acct.options_buying_power || acct.buying_power || acct.cash);
     state.alpacaCash      = alpacaCash;
     state.alpacaBuyPower  = alpacaBuyPower;
-    state.alpacaOptBP     = alpacaOptBP; // options-specific buying power — gates new option entries
-    // Store full portfolio value (cash + open position market value) for profit lock
+    state.alpacaOptBP     = alpacaOptBP;
     const alpacaEquity    = parseFloat(acct.equity || acct.portfolio_value || alpacaCash);
     if (alpacaEquity > 0) state.alpacaEquity = alpacaEquity;
-
-    // V2.99: PDT tracking removed — FINRA sunset the PDT rule (April 21 2026).
-    // Alpaca implementing ~June 5 2026. PDT_RULE_ACTIVE = false in constants.js.
-    // The [PDT] log line was firing every hour from daytrade_count sync — removed.
-    // Keeping pattern_day_trader flag for Alpaca account status awareness only.
     if (acct.pattern_day_trader !== undefined) {
       state._patternDayTrader = acct.pattern_day_trader;
     }
-    // Set accountBaseline on first sync if not already established
     if (!state.accountBaseline) state.accountBaseline = alpacaCash;
     const hasCustomBudget = state.customBudget && state.customBudget > 0 && state.customBudget !== MONTHLY_BUDGET;
-    // Alpaca is the single source of truth for cash.
-    // Always sync state.cash to Alpaca's actual value — no exceptions.
-    // Previous "custom budget protection" was preventing correct sync on account resets.
     const drift = Math.abs(alpacaCash - state.cash);
     if (drift > 1.00) {
       if (drift > 500) {
-        // Large drift — reset all baselines to Alpaca's actual values
         logEvent("scan", `[CASH SYNC] Drift $${drift.toFixed(2)} — syncing all baselines to Alpaca: $${alpacaCash.toFixed(2)}`);
-        state.dayStartCash  = state.dayStartCash  || alpacaCash; // preserve today's start if set
+        state.dayStartCash  = state.dayStartCash  || alpacaCash;
         state.weekStartCash = state.weekStartCash || alpacaCash;
         state.peakCash      = Math.max(state.peakCash || 0, alpacaCash);
         state.cash          = alpacaCash;
         markDirty();
       } else {
-        // Small drift — routine fill/credit/premium change
         logEvent("scan", `[CASH SYNC] Alpaca: $${alpacaCash.toFixed(2)} | APEX: $${state.cash.toFixed(2)} | drift: $${drift.toFixed(2)} — syncing`);
         state.cash = alpacaCash;
         markDirty();
       }
     }
-  } catch(e) {} // silent
+  } catch(e) {}
 }
 
-// Module-level close semaphore — prevents concurrent closes from submitting duplicate orders
-// when VIX spike close-all fires simultaneously with a stop-loss from the scan loop.
-// _closingInProgress tracks tickers currently in-flight; per-position _closingSubmitted
-// handles within-position duplicate calls. Together they form a two-layer mutex.
 const _closingInProgress = new Set();
 
 async function closePosition(ticker, reason, exitPremium = null, contractSym = null, opts = {}) {
-  // Layer 1: module-level mutex — block concurrent closes on the same ticker
-  // (e.g. stop-loss + VIX spike firing simultaneously for the same instrument)
   const mutexKey = contractSym || ticker;
   if (_closingInProgress.has(mutexKey)) {
     logEvent("warn", `${ticker} close already in-flight (mutex) — skipping concurrent close (${reason})`);
@@ -126,7 +111,6 @@ async function closePosition(ticker, reason, exitPremium = null, contractSym = n
   }
   _closingInProgress.add(mutexKey);
   try {
-    // Layer 2: position-level guard (per-position _closingSubmitted handled below)
     return await _doClosePosition(ticker, reason, exitPremium, contractSym, opts);
   } finally {
     _closingInProgress.delete(mutexKey);
@@ -135,7 +119,6 @@ async function closePosition(ticker, reason, exitPremium = null, contractSym = n
 
 async function _doClosePosition(ticker, reason, exitPremium = null, contractSym = null, opts = {}) {
   try {
-    // If contractSym provided, find exact position - handles multiple same-ticker positions
     const idx = contractSym
       ? state.positions.findIndex(p => p.contractSymbol === contractSym || p.buySymbol === contractSym)
       : state.positions.findIndex(p => p.ticker === ticker);
@@ -147,30 +130,20 @@ async function _doClosePosition(ticker, reason, exitPremium = null, contractSym 
     }
     pos._closingSubmitted = true;
 
-    // NAKED OPTIONS: no spread close logic — single leg close handled below via sell order
     var alpacaCloseOk = _dryRunMode;
   const mult = pos.partialClosed ? 0.5 : 1.0;
 
-  // Use real exit price in order of priority:
-  // 1. Explicitly passed exitPremium
-  // 2. Real-time options price from Alpaca
-  // 3. Tracked currentPrice from last scan
-  // 4. Estimated based on reason (last resort)
   let ep;
   if (exitPremium !== null) {
     ep = exitPremium;
   } else {
-    // Try real-time price first
-    // Spreads: use currentPrice (net spread value), not individual leg price
     if (pos.contractSymbol) {
       const realP = await _getOptionsPrice(pos.contractSymbol);
       if (realP) ep = realP;
     }
-    // Fall back to last tracked price
     if (!ep && pos.currentPrice && pos.currentPrice > 0) {
       ep = pos.currentPrice;
     }
-    // Last resort - use fixed estimates based on reason (no random - deterministic P&L)
     if (!ep) {
       const g = reason === "stop"        ? -STOP_LOSS_PCT
               : reason === "fast-stop"   ? -FAST_STOP_PCT
@@ -178,24 +151,15 @@ async function _doClosePosition(ticker, reason, exitPremium = null, contractSym 
               : reason === "trail"       ? TRAIL_ACTIVATE_PCT
               : reason === "expiry-roll" ? 0.15
               : reason === "fast-profit" ? FAST_PROFIT_PCT
-              : 0; // all other exits - use entry premium (breakeven)
+              : 0;
       ep = parseFloat((pos.premium * (1 + g)).toFixed(2));
       logEvent("warn", `${pos.ticker} using estimated exit price (no real data available) | reason:${reason} | ep:$${ep}`);
     }
   }
   ep = parseFloat(ep.toFixed(2));
-  // V2.94 FIX: contractsToSell declared HERE (before first use) to fix
-  // "Cannot access 'contractsToSell' before initialization" crash.
-  // Was previously declared with const 26 lines below its first reference —
-  // const declarations do not hoist, causing closePosition to crash on every
-  // TP/trail/stop event and force-removing positions from state.
-  // For pos.cost we use (pos.premium * 100 * contractsToSell) as the cost basis
-  // for exactly the contracts being closed, not the full remaining position cost.
   const contractsToSell = pos.contracts === 1 ? 1 : Math.max(1, Math.floor(pos.contracts * mult));
   const ev   = parseFloat((ep * 100 * contractsToSell).toFixed(2));
   const costBasis = parseFloat((pos.premium * 100 * contractsToSell).toFixed(2));
-  // Credit spreads: P&L = (premium received - cost to close) - 100 - contracts
-  // Debit spreads:  P&L = (current value - premium paid) - 100 - contracts
   let pnl;
   if (pos.isCreditSpread) {
     pnl = parseFloat(((pos.premium - ep) * 100 * contractsToSell).toFixed(2));
@@ -208,27 +172,17 @@ async function _doClosePosition(ticker, reason, exitPremium = null, contractSym 
   const nr   = state.totalRevenue + (pnl > 0 ? pnl : 0);
   const bonus= state.totalRevenue < REVENUE_THRESHOLD && nr >= REVENUE_THRESHOLD;
 
-  // In dry run - log what would happen but don't mutate state or submit orders
   if (_dryRunMode) {
     logEvent("dryrun", `WOULD CLOSE ${ticker} | reason:${reason} | exit:$${ep} | P&L:${pnl>=0?"+":""}$${pnl.toFixed(2)} (${pct}%)`);
-    pos._dryRunWouldClose = true; // flag so position loop skips further exit checks this scan
+    pos._dryRunWouldClose = true;
     return;
   }
 
-  // Submit close order to Alpaca if we have a contract symbol
-  // For partial closes (mult=0.5), sell half; for full closes (mult=1.0), sell all
-  // But minimum 1 contract - if only 1 contract, full close regardless
-  // contractsToSell already declared above (moved to fix hoisting crash)
   const closeQty = contractsToSell;
-  // Minimum 60 seconds hold before Alpaca close - prevents wash trade rejections
   const heldSeconds = (Date.now() - new Date(pos.openDate).getTime()) / 1000;
   const alpacaCloseAllowed = heldSeconds >= 60;
   if (!alpacaCloseAllowed) logEvent("warn", `${ticker} held only ${heldSeconds.toFixed(0)}s - skipping Alpaca close order to avoid wash trade`);
-  // alpacaCloseOk declared above, near start of try block
   if (!pos.isSpread && closeQty > 0 && !_dryRunMode && alpacaCloseAllowed) {
-    // Determine if this is a long or short leg
-    // Long leg (bought): has buySymbol or positive qty → close with sell_to_close
-    // Short leg (sold):  has sellSymbol, no buySymbol → close with buy_to_close
     const isShortLeg = !!(pos.sellSymbol && !pos.buySymbol);
     const closeSym   = pos.contractSymbol || pos.buySymbol || pos.sellSymbol;
 
@@ -238,7 +192,6 @@ async function _doClosePosition(ticker, reason, exitPremium = null, contractSym 
       try {
         let closeBody;
         if (isShortLeg) {
-          // Short option: buy it back to close
           closeBody = {
             symbol:          closeSym,
             qty:             closeQty,
@@ -248,7 +201,6 @@ async function _doClosePosition(ticker, reason, exitPremium = null, contractSym 
             position_intent: "buy_to_close",
           };
         } else {
-          // Long option: sell it to close
           const bidPrice = parseFloat((pos.bid > 0 ? pos.bid : ep * 0.98).toFixed(2));
           closeBody = {
             symbol:          closeSym,
@@ -269,22 +221,12 @@ async function _doClosePosition(ticker, reason, exitPremium = null, contractSym 
           }
         } else {
           logEvent("warn", `Alpaca close order failed for ${closeSym}: ${JSON.stringify(closeResp)?.slice(0,150)}`);
-          // Error 40310000: account not eligible to trade uncovered option contracts.
-          // This means the paper account lacks options permissions for this contract type.
-          // Mark position as permissionBlocked — stop infinite retry loop and alert.
-          // Manual resolution: fix paper account options permissions on Alpaca dashboard.
           if (closeResp && closeResp.code === 40310000) {
-            // V2.98 FIX: 40310000 treated as timed cooldown (15min) not permanent block.
-            // Evidence: APEX opened a new option position on same account that received 40310000,
-            // proving the account CAN trade options. Error was transient (wrong order format,
-            // stale Alpaca session, or rate limit). Permanent block prevented recovery entirely.
-            // Fix: set cooldown timestamp. exitEngine clears flag after 15min and retries.
             pos._permissionBlocked = true;
             pos._permissionBlockedAt = new Date().toISOString();
             pos._permBlockReason = "40310000 transient reject — 15min cooldown then auto-retry";
             logEvent("warn", `[PERM BLOCK] ${ticker} ${closeSym} blocked (40310000) — 15min cooldown, will auto-retry. If persists after retry, check Alpaca options tier.`);
-            // alpacaCloseOk stays false — state preserved, exitEngine retries after cooldown
-            return; // exit closePosition, exitEngine will retry after cooldown
+            return;
           }
         }
       } catch(e) {
@@ -293,16 +235,11 @@ async function _doClosePosition(ticker, reason, exitPremium = null, contractSym 
     }
   }
 
-  // Only update state if Alpaca confirmed the close (or dry run)
-  // Prevents ghost positions: ARGO thinks closed, Alpaca still holds → reconcile loop
   if (!alpacaCloseOk && !_dryRunMode) {
     logEvent("warn", `${ticker} state NOT updated — Alpaca close unconfirmed. Position preserved.`);
-    delete pos._closingSubmitted; // allow retry on next scan
+    delete pos._closingSubmitted;
     return;
   }
-  // D-FIX4: credit spreads: cash += pnl (delta only — credit already collected at entry)
-  // debit spreads: cash += ev (proceeds received on sale)
-  // syncCashFromAlpaca() called immediately after corrects any residual drift
   const _cashDelta = pos.isCreditSpread ? pnl : ev;
   state.cash       = parseFloat((state.cash + _cashDelta + (bonus?BONUS_AMOUNT:0)).toFixed(2));
   state.extraBudget  += bonus ? BONUS_AMOUNT : 0;
@@ -310,25 +247,18 @@ async function _doClosePosition(ticker, reason, exitPremium = null, contractSym 
   state.monthlyProfit = parseFloat((state.monthlyProfit + pnl).toFixed(2));
   const _spliceIdx = state.positions.indexOf(pos);
   if (_spliceIdx !== -1) state.positions.splice(_spliceIdx, 1);
-  // PDT tracking - only when PDT_RULE_ACTIVE=true (FINRA PDT rule sunset April 2026)
-  // PDT_RULE_ACTIVE=false: rule is off, Alpaca not enforcing. Do not count day trades.
   const bypassPDT = opts.bypassPDT === true;
   if (PDT_RULE_ACTIVE && isDayTrade(pos) && !bypassPDT) {
     recordDayTrade(pos, reason);
   } else if (PDT_RULE_ACTIVE && isDayTrade(pos) && bypassPDT) {
     logEvent("scan", `[PDT] Emergency exit (${reason}) - day trade NOT counted (bypassPDT)`);
   }
-  // - Trade Outcome Tracker - full data for post-30 analysis -
-  // Derive tradeType from position structure - isSpread may be false if state was corrupted
   const hasSpreadStructure = !!(pos.buySymbol && pos.sellSymbol && pos.buyStrike && pos.sellStrike);
   const tradeOutcome = {
-    // Identity
     ticker, tradeType: pos.isCreditSpread ? "credit_spread" : (pos.isSpread || hasSpreadStructure) ? "debit_spread" : "naked",
     optionType: pos.optionType,
-    // Outcome
     pnl, pct, reason, date: new Date().toLocaleDateString(), closeTime: Date.now(),
     won: pnl > 0,
-    // Entry conditions - for validating score/regime predictive power
     entryScore:    pos.score || 0,
     entryRSI:      pos.entryRSI || 0,
     entryMACD:     pos.entryMACD || "neutral",
@@ -343,19 +273,16 @@ async function _doClosePosition(ticker, reason, exitPremium = null, contractSym 
     exitSKEW:      state._skew?.skew || 0,
     exitAgentSignal: (state._agentMacro || {}).signal || "unknown",
     exitRegime:    (state._agentMacro || {}).regime || "unknown",
-    // Timing
     daysHeld:    Math.round((Date.now() - new Date(pos.openDate).getTime()) / MS_PER_DAY),
-    maxAdverseExcursion: pos.maxAdverseExcursion || 0, // Chan: worst drawdown before close
+    maxAdverseExcursion: pos.maxAdverseExcursion || 0,
     dteAtEntry:  pos.expDays || 0,
     dteAtExit:   Math.max(0, Math.round((new Date(pos.expDate) - new Date()) / MS_PER_DAY)),
-    // Spread specifics
     spreadWidth:  pos.spreadWidth || 0,
     buyStrike:    pos.buyStrike || pos.strike || 0,
     sellStrike:   pos.sellStrike || 0,
     maxProfit:    pos.maxProfit || 0,
     maxLoss:      pos.maxLoss || pos.premium || 0,
     pctOfMaxProfit: pos.maxProfit > 0 ? parseFloat(((pnl / (pos.maxProfit * 100 * (pos.contracts||1))) * 100).toFixed(1)) : 0,
-    // Regime context
     regime:        (state._agentMacro || {}).regime || (state._dayPlan || {}).regime || "unknown",
     regimeConf:    (state._agentMacro || {}).confidence || 0,
     agentSignal:   (state._agentMacro || {}).signal || "neutral",
@@ -364,11 +291,39 @@ async function _doClosePosition(ticker, reason, exitPremium = null, contractSym 
   // FIX 10: Track daily realized P&L for circuit breaker
   if (typeof tradeOutcome.pnl === 'number') {
     state.todayRealizedPnL = (state.todayRealizedPnL || 0) + tradeOutcome.pnl;
+
+    // C1-A: Daily loss lock — soft gate at -$300
+    if (!state._dailyLossLockActive && state.todayRealizedPnL <= DAILY_LOSS_LOCK_THRESHOLD) {
+      state._dailyLossLockActive    = true;
+      state._dailyLossLockTriggeredAt = new Date().toISOString();
+      logEvent("circuit", `[C1-A] Daily loss lock TRIGGERED — todayRealizedPnL $${state.todayRealizedPnL.toFixed(0)} <= $${DAILY_LOSS_LOCK_THRESHOLD} — minScore raised to ${DAILY_LOSS_LOCK_MIN_SCORE}`);
+    }
+
+    // C1-B: Per-instrument loss count — increment when loss exceeds threshold
+    if (tradeOutcome.pnl < LOSS_THRESHOLD_FOR_COUNTER) {
+      if (!state._instrumentLossCount) state._instrumentLossCount = {};
+      state._instrumentLossCount[ticker] = (state._instrumentLossCount[ticker] || 0) + 1;
+      const _instrCount = state._instrumentLossCount[ticker];
+      if (_instrCount >= INSTRUMENT_LOSS_LIMIT) {
+        logEvent("circuit", `[C1-B] ${ticker} instrument loss count ${_instrCount} >= ${INSTRUMENT_LOSS_LIMIT} — minScore raised to ${INSTRUMENT_LOSS_MIN_SCORE} for this ticker`);
+      }
+    }
+
+    // C1-G: Weekly accumulator
+    state._weeklyRealizedPnL = (state._weeklyRealizedPnL || 0) + tradeOutcome.pnl;
+    if (!state._weeklyLossLockActive && state._weeklyRealizedPnL <= WEEKLY_LOSS_LIMIT) {
+      state._weeklyLossLockActive = true;
+      logEvent("circuit", `[C1-G] Weekly loss lock TRIGGERED — weeklyRealizedPnL $${state._weeklyRealizedPnL.toFixed(0)} <= $${WEEKLY_LOSS_LIMIT} — all entries halted`);
+    }
+    // C1-G: Monthly accumulator (use monthlyProfit which is already tracked)
+    if (!state._monthlyLossLockActive && (state.monthlyProfit || 0) <= MONTHLY_LOSS_LIMIT) {
+      state._monthlyLossLockActive = true;
+      logEvent("circuit", `[C1-G] Monthly loss lock TRIGGERED — monthlyProfit $${(state.monthlyProfit||0).toFixed(0)} <= $${MONTHLY_LOSS_LIMIT} — all entries halted`);
+    }
   }
 
-  // - Score bracket win rate - updated on every close -
   if (!state.scoreBrackets) state.scoreBrackets = {};
-  const entryScore = pos.score || 0; // extract here - not in scope from tradeOutcome object
+  const entryScore = pos.score || 0;
   const bracket = entryScore >= 90 ? "90-100" : entryScore >= 80 ? "80-89" : entryScore >= 70 ? "70-79" : "below-70";
   if (!state.scoreBrackets[bracket]) state.scoreBrackets[bracket] = { trades:0, wins:0, totalPnl:0 };
   state.scoreBrackets[bracket].trades++;
@@ -376,17 +331,11 @@ async function _doClosePosition(ticker, reason, exitPremium = null, contractSym 
   state.scoreBrackets[bracket].totalPnl = parseFloat((state.scoreBrackets[bracket].totalPnl + pnl).toFixed(2));
   state.scoreBrackets[bracket].winRate  = parseFloat(((state.scoreBrackets[bracket].wins / state.scoreBrackets[bracket].trades) * 100).toFixed(1));
 
-  // BF-W4: Spiral detection - track consecutive losses by option type
-  // A put spiral (5+ consecutive put losses) = system keeps entering the same losing trade
   if (!state._spiralTracker) state._spiralTracker = { put: 0, call: 0 };
   const posType = pos.optionType || "unknown";
   if (pnl <= 0) {
     state._spiralTracker[posType] = (state._spiralTracker[posType] || 0) + 1;
     const consecLosses = state._spiralTracker[posType];
-    // Bug-spiral FIX: spiral requires 20+ total trades to be meaningful.
-    // During paper trading validation, 5 consecutive losses in a new system is noise.
-    // March 25th: 9 puts closed via macro-reversal → spiral active → all puts blocked.
-    // At <20 trades, log the warning but do not activate the block.
     const totalTrades = (state.closedTrades || []).length;
     if (consecLosses >= 5) {
       logEvent("warn", `[SPIRAL] ${consecLosses} consecutive ${posType} losses (total trades: ${totalTrades})`);
@@ -398,7 +347,6 @@ async function _doClosePosition(ticker, reason, exitPremium = null, contractSym 
       }
     }
   } else {
-    // Win resets that type's spiral counter
     state._spiralTracker[posType] = 0;
     if (state._spiralActive === posType) {
       state._spiralActive = null;
@@ -406,10 +354,8 @@ async function _doClosePosition(ticker, reason, exitPremium = null, contractSym 
     }
   }
 
-  // Cap closedTrades at 200
   if (state.closedTrades.length > 200) state.closedTrades = state.closedTrades.slice(0, 200);
 
-  // - Exit performance tracking -
   if (!state.exitStats) state.exitStats = {};
   if (!state.exitStats[reason]) state.exitStats[reason] = { count:0, wins:0, totalPnl:0, avgPnl:0, winRate:0 };
   const es = state.exitStats[reason];
@@ -419,21 +365,14 @@ async function _doClosePosition(ticker, reason, exitPremium = null, contractSym 
   es.avgPnl    = parseFloat((es.totalPnl / es.count).toFixed(2));
   es.winRate   = parseFloat(((es.wins / es.count) * 100).toFixed(1));
   logEvent("scan", `Exit stats [${reason}]: ${es.count} trades | win ${es.winRate}% | avg P&L $${es.avgPnl}`);
-  await saveStateNow(); // force immediate save on trade close
+  await saveStateNow();
 
-  // Update consecutive losses
   if (pnl < 0) state.consecutiveLosses++;
   else state.consecutiveLosses = 0;
 
-  // Record recent losses for re-entry veto (24hr agent confirmation required)
   if (pnl < 0) {
     state._recentLosses = state._recentLosses || {};
-    // Fix 3 SUPPORT: stamp entryRSI so scanner can check RSI delta on re-entry attempt
     const _lossPos = state.positions.find(p => p.ticker === ticker) || {};
-    // SPRINT-08: Store exitRSI (RSI at time of close) not entryRSI.
-    // The re-entry gate measures RSI shift since the position CLOSED, not since it OPENED.
-    // Using entryRSI caused drift: QQQ entered at RSI 50, closed at RSI 39, then
-    // comparing current RSI to 50 (not 39) gave wrong delta → gate fired inconsistently.
     const _exitRSI = _lossPos._prevRSI || _lossPos.rsi || _lossPos.entryRSI || 50;
     state._recentLosses[ticker] = {
       closedAt:    Date.now(),
@@ -441,16 +380,13 @@ async function _doClosePosition(ticker, reason, exitPremium = null, contractSym 
       agentSignal: (state._agentMacro || {}).signal || "neutral",
       price:       ep,
       pnlPct:      parseFloat(pct),
-      entryRSI:    _lossPos.entryRSI || _lossPos.rsi || 50, // kept for reference
-      exitRSI:     _exitRSI, // SPRINT-08: RSI at close time — use this for re-entry delta
+      entryRSI:    _lossPos.entryRSI || _lossPos.rsi || 50,
+      exitRSI:     _exitRSI,
       optionType:  _lossPos.optionType || null,
     };
     logEvent("warn", `[THESIS] ${ticker} loss recorded - re-entry requires agent confirmation for 24h`);
   }
 
-  // Record all closes (wins AND losses) for same-day cooldown gate.
-  // After any close, block same-instrument re-entry for 30 minutes.
-  // Prevents: win at 9:23am → re-enter at 9:27am same direction at worse strike.
   state._recentCloses = state._recentCloses || {};
   const _closingPos = state.positions.find(p => p.ticker === ticker) || {};
   state._recentCloses[ticker] = {
@@ -460,31 +396,24 @@ async function _doClosePosition(ticker, reason, exitPremium = null, contractSym 
     reason,
   };
 
-  // Peak cash tracking for drawdown
   const fullPortfolioValue = state.cash + openRisk() ;
   if (fullPortfolioValue > state.peakCash) state.peakCash = fullPortfolioValue;
 
-  // Circuit breaker checks -- use total portfolio value (cash + open positions)
   const portfolioValue = state.cash + openRisk() ;
   const dailyPnL  = portfolioValue - state.dayStartCash;
   const weeklyPnL = portfolioValue - state.weekStartCash;
 
-  // Daily max loss - 25% of TOTAL capital (not just deployed)
-  // Using deployed capital caused false triggers when few positions were open
   if (dailyPnL / totalCap() <= -0.25 && state.circuitOpen) {
     state.circuitOpen = false;
     logEvent("circuit", `DAILY MAX LOSS circuit - lost ${_fmt(Math.abs(dailyPnL))} (${(dailyPnL/totalCap()*100).toFixed(1)}% of total capital)`);
   }
-  // Weekly circuit - 25% of total capital using weeklyPnL
   if (weeklyPnL / totalCap() <= -WEEKLY_DD_LIMIT && state.weeklyCircuitOpen) {
     state.weeklyCircuitOpen = false;
     logEvent("circuit", `WEEKLY circuit breaker - loss ${_fmt(Math.abs(weeklyPnL))} (${(WEEKLY_DD_LIMIT*100)}% limit)`);
   }
 
-  // Bonus notification
   if (bonus) logEvent("bonus", `REVENUE HIT $${REVENUE_THRESHOLD} - +$${BONUS_AMOUNT} bonus added!`);
 
-  // Journal entry
   state.tradeJournal.unshift({
     time:      new Date().toISOString(),
     ticker,
@@ -504,10 +433,6 @@ async function _doClosePosition(ticker, reason, exitPremium = null, contractSym 
     reasoning: `Closed ${reason}. Exit premium $${ep} vs entry $${pos.premium}. P&L: ${pnl>=0?"+":""}${_fmt(pnl)} (${pct}%).`,
   });
 
-  // V2.94: Write authoritative exit to new journal — merges onto open entry.
-  // updateJournalExit finds the OPEN entry for this contractSymbol and merges
-  // all exit fields. If not found (e.g. position pre-dates new journal), writes
-  // standalone exit record so no data is lost.
   const _now       = new Date();
   const _etStr2    = (dt) => new Date(dt).toLocaleString('en-US', {timeZone:'America/New_York',
     month:'2-digit', day:'2-digit', year:'numeric', hour:'2-digit', minute:'2-digit'});
@@ -521,7 +446,6 @@ async function _doClosePosition(ticker, reason, exitPremium = null, contractSym 
     ? parseFloat(((pos._peakTime - new Date(pos.openDate).getTime()) / 60000).toFixed(0))
     : null;
   const _pnlApex   = parseFloat(((ep - pos.premium) * 100 * (pos.contracts || contractsToSell)).toFixed(2));
-  // actualFillProceeds: will be filled by Alpaca activities lookup in reconciler if not available here
   const _exitFields = {
     closeDate:          _now.toISOString(),
     closeDateET:        _etStr2(_now),
@@ -530,8 +454,7 @@ async function _doClosePosition(ticker, reason, exitPremium = null, contractSym 
     exitRSI:            pos._prevRSI || null,
     exitVIX:            state.vix || null,
     exitScore:          pos._lastAgentScore || null,
-    actualFillProceeds: null, // reconciler will fill this from Alpaca activities
-    // Lifecycle final values
+    actualFillProceeds: null,
     peakPrice:          pos.peakPremium || ep,
     peakPct:            _peakPct,
     peakTime:           pos._peakTime ? new Date(pos._peakTime).toISOString() : null,
@@ -539,15 +462,10 @@ async function _doClosePosition(ticker, reason, exitPremium = null, contractSym 
     _thesisFulfilled:   pos._thesisFulfilled || false,
     _thesisFailure:     pos._thesisFailure || false,
     contractsAtClose:   pos.contracts || contractsToSell,
-    // P&L
     pnl_apex:           _pnlApex,
-    // V2.94 FIX: compute pnl_alpaca from actual exit price vs cost basis.
-    // Previously deferred to a reconciler lookup that was never implemented.
-    // ep = actual fill price (from Alpaca fill confirmation or last known price).
-    // pos.cost = original entry cost basis. This is fill-accurate.
     pnl_alpaca:         pos.cost > 0
       ? parseFloat((ep * 100 * (pos.contracts || contractsToSell) - pos.cost).toFixed(2))
-      : _pnlApex, // fallback to apex calc if no cost basis
+      : _pnlApex,
     pnl_pct:            pos.cost > 0 ? parseFloat((_pnlApex / pos.cost * 100).toFixed(1)) : 0,
     hoursHeld:          _hoursHeld,
     isWin:              _pnlApex > 0,
@@ -556,7 +474,6 @@ async function _doClosePosition(ticker, reason, exitPremium = null, contractSym 
   const _sym = pos.contractSymbol || pos.buySymbol;
   updateJournalExit(_sym, _exitFields).then(found => {
     if (!found) {
-      // No open entry found — write standalone exit record
       writeJournalEntry({
         id:             `${_sym}_exit_${Date.now()}`,
         contractSymbol: _sym,
@@ -590,12 +507,11 @@ async function _doClosePosition(ticker, reason, exitPremium = null, contractSym 
     `${reason.toUpperCase()} ${ticker} | exit $${ep} | P&L ${pnl>=0?"+":""}${_fmt(pnl)} (${pct}%) | ` +
     `cash ${_fmt(state.cash)}`
   );
-  await syncCashFromAlpaca(); // sync cash from Alpaca after close
-  markDirty(); // caller saves - prevents N Redis writes when multiple positions close together
+  await syncCashFromAlpaca();
+  markDirty();
   return true;
   } catch(e) {
     logEvent("error", `closePosition crashed for ${ticker} (${reason}): ${e.message}`);
-    // Force remove from positions on error - don't leave stuck positions
     const stuckIdx = state.positions.findIndex(p => p.ticker === ticker);
     if (stuckIdx !== -1) {
       state.positions.splice(stuckIdx, 1);
@@ -610,32 +526,22 @@ async function partialClose(ticker) {
   const pos = state.positions.find(p => p.ticker === ticker);
   if (!pos || pos.partialClosed) return;
 
-  // V2.98 FIX: Guard against partial close executing when full close is in-flight.
-  // Race condition: profit-lock-partial and thesis-complete both queue in same scan.
-  // If closePosition already submitted for this position, Alpaca infers sell_to_open
-  // (no existing position) → 42210000 intent mismatch error.
-  // _closingInFlight is set true by closePosition before order submission and cleared
-  // on completion. If it's true here, the position is mid-close — skip partial.
   if (pos._closingInFlight) {
     logEvent("partial", `${ticker} partial close skipped — full close in-flight (_closingInFlight=true)`);
     return;
   }
 
-  // 1-contract positions can't be split - full close
   if ((pos.contracts || 1) === 1) {
     logEvent("partial", `${ticker} 1-contract - escalating to full close`);
     await closePosition(ticker, "target");
     return;
   }
 
-  // Spreads: partial close = close half contracts via separate mleg orders
-  // This is valid - close half the spread position, leave half open
   if (pos.isSpread && pos.contracts >= 2) {
     const half = Math.floor(pos.contracts / 2);
     logEvent("partial", `${ticker} spread partial close - closing ${half}/${pos.contracts} contracts`);
     if (!_dryRunMode && pos.buySymbol && pos.sellSymbol) {
       try {
-        // Close half via mleg - both legs simultaneously
         const closeMleg = {
           order_class: "mleg", type: "market", time_in_force: "day",
           qty: String(half),
@@ -652,7 +558,6 @@ async function partialClose(ticker) {
         logEvent("error", `[SPREAD PARTIAL] mleg error: ${e.message}`);
       }
     }
-    // Update state - reduce contracts, mark partial
     const curP  = pos.currentPrice || pos.premium;
     const pnl   = parseFloat(((curP - pos.premium) * 100 * half).toFixed(2));
     pos.contracts     -= half;
@@ -671,7 +576,6 @@ async function partialClose(ticker) {
   }
 
   pos.partialClosed = true;
-  // Use real options price if available, otherwise use current tracked price
   let ep = pos.currentPrice || pos.premium * 1.5;
   if (pos.contractSymbol) {
     const realP = await _getOptionsPrice(pos.contractSymbol);
@@ -680,7 +584,6 @@ async function partialClose(ticker) {
   ep = parseFloat(ep.toFixed(2));
   const half = Math.max(1, Math.floor(pos.contracts / 2));
 
-  // Submit partial close order to Alpaca
   if (pos.contractSymbol && half > 0 && !_dryRunMode) {
     try {
       const bidPrice = parseFloat((pos.bid > 0 ? pos.bid : ep * 0.98).toFixed(2));
@@ -699,9 +602,6 @@ async function partialClose(ticker) {
         if (partialResp.filled_avg_price && parseFloat(partialResp.filled_avg_price) > 0) {
           ep = parseFloat(parseFloat(partialResp.filled_avg_price).toFixed(2));
         }
-        // SPRINT-03: Mark order as submitted — state mutation (contracts/cost) only
-        // happens below if this flag is true. If Alpaca rejects the order,
-        // we skip the state mutation so pos.contracts stays accurate.
         pos._partialOrderSubmitted = true;
       } else {
         logEvent("warn", `Alpaca partial close FAILED for ${pos.contractSymbol}: ${JSON.stringify(partialResp)?.slice(0,100)} — state NOT mutated`);
@@ -723,31 +623,16 @@ async function partialClose(ticker) {
   state.cash = parseFloat((state.cash + ev).toFixed(2));
   state.monthlyProfit = parseFloat((state.monthlyProfit + pnl).toFixed(2));
   state.closedTrades.push({
-    ticker, pnl, pct: ((pnl/pos.cost)*100).toFixed(1), // V2.93: pos.cost already reflects remaining contracts after fix
+    ticker, pnl, pct: ((pnl/pos.cost)*100).toFixed(1),
     date: new Date().toLocaleDateString(), reason: "partial",
     tradeType:  pos.isCreditSpread ? "credit_spread" : (pos.isSpread || (pos.buySymbol && pos.sellSymbol)) ? "debit_spread" : "naked",
     optionType: pos.optionType,
     closeTime:  Date.now(),
   });
-  // V2.93 FIX: Update pos.contracts, pos.cost, AND reset partialClosed flag.
-  //
-  // Root cause of -$210 bug on QQQ:
-  //   Before partial: contracts=2, cost=$1282, partialClosed=false
-  //   After partial:  contracts=2 (NOT updated), cost=$1282, partialClosed=true
-  //   Final close:    mult = partialClosed ? 0.5 : 1.0 = 0.5
-  //                   ev   = $8.62 × 100 × 1 (Alpaca qty) × 0.5 = $431
-  //                   cost = $1282 × 0.5 = $641
-  //                   pnl  = $431 - $641 = -$210  ← WRONG
-  //
-  // SPRINT-03: Guard state mutation — only decrement contracts if Alpaca confirmed
-  // the partial order was submitted. If the flag is false, the order failed and
-  // Alpaca still has all contracts — don't mutate pos.contracts.
   if (pos._partialOrderSubmitted !== false) {
-    // Fix: after partial close, decrement contracts, recalculate cost, and reset
-    // partialClosed to false so the remaining contract is treated as a fresh position.
     pos.contracts     = Math.max(0, pos.contracts - half);
     pos.cost          = parseFloat((pos.premium * 100 * pos.contracts).toFixed(2));
-    pos.partialClosed = false; // Reset: remaining contract is now a standalone position
+    pos.partialClosed = false;
     logEvent("partial", `PARTIAL ${ticker} - ${half}x @ $${ep} | P&L:${pnl>=0?"+":""}${_fmt(pnl)} | ${pos.contracts}x remaining @ cost $${pos.cost} | cash ${_fmt(state.cash)}`);
   } else {
     logEvent("warn", `[SPRINT-03] ${ticker} partial order rejected by Alpaca — pos.contracts unchanged at ${pos.contracts}`);
@@ -756,23 +641,15 @@ async function partialClose(ticker) {
   await saveStateNow();
 }
 
-// V2.99 TIERED EXITS: closeNContracts(ticker, n, reason)
-// Closes exactly N contracts from a position — used by T1 (+8%), T2 (thesis-complete partial).
-// Unlike partialClose() which always closes Math.floor(contracts/2),
-// this function closes precisely the requested count.
-// Guards: _closingInFlight (full close in flight), _closingSubmitted (dedup).
-// Writes a PARTIAL journal entry so partial closes appear in the trade journal.
 async function closeNContracts(ticker, n, reason, exitPremium = null) {
   const pos = state.positions.find(p => p.ticker === ticker);
   if (!pos) { logEvent("warn", `closeNContracts: no position found for ${ticker}`); return; }
 
-  // Guard: full close already in flight
   if (pos._closingInFlight) {
     logEvent("partial", `${ticker} closeNContracts skipped — full close in-flight`);
     return;
   }
 
-  // Guard: already closing this cycle (dedup)
   if (pos._closingSubmitted) {
     logEvent("partial", `${ticker} closeNContracts skipped — _closingSubmitted`);
     return;
@@ -780,19 +657,17 @@ async function closeNContracts(ticker, n, reason, exitPremium = null) {
 
   const remaining = pos.contracts || 1;
   if (remaining <= 1) {
-    // 1 contract left — escalate to full close
     logEvent("partial", `${ticker} closeNContracts: 1 contract remaining — escalating to full close`);
     await closePosition(ticker, reason, exitPremium, pos.contractSymbol || null);
     return;
   }
 
-  const closeQty = Math.min(n, remaining - 1); // always leave at least 1 runner
+  const closeQty = Math.min(n, remaining - 1);
   if (closeQty <= 0) {
     logEvent("warn", `${ticker} closeNContracts: closeQty ${closeQty} invalid — skipping`);
     return;
   }
 
-  // Get live exit price
   let ep = exitPremium || pos.currentPrice || pos.premium;
   if (!exitPremium && pos.contractSymbol) {
     const realP = await _getOptionsPrice(pos.contractSymbol);
@@ -804,7 +679,6 @@ async function closeNContracts(ticker, n, reason, exitPremium = null) {
   const ev      = parseFloat((ep * 100 * closeQty).toFixed(2));
   const bidPrice = parseFloat((pos.bid > 0 ? pos.bid : ep * 0.98).toFixed(2));
 
-  // Submit to Alpaca
   let orderConfirmed = false;
   if (pos.contractSymbol && !_dryRunMode) {
     try {
@@ -839,14 +713,12 @@ async function closeNContracts(ticker, n, reason, exitPremium = null) {
 
   if (!orderConfirmed) return;
 
-  // Update state
   state.cash          = parseFloat((state.cash + ev).toFixed(2));
   state.monthlyProfit = parseFloat((state.monthlyProfit + pnl).toFixed(2));
   pos.contracts       = Math.max(0, pos.contracts - closeQty);
   pos.cost            = parseFloat((pos.premium * 100 * pos.contracts).toFixed(2));
   pos.contractsClosed = (pos.contractsClosed || 0) + closeQty;
 
-  // Push to closedTrades for Kelly/streak tracking
   state.closedTrades.push({
     ticker, pnl,
     pct:        ((pnl / (pos.premium * 100 * closeQty)) * 100).toFixed(1),
@@ -857,7 +729,6 @@ async function closeNContracts(ticker, n, reason, exitPremium = null) {
     closeTime:  Date.now(),
   });
 
-  // Write PARTIAL journal entry so it appears in journal UI
   const nowET   = new Date().toLocaleString("en-US", { timeZone: "America/New_York" });
   const _todayStr = new Date().toLocaleDateString('en-US', {timeZone:'America/New_York'}).replace(/\//g,'-');
   const journal = await loadJournalDay(_todayStr);
@@ -881,11 +752,8 @@ async function closeNContracts(ticker, n, reason, exitPremium = null) {
 }
 
 async function confirmPendingOrder() {
-  // NAKED OPTIONS: confirm single-leg long option fill
   const pending = state._pendingOrder;
   if (!pending) return;
-
-  // Skip if pre-submit placeholder not yet sent to Alpaca
   if (pending._preSubmit) return;
 
   const age = (Date.now() - pending.submittedAt) / 1000;
@@ -922,7 +790,7 @@ async function confirmPendingOrder() {
         realData:      true,
         vix:           state.vix,
         entryVIX:      state.vix,
-        entryIV:       pending.iv || null, // FIX 4: store entry IV for collapse detection
+        entryIV:       pending.iv || null,
         partialClosed: false,
         target:        parseFloat((fillPrice * (1 + TAKE_PROFIT_PCT)).toFixed(2)),
         stop:          parseFloat((fillPrice * (1 - STOP_LOSS_PCT)).toFixed(2)),
@@ -931,11 +799,6 @@ async function confirmPendingOrder() {
           : parseFloat((pending.strike + fillPrice).toFixed(2)),
       };
 
-      // SPRINT-01: Same-symbol re-entry detection.
-      // If the same contract symbol was closed within the last 10 minutes,
-      // this is a churn re-entry (APEX exited and immediately re-entered the
-      // same option). Log it clearly but still create the position — the key
-      // fix is the warning so we can detect the churn pattern in logs.
       const _tenMinAgo = Date.now() - 10 * 60 * 1000;
       const _recentSameSymbol = (state.closedTrades || []).find(t =>
         t.contractSymbol === pending.contractSymbol &&
@@ -971,12 +834,9 @@ async function confirmPendingOrder() {
       });
       if (state.tradeJournal.length > 100) state.tradeJournal = state.tradeJournal.slice(0, 100);
 
-      // V2.94: Write authoritative journal entry to Redis.
-      // This is the new journal — complete, accurate, Alpaca-reconcilable.
       const _etStr = (dt) => new Date(dt).toLocaleString('en-US', {timeZone:'America/New_York',
         month:'2-digit', day:'2-digit', year:'numeric', hour:'2-digit', minute:'2-digit'});
       const _journalEntry = {
-        // Identity
         id:               `${pending.contractSymbol}_${Date.now()}`,
         contractSymbol:   pending.contractSymbol || `${pending.ticker}${pending.expDate}${pending.optionType[0].toUpperCase()}${pending.strike}`,
         ticker:           pending.ticker,
@@ -985,7 +845,6 @@ async function confirmPendingOrder() {
         expDate:          pending.expDate,
         tradeType:        'naked',
         isMeanReversion:  pending.isMeanReversion || false,
-        // Entry
         openDate:         new Date().toISOString(),
         openDateET:       _etStr(new Date()),
         entryPrice:       fillPrice,
@@ -993,7 +852,7 @@ async function confirmPendingOrder() {
         entryCost:        cost,
         actualFillCost:   fillResp.filled_avg_price
           ? parseFloat((parseFloat(fillResp.filled_avg_price) * 100 * contracts).toFixed(2))
-          : cost, // Alpaca fill total (includes commission)
+          : cost,
         entryScore:       pending.score || 0,
         entryReasons:     pending.reasons || [],
         entryRSI:         pending.rsi || pending.liveRSI || null,
@@ -1007,8 +866,7 @@ async function confirmPendingOrder() {
         entryMomentum:    pending.momentum || null,
         macroSignal:      (state._agentMacro || {}).signal || 'neutral',
         regimeAtEntry:    (state._marketRegime || {}).regime || 'unknown',
-        // Lifecycle (will be updated at close)
-        peakPrice:        fillPrice, // updated each scan
+        peakPrice:        fillPrice,
         peakPct:          0,
         peakTime:         new Date().toISOString(),
         minsToPeak:       0,
@@ -1017,7 +875,6 @@ async function confirmPendingOrder() {
         _thesisFailure:   false,
         _churnReEntry:    position._churnReEntry || false,
         contractsAtClose: contracts,
-        // Exit (null until closed)
         closeDate:        null,
         closeDateET:      null,
         exitPrice:        null,
@@ -1026,13 +883,11 @@ async function confirmPendingOrder() {
         exitVIX:          null,
         exitScore:        null,
         actualFillProceeds: null,
-        // P&L (null until closed)
         pnl_apex:         null,
         pnl_alpaca:       null,
         pnl_pct:          null,
         hoursHeld:        null,
         isWin:            null,
-        // Status
         status:           'OPEN',
       };
       writeJournalEntry(_journalEntry).catch(e =>
@@ -1046,7 +901,6 @@ async function confirmPendingOrder() {
       state._pendingOrder = null;
       markDirty();
     } else if (age > 30) {
-      // Unfilled after 30s — cancel
       logEvent('warn', `[NAKED] Order ${pending.orderId} unfilled after ${age.toFixed(0)}s — cancelling`);
       await alpacaDelete(`/orders/${pending.orderId}`).catch(() => {});
       state._pendingOrder = null;
