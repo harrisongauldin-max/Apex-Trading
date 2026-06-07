@@ -1,11 +1,8 @@
 // scanner.js — ARGO V3.2
 // Main scan orchestrator: market data fetching, exit checks, entry scoring, execution.
 // runScan() runs every 10 seconds during market hours.
-// NOTE: This is a direct lift of runScan from server.js.
-//       Phase D.2 will decompose runScan into pure sub-functions.
 'use strict';
 
-// ─── All module imports ──────────────────────────────────────────
 const {
   alpacaGet, alpacaPost, alpacaDelete,
   getStockBars, getIntradayBars, getStockQuote, getCircuitState,
@@ -33,7 +30,7 @@ const {
   getCached, setCache } = require('./market');
 
 const {
-  scoreIndexSetup, scorePutSetup, scoreMeanReversionCall, // APEX: scoreCreditSpread and scoreDebitCallSpread removed — no spread scoring
+  scoreIndexSetup, scorePutSetup, scoreMeanReversionCall,
   detectMarketRegime, getRegimeModifier, applyIntradayRegimeOverride,
   updateOversoldTracker, recordGateBlock, checkMacroShift,
   checkSectorETF, isGLDEntryAllowed, isXLEEntryAllowed, isTLTEntryAllowed,
@@ -74,7 +71,7 @@ const {
   getTimeAdjustedStop, getDTEExitParams, applyExitUrgency, getTimeOfDayAnalysis,
 } = require('./exitEngine');
 
-const { sendMorningBriefing, sendEmail, setReportingContext , getBenchmarkComparison, sendResendEmail } = require('./reporting');
+const { sendMorningBriefing, sendEmail, setReportingContext, getBenchmarkComparison, sendResendEmail } = require('./reporting');
 
 const {
   WATCHLIST, CAPITAL_FLOOR, MIN_SCORE, MIN_SCORE_CREDIT, MAX_HEAT,
@@ -91,17 +88,15 @@ const {
 } = require('./constants');
 
 let scanRunning  = false;
-let _scanGen       = 0;   // increments each scan - finally block only resets its own generation
-let _lastScanStart = 0;   // timestamp of last scan start — read by watchdog via getScannerState()
+let _scanGen       = 0;
+let _lastScanStart = 0;
 
-// ─── Local utilities ─────────────────────────────────────────
 const fmt = (n) => '$' + (n || 0).toFixed(2);
-let lastMedScan  = 0;  // 5 minute tier
-let lastSlowScan = 0;  // 15 minute tier
-let lastHourScan = 0;  // 60 minute tier
-let dryRunMode   = false; // when true: skips market hours check, Alpaca orders, state mutations
+let lastMedScan  = 0;
+let lastSlowScan = 0;
+let lastHourScan = 0;
+let dryRunMode   = false;
 
-// Shared market context updated on tiers
 let marketContext = {
   fearGreed:      { score: 50, rating: "neutral" },
   breadth:        { advancing: 5, declining: 5, breadthPct: 50 },
@@ -128,84 +123,66 @@ let marketContext = {
 async function runScan() {
   if (scanRunning) { logEvent("scan", "Scan skipped - previous scan still running"); return; }
   scanRunning = true;
-  _lastScanStart = Date.now(); // watchdog timestamp
-  const thisScanGen = ++_scanGen; // stamp this scan's generation
+  _lastScanStart = Date.now();
+  const thisScanGen = ++_scanGen;
   try {
   if (!ALPACA_KEY) { logEvent("warn", "No ALPACA_KEY set - check Railway variables"); scanRunning = false; return; }
   if (!isMarketHours() && !dryRunMode) { logEvent("scan", "Outside market hours - skipping trade logic"); scanRunning = false; return; }
   if (dryRunMode) logEvent("scan", "- DRY RUN MODE - no orders submitted, no state changes");
-  // Clear dry run close flags from previous scan
   if (dryRunMode) state.positions.forEach(p => { delete p._dryRunWouldClose; });
 
   const now    = Date.now();
-  const scanET = getETTime(); // single ET time reference for entire scan
+  const scanET = getETTime();
 
-  // FIX 10: Reset daily circuit and P&L tracker at start of each new trading day
   const todayScanDate = scanET.toLocaleDateString("en-US", { timeZone: "America/New_York" });
   if (todayScanDate !== (state._lastScanDate || "")) {
     state._lastScanDate     = todayScanDate;
     state._dailyCircuitOpen = true;
     state._dailyPnL         = 0;
-    // V2.87 FIX: Actually zero todayRealizedPnL on new day.
-    // Previous code: `state.todayRealizedPnL || 0` is a NO-OP for negative values.
-    // -$4374 is truthy — the OR never fires. Comment said "reset in server.new.js at midnight"
-    // but no such cron exists. Every Monday APEX boots with Friday's full loss still active,
-    // immediately fires the daily circuit, and stays blocked until manual RESET DAY P&L.
     const _prevDayPnL = state.todayRealizedPnL || 0;
     state.todayRealizedPnL       = 0;
-    state._intradayOversoldScans = {}; // Reset bounce counters — new session
-    state._sessionLowRSI         = {}; // Reset session low RSI — new session
-    state._sessionLowRSIAt       = {}; // Reset timestamps
-    // V2.98 FIX (Bug 3): Reset gap state at start of each new trading day.
-    // _gapReversalDay, _todayMaxGap, _todayGapDirection are intraday state.
-    // Without reset, yesterday's gap-up day could suppress calls on a flat open day.
+    state._intradayOversoldScans = {};
+    state._sessionLowRSI         = {};
+    state._sessionLowRSIAt       = {};
     state._gapReversalDay   = false;
     state._todayMaxGap      = 0;
     state._todayGapDirection = null;
-    state._dailyThesisComplete = {}; // V2.98 Gate A: clear same-day thesis exhaustion records
+    state._dailyThesisComplete = {};
+    // C1-N Sunday 6/8: clear daily loss lock and instrument loss counts at session start
+    state._dailyLossLockActive    = false;
+    state._dailyLossLockTriggeredAt = null;
+    state._instrumentLossCount    = {};
     logEvent("scan", `[DAILY RESET] New trading day ${todayScanDate} — circuit reset, P&L zeroed (was $${_prevDayPnL.toFixed(0)}), gap + thesis state cleared`);
     markDirty();
   }
 
-  // Scan-level time and volume vars -- declared here so execution loop can access them
-  // Per-stock loop also uses these; declaring at scan scope eliminates TDZ crashes
   const etHourNow  = scanET.getHours() + scanET.getMinutes() / 60;
   const isLateDay  = etHourNow >= 14.5;
   const isLastHour = etHourNow >= 15.0;
 
-  // Scan-level memos - computed once, reused throughout scan
-  // Prevents repeated iteration over state.positions on every check
   const _totalCap  = totalCap();
   const _openRisk  = openRisk();
-  const _heatPct   = Math.max(0, openCostBasis()) / _totalCap; // margin deployed / total cap — matches heatPct()
+  const _heatPct   = Math.max(0, openCostBasis()) / _totalCap;
   const _heatPctPc = parseFloat((_heatPct * 100).toFixed(1));
 
-  // Scan-cycle cache - expensive fetches reused within same scan window
   if (!runScan._cache || Date.now() - (runScan._cacheTime||0) > 8000) {
     runScan._cache = {};
     runScan._cacheTime = Date.now();
   }
   const scanCache = runScan._cache;
 
-  // Update VIX and check velocity
   const newVIX  = await getVIX() || state.vix;
   const isBlackSwan = checkVIXVelocity(newVIX);
   state.vix     = newVIX;
 
-  // - 1B: IV RANK TRACKING -
-  // Rolling 52-week VIX history to compute IV rank (VIX percentile)
-  // IVR = where is today's VIX vs the last 252 trading days (0-100)
-  // IVR 80+ = sell premium. IVR 20- = buy premium. IVR 50-80 = neutral.
   if (!state._vixRolling) state._vixRolling = [];
   state._vixRolling.push(newVIX);
-  if (state._vixRolling.length > 252) state._vixRolling.shift(); // 1 year rolling
-  // OPT-1+5: Sort once per meaningful VIX change, read min/max from sorted ends
-  // Cache sorted array -- VIX moves <0.5 pts between scans 95% of the time
+  if (state._vixRolling.length > 252) state._vixRolling.shift();
   const _prevSortedVix = state._sortedVixCache;
   const _prevSortedVixVal = state._sortedVixCacheVal || 0;
   let sortedVix;
   if (_prevSortedVix && Math.abs(newVIX - _prevSortedVixVal) < 0.5 && _prevSortedVix.length === state._vixRolling.length) {
-    sortedVix = _prevSortedVix; // use cached sort
+    sortedVix = _prevSortedVix;
   } else {
     sortedVix = [...state._vixRolling].sort((a, b) => a - b);
     state._sortedVixCache    = sortedVix;
@@ -217,64 +194,43 @@ async function runScan() {
   const p95idx = Math.floor(sortedVix.length * 0.95);
   const vixP5  = sortedVix[p5idx]  || vixMin;
   const vixP95 = sortedVix[p95idx] || vixMax;
-  // Clamp newVIX to the trimmed range for rank calculation
   const vixClamped = Math.min(Math.max(newVIX, vixP5), vixP95);
   state._ivRank = vixP95 > vixP5
     ? parseFloat(((vixClamped - vixP5) / (vixP95 - vixP5) * 100).toFixed(1))
-    : 50; // default to 50 when insufficient history
-  // Sanity check: if absolute range is very narrow (<5pts) fall back to VIX formula
+    : 50;
   if (vixMax - vixMin < 5) {
     const formulaIVR = Math.min(95, Math.max(5, parseFloat(((newVIX - 12) / 33 * 100).toFixed(1))));
     state._ivRank = formulaIVR;
   }
-  // V2.84 fix: if IVR comes out very low (<=20) but VIX is objectively elevated (>=25),
-  // the rolling window has no low-VIX baseline (fresh start or reset during high-VIX period).
-  // Also fires when P5 of rolling window is within 2pts of current VIX — meaning VIX is
-  // near the bottom of the observed range, so rank underestimates true expensiveness.
-  // Fall back to formula which is calibrated on full 2012-2024 cycle.
-  // VIX 29 = ~52nd percentile historically. VIX 35 = ~70th. VIX 20 = ~24th.
   const _windowTooNarrowForRank = vixP5 > 0 && (newVIX - vixP5) < 2.0 && newVIX >= 25;
   if ((state._ivRank <= 20 || _windowTooNarrowForRank) && newVIX >= 20) {
     const formulaIVR = Math.min(95, Math.max(5, parseFloat(((newVIX - 12) / 33 * 100).toFixed(1))));
-    // Critical: if VIX is BELOW the rolling window P5, IV is at a relative LOW.
-    // Premium is contracting — credit spreads are less attractive, not more.
-    // Don't let a formula-inflated IVR activate credit mode when vol is falling.
-    // vixFallingPause already handles the directional block; this ensures IVR reflects reality.
-    const vixBelowRecentLow = newVIX < vixP5 && vixP5 > 25 && newVIX < 25; // must be objectively low
+    const vixBelowRecentLow = newVIX < vixP5 && vixP5 > 25 && newVIX < 25;
     if (vixBelowRecentLow) {
       const cappedIVR = Math.min(40, formulaIVR);
-      logEvent("scan", `[IVR] Window has no low-VIX baseline (min:${vixMin.toFixed(1)}) - VIX ${newVIX} below recent P5 ${vixP5.toFixed(1)} AND below 25 (IV contracting) - IVR capped at ${cappedIVR}`);
+      logEvent("scan", `[IVR] Window has no low-VIX baseline - VIX ${newVIX} below recent P5 ${vixP5.toFixed(1)} - IVR capped at ${cappedIVR}`);
       state._ivRank = cappedIVR;
       state._ivEnv  = cappedIVR >= 50 ? "elevated" : cappedIVR >= 30 ? "normal" : "low";
     } else {
-      logEvent("scan", `[IVR] Window has no low-VIX baseline (min:${vixMin.toFixed(1)}) - using formula fallback: VIX ${newVIX} = IVR ${formulaIVR}`);
+      logEvent("scan", `[IVR] Window has no low-VIX baseline - using formula fallback: VIX ${newVIX} = IVR ${formulaIVR}`);
       state._ivRank = formulaIVR;
       state._ivEnv  = formulaIVR >= 70 ? "high" : formulaIVR >= 50 ? "elevated" : formulaIVR >= 30 ? "normal" : "low";
     }
   }
-  // IV environment classification
-  state._ivEnv = state._ivRank >= 70 ? "high"    // sell premium aggressively
-               : state._ivRank >= 50 ? "elevated" // credit spreads allowed
-               : state._ivRank >= 30 ? "normal"   // neutral
-               : "low";                            // buy premium (debit preferred)
-  logEvent("scan", `[IV] Rank:${state._ivRank} (${state._ivEnv}) | VIX:${newVIX} | P5-P95:[${vixP5.toFixed(1)}-${vixP95.toFixed(1)}] | AbsRange:[${vixMin.toFixed(1)}-${vixMax.toFixed(1)}] | History:${state._vixRolling.length}d`);
+  state._ivEnv = state._ivRank >= 70 ? "high"
+               : state._ivRank >= 50 ? "elevated"
+               : state._ivRank >= 30 ? "normal"
+               : "low";
+  logEvent("scan", `[IV] Rank:${state._ivRank} (${state._ivEnv}) | VIX:${newVIX} | P5-P95:[${vixP5.toFixed(1)}-${vixP95.toFixed(1)}] | History:${state._vixRolling.length}d`);
 
-  // - Confirm any pending mleg order from previous scan -
-  // Must run before entry logic - if filled, records position and clears pending
-  // If still pending, blocks new entries to prevent duplicate orders
   if (state._pendingOrder) {
     await confirmPendingOrder();
     if (state._pendingOrder) {
-      // Still pending after check - skip entry section entirely this scan
-      // This is the ONLY safe way to prevent duplicate mleg submissions
       logEvent("scan", `[SPREAD] Order ${state._pendingOrder.orderId} still pending (${((Date.now()-state._pendingOrder.submittedAt)/1000).toFixed(0)}s) - skipping entries`);
     }
   }
 
-  // - 3D: SECTOR ROTATION SIGNALS -
-  // Track sector ETF relative strength vs SPY (5-day return diff)
-  // Used to gate XLE/KRE entries and signal cross-asset themes to agent
-  if (!state._sectorRelStrChecked || Date.now() - state._sectorRelStrChecked > 600000) { // every 10min
+  if (!state._sectorRelStrChecked || Date.now() - state._sectorRelStrChecked > 600000) {
     state._sectorRelStrChecked = Date.now();
     (async () => {
       try {
@@ -283,8 +239,6 @@ async function runScan() {
         const spyChange = spySnap?.dailyBar?.c && spySnap?.prevDailyBar?.c
           ? (spySnap.dailyBar.c - spySnap.prevDailyBar.c) / spySnap.prevDailyBar.c * 100
           : 0;
-        // TODO #9: Expanded sector tracking — XLF/SMH/IWM/HYG added as data-only signals
-        // Each wired to specific scoring modifiers (applied in scoreIndexSetup)
         const dataSectors = ["XLE","KRE","XOP","XLF","SMH","IWM","HYG","UNH","CAT"];
         const sectorSnaps = await Promise.all(
           dataSectors.map(s => alpacaGet(`/stocks/${s}/snapshot`, ALPACA_DATA).catch(() => null))
@@ -296,25 +250,20 @@ async function runScan() {
           const relStr = parseFloat((sectorChange - spyChange).toFixed(2));
           state._sectorRelStr[sector] = { relStr, sectorPct: parseFloat(sectorChange.toFixed(2)), spyPct: parseFloat(spyChange.toFixed(2)) };
           if (Math.abs(relStr) > 2.0) {
-            logEvent("scan", `[SECTOR] ${sector} ${relStr > 0 ? "outperforming" : "underperforming"} SPY by ${relStr.toFixed(1)}% today - rotation signal`);
+            logEvent("scan", `[SECTOR] ${sector} ${relStr > 0 ? "outperforming" : "underperforming"} SPY by ${relStr.toFixed(1)}% today`);
           }
         });
-        // Credit stress flag: HYG and TLT both falling = forced liquidation signal
         const hygRelStr  = state._sectorRelStr?.HYG?.sectorPct || 0;
         const tltRelStr  = state._sectorRelStr?.TLT?.sectorPct || 0;
         state._creditStress = hygRelStr < -1.0 && tltRelStr < -0.5;
         if (state._creditStress) {
           logEvent("scan", `[CREDIT STRESS] HYG ${hygRelStr.toFixed(1)}% + TLT ${tltRelStr.toFixed(1)}% both falling — forced liquidation signal`);
         }
-      } catch(e) { /* non-critical */ }
+      } catch(e) {}
     })();
   }
 
-  // - 2D: OPTIONS FLOW SCANNER -
-  // Lightweight unusual options activity check - flags informed positioning
-  // Uses Alpaca snapshot which includes options volume/OI data
-  // Fire-and-forget - non-blocking, feeds agent context only
-  if (!state._optFlowChecked || Date.now() - state._optFlowChecked > 300000) { // every 5 min
+  if (!state._optFlowChecked || Date.now() - state._optFlowChecked > 300000) {
     state._optFlowChecked = Date.now();
     (async () => {
       try {
@@ -327,33 +276,25 @@ async function runScan() {
           if (volRatio > 2.5) {
             if (!state._optFlow) state._optFlow = {};
             state._optFlow[ticker] = { volRatio: parseFloat(volRatio.toFixed(1)), detectedAt: new Date().toISOString() };
-            logEvent("scan", `[FLOW] ${ticker} unusual volume - ${volRatio.toFixed(1)}x normal. Informed positioning signal.`);
+            logEvent("scan", `[FLOW] ${ticker} unusual volume - ${volRatio.toFixed(1)}x normal.`);
           }
         }
-      } catch(e) { /* non-critical */ }
+      } catch(e) {}
     })();
   }
 
-  // Refresh PDT count from Alpaca at scan start - lightweight single field read
-  // Runs in parallel with VIX already fetched above - no added latency
-  // Keeps day trade count current without waiting for the 30s sync interval
-  // Fire-and-forget Alpaca syncs - non-blocking, run in background
   alpacaGet("/account").then(acct => {
     if (acct?.daytrade_count !== undefined) {
       state._alpacaDayTradeCount = parseInt(acct.daytrade_count, 10);
     }
   }).catch(() => {});
-  // Await Alpaca sync BEFORE exit evaluation - ensures pos.currentPrice is fresh
-  // from Alpaca before any stop/TP checks run. Timeout prevents stalling scanner.
-  // Fix for Bug 1: stale Redis currentPrice causing false stop triggers.
   await Promise.race([
     syncPositionPnLFromAlpaca(),
-    new Promise(r => setTimeout(r, 2000)), // 2s max - fast Alpaca /positions call
+    new Promise(r => setTimeout(r, 2000)),
   ]).catch(() => {});
 
-  // Emergency close all on VIX velocity spike
   if (isBlackSwan) {
-    for (const pos of [...state.positions]) await closePosition(pos.ticker, "vix-spike", null, pos.contractSymbol || pos.buySymbol, { bypassPDT: true }); // emergency exit — bypasses PDT day-trade counting
+    for (const pos of [...state.positions]) await closePosition(pos.ticker, "vix-spike", null, pos.contractSymbol || pos.buySymbol, { bypassPDT: true });
     await saveStateNow();
     scanRunning = false;
     return;
@@ -361,62 +302,65 @@ async function runScan() {
 
   logEvent("scan", `Scan | VIX:${state.vix} | cash:${fmt(state.cash)} | positions:${state.positions.length} | breadth:${marketContext.breadth.breadthPct}% | F&G:${marketContext.fearGreed.score}`);
 
-  // -- MEDIUM TIER (every 5 minutes) --
-  if (now - lastMedScan > 3 * 60 * 1000) { // 3-minute tier - faster with only 2 instruments
+  // C1-A: Daily loss lock check at scan top — halt entries if lock active
+  if (state._dailyLossLockActive && !dryRunMode) {
+    logEvent("circuit", `[C1-A] Daily loss lock ACTIVE — entries blocked. todayRealizedPnL: $${(state.todayRealizedPnL||0).toFixed(0)}`);
+    // exits still run — fall through, don't return early
+  }
+
+  // C1-G: Weekly/monthly halt check
+  if (state._weeklyLossLockActive && !dryRunMode) {
+    logEvent("circuit", `[C1-G] Weekly loss lock ACTIVE — entries blocked. weeklyRealizedPnL: $${(state._weeklyRealizedPnL||0).toFixed(0)}`);
+  }
+  if (state._monthlyLossLockActive && !dryRunMode) {
+    logEvent("circuit", `[C1-G] Monthly loss lock ACTIVE — entries blocked.`);
+  }
+
+  // -- MEDIUM TIER (every 3 minutes) --
+  if (now - lastMedScan > 3 * 60 * 1000) {
     lastMedScan = now;
     const breadth = await getMarketBreadth();
     marketContext.breadth        = breadth;
 
-    // - Breadth momentum tracking (Aronson: direction > single reading) -
-    // Track last 10 breadth readings for momentum and Zweig Thrust detection
     if (!state._breadthHistory) state._breadthHistory = [];
     const bPct = parseFloat((marketContext.breadth.breadthPct || 50).toString());
-    state._lastBreadthPct = bPct; // persisted for score-debug endpoint
+    state._lastBreadthPct = bPct;
     state._breadthHistory.push({ t: now, v: bPct });
     if (state._breadthHistory.length > 10) state._breadthHistory = state._breadthHistory.slice(-10);
 
-    // 5-day breadth direction
     const bHist = state._breadthHistory;
-    if (bHist.length >= 2) {  // lowered from 3 — 2 readings enough to establish direction
+    if (bHist.length >= 2) {
       const bRecent = bHist.slice(-Math.min(3, bHist.length)).map(b=>b.v);
       const bOld    = bHist.slice(0, Math.min(3, bHist.length)).map(b=>b.v);
       const bAvgRecent = bRecent.reduce((a,b)=>a+b,0)/bRecent.length;
       const bAvgOld    = bOld.reduce((a,b)=>a+b,0)/bOld.length;
-      state._breadthMomentum = bAvgRecent - bAvgOld; // positive = rising, negative = falling
+      state._breadthMomentum = bAvgRecent - bAvgOld;
       state._breadthTrend    = state._breadthMomentum > 5 ? "rising"
                              : state._breadthMomentum < -5 ? "falling"
                              : "flat";
     }
 
-    // - Breadth recovery detection -
-    // Adapted from Zweig Thrust concept but calibrated for 4-instrument watchlist
-    // Fires when breadth recovers from weak (<40%) to strong (>60%) within 5 readings
-    // Much more common than true Zweig but still meaningful for small watchlists
     if (bHist.length >= 4) {
-      const hadLowBreadth  = bHist.slice(0, -1).some(b => b.v < 40); // was weak recently
-      const hasHighBreadth = bPct > 60;                               // now strong
+      const hadLowBreadth  = bHist.slice(0, -1).some(b => b.v < 40);
+      const hasHighBreadth = bPct > 60;
       if (hadLowBreadth && hasHighBreadth) {
         if (!state._zweigThrust?.detected) {
           state._zweigThrust = { detected: true, detectedAt: new Date().toISOString() };
           logEvent("scan", "[BREADTH RECOVERY] Watchlist breadth recovered from weak to strong - call bias");
         }
       } else if (state._zweigThrust?.detected) {
-        // Clear after 2 days - short-lived signal on small watchlist
         const age = (now - new Date(state._zweigThrust.detectedAt).getTime()) / MS_PER_DAY;
         if (age > 2) state._zweigThrust = { detected: false };
       }
     }
 
-    // sectorRotation removed - SPY/QQQ index trading doesn't need sector rotation
     state.lastRebalance = now;
-    // Update macro calendar and beta-weighted delta
     const calMod = getMacroCalendarModifier();
     marketContext.macroCalendar      = calMod;
     marketContext.betaWeightedDelta  = calcBetaWeightedDelta();
     if (calMod.events.length > 0) {
       logEvent("macro", `Calendar: ${calMod.message || calMod.events.map(e => e.event + " in " + e.daysTo + "d").join(", ")}`);
     }
-    // Run async market context calls in parallel
     const [regime, benchmark] = await Promise.all([
       detectMarketRegime(),
       getBenchmarkComparison(),
@@ -424,8 +368,6 @@ async function runScan() {
     marketContext.regime      = regime;
     marketContext.benchmark   = benchmark;
 
-    // Synchronous calculations (no API calls)
-    // Portfolio Greeks - track total delta/theta/vega/gamma across all positions
     const portfolioGreeks = state.positions.reduce((acc, pos) => {
       const g    = pos.greeks || {};
       const mult = (pos.contracts || 1) * 100;
@@ -445,17 +387,12 @@ async function runScan() {
       const ve = marketContext.vegaExposure;
       logEvent("scan", `[Vega] $${ve.vegaDollar}/pt VIX move | Risk:${ve.vegaRisk}`);
     }
-    if (state.positions.length > 0) {
-      logEvent("scan", `[Greeks] -:${portfolioGreeks.delta} -:${portfolioGreeks.theta}/day -:${portfolioGreeks.gamma} V:${portfolioGreeks.vega}`);
-    }
 
     marketContext.concentration    = checkConcentrationRisk();
     marketContext.drawdownProtocol = getDrawdownProtocol();
     marketContext.stressTest       = runStressTest();
-    // marketContext.monteCarlo removed - SPY/QQQ strategy doesn't use Monte Carlo
     marketContext.kelly            = calcKellySize(20);
-    // relativeValue screening disabled (individual stocks off)
-    marketContext.streaks          = getStreakAnalysis(); // now a stub
+    marketContext.streaks          = getStreakAnalysis();
 
     if (marketContext.concentration.alerts.length > 0) {
       marketContext.concentration.alerts.forEach(a => logEvent("risk", a));
@@ -464,22 +401,14 @@ async function runScan() {
       logEvent("risk", `Drawdown protocol: ${marketContext.drawdownProtocol.message}`);
     }
 
-    // These need to run after context is updated
     await checkScaleIns();
 
-    // Earnings plays removed - SPY/QQQ don't have earnings dates
-
-    // ── Macro authority — agent is the only signal source ─────────────────
-    // Keywords eliminated. Agent runs on headline delta in server.new.js interval.
-    // Scanner reads state._agentMacro directly — no keyword scoring, no fallback.
-    // Staleness: agent internally caps at 90 minutes. Scanner warns if > 30 min.
     const agentMacroForAuth = state._agentMacro;
     const agentAuthAge = agentMacroForAuth?.timestamp
       ? (Date.now() - new Date(agentMacroForAuth.timestamp).getTime()) / 60000 : 999;
 
     if (agentMacroForAuth) {
-      // Use agent signal — fresh or held (stability threshold filters noise)
-      const staleSuffix = agentAuthAge > 30 ? ` (⚠️ ${agentAuthAge.toFixed(0)}min stale)` : '';
+      const staleSuffix = agentAuthAge > 30 ? ` (${agentAuthAge.toFixed(0)}min stale)` : '';
       marketContext.macro = {
         signal:        agentMacroForAuth.signal || 'neutral',
         scoreModifier: agentMacroForAuth.modifier || 0,
@@ -490,74 +419,49 @@ async function runScan() {
         triggers:      agentMacroForAuth.catalysts || [],
       };
       if (agentAuthAge > 30 && !dryRunMode) {
-        logEvent("warn", `[MACRO] Agent signal is ${agentAuthAge.toFixed(0)}min old — headline delta may be suppressing calls`);
+        logEvent("warn", `[MACRO] Agent signal is ${agentAuthAge.toFixed(0)}min old`);
       }
       if (marketContext.macro.mode !== 'normal') {
-        logEvent("macro", `[5min] Macro: ${marketContext.macro.signal} via agent (${marketContext.macro.scoreModifier > 0 ? '+' : ''}${marketContext.macro.scoreModifier}) age:${agentAuthAge.toFixed(0)}min${staleSuffix}`);
+        logEvent("macro", `[5min] Macro: ${marketContext.macro.signal} via agent (${marketContext.macro.scoreModifier > 0 ? '+' : ''}${marketContext.macro.scoreModifier}) age:${agentAuthAge.toFixed(0)}min`);
       }
     } else {
-      // No agent signal yet — neutral until first call completes
       marketContext.macro = { signal: 'neutral', scoreModifier: 0, mode: 'normal', macroAuthority: 'pending', triggers: [] };
       if (!dryRunMode) logEvent("warn", `[MACRO] No agent signal yet — neutral until startup analysis completes`);
     }
 
-    // Alias marketContext.macro as 'macro' for backward compatibility with all scan loop references
-    // Previously macro = await getMacroNews() — now it's set via agent authority block above
     const macro = marketContext.macro;
 
-    // Bug 4 FIX: Compute agent staleness ONCE at scan scope for use in both:
-    // (a) defensive close block below, and (b) per-instrument defensive zero/skip in scan loop.
-    // Agent stale > 120min → treat defensive mode as neutral — don't block entries or close positions.
     const _agentAgeForDefensive = state._agentMacro?.timestamp
       ? (Date.now() - new Date(state._agentMacro.timestamp).getTime()) / 60000 : 999;
     const _agentFreshForDefensive = _agentAgeForDefensive < 120;
-    // effectiveDefensive defined at scan scope above — available throughout runScan
 
-    // Strongly bearish macro - close all calls immediately
-    // ONLY fire if agent also confirms bearish - keyword scorer alone gives false positives
-    // Agent signal takes priority: if agent ever said bullish/neutral, suppress keyword defensive
-    // This protects against: keyword fires on GLD/tariff headlines while SPY is rallying
     const agentSignal      = (state._agentMacro || {}).signal || "neutral";
     const agentIsBullish   = ["bullish","strongly bullish","mild bullish"].includes(agentSignal);
     const agentIsNeutral   = agentSignal === "neutral";
     const agentIsBearish   = ["strongly bearish","bearish"].includes(agentSignal);
-    const agentAge         = state._agentMacro && state._agentMacro.timestamp
-      ? (Date.now() - new Date(state._agentMacro.timestamp).getTime()) / 60000 : 999;
-    // Extend freshness to 60 min - agent runs every 3 min but cache + restart gaps can widen this
-    // If no agent signal ever (agentAge=999), allow defensive to fire (can't suppress without data)
-    const agentFresh       = _agentFreshForDefensive; // Bug 4 FIX: uses scan-scope staleness
-    // Suppress if: agent is fresh AND (bullish or neutral) - don't close calls on keyword alone
-    // Also suppress if: agent is fresh AND bearish but NOT strongly bearish (mild disagreement)
-    const defensiveSuppressed = agentFresh && !agentIsBearish; // only strongly bearish fires through
-    // DEF-1: Skip defensive close entirely when no calls are open - avoids spurious log noise
+    const agentFresh       = _agentFreshForDefensive;
+    const defensiveSuppressed = agentFresh && !agentIsBearish;
     const openCallPositions = (state.positions || []).filter(p => p.optionType === "call");
     if (macro.mode === "defensive" && state.circuitOpen && !defensiveSuppressed) {
       if (openCallPositions.length === 0) {
         logEvent("macro", `[DEFENSIVE] No open calls - nothing to close (macro: ${macro.signal})`);
       } else {
-      const defTriggers = (macro.triggers || []).slice(0,3).join(", ") || "strongly bearish signal";
-      logEvent("macro", `DEFENSIVE MODE - keyword+agent agree bearish: ${defTriggers} - closing calls`);
-      for (const pos of [...state.positions]) {
-        if (pos.optionType === "call") {
-          if (!state._macroDefensiveCooldown) state._macroDefensiveCooldown = {};
-          state._macroDefensiveCooldown[pos.ticker] = Date.now();
-          await closePosition(pos.ticker, "macro-defensive");
+        const defTriggers = (macro.triggers || []).slice(0,3).join(", ") || "strongly bearish signal";
+        logEvent("macro", `DEFENSIVE MODE - closing calls: ${defTriggers}`);
+        for (const pos of [...state.positions]) {
+          if (pos.optionType === "call") {
+            if (!state._macroDefensiveCooldown) state._macroDefensiveCooldown = {};
+            state._macroDefensiveCooldown[pos.ticker] = Date.now();
+            await closePosition(pos.ticker, "macro-defensive");
+          }
         }
       }
-      } // end openCallPositions.length > 0
     } else if (macro.mode === "defensive" && defensiveSuppressed) {
-      logEvent("macro", `[AGENT OVERRIDE] Defensive suppressed - agent ${agentSignal} (${agentAge.toFixed(0)}min ago, conf:${(state._agentMacro||{}).confidence||"unknown"}) overrides keyword - keeping calls open`);
+      logEvent("macro", `[AGENT OVERRIDE] Defensive suppressed - agent ${agentSignal} overrides - keeping calls open`);
     } else if (macro.mode === "defensive" && !agentFresh) {
-      // Bug 4 FIX: Agent stale >120min — do NOT fire defensive close.
-      // A 5-hour-old bearish signal should not close calls at tomorrow's open.
-      // Stale agent = treat as neutral. Log warning, resume normal operations.
-      logEvent("warn", `[AGENT] Defensive triggered but agent stale (${agentAge.toFixed(0)}min) — treating as neutral, NOT closing calls`);
+      logEvent("warn", `[AGENT] Defensive triggered but agent stale (${_agentAgeForDefensive.toFixed(0)}min) — NOT closing calls`);
     }
 
-    // Strongly bullish macro - close losing puts (thesis broken by macro tailwind)
-    // Agent freshness gate: keyword-only "aggressive" with stale agent must not fire.
-    // "ceasefire" or "tariff truce" headlines during a VIX-30 bear regime are bounce reads,
-    // not regime changes. Agent must confirm bullish or be fresh to trigger puts close.
     const bullishAgentSignal   = (state._agentMacro || {}).signal || "neutral";
     const bullishAgentAge      = state._agentMacro?.timestamp
       ? (Date.now() - new Date(state._agentMacro.timestamp).getTime()) / 60000 : 999;
@@ -571,35 +475,25 @@ async function runScan() {
       !bullishCloseSuppressed && !(agentContrasBullish && bullishAgentFresh);
 
     if (macro.mode === "aggressive" && !dryRunMode && bullishCloseAllowed) {
-      logEvent("macro", `BULLISH MACRO - ${macro.signal}: ${macro.triggers.slice(0,3).join(", ")} - closing losing puts`);
+      logEvent("macro", `BULLISH MACRO - closing losing puts`);
       for (const pos of [...state.positions]) {
         if (pos.optionType !== "put") continue;
         const curP = pos.currentPrice || pos.premium;
         const chg  = pos.premium > 0 ? (curP - pos.premium) / pos.premium : 0;
         if (chg < -0.05) await closePosition(pos.ticker, "macro-bullish", null, pos.contractSymbol || pos.buySymbol);
       }
-    } else if (macro.mode === "aggressive" && !dryRunMode && !bullishCloseAllowed) {
-      const suppressReason = bullishCloseSuppressed
-        ? `keyword-only + agent stale ${bullishAgentAge.toFixed(0)}min + no agent bullish confirmation`
-        : `agent ${bullishAgentSignal} (${bullishAgentAge.toFixed(0)}min) contradicts keyword bullish`;
-      logEvent("macro", `[BULLISH SUPPRESSED] Signal suppressed - ${suppressReason} - keeping puts open`);
     }
-    // Always compute streaks live from closedTrades - avoids stale Redis values
+
     const liveStreaks = getStreakAnalysis();
     logEvent("scan", `[5min] Regime:${regime.regime}(${regime.confidence}%) | Kelly:${marketContext.kelly?.contracts||1}x | Streak:${liveStreaks.currentStreak}x${liveStreaks.currentType||'--'}`);
 
-    // Record portfolio value snapshot every 5 minutes during market hours
     if (!state.portfolioSnapshots) state.portfolioSnapshots = [];
     const snapValue = state.cash + openRisk();
     state.portfolioSnapshots.push({ t: new Date().toISOString(), v: parseFloat(snapValue.toFixed(2)) });
-    // Cap at 2500 entries (~8 trading days at 5-min intervals)
     if (state.portfolioSnapshots.length > 2500) state.portfolioSnapshots = state.portfolioSnapshots.slice(-2500);
-    runAgentRescore();        // parallel hourly rescore for overnight positions (non-blocking)
-    runReconciliation().catch(e => logEvent("error", `[RECONCILE] 5-min sync failed: ${e.message}`)); // non-blocking
+    runAgentRescore();
+    runReconciliation().catch(e => logEvent("error", `[RECONCILE] 5-min sync failed: ${e.message}`));
 
-    // - Agent accuracy resolution (non-blocking) -
-    // Checks pending agent calls that are 30+ or 120+ minutes old
-    // Resolves directional accuracy: did SPY move the way the agent predicted?
     if (state._agentAccuracy && state._agentAccuracy.pending.length > 0) {
       const spyNow = state._liveSPY || state.spy || 0;
       if (spyNow > 0) {
@@ -608,117 +502,58 @@ async function runScan() {
         state._agentAccuracy.pending.forEach(p => {
           const minsElapsed = (now - p.timestamp) / 60000;
           const spyChange   = (spyNow - p.spyAtCall) / p.spyAtCall;
-          // bearish signals expect SPY to fall (negative change = correct)
-          // bullish signals expect SPY to rise (positive change = correct)
           const expectsFall = ["strongly bearish","bearish"].includes(p.signal);
           const expectsRise = ["strongly bullish","bullish"].includes(p.signal);
           const correct     = (expectsFall && spyChange < -0.001) || (expectsRise && spyChange > 0.001);
-
-          if (!p.resolved30 && minsElapsed >= 30) {
-            p.resolved30 = true;
-            if (correct) state._agentAccuracy.correct30++;
-            resolved30++;
-          }
-          if (!p.resolved120 && minsElapsed >= 120) {
-            p.resolved120 = true;
-            if (correct) state._agentAccuracy.correct120++;
-            resolved120++;
-          }
+          if (!p.resolved30 && minsElapsed >= 30) { p.resolved30 = true; if (correct) state._agentAccuracy.correct30++; resolved30++; }
+          if (!p.resolved120 && minsElapsed >= 120) { p.resolved120 = true; if (correct) state._agentAccuracy.correct120++; resolved120++; }
         });
-        // Remove fully resolved entries (both windows done)
         state._agentAccuracy.pending = state._agentAccuracy.pending.filter(p => !p.resolved120);
-        // Compute accuracy rates
         const resolved30Total  = state._agentAccuracy.calls - state._agentAccuracy.pending.filter(p => !p.resolved30).length;
         const resolved120Total = state._agentAccuracy.calls - state._agentAccuracy.pending.length;
         if (resolved30Total > 0)  state._agentAccuracy.acc30  = parseFloat((state._agentAccuracy.correct30  / resolved30Total  * 100).toFixed(1));
         if (resolved120Total > 0) state._agentAccuracy.acc120 = parseFloat((state._agentAccuracy.correct120 / resolved120Total * 100).toFixed(1));
-        if (resolved30 > 0 || resolved120 > 0) {
-          const acc30val  = state._agentAccuracy.acc30;
-          const acc120val = state._agentAccuracy.acc120;
-          logEvent("scan", `[AGENT ACC] 30min: ${acc30val || "--"}% | 120min: ${acc120val || "--"}% | n=${state._agentAccuracy.calls} directional calls`);
-          // Flag calibration concern if 30min accuracy is below random chance (50%)
-          // Agent macro is used for timing and regime framing — low short-term accuracy is expected
-          // but worth surfacing when sample size is sufficient (10+ resolved calls)
-          const resolved30Total = state._agentAccuracy.calls - state._agentAccuracy.pending.filter(p => !p.resolved30).length;
-          if (acc30val !== null && acc30val < 45 && resolved30Total >= 10) {
-            logEvent("warn", `[AGENT ACC] 30min accuracy ${acc30val}% below 45% threshold (n=${resolved30Total}) — agent useful for regime framing, not short-term direction`);
-          }
-        }
       }
     }
   }
 
-
-
-  // -- SLOW TIER (every 15 minutes) --
-  if (now - lastSlowScan > 10 * 60 * 1000) { // 10-minute tier (was 15)
+  // -- SLOW TIER (every 10 minutes) --
+  if (now - lastSlowScan > 10 * 60 * 1000) {
     lastSlowScan = now;
     const [fg, dxy, yc, pcrSynth, termStruct, skew, sentiment] = await Promise.all([
       getFearAndGreed(), getDXY(), getYieldCurve(),
-      getSyntheticPCR(),        // synthetic put/call ratio from SPY options chain
-      getVolTermStructure(),    // near vs far month IV term structure
-      getCBOESKEW(),            // synthetic SKEW from IV smirk (Alpaca-native)
-      getSentimentSignal(),     // VIX momentum + price action sentiment (replaces AAII)
+      getSyntheticPCR(), getVolTermStructure(), getCBOESKEW(), getSentimentSignal(),
     ]);
 
-    // PCR - use synthetic (Alpaca options chain) - CBOE CDN blocked on Railway
     const pcr = pcrSynth;
     if (pcr) {
       marketContext.pcr = pcr;
       state._pcr = { ...pcr, updatedAt: Date.now() };
       logEvent("scan", `[PCR:synthetic] ${pcr.pcr} (${pcr.signal})`);
-    } else {
-      logEvent("scan", `[PCR] synthetic unavailable - scoring uses cached value`);
     }
     if (termStruct) {
       marketContext.termStructure = termStruct;
       state._termStructure = { ...termStruct, updatedAt: Date.now() };
-      logEvent("scan", `[VOL TERM] near:${(termStruct.nearIV*100).toFixed(1)}% far:${(termStruct.farIV*100).toFixed(1)}% ratio:${termStruct.ratio} (${termStruct.structure})`);
     }
     if (skew) {
       marketContext.skew = skew;
       state._skew = { ...skew, updatedAt: Date.now() };
-      logEvent("scan", `[SKEW] ${skew.skew} (${skew.signal}) ${skew.creditPutIdeal ? "- CREDIT PUT IDEAL" : ""}`);
-    } else {
-      // Fix #8: Fallback synthetic SKEW from VIX when options chain fetch returns null
-      // VIX 30+ ≈ SKEW 130+ (extreme), VIX 25-30 ≈ SKEW 120-130 (elevated), VIX <25 ≈ normal
-      // This ensures _skew is never empty during elevated VIX environments
+    } else if (!state._skew && (state.vix || 0) >= 25) {
       const vixNow = state.vix || 20;
-      if (!state._skew && vixNow >= 25) {
-        const synthSkew = vixNow >= 32 ? 135 : vixNow >= 28 ? 128 : vixNow >= 25 ? 122 : 110;
-        const synthSignal = synthSkew >= 130 ? "extreme" : synthSkew >= 120 ? "elevated" : "moderate";
-        const synthSmirk  = parseFloat(((synthSkew - 100) / 200 + 1).toFixed(3));
-        const synthResult = {
-          skew: synthSkew, smirkRatio: synthSmirk, signal: synthSignal,
-          creditPutIdeal: synthSkew >= 120 && vixNow >= 25,
-          synthetic: true, vixBased: true,
-          updatedAt: Date.now(),
-        };
-        state._skew = synthResult;
-        marketContext.skew = synthResult;
-        logEvent("scan", `[SKEW] VIX-based fallback: ${synthSkew} (${synthSignal}) - chain fetch returned null`);
-      }
+      const synthSkew = vixNow >= 32 ? 135 : vixNow >= 28 ? 128 : vixNow >= 25 ? 122 : 110;
+      const synthSignal = synthSkew >= 130 ? "extreme" : synthSkew >= 120 ? "elevated" : "moderate";
+      const synthSmirk  = parseFloat(((synthSkew - 100) / 200 + 1).toFixed(3));
+      state._skew = { skew: synthSkew, smirkRatio: synthSmirk, signal: synthSignal, creditPutIdeal: synthSkew >= 120 && vixNow >= 25, synthetic: true, vixBased: true, updatedAt: Date.now() };
+      marketContext.skew = state._skew;
     }
-    if (sentiment) {
-      marketContext.aaii = sentiment; // scoring reads state._aaii — wire sentiment here
-      state._aaii = { ...sentiment, updatedAt: Date.now() };
-      logEvent("scan", `[SENTIMENT] ${sentiment.signal} | vixMom:${sentiment.vixMomentum} spyDd:${sentiment.spyDrawdown}%`);
-    }
+    if (sentiment) { marketContext.aaii = sentiment; state._aaii = { ...sentiment, updatedAt: Date.now() }; }
     marketContext.fearGreed   = fg;
     marketContext.dxy         = dxy;
     marketContext.yieldCurve  = yc;
-    // Wire DXY and yield curve into state so scoreCreditSpread can read them
-    // scoreCreditSpread reads state._dxy and state._yieldEnv — these were never set
     if (dxy) state._dxy = { ...dxy, updatedAt: Date.now() };
-    // _yieldEnv: derive from yield curve signal for TLT scoring
-    // yc.signal: "steepening" = rising long rates (TLT falls), "flattening" = falling long rates (TLT rallies)
-    // "normal" = flat curve. Map to _yieldEnv for TLT augmentation in scoreCreditSpread.
     if (yc && yc.signal) {
-      state._yieldEnv = yc.signal === "steepening" ? "steepening"
-                      : yc.signal === "flattening" ? "inverted"  // flattening = long rates falling = TLT bid = like inverted
-                      : "normal";
+      state._yieldEnv = yc.signal === "steepening" ? "steepening" : yc.signal === "flattening" ? "inverted" : "normal";
     }
-    // Real put/call ratio — OPT-PCCE: 15min gate, daily bar
     if (!state._pcceCheckedAt || Date.now() - state._pcceCheckedAt > 15 * 60 * 1000) {
       state._pcceCheckedAt = Date.now();
       try {
@@ -739,73 +574,45 @@ async function runScan() {
   if (now - lastHourScan > 60 * 60 * 1000) {
     lastHourScan = now;
     const today  = getETTime().toISOString().split("T")[0];
-    let updated  = 0;
-    let cleared  = 0;
+    let updated  = 0, cleared = 0;
     for (const stock of WATCHLIST) {
-      // Clear stale past earnings dates
-      if (stock.earningsDate && stock.earningsDate < today) {
-        stock.earningsDate = null;
-        cleared++;
-      }
-      // Fetch new upcoming earnings date
+      if (stock.earningsDate && stock.earningsDate < today) { stock.earningsDate = null; cleared++; }
       const ed = await getEarningsDate(stock.ticker);
       if (ed) { stock.earningsDate = ed; updated++; }
     }
     logEvent("scan", `[1hr] Earnings: ${updated} updated, ${cleared} stale dates cleared`);
   }
 
-  // Individual stock positions disabled - SPY/QQQ only
-
-  // V2.98 FIX E (HOISTED): _liveDailyRsiMap must be declared before the injection
-  // block at line ~772 which runs before the stockData loop on some scan paths.
-  // Populated by the stockData loop below; empty map on first scan is safe —
-  // pos.dailyRsi injection simply skips (no matching ticker = no update).
   let _liveDailyRsiMap = {};
 
-  // 1. Exit checks for open positions
-  // Pre-compute ctx values for exitEngine
   const alpacaBalance = state.alpacaCash || state.cash || 0;
   const pdtCount      = countRecentDayTrades();
 
-  // Fetch live prices + news for all open positions (parallel, non-blocking)
   const { posSnapshots, posQuotes, posNewsCache } = await fetchPositionData(state.positions);
 
-  // V2.98 FIX E: Inject live daily RSI into open positions before exit evaluation.
-  // pos.dailyRsi is never updated after entry — exitEngine's _putFulfilled falls back
-  // to intraday RSI without this injection. Stamping here ensures every scan cycle
-  // gives exitEngine the current daily RSI to check against the put thesis-complete
-  // condition (entryDailyRSI >= 65 && curDailyRSI < 50).
   for (const pos of state.positions) {
     const _liveDR = _liveDailyRsiMap[pos.ticker];
-    if (_liveDR != null) {
-      pos.dailyRsi = _liveDR;
-    }
+    if (_liveDR != null) pos.dailyRsi = _liveDR;
   }
 
-  // Evaluate all exit conditions — pure function, returns decisions, never mutates state
   const exitDecisions = await checkExits(
     state.positions, posSnapshots, posQuotes, posNewsCache,
     { dryRunMode, scanET, alpacaBalance, pdtCount, marketContext }
   );
 
-  // Apply decisions — closePosition/partialClose/closeNContracts are the only side effects
   for (const d of exitDecisions) {
     if (d.action === 'close')
       await closePosition(d.ticker, d.reason, d.exitPremium, d.contractSym);
     else if (d.action === 'partial')
       await partialClose(d.ticker);
     else if (d.action === 'partial-n')
-      // V2.99 TIERED EXITS: close exactly d.contractsToClose contracts (T1=1, T2=1)
       await closeNContracts(d.ticker, d.contractsToClose || 1, d.reason, d.exitPremium);
   }
   if (exitDecisions.length > 0) markDirty();
 
-  // 2. New entries - check if any entry type is valid
-  // Skip entirely if a pending mleg order is in flight - prevents duplicate submissions
   if (state._pendingOrder) {
-    // Already logged above - just skip to end of scan
+    // pending order in flight — skip entry section
   } else {
-  // Fetch SPY data in parallel - all three are independent requests
   const [spyPrice, spyBars, spyIntraday] = await Promise.all([
     getStockQuote("SPY").then(p => p || 500),
     getStockBars("SPY", 5),
@@ -813,11 +620,9 @@ async function runScan() {
   ]);
   if (spyPrice) {
     state._liveSPY = spyPrice;
-    // Track SPY day change for debit call gate (don't buy calls into a down day)
     const spyPrevClose = state._spyPrevClose || spyPrice;
     state._spyDayChange = spyPrevClose > 0 ? (spyPrice - spyPrevClose) / spyPrevClose : 0;
   }
-  // Compute SPY 200MA once per day at scan time — needed for below200MACallBlock gate
   const _ma200Date = state._spyMA200Date || "";
   const _todayStr  = new Date().toLocaleDateString("en-US", { timeZone: "America/New_York" });
   if (!state._spyMA200 || _ma200Date !== _todayStr) {
@@ -828,23 +633,15 @@ async function runScan() {
         state._spyMA200    = parseFloat((_closes200.reduce((s,c) => s+c, 0) / _closes200.length).toFixed(2));
         state._spyMA200Date = _todayStr;
         logEvent("scan", `[MA] SPY 200MA: $${state._spyMA200} (${_closes200.length} bars)`);
-      } else {
-        // Dinesh: log warning so gate-disabled state is visible, not silent
-        logEvent("warn", `[MA] SPY 200MA: only ${_spyBars200.length} bars returned (need 50+) — below200MACallBlock disabled until data available`);
       }
-    } catch(e) { logEvent("warn", `[MA] SPY 200MA fetch failed: ${e.message} — below200MACallBlock disabled`); }
+    } catch(e) { logEvent("warn", `[MA] SPY 200MA fetch failed: ${e.message}`); }
   }
   const spyReturn    = spyBars.length >= 5 ? (spyBars[spyBars.length-1].c - spyBars[0].o) / spyBars[0].o : 0;
 
-  // - SPY 5-DAY AVERAGE INTRADAY RANGE -
-  // Measures how much SPY moves high-to-low each day as % of open
-  // High range (2.5%+) = volatile chop — short strikes less safe, credit spread risk elevated
-  // Updated every scan from daily bars. Same rolling pattern as _vixSustained.
   if (spyBars.length >= 2) {
     const todayBar = spyBars[spyBars.length - 1];
     const todayRange = todayBar.o > 0 ? (todayBar.h - todayBar.l) / todayBar.o : 0;
     if (!state._spyRangeHistory) state._spyRangeHistory = [];
-    // Only push once per day — check last entry date vs today
     const _lastRangeDate = state._spyRangeDateLast || '';
     if (_lastRangeDate !== _todayStr && todayRange > 0) {
       state._spyRangeHistory.push(parseFloat(todayRange.toFixed(5)));
@@ -857,6 +654,7 @@ async function runScan() {
       );
     }
   }
+
   const spyRecovering = (() => {
     if (spyIntraday.length >= 15) {
       const recent  = spyIntraday.slice(-15);
@@ -873,27 +671,16 @@ async function runScan() {
     }
     return false;
   })();
-  // SPY recovery: agent macro handles this - spyRecovering no longer blocks puts
-  // spyAlreadyDown: removed - agent scores this into individual stock signals already
-  const spyAlreadyDown = false; // disabled - agent macro signal replaces this
+  const spyAlreadyDown = false;
 
-  // - SPY 200MA REGIME FILTER - panel consensus (6/8) -
-  // When SPY is below its 200MA, market is in bearish regime
-  // Block calls entirely + require score 80+ for puts + 50% size reduction
-  // Addresses 2022 knife-catching problem: RSI "oversold" signals in prolonged downtrend
   const spyBelow200MA = state._spyMA200 && state._liveSPY && state._liveSPY < state._spyMA200;
   if (spyBelow200MA && !dryRunMode) {
-    logEvent("filter", `[200MA] SPY $${state._liveSPY?.toFixed(2)} below 200MA $${state._spyMA200?.toFixed(2)} - bear regime: calls blocked, puts need 80+ score, 50% size`);
+    logEvent("filter", `[200MA] SPY $${state._liveSPY?.toFixed(2)} below 200MA $${state._spyMA200?.toFixed(2)} - bear regime`);
   }
 
-  // finalHourBlock REMOVED — entry window already closes at 3pm (panel consensus).
-  // 3:45pm block was redundant secondary backup. One clear rule: entries close at 3pm.
   const etHourEntry    = scanET.getHours() + scanET.getMinutes() / 60;
-  const finalHourBlock = false; // removed — entry window governs
+  const finalHourBlock = false;
 
-  // - DAY PLAN: suppressUntil gate -
-  // Agent sets suppressUntil on high-impact event days (CPI, FOMC, NFP)
-  // Blocks all entries until after the event reaction settles
   const dayPlan = state._dayPlan;
   let suppressBlock = false;
   if (dayPlan && dayPlan.suppressUntil && !dryRunMode) {
@@ -902,70 +689,56 @@ async function runScan() {
     const currentMins  = scanET.getHours() * 60 + scanET.getMinutes();
     if (currentMins < suppressMins) {
       suppressBlock = true;
-      logEvent("filter", `[DAY PLAN] Entries suppressed until ${dayPlan.suppressUntil} ET - high impact event`);
+      logEvent("filter", `[DAY PLAN] Entries suppressed until ${dayPlan.suppressUntil} ET`);
     }
   }
 
-  // - DAY PLAN: riskLevel sizing modifier -
-  // High risk days (FOMC, CPI) get 50% size reduction on top of drawdown protocol
   const dayPlanRiskMult = (dayPlan && dayPlan.riskLevel === "high" && !dryRunMode) ? 0.50 : 1.0;
   if (dayPlanRiskMult < 1.0) logEvent("filter", `[DAY PLAN] High risk day - position sizing reduced 50%`);
 
-  // -- ENTRY ENGINE: Regime Rulebook ----------------------------------------
-  // Moved here (before any rb.gates references) to prevent temporal dead zone crash
-  // OPT-7: Compute rulebook once -- dryRun overrides specific gates only
   const _rbBase = getRegimeRulebook(state);
   const rb = dryRunMode
-    ? { ..._rbBase, gates: { ..._rbBase.gates,
-        choppyDebitBlock: false, crisisDebitBlock: false, avoidHoldActive: false,
-        postReversalBlock: false, vixFallingPause: false } }
+    ? { ..._rbBase, gates: { ..._rbBase.gates, choppyDebitBlock: false, crisisDebitBlock: false, avoidHoldActive: false, postReversalBlock: false, vixFallingPause: false } }
     : _rbBase;
 
-  const macroBullish      = rb.gates.macroBullishBlock; // from rulebook (replaces old derivation)
-  // pdtCount already computed before exit checks
-  const pdtBlocked    = PDT_RULE_ACTIVE && !dryRunMode && pdtCount >= PDT_LIMIT;
-  if (pdtBlocked) logEvent("filter", `PDT limit reached (${pdtCount}/${PDT_LIMIT} day trades in 5 days) - same-day exits blocked, new entries still allowed`);
+  // C1-C: HIGH RISK day plan raises effective minScore to 85
+  const _dayPlanHighRisk = (state._dayPlan?.riskLevel === 'high') && !dryRunMode;
+  if (_dayPlanHighRisk) {
+    logEvent("filter", `[C1-C] Day plan HIGH RISK — effective minScore raised to 85`);
+  }
 
-  // Agent macro signal gates puts - replaces blunt SPY recovery detector
-  // puts blocked only when agent explicitly says aggressive/bullish AND SPY gap is large
+  // C1-A: Compute effective min score based on daily loss lock state
+  function _computeEffectiveMinScore(baseMin) {
+    let effectiveMin = baseMin;
+    // C1-C: HIGH RISK day plan
+    if (_dayPlanHighRisk) effectiveMin = Math.max(effectiveMin, 85);
+    // C1-A: Daily loss lock active → raise to 85
+    if (state._dailyLossLockActive) effectiveMin = Math.max(effectiveMin, 85);
+    // C1-B: Per-instrument loss count >= 2 → raise to 90
+    return effectiveMin;
+  }
+
+  const macroBullish      = rb.gates.macroBullishBlock;
+  const pdtBlocked    = PDT_RULE_ACTIVE && !dryRunMode && pdtCount >= PDT_LIMIT;
+  if (pdtBlocked) logEvent("filter", `PDT limit reached (${pdtCount}/${PDT_LIMIT}) - same-day exits blocked`);
+
   const spyGapUp = (() => {
     if (spyBars.length >= 2) {
       const prevClose  = spyBars[spyBars.length-2].c;
-    if (prevClose) state._spyPrevClose = prevClose; // used for _spyDayChange
+      if (prevClose) state._spyPrevClose = prevClose;
       const curSPY     = spyBars[spyBars.length-1].c;
       const gapPct     = (curSPY - prevClose) / prevClose;
       const etMinSince = (scanET.getHours() - 9) * 60 + scanET.getMinutes() - 30;
-      if (!(gapPct > 0.015 && etMinSince >= 0)) return false; // no gap or outside window
-
-      // PM/TA panel modification: shorten delay to 10min when gap is already fading
-      // Gap fading = current price already below intraday VWAP (selling into the gap)
-      // In that case the gap-up thesis has failed - weaker reason to delay puts
+      if (!(gapPct > 0.015 && etMinSince >= 0)) return false;
       const spyVWAP = spyIntraday.length >= 5 ? calcVWAP(spyIntraday) : 0;
       const gapFading = spyVWAP > 0 && curSPY < spyVWAP;
       const delayMins = gapFading ? 10 : 15;
-
       return etMinSince < delayMins;
     }
     return false;
   })();
-  // SPY gap-up delay REMOVED — gap up is supportive for bull put spreads (further from short strike).
-  // Was designed for debit puts; wrong for current credit spread architecture (panel consensus).
-  // Agent handles macro context from 8:30am including gap events.
-  if (spyGapUp && !dryRunMode) logEvent("filter", `[INFO] SPY gap-up >1.5% — gap-up entry context noted (intraday RSI watch active)`);
+  if (spyGapUp && !dryRunMode) logEvent("filter", `[INFO] SPY gap-up >1.5% — gap-up entry context noted`);
 
-  // ── FIX 3: GAP-REVERSAL DAY DETECTOR (V2.96) ────────────────────────────
-  // Problem: QQQ +7.7% yesterday → market gave it back today.
-  // Day-2-of-a-gap is high-risk for call entries: underlying digests the move,
-  // IV compresses overnight, and any intraday dip is a hangover dip not MR.
-  //
-  // Detection: compare SPY's yesterday close to the prior close (2 bars back).
-  // If yesterday moved 3%+, set _gapReversalDay flag until EOD reset.
-  // Gate (per-stock below ~line 2410): if _gapReversalDay, call entries require
-  // RSI < 35 (stricter than normal 45) AND price < VWAP. Both must pass.
-  //
-  // Note: this is complementary to the existing gap-VWAP gate (line ~1759)
-  // which uses today's gapPct. Today's gapPct on day 2 is near 0 — the gap
-  // happened yesterday so the existing gate doesn't fire. This gate does.
   if (spyBars.length >= 3) {
     const _dayBeforeYesterday = spyBars[spyBars.length-3].c;
     const _yesterday          = spyBars[spyBars.length-2].c;
@@ -974,57 +747,38 @@ async function runScan() {
       state._yesterdayGapPct = parseFloat((_yesterdayMove * 100).toFixed(2));
       if (Math.abs(_yesterdayMove) >= 0.03) {
         state._gapReversalDay = true;
-        logEvent("filter", `[GAP-REVERSAL] Yesterday SPY moved ${state._yesterdayGapPct > 0 ? '+' : ''}${state._yesterdayGapPct.toFixed(1)}% — day-2 reversal risk elevated. Call entries require RSI < 35 + price < VWAP`);
+        logEvent("filter", `[GAP-REVERSAL] Yesterday SPY moved ${state._yesterdayGapPct > 0 ? '+' : ''}${state._yesterdayGapPct.toFixed(1)}% — day-2 reversal risk elevated`);
       } else {
         state._gapReversalDay = false;
       }
     }
   }
-  // ── END GAP-REVERSAL DETECTOR ─────────────────────────────────────────────
 
-  // - CONDITION-BASED POST-REVERSAL COOLDOWN -
-  // FIX 2: Uses marketContext.macro (authoritative merged signal) not state._agentMacro (raw)
-  // Prevents split-brain where cooldown and entry gate use different macro objects
-  // Also requires agent update to postdate the reversal event
   let postReversalBlock = false;
   if (state._macroReversalAt && !dryRunMode) {
     const minsSinceReversal = (Date.now() - state._macroReversalAt) / 60000;
-    // Use marketContext.macro - same authoritative object the entry gate reads
     const macroSignal     = (marketContext.macro || {}).signal || "neutral";
     const macroBearish    = ["bearish", "strongly bearish", "mild bearish"].includes(macroSignal);
-    const macroAuthority  = (marketContext.macro || {}).macroAuthority || "keyword_fallback";
     const agentUpdatedAt  = (marketContext.macro || {}).agentLastUpdated || null;
     const agentConfidence = (state._agentMacro || {}).agentConfidence || (state._agentMacro || {}).confidence || "low";
-
-    // Condition 1: minimum 30 minutes
     const minTimeElapsed = minsSinceReversal >= 30;
-
-    // Condition 2: marketContext.macro (authoritative) must be bearish
     const macroConfirmedBearish = macroBearish;
-
-    // Condition 3: SPY must not be above reversal level
     const spyAboveReversal = state._macroReversalSPY && spyPrice > state._macroReversalSPY * 1.005;
-
-    // Condition 4: agent update must postdate the reversal event (no stale pre-reversal reads)
-    const agentPostdatesReversal = !agentUpdatedAt ||
-      new Date(agentUpdatedAt).getTime() > state._macroReversalAt;
-
-    // Extra gate: large reversal (5+ positions) requires high confidence
+    const agentPostdatesReversal = !agentUpdatedAt || new Date(agentUpdatedAt).getTime() > state._macroReversalAt;
     const largeReversal = (state._macroReversalCount || 0) >= 5;
     const confidenceOk  = !largeReversal || agentConfidence === "high";
 
     if (!minTimeElapsed || !macroConfirmedBearish || spyAboveReversal || !confidenceOk || !agentPostdatesReversal) {
       postReversalBlock = true;
       const reasons = [];
-      if (!minTimeElapsed)           reasons.push(`${minsSinceReversal.toFixed(0)}min elapsed (need 30)`);
-      if (!macroConfirmedBearish)    reasons.push(`macro: ${macroSignal} via ${macroAuthority} (need bearish)`);
-      if (spyAboveReversal)          reasons.push(`SPY above reversal $${state._macroReversalSPY?.toFixed(2)}`);
-      if (!agentPostdatesReversal)   reasons.push(`waiting for post-reversal agent update`);
-      if (!confidenceOk)             reasons.push(`large reversal needs high confidence (have: ${agentConfidence})`);
+      if (!minTimeElapsed)         reasons.push(`${minsSinceReversal.toFixed(0)}min elapsed (need 30)`);
+      if (!macroConfirmedBearish)  reasons.push(`macro: ${macroSignal} (need bearish)`);
+      if (spyAboveReversal)        reasons.push(`SPY above reversal $${state._macroReversalSPY?.toFixed(2)}`);
+      if (!agentPostdatesReversal) reasons.push(`waiting for post-reversal agent update`);
+      if (!confidenceOk)           reasons.push(`large reversal needs high confidence`);
       logEvent("filter", `[REVERSAL COOLDOWN] Active - ${reasons.join(" | ")}`);
     } else {
-      // All conditions met - clear the cooldown
-      logEvent("filter", `[REVERSAL COOLDOWN] Cleared - macro confirmed bearish via ${macroAuthority}, all conditions met`);
+      logEvent("filter", `[REVERSAL COOLDOWN] Cleared`);
       state._macroReversalAt    = null;
       state._macroReversalCount = 0;
       state._macroReversalSPY   = null;
@@ -1032,33 +786,21 @@ async function runScan() {
     }
   }
 
-  // Macro authority - which system is driving decisions this scan
-  // Agent is primary (if fresh), keyword is fallback (halved weight)
   const macroAuthStamp    = (marketContext.macro || {}).macroAuthority || "keyword_fallback";
-  const agentMacroSignal  = (marketContext.macro || {}).signal || "neutral"; // use authoritative merged signal
-  // Scan-scope effectiveDefensive — used both in defensive close block AND per-instrument loop (line ~2205).
-  // Must be at runScan scope so both references resolve. Defined once, read everywhere.
+  const agentMacroSignal  = (marketContext.macro || {}).signal || "neutral";
   const _defAgentAge   = state._agentMacro?.timestamp
     ? (Date.now() - new Date(state._agentMacro.timestamp).getTime()) / 60000 : 999;
-  const _defAgentFresh = _defAgentAge < 120; // Bug 4 FIX: 60→120min threshold
+  const _defAgentFresh = _defAgentAge < 120;
   const effectiveDefensive = (marketContext.macro || {}).mode === "defensive" && _defAgentFresh;
   const putsMacroAllowed  = ["bearish", "strongly bearish", "mild bearish", "neutral"].includes(agentMacroSignal);
   const agentHasRun       = !!state._agentMacro;
   const macroClearForPuts = !agentHasRun || putsMacroAllowed;
-  if (!dryRunMode) logEvent("scan", `[MACRO AUTH] ${macroAuthStamp} | signal: ${agentMacroSignal} | agent age: ${agentHasRun ? ((Date.now()-new Date((state._agentMacro||{}).timestamp||0).getTime())/60000).toFixed(0)+"min" : "never"}`);
+  if (!dryRunMode) logEvent("scan", `[MACRO AUTH] ${macroAuthStamp} | signal: ${agentMacroSignal}`);
 
-  const isIndexScan  = true; // scan loop handles both index and stocks
+  const isIndexScan  = true;
 
-  // - REGIME GATE - choppy blocks debit entries, credit still allowed -
-  // UNIFIED REGIME SOURCE: _agentMacro.regime is authoritative (updated every 3min).
-  // _dayPlan.regime is the morning baseline, used only when _agentMacro hasn't run yet.
-  // applyIntradayRegimeOverride updates _dayPlan for the morning context - but scoring
-  // uses _agentMacro directly so intraday shifts are immediately reflected.
-  // (rb rulebook computed earlier in runScan -- before first rb.gates reference)
-
-  // Surface key flags for the rest of runScan that references them directly
   const authRegimeName    = rb.regimeName;
-  const isChoppyRegime    = rb.gates.choppyDebitBlock; // agent said none
+  const isChoppyRegime    = rb.gates.choppyDebitBlock;
   const creditModeActive  = rb.gates.creditPutActive;
   const creditCallModeActive = rb.gates.creditCallActive;
   const choppyDebitBlock  = rb.gates.choppyDebitBlock;
@@ -1070,160 +812,94 @@ async function runScan() {
   const ivHigh            = rb.ivHigh;
   const regimeClass       = rb.regimeClass;
   const skewElevated      = (state._skew?.skew || 0) >= 130;
-  const creditAllowedVIX  = rb.creditAllowedVIX; // entryEngine v2.0: IVR>=50 AND VIX>=25 (both required)
+  const creditAllowedVIX  = rb.creditAllowedVIX;
 
-  // ── Overnight scan intelligence — read pre-market compute if available ────
-  // Stored by getAgentOvernightScan("premarket-compute") at 7:30am CT (8:30am ET)
-  // Provides: instrument biases, suppress window, wait-for-open flag, strike targets
   const overnightScan = state._overnightScan || null;
-  const overnightAge  = overnightScan?.generatedAt
-    ? (Date.now() - new Date(overnightScan.generatedAt).getTime()) / 3600000 // hours
-    : 999;
-  const useOvernightBias = false; // Overnight bias disabled — no all-day instrument blockers.
+  const useOvernightBias = false;
 
-  if (useOvernightBias) {
-    // Suppress entries until specified CT time (FOMC, CPI, etc.)
-    if (overnightScan.suppressUntil) {
-      const [supHH, supMM] = overnightScan.suppressUntil.replace(/[^0-9:]/g,'').split(':').map(Number);
-      const etNow = getETTime();
-      const ctHour = etNow.getHours() - 1; // ET → CT (rough, handles EDT)
-      const ctMin  = etNow.getMinutes();
-      if (ctHour < supHH || (ctHour === supHH && ctMin < supMM)) {
-        logEvent("scan", `[OVERNIGHT] Entries suppressed until ${overnightScan.suppressUntil} CT (${overnightScan.catalysts?.join(', ') || 'scheduled event'})`);
-      }
-    }
-    // Log wait-for-open flag if set
-    if (overnightScan.waitForOpen && etHourNow < 10.5) { // before 9:30am CT
-      logEvent("scan", `[OVERNIGHT] Wait-for-open flag set: ${overnightScan.waitReason || 'pre-market volatility'}`);
-    }
-    // Log overnight regime assessment
-    if (overnightScan.scanType === 'premarket-compute') {
-      logEvent("scan", `[OVERNIGHT] Pre-market: ${overnightScan.regime} | ${overnightScan.signal} (${overnightScan.confidence}) | bias: ${overnightScan.entryBias} | risk: ${overnightScan.riskLevel}`);
-    }
-  }
-
-  // Strategy log
   const strategyMode = regimeClass === "C" ? "CRISIS - long puts, careful sizing"
     : regimeClass === "B" ? "BEAR TREND - long puts + MR calls on oversold"
     : "BULL - long puts on overbought, MR calls on oversold";
   logEvent("scan", `[STRATEGY] Regime ${regimeClass}: ${strategyMode} | IVR:${ivRankNow} (${state._ivEnv})`);
-  // NAKED OPTIONS: choppyDebitBlock removed from logs — no credit mode in APEX
-  // Bug 2 FIX: creditCallModeActive log removed — APEX has no credit call mode. Dead spread-era log.
-  if (crisisDebitBlock && !dryRunMode) logEvent("filter", `[REGIME C] Crisis mode - debit put entries blocked, mean reversion unreliable`);
-  if (skewElevated && state.vix >= 22 && state.vix < 28) logEvent("filter", `SKEW ${(state._skew?.skew||0)} elevated - credit VIX threshold lowered to 22`);
+  if (crisisDebitBlock && !dryRunMode) logEvent("filter", `[REGIME C] Crisis mode - debit put entries blocked`);
 
-
-  // AVOID HOLD: agent entryBias:avoid no longer auto-stamps a 30-minute block.
-  // Agent directional accuracy is 10.1% at 30min — automatic blocks based on this signal
-  // caused more harm than protection (today's startup chaos blocked entries for 23+ minutes).
-  //
-  // entryBias:avoid now logs a prominent warning only. Human can manually set avoid via
-  // dashboard if needed. _avoidUntil can still be set by /api/clear-avoid (inverse) or
-  // manually via dashboard. Emergency triggers (VIX spike, flash crash) still auto-block
-  // via separate mechanisms that don't depend on agent direction accuracy.
   const agentBias = (state._agentMacro || {}).entryBias || (state._dayPlan || {}).entryBias || "neutral";
   if (agentBias === "avoid") {
-    // Log a warning every 15 minutes at most — don't spam every scan
     const _lastAvoidWarn = state._lastAvoidWarnAt || 0;
     if (Date.now() - _lastAvoidWarn > 15 * 60 * 1000) {
-      logEvent("warn", `[AVOID] Agent recommends avoid bias — entries NOT auto-blocked (10.1% accuracy). Use dashboard to manually set hold if needed.`);
+      logEvent("warn", `[AVOID] Agent recommends avoid bias — NOT auto-blocked (10.1% accuracy).`);
       state._lastAvoidWarnAt = Date.now();
     }
   }
-  // Manual avoid hold still respected — set via dashboard or /api endpoints
   const avoidHoldActive = !!(state._avoidUntil && Date.now() < state._avoidUntil);
   if (avoidHoldActive) {
     const minsLeft = ((state._avoidUntil - Date.now()) / 60000).toFixed(0);
-    logEvent("filter", `[AVOID] Entry hold active - ${minsLeft}min remaining (manually set or legacy stamp)`);
+    logEvent("filter", `[AVOID] Entry hold active - ${minsLeft}min remaining`);
   }
-  // BF-W2: Enforce macro-defensive cooldown - 30min block on same ticker after defensive close
   if (state._macroDefensiveCooldown) {
-    // Clean expired entries
     const now30 = Date.now();
     for (const tk of Object.keys(state._macroDefensiveCooldown)) {
       if (now30 - state._macroDefensiveCooldown[tk] > 30 * 60 * 1000) delete state._macroDefensiveCooldown[tk];
     }
   }
 
-  // MR calls bypass choppy block  -- extreme oversold in high-VIX is the ideal MR setup
   const spyRSIForMR   = (marketContext.spySignals && marketContext.spySignals.rsi) || state._lastSpyRSI || 50;
   const isMRCondition = spyRSIForMR <= 35 && state.vix >= 25;
   const below200MACallBlock = rb.gates.below200MACallBlock;
-  // Derive allowed flags from rulebook gates (entry window still checked here for timing)
   const entryWindowOpen   = isEntryWindow("put", true) && !finalHourBlock && !suppressBlock;
   const callWindowOpen    = isEntryWindow("call", true) && !finalHourBlock && !suppressBlock;
-  // Credit spreads: 9:45am start — options market needs 15min for reliable quotes
-  // dryRunMode bypass: test-scan after hours needs to simulate credit execution
   const creditWindowOpen  = (isEntryWindow("call", false) && !finalHourBlock && !suppressBlock) || dryRunMode;
-  // ── V3.2: Compute new regime gates inline ───────────────────────────────
-  // Post-crisis lock: block debit puts for 10 trading days after C→B transition
+
   const postCrisisLockActive = !!(state._postCrisisLock && state._postCrisisLockExpiry && Date.now() < state._postCrisisLockExpiry);
   if (postCrisisLockActive && !dryRunMode) {
     const daysLeft = Math.ceil((state._postCrisisLockExpiry - Date.now()) / 86400000);
-    logEvent("filter", `[REGIME] Post-crisis recovery lock active — debit puts blocked (${daysLeft}d remaining)`);
+    logEvent("filter", `[REGIME] Post-crisis recovery lock active (${daysLeft}d remaining)`);
   }
 
-  // VIX spike cooldown: block debit puts for 48h after VIX spike > 8pt
-  // Credit spreads still allowed (elevated IV benefits premium selling)
   const SPIKE_COOLDOWN_MS = 48 * 3600 * 1000;
   const vixSpikeCooldownActive = !!(state._vixSpikeAt && (Date.now() - state._vixSpikeAt) < SPIKE_COOLDOWN_MS);
   if (vixSpikeCooldownActive && !dryRunMode) {
     const hoursLeft = Math.ceil((SPIKE_COOLDOWN_MS - (Date.now() - state._vixSpikeAt)) / 3600000);
-    logEvent("filter", `[REGIME] VIX spike cooldown active — debit puts blocked (${hoursLeft}h remaining). Credits still allowed.`);
+    logEvent("filter", `[REGIME] VIX spike cooldown active (${hoursLeft}h remaining)`);
   }
-  // Auto-clear _vixSpikeAt after cooldown window expires (48h elapsed)
-  // The primary guard is the 48h window — no additional VIX recovery check needed
-  // (VIX recovery is monitored separately via _vixSustained and vixFallingPause)
   if (state._vixSpikeAt && !vixSpikeCooldownActive) {
     logEvent("filter", "[REGIME] VIX spike cooldown expired — debit put entries re-enabled");
     state._vixSpikeAt = null;
     markDirty();
   }
 
-  // B1 gate: log sub-regime on CHANGE only (not every scan — would flood 500-entry log buffer)
-  const _prevSubClass = state._lastLoggedSubClass;
-  if (state._regimeSubClass !== _prevSubClass && !dryRunMode) {
-    state._lastLoggedSubClass = state._regimeSubClass;
-    if (state._regimeSubClass === "B1") {
-      logEvent("warn", `[REGIME B1] Entered early bear sub-regime — min score 75, sizing 0.75x, reversal threshold 2.0%`);
-    } else if (state._regimeSubClass === "B2") {
-      logEvent("warn", `[REGIME B2] Entered confirmed bear sub-regime — full puts-on-bounces conviction, min score 70, sizing 1.0x`);
-    } else if (_prevSubClass && !state._regimeSubClass) {
-      logEvent("warn", `[REGIME] Exited Regime B sub-classification (now Regime ${state._regimeClass})`);
-    }
-  }
+  // C1-A + C1-B + C1-D: gated entry flags
+  // C1-D: stagger bypass disabled on HIGH RISK days
+  const _c1dHighRiskDay = _dayPlanHighRisk;
 
-  // APEX: puts allowed whenever entry window is open. choppyDebitBlock/crisisDebitBlock removed.
-  // Directional filters (RSI, MACD, regime) live in scoring and evaluateEntry — not here.
+  // putsAllowed / callsAllowed incorporate C1-A and C1-G locks
+  const _c1aLockBlocking  = state._dailyLossLockActive && !dryRunMode;
+  const _c1gWeeklyBlocking = state._weeklyLossLockActive && !dryRunMode;
+  const _c1gMonthlyBlocking = state._monthlyLossLockActive && !dryRunMode;
+  const _c1AnyLockActive   = _c1aLockBlocking || _c1gWeeklyBlocking || _c1gMonthlyBlocking;
+
   const putsAllowed       = (entryWindowOpen
                              && !rb.gates.postReversalBlock && !rb.gates.macroBullishBlock
                              && !rb.gates.avoidHoldActive
+                             && !_c1AnyLockActive
                              ) || dryRunMode;
-  // APEX: calls allowed when entry window open. No choppyDebitBlock restriction.
-  const callsAllowed      = (callWindowOpen && !rb.gates.avoidHoldActive) || dryRunMode;
-  // APEX: no credit modes — all entries are naked puts or calls
+  const callsAllowed      = (callWindowOpen && !rb.gates.avoidHoldActive && !_c1AnyLockActive) || dryRunMode;
   const creditAllowed     = false;
   const callCreditAllowed = false;
+
   if (macroBullish && !dryRunMode)  logEvent("filter", `Macro bullish (${marketContext.macro?.signal}) - puts blocked`);
-  // vixFallingPause removed — falling VIX is good for credit spreads (less downside risk).
-  // Was correct for debit puts (IV crush) but wrong for current credit spread architecture (panel consensus).
   if (rb.gates.postReversalBlock && !dryRunMode) logEvent("filter", "Post-reversal cooldown active - puts blocked 30min");
 
-  // - VIX SPIKE EXIT - close call positions on sharp VIX spike -
-  // VIX jumping 8+ points intraday crushes call delta AND increases IV on short leg
   if (!dryRunMode) {
     const vixPrev = state._prevScanVIX || state.vix;
     const vixMove = state.vix - vixPrev;
     if (vixMove >= 8) {
       for (const pos of [...state.positions]) {
         if (pos.optionType === "call" && !isDayTrade(pos)) {
-          const chgPct = pos.currentPrice && pos.premium
-            ? (pos.currentPrice - pos.premium) / pos.premium : 0;
+          const chgPct = pos.currentPrice && pos.premium ? (pos.currentPrice - pos.premium) / pos.premium : 0;
           if (chgPct <= -0.10) {
             logEvent("warn", `[VIX SPIKE] VIX +${vixMove.toFixed(1)}pts, call ${pos.ticker} down ${(chgPct*100).toFixed(0)}% - closing`);
-            await closePosition(pos.ticker, "vix-spike", null, pos.contractSymbol || pos.buySymbol, { bypassPDT: true }); // emergency exit
-          } else {
-            logEvent("warn", `[VIX SPIKE] VIX +${vixMove.toFixed(1)}pts, call ${pos.ticker} at ${(chgPct*100).toFixed(0)}% - monitoring`);
+            await closePosition(pos.ticker, "vix-spike", null, pos.contractSymbol || pos.buySymbol, { bypassPDT: true });
           }
         }
       }
@@ -1231,7 +907,6 @@ async function runScan() {
     state._prevScanVIX = state.vix;
   }
 
-  // - BREADTH COLLAPSE EXIT - close calls on sharp breadth deterioration -
   if (!dryRunMode) {
     const breadthNow  = typeof marketContext?.breadth === "number" ? marketContext.breadth * 100 : parseFloat((marketContext?.breadth || "50").toString()) || 50;
     const breadthPrev = state._prevBreadth || breadthNow;
@@ -1239,7 +914,7 @@ async function runScan() {
     if (breadthDrop >= 30 && breadthNow <= 35) {
       for (const pos of [...state.positions]) {
         if (pos.optionType === "call" && !isDayTrade(pos)) {
-          logEvent("warn", `[BREADTH COLLAPSE] Breadth dropped ${breadthDrop.toFixed(0)}pts - ${breadthNow}% - closing call ${pos.ticker}`);
+          logEvent("warn", `[BREADTH COLLAPSE] Breadth dropped ${breadthDrop.toFixed(0)}pts - closing call ${pos.ticker}`);
           await closePosition(pos.ticker, "breadth-collapse", null, pos.contractSymbol || pos.buySymbol);
         }
       }
@@ -1247,22 +922,13 @@ async function runScan() {
     state._prevBreadth = breadthNow;
   }
 
-  // - SPY STRONG RECOVERY - exit losing puts -
-  // If SPY is up 1%+ from prior close, the macro environment has reversed
-  // This catches gap-up opens driven by news (ceasefire, Fed pivot, etc)
-  // Close puts that are underwater - thesis is broken by the macro move
   if (!dryRunMode && spyBars.length >= 2) {
     const prevClose  = spyBars[spyBars.length-2].c;
     const curSPY     = spyBars[spyBars.length-1].c;
     const spyDayMove = (curSPY - prevClose) / prevClose;
-    // V3.2: B1 uses tighter 2.0% threshold (early-bear bounces more likely real reversals)
     const _macroRevThreshold = (_rbBase && _rbBase.macroReversalThreshold) ? _rbBase.macroReversalThreshold : 0.025;
-    if (spyDayMove > _macroRevThreshold) { // SPY up threshold% = genuine macro reversal (2.0% B1, 2.5% B2)
+    if (spyDayMove > _macroRevThreshold) {
       let reversalCount = 0;
-      // Panel CRITICAL #4: close ALL puts on macro-reversal, not just losing ones.
-      // A 2.5% SPY spike breaks the puts-on-bounces thesis categorically.
-      // A winning put left open through a genuine reversal can rapidly become a loss.
-      // P&L at reversal time is not predictive of P&L after continuation.
       for (const pos of [...state.positions]) {
         if (pos.optionType !== "put") continue;
         const snap = posSnapshots[pos.contractSymbol];
@@ -1272,31 +938,21 @@ async function runScan() {
         const curP   = bid > 0 && ask > 0 ? (bid + ask) / 2 : pos.premium;
         const chg    = pos.premium > 0 ? (curP - pos.premium) / pos.premium : 0;
         const pnlLabel = chg >= 0 ? `+${(chg*100).toFixed(0)}%` : `${(chg*100).toFixed(0)}%`;
-        logEvent("scan", `${pos.ticker} SPY macro reversal +${(spyDayMove*100).toFixed(1)}% - closing ALL puts (${pnlLabel}) - thesis broken`);
+        logEvent("scan", `${pos.ticker} SPY macro reversal +${(spyDayMove*100).toFixed(1)}% - closing ALL puts (${pnlLabel})`);
         await closePosition(pos.ticker, "macro-reversal", null, pos.contractSymbol || pos.buySymbol, { bypassPDT: true });
         reversalCount++;
       }
-      // Record reversal event for condition-based cooldown
       if (reversalCount > 0) {
         state._macroReversalAt    = Date.now();
         state._macroReversalCount = reversalCount;
         state._macroReversalSPY   = spyBars[spyBars.length-1].c;
-        logEvent("warn", `[REVERSAL COOLDOWN] ${reversalCount} position(s) closed - put entries gated until conditions confirm bearish`);
+        logEvent("warn", `[REVERSAL COOLDOWN] ${reversalCount} position(s) closed`);
         markDirty();
       }
     }
   }
-  if (!callsAllowed && !putsAllowed) return; // APEX: only need puts and calls
+  if (!callsAllowed && !putsAllowed) return;
 
-  // [opening/final hour blocks moved above callsAllowed]
-  // Weekly circuit breaker REMOVED — penalizes new code for old code's losses (panel consensus).
-  // Daily circuit breaker retained for paper trading safety.
-  // V2.87 FIX: circuitOpen=false halts entries only — exits still run (see _circuitHaltEntries flag).
-  // _circuitEntryHalt evaluated AFTER daily circuit block below (line ~1292) to avoid one-scan gap.
-  // See: _circuitEntryHalt declaration after FIX 10 daily circuit block.
-
-  // - ACT ON MORNING EXIT FLAGS -
-  // Positions flagged by morning review get closed at open
   for (const pos of [...(state.positions || [])]) {
     if (pos._morningExitFlag) {
       logEvent("warn", `[MORNING REVIEW] Closing ${pos.ticker} flagged overnight - ${pos._morningExitReason}`);
@@ -1306,109 +962,60 @@ async function runScan() {
     }
   }
 
-  // consecutive loss gate removed - agent macro and score quality gates entries
   if (state.cash <= CAPITAL_FLOOR) return;
 
-  // FIX 10: Max daily loss circuit breaker
-  // Tracks intraday unrealized + realized P&L against daily limit.
-  // If daily loss exceeds 3% of account, halt all new entries for the session.
-  //
-  // V2.86: Staleness guard on unrealized P&L — stale currentPrice from API failures
-  //    was masking real losses (phantom gains from hours-old prices skipped circuit).
-  //    NOTE: unrealized P&L only counts positions opened TODAY (openedToday flag).
-  //    Overnight carry positions are excluded — their losses belong to the prior day's session.
-  //    todayRealizedPnL includes all closed P&L from today's session.
   {
-    const MAX_PRICE_STALE_MS = 60000; // 60s — if currentPrice is older, treat as flat
+    const MAX_PRICE_STALE_MS = 60000;
     const todayOpen = new Date(); todayOpen.setHours(0,0,0,0);
     const unrealizedPnL = (state.positions || []).reduce((s, p) => {
-      // Only count unrealized from TODAY's entries — carry positions excluded from daily circuit
       const openedToday = p.openDate && new Date(p.openDate) >= todayOpen;
       if (!openedToday) return s;
       const priceAge = p._currentPriceUpdatedAt ? Date.now() - p._currentPriceUpdatedAt : Infinity;
       const safeCurrentPrice = priceAge < MAX_PRICE_STALE_MS ? p.currentPrice : null;
-      if (!safeCurrentPrice || !p.premium) return s; // skip stale — treat as flat
+      if (!safeCurrentPrice || !p.premium) return s;
       const chg = (safeCurrentPrice - p.premium) / p.premium;
       return s + chg * p.premium * 100 * (p.contracts || 1);
     }, 0);
     const todayPnL = (state.todayRealizedPnL || 0) + unrealizedPnL;
-    const dailyLossLimit = (state.alpacaCash || state.cash || 30000) * -0.03; // -3% daily loss limit
+    const dailyLossLimit = (state.alpacaCash || state.cash || 30000) * -0.03;
     state._dailyPnL = parseFloat(todayPnL.toFixed(2));
     if (todayPnL < dailyLossLimit && !dryRunMode) {
-      logEvent("warn", `[DAILY CIRCUIT] Daily P&L $${todayPnL.toFixed(0)} below -3% limit ($${dailyLossLimit.toFixed(0)}) — halting new entries`);
+      logEvent("warn", `[DAILY CIRCUIT] Daily P&L $${todayPnL.toFixed(0)} below -3% limit — halting new entries`);
       state._dailyCircuitOpen = false;
     } else if (state._dailyCircuitOpen === false && todayPnL >= dailyLossLimit * 0.75) {
-      // Auto-reset if losses recover to within 75% of limit (e.g. -$627 vs -$836 limit)
-      // Allows resumption after a partial recovery without requiring full return to flat
-      logEvent("scan", `[DAILY CIRCUIT] Auto-reset — P&L $${todayPnL.toFixed(0)} recovered to within 75% of limit ($${(dailyLossLimit * 0.75).toFixed(0)})`);
+      logEvent("scan", `[DAILY CIRCUIT] Auto-reset — P&L $${todayPnL.toFixed(0)} recovered`);
       state._dailyCircuitOpen = true;
     }
     if (state._dailyCircuitOpen === false) {
-      // V2.87 FIX: Halt ENTRIES only — exits must always run regardless of circuit state.
-      // Previous behavior: return here exited runScan() entirely, blocking checkExits().
-      // GLD at -41% could not close because the circuit return fired before checkExits ran.
-      // Fix: set a flag, skip entry logic below, but allow the scan to continue to exits.
       state._circuitHaltEntries = true;
     } else {
       state._circuitHaltEntries = false;
     }
   }
 
-  // V2.87 BUG FIX: _circuitEntryHalt evaluated HERE (after daily circuit sets _circuitHaltEntries).
-  // Previous position (before morning exit flags) had a one-scan gap where entries weren't blocked
-  // on the scan that first tripped the daily circuit — _circuitHaltEntries was still false from
-  // the previous scan when _circuitEntryHalt was evaluated.
   const _circuitEntryHalt = (state.circuitOpen === false) || (state._circuitHaltEntries === true);
 
-  // V2.88: VIX-AWARE CALL GATE
-  // When VIX >= 28 AND macro agent is bearish, block NEW call entries.
-  // Rationale: at VIX 28+ buying calls is expensive (options priced for big moves).
-  // In a bearish macro environment, RSI dipping to 30 is the trend continuing, not a reversal.
-  // Put entries remain open — market weakness is the signal for puts.
-  // VIX_PAUSE (35) is the hard halt for ALL entries. This is a softer call-only gate at 28.
   const _macroSignal    = (state._agentMacro?.signal || "").toLowerCase();
   const _macroIsBearish = _macroSignal.includes("bearish");
   const _vixCallGate    = (state.vix || 0) >= 28 && _macroIsBearish;
-  // Full halt at VIX_PAUSE (35) regardless of macro
   const _vixFullHalt    = (state.vix || 0) >= VIX_PAUSE;
 
-  // - PORTFOLIO GREEKS LIMITS -
-  // Prevent extreme one-sided exposure
   const pgr = marketContext.portfolioGreeks || { delta: 0, vega: 0 };
-  const MAX_PORTFOLIO_DELTA = -500; // max short delta (puts) = -$500 per 1% SPY move
-  // RM-C1 fix: heat cap does not prevent adding OPPOSITE-direction positions when PDT-locked
-  // If all positions are PDT-locked and losing, allowing a hedge is risk-reducing not risk-adding
-  // allPDTLocked removed — PDT_RULE_ACTIVE=false, rule sunset April 2026
-  // Natenberg: VIX-scaled vega cap - high VIX = more volatile IV = tighter cap
-  // At VIX 37, a $2000 vega position loses $2000 on a 1pt VIX move - too much
+  const MAX_PORTFOLIO_DELTA = -500;
   const MAX_PORTFOLIO_VEGA  = state.vix >= 35 ? 500 : state.vix >= 25 ? 1000 : 2000;
-  // FIX 7: Portfolio delta hard gate — block new same-direction entries when delta is extreme.
-  // Heat cap tracks cost, not directional exposure. Five SPY puts + two QQQ puts all move together.
-  // MAX_PORTFOLIO_DELTA = -500 means net -$500 per 1% SPY move. Beyond this, concentrate risk further only on very high conviction (score 85+).
-  // This runs BEFORE per-instrument scoring — if portfolio is already max short, skip low-conviction adds.
   const portfolioDeltaBreached = pgr.delta < MAX_PORTFOLIO_DELTA;
   if (portfolioDeltaBreached) {
-    logEvent("filter", `[DELTA CAP] Portfolio delta ${pgr.delta.toFixed(0)} below -500 limit — only score >= 85 can add more puts`);
+    logEvent("filter", `[DELTA CAP] Portfolio delta ${pgr.delta.toFixed(0)} below -500 limit`);
     state._portfolioDeltaCapped = true;
   } else {
     state._portfolioDeltaCapped = false;
   }
-  // Directional concentration + Beta-adjusted portfolio delta check (DB-1/GL-3)
-  // Simple directional count
   const openPuts  = (state.positions || []).filter(p => p.optionType === "put").length;
   const openCalls = (state.positions || []).filter(p => p.optionType === "call").length;
   const totalOpen = state.positions.length;
-  // Directional concentration blocks removed — correct behavior in trending market (panel consensus).
-  // Heat cap governs concentration. Log for visibility only.
   if (totalOpen >= 3 && openPuts === totalOpen) logEvent("filter", `[INFO] All ${totalOpen} positions are puts (heat cap governs)`);
   if (totalOpen >= 3 && openCalls === totalOpen) logEvent("filter", `[INFO] All ${totalOpen} positions are calls (heat cap governs)`);
-  // Beta-adjusted net delta — tracks directional exposure across positions.
-  // MAX was 6 (calibrated for 1-2 contract individual stock positions).
-  // New contract sizing targets 9-10 contracts per position on index ETFs.
-  // At 9x per position: 1 position = -9, 2 = -18, 3 = -27, 4 = -37, 5 = -46.
-  // The directional heat cap (40% of cash) is the correct portfolio-level governor.
-  // Beta-delta is retained for logging/dashboard visibility but scaled to max 3 positions
-  // at full 10-contract sizing = 30. Beyond that the heat cap fires first anyway.
+
   const betaDelta = (state.positions || []).reduce((sum, p) => {
     const beta = Math.min(p.beta || 1.0, 2.0);
     const dir  = p.optionType === "put" ? -1 : 1;
@@ -1416,39 +1023,21 @@ async function runScan() {
     return sum + (dir * beta * contracts);
   }, 0);
   state._portfolioBetaDelta = parseFloat(betaDelta.toFixed(1));
-  const MAX_BETA_DELTA = 50; // scaled for 9-10 contract index ETF positions (5 max × 10 = 50)
-  // MAX_BETA_DELTA blocks removed — heat cap fires first at 5 positions × 10 contracts (panel consensus).
+  const MAX_BETA_DELTA = 50;
   if (betaDelta < -MAX_BETA_DELTA) logEvent("filter", `[INFO] Beta delta ${betaDelta.toFixed(1)} (heat cap governs)`);
   if (betaDelta > MAX_BETA_DELTA) logEvent("filter", `[INFO] Beta delta +${betaDelta.toFixed(1)} (heat cap governs)`);
-  // MAX_PORTFOLIO_VEGA block removed — heat cap fires first across 5 ETF instruments (panel consensus).
-  if (Math.abs(pgr.vega) > MAX_PORTFOLIO_VEGA) logEvent("filter", `[INFO] Portfolio vega $${pgr.vega.toFixed(0)} (heat cap governs)`);
 
-  // - DURATION DIVERSIFICATION CHECK -
-  // PM-W1: Prevent all positions expiring in same cycle - one event hits everything
-  // Allow entry only if there's at least one position expiring in a different month, OR no positions yet
   if (state.positions.length >= 2) {
     const expDates  = state.positions.map(p => p.expDate).filter(Boolean);
-    const uniqueExp = new Set(expDates.map(d => d.slice(0, 7))); // YYYY-MM
+    const uniqueExp = new Set(expDates.map(d => d.slice(0, 7)));
     if (uniqueExp.size === 1 && state.positions.length >= 3) {
-      // All in same month - check if new entry would be in the same month
-      const sameMonthCap = 4; // max 4 positions in same expiry month
+      const sameMonthCap = 4;
       if (state.positions.length >= sameMonthCap) {
-        logEvent("filter", `Duration concentration: all ${state.positions.length} positions expire ${[...uniqueExp][0]} - capped at ${sameMonthCap}`);
-        // Don't return - just log. Entry scoring will naturally space out expiries.
+        logEvent("filter", `Duration concentration: all ${state.positions.length} positions expire ${[...uniqueExp][0]}`);
       }
     }
   }
 
-  // V2.90: 3-slot call cap with correlation groups and tiered score threshold.
-  // Slot 1-2: standard MR entry, score >= 70/73 (existing gates apply).
-  // Slot 3: high-conviction only — score >= 85 AND instrument must be from a
-  //   different correlation group than BOTH existing call positions.
-  // Correlation groups:
-  //   EQUITY:  SPY, QQQ, SMH   (beta-correlated, move together)
-  //   MACRO:   GLD, TLT        (inflation/fear hedge, negative equity correlation)
-  //   SECTOR:  XLE, IYR, HYG   (sector-specific, lower correlation to equity index)
-  // Put positions are uncapped — puts hedge call exposure.
-  // openCalls/openPuts already declared above (line ~1337)
   const MAX_SIMULTANEOUS_CALLS = 3;
   const SLOT3_MIN_SCORE = 85;
   const CORR_GROUPS = {
@@ -1456,18 +1045,16 @@ async function runScan() {
     GLD: 'macro',  TLT: 'macro',
     XLE: 'sector', IYR: 'sector', HYG: 'sector',
   };
-  // Build set of correlation groups currently occupied by open calls
   const openCallPositions = (state.positions || []).filter(p => p.optionType === 'call');
   const occupiedGroups    = new Set(openCallPositions.map(p => CORR_GROUPS[p.ticker] || 'other'));
   state._occupiedCorrGroups = [...occupiedGroups];
   state._openCallCount = openCalls;
 
   if (openCalls >= MAX_SIMULTANEOUS_CALLS) {
-    logEvent("filter", `[CALL CAP] ${openCalls} calls already open (max ${MAX_SIMULTANEOUS_CALLS}) — no new call entries until one closes`);
+    logEvent("filter", `[CALL CAP] ${openCalls} calls already open (max ${MAX_SIMULTANEOUS_CALLS})`);
     state._callCapActive = true;
     state._slot3Active   = false;
   } else if (openCalls === 2) {
-    // Slot 3 mode: active but requires score >= 85 + uncorrelated group
     state._callCapActive = false;
     state._slot3Active   = true;
     logEvent("filter", `[CALL CAP] 2 calls open — slot 3 available (score >= ${SLOT3_MIN_SCORE} + uncorrelated group only)`);
@@ -1476,103 +1063,56 @@ async function runScan() {
     state._slot3Active   = false;
   }
 
-  // High-beta block removed — ARGO trades index ETFs (SPY, QQQ, GLD, TLT, XLE),
-  // none of which have beta > 1.5 relative to each other. Vestigial from individual stock mode.
-
-  // ── V2.96: REGIME RULEBOOK — compute once per scan ──────────────────────
-  // getRegimeRulebook returns creditPutActive, choppyDebitBlock, and other flags.
-  // Used here for: (1) VIX regime mode switch, (2) credit spread entry path.
-  // Previously APEX never called this — it was ARGO-only infrastructure.
   const _rb               = getRegimeRulebook(state);
   const _creditPutActive  = _rb.gates.creditPutActive;
   const _choppyDebitBlock = _rb.gates.choppyDebitBlock;
   const _vixNow           = state.vix || 20;
-
-  // VIX regime mode — determines whether calls are allowed and at what bar
-  // VIX < 25:  Normal mode. Calls allowed at standard score threshold (MIN_SCORE 70).
-  // VIX 25-30: Credit primary mode. Calls blocked UNLESS score >= VIX_HIGH_CALL_SCORE (90)
-  //            AND RSI < VIX_HIGH_CALL_RSI (32) AND price < VWAP. Escape hatch only.
-  // VIX >= 30: Credit only. Naked calls fully blocked regardless of score.
-  const _vixCreditMode    = _vixNow >= VIX_CREDIT_PRIMARY;  // VIX >= 25
-  const _vixCallsBlocked  = _vixNow >= VIX_CALLS_BLOCKED;   // VIX >= 30
+  const _vixCreditMode    = _vixNow >= VIX_CREDIT_PRIMARY;
+  const _vixCallsBlocked  = _vixNow >= VIX_CALLS_BLOCKED;
 
   if (_vixCreditMode && !_vixCallsBlocked) {
-    logEvent("filter", `[VIX REGIME] VIX ${_vixNow.toFixed(1)} >= ${VIX_CREDIT_PRIMARY} — RSI gate ACTIVE | calls require RSI < ${VIX_HIGH_CALL_RSI} (deeply oversold only)`);
+    logEvent("filter", `[VIX REGIME] VIX ${_vixNow.toFixed(1)} >= ${VIX_CREDIT_PRIMARY} — RSI gate ACTIVE | calls require RSI < ${VIX_HIGH_CALL_RSI}`);
   } else if (_vixCallsBlocked) {
     logEvent("filter", `[VIX REGIME] VIX ${_vixNow.toFixed(1)} >= ${VIX_CALLS_BLOCKED} — calls FULLY BLOCKED`);
   }
-  // ── END REGIME RULEBOOK ───────────────────────────────────────────────────
 
-  // ── GATE C: PM CALL GATE ON GAP-UP DAYS (V2.98) ──────────────────────────
-  // Panel finding (May 19, 2026): On gap-up catalyst days, RSI oversold reads
-  // after 1 PM are NOT mean-reversion signals — they are PM fades after a
-  // completed morning squeeze. The morning catalyst is exhausted. RSI 30 at
-  // 1:57 PM after a 2%+ gap-up day is directional distribution, not a bounce.
-  // Gate: after 1 PM on any day where _todayMaxGap >= 2%, require RSI < 28
-  // for new call entries (vs normal 38). Tighter bar prevents PM re-entry
-  // into exhausted setups. 28 = genuine capitulation only, not AM-equivalent dip.
-  const _etHourForGateC   = etHourNow; // already computed above
-  const _isPMWindow       = _etHourForGateC >= 13.0; // 1:00 PM ET or later
+  const _etHourForGateC   = etHourNow;
+  const _isPMWindow       = _etHourForGateC >= 13.0;
   const _isGapUpDay       = Math.abs(state._todayMaxGap || 0) >= 2.0 &&
                             (state._todayGapDirection || 'up') === 'up';
   const _gateCActive      = _isPMWindow && _isGapUpDay;
-  const GATE_C_RSI_FLOOR  = 28; // tighter than normal VIX regime 38
-
+  const GATE_C_RSI_FLOOR  = 28;
   if (_gateCActive) {
-    logEvent("filter", `[GATE-C] PM gap-up day — calls require RSI < ${GATE_C_RSI_FLOOR} after 1PM (session high gap: +${(state._todayMaxGap||0).toFixed(1)}%)`);
+    logEvent("filter", `[GATE-C] PM gap-up day — calls require RSI < ${GATE_C_RSI_FLOOR} after 1PM`);
   }
-  // ── END GATE C ────────────────────────────────────────────────────────────
 
-  // ── FIX 1: SAME-SESSION ENTRY STAGGER (V2.96) ───────────────────────────
-  // Problem: 3 positions opened in 6 minutes on May 12 → -$555 when market reversed.
-  // Rule 1: No entries in the first 30 minutes of the session.
-  //         VWAP is unreliable until ~30min of price history has built up.
-  //         RSI oversold reads at open are often false — momentum needs to confirm.
-  // Rule 2: After any confirmed fill, block new entries for 20 minutes.
-  //         Forces APEX to observe how the first position behaves before adding exposure.
-  //         20 minutes = roughly 2 scan cycles + time for option price to settle.
-  // Exception: neither rule applies to exit logic — only entry gate.
   const _sessionMinsNow   = etHourNow >= 9.5 ? (etHourNow - 9.5) * 60 : 0;
   const _msSinceLastEntry = Date.now() - (state._lastEntryAt || 0);
   const _minsSinceEntry   = _msSinceLastEntry / 60000;
-  // V2.97: Dynamic stagger cooldown — 45min on large gap-up days, 20min normally.
-  // Rationale: on a gap > 3% day, RSI distortion lasts the full first hour.
-  // Re-entering 20min after a loss into the same distorted AM conditions is wrong.
   const _todayGapAbs      = Math.abs(state._todayMaxGap || 0);
-  const _staggerMins      = _todayGapAbs >= 3.0 ? 25 : 20; // V3.01: reduced gap-day from 45→25min (gap days = best MR setups, don't over-restrict)
+  const _staggerMins      = _todayGapAbs >= 3.0 ? 25 : 20;
   const _staggerCooling   = state._lastEntryAt && _minsSinceEntry < _staggerMins;
-  // V3.00: TWO-TIER STAGGER GATE
-  // Tier 1 (0-15 min): Hard block. Spreads wide, VWAP meaningless, IV bleeding.
-  // Tier 2 (15-30 min): Soft block. Score >= 85 can bypass. Still 0.75x sizing.
-  // Panel decision 5/27/2026: 9:45 AM is the practical stabilization point.
-  // Score 85 requires RSI deeply oversold + MACD + breadth + regime — rare before 9:45.
-  const _hardBlock        = _sessionMinsNow < 15;  // 9:30-9:45 AM: hard block always
-  const _softBlock        = _sessionMinsNow >= 15 && _sessionMinsNow < 30; // 9:45-10:00 AM: score-gated
-  const _tooEarlyToTrade  = _hardBlock; // backward compat — consumed in per-stock gate
+  const _hardBlock        = _sessionMinsNow < 15;
+  const _softBlock        = _sessionMinsNow >= 15 && _sessionMinsNow < 30;
+  const _tooEarlyToTrade  = _hardBlock;
 
   if (_hardBlock) {
-    logEvent("filter", `[STAGGER] Session only ${_sessionMinsNow.toFixed(0)}min old — hard block until 9:45 AM (VWAP/IV not yet stable)`);
+    logEvent("filter", `[STAGGER] Session only ${_sessionMinsNow.toFixed(0)}min old — hard block until 9:45 AM`);
   } else if (_softBlock) {
     logEvent("filter", `[STAGGER] Session ${_sessionMinsNow.toFixed(0)}min old — soft block (9:45-10:00 AM window, score >= 85 can bypass)`);
   } else if (_staggerCooling) {
     const _remaining = (_staggerMins - _minsSinceEntry).toFixed(0);
-    logEvent("filter", `[STAGGER] Last entry ${_minsSinceEntry.toFixed(0)}min ago — cooling ${_staggerMins}min before next entry (${_remaining}min remaining)${_staggerMins === 45 ? ' [GAP DAY extended cooldown]' : ''}`);
+    logEvent("filter", `[STAGGER] Last entry ${_minsSinceEntry.toFixed(0)}min ago — cooling ${_staggerMins}min (${_remaining}min remaining)`);
   }
-  // Flags consumed per-stock in entry gate below
   state._tooEarlyToTrade = _tooEarlyToTrade;
   state._hardBlock       = _hardBlock;
   state._softBlock       = _softBlock;
   state._staggerCooling  = _staggerCooling;
 
-  // Legacy burst log (kept for reference)
   const tenMinAgo = Date.now() - 10 * 60 * 1000;
   const recentEntries = state.positions.filter(p => new Date(p.openDate).getTime() > tenMinAgo).length;
   if (recentEntries >= 3) logEvent("filter", `[INFO] ${recentEntries} entries in last 10min (heat cap governs)`);
-  // ── END STAGGER GATE SETUP ────────────────────────────────────────────────
 
-  // [SPY fetch moved above callsAllowed]
-
-  // Gap detection - large gap down = put opportunity, gap up = call opportunity
   let marketGapDirection = null;
   if (spyBars.length >= 2) {
     const todayOpen = spyBars[spyBars.length-1].o;
@@ -1580,30 +1120,15 @@ async function runScan() {
     const gapPct    = (todayOpen - prevClose) / prevClose;
     if (Math.abs(gapPct) > MAX_GAP_PCT) {
       marketGapDirection = gapPct < 0 ? "down" : "up";
-      logEvent("filter", `Market gap ${marketGapDirection} ${(Math.abs(gapPct)*100).toFixed(1)}% - blocking calls, allowing puts only`);
-      // Don't return - allow puts to be evaluated on gap down days
+      logEvent("filter", `Market gap ${marketGapDirection} ${(Math.abs(gapPct)*100).toFixed(1)}%`);
     }
   }
 
-  // Score and rank candidates
-  // - PARALLEL PREFETCH - fetch all data for all stocks simultaneously -
-  // This is the key performance optimization: instead of sequential API calls
-  // per stock (~70s total), we fetch everything in parallel (~4s total)
   logEvent("scan", `Prefetching data for ${WATCHLIST.length} instruments in parallel...`);
-  // OPT-4: declare before prefetch loop -- used in aggregate log after prefetch completes
-  const scored = []; // moved here to avoid TDZ with the OPT-4 log
-  // V2.98 FIX E: live daily RSI map — populated during stockData loop, used to
-  // inject pos.dailyRsi before checkExits so _putFulfilled uses current daily RSI.
-  // NOTE: _liveDailyRsiMap is declared early (near top of runScan) so the injection
-  // at line ~772 never crashes on early-scan paths before the stockData loop runs.
-  // This re-assignment is intentional — stockData loop will populate it below.
+  const scored = [];
   let _zeroScoreCount = 0;
-
   const prefetchStart = Date.now();
 
-  // OPT-8: Pre-filter -- skip full prefetch for stocks with no realistic path to entry
-  // Mandatory include: open positions (need exit monitoring), news-flagged, stale cache
-  // Saves 40-50% of prefetch API calls on typical scans where 20+ stocks score 0
   const _openPosTickers = new Set(state.positions.map(p => p.ticker));
   const _newsAlertTickers = new Set(
     (state._recentNewsAlerts || [])
@@ -1611,20 +1136,19 @@ async function runScan() {
       .map(n => n.ticker)
   );
   const PREFETCH_WATCHLIST = WATCHLIST.filter(stock => {
-    if (_openPosTickers.has(stock.ticker)) return true; // always include open positions
-    if (_newsAlertTickers.has(stock.ticker)) return true; // always include news-flagged
-    if (stock.isIndex) return true; // always include index instruments (SPY/QQQ/TLT/GLD/XLE)
+    if (_openPosTickers.has(stock.ticker)) return true;
+    if (_newsAlertTickers.has(stock.ticker)) return true;
+    if (stock.isIndex) return true;
     const lastScore = state._scoreDebug?.[stock.ticker]?.putScore || state._scoreDebug?.[stock.ticker]?.callScore || 50;
     const lastTs    = state._scoreDebug?.[stock.ticker]?.ts || 0;
     const cacheAge  = Date.now() - lastTs;
-    if (cacheAge > 5 * 60 * 1000) return true; // stale cache -- must refresh
-    return lastScore >= 35; // only prefetch if last score was within striking distance
+    if (cacheAge > 5 * 60 * 1000) return true;
+    return lastScore >= 35;
   });
   if (PREFETCH_WATCHLIST.length < WATCHLIST.length) {
-    logEvent("scan", `[OPT-8] Pre-filter: prefetching ${PREFETCH_WATCHLIST.length}/${WATCHLIST.length} stocks (${WATCHLIST.length - PREFETCH_WATCHLIST.length} skipped -- low score + no position/news)`);
+    logEvent("scan", `[OPT-8] Pre-filter: prefetching ${PREFETCH_WATCHLIST.length}/${WATCHLIST.length} stocks`);
   }
 
-  // Batch stock prefetch in groups of 10 - prevents 288 simultaneous connections
   const STOCK_BATCH = 10;
   const stockData = [];
   for (let i = 0; i < PREFETCH_WATCHLIST.length; i += STOCK_BATCH) {
@@ -1633,8 +1157,6 @@ async function runScan() {
       batch.map(async stock => {
         try {
           if (stock.isIndex) {
-            // SPY/QQQ: skip individual stock calls (sector ETF, analyst, earnings quality)
-            // Only fetch what matters for macro regime trading
             const [price, bars, intradayBars, preMarket, newsArticles] = await Promise.all([
               getStockQuote(stock.ticker),
               getStockBars(stock.ticker, 60),
@@ -1644,7 +1166,6 @@ async function runScan() {
             ]);
             return { stock, price, bars, intradayBars, sectorResult: { pass:true, putBoost:0 }, preMarket, newsArticles, analystData:{ modifier:0, signal:"neutral", upgrades:[], downgrades:[] }, eqScore:{ signal:"neutral" } };
           }
-          // Individual stocks: full prefetch (used when INDIVIDUAL_STOCKS_ENABLED = true at $25k)
           const [price, bars, intradayBars, sectorResult, preMarket, newsArticles, analystData, eqScore, liveBeta, weeklyTrend] = await Promise.all([
             getStockQuote(stock.ticker),
             getStockBars(stock.ticker, 60),
@@ -1653,7 +1174,7 @@ async function runScan() {
             getPreMarketData(stock.ticker),
             getNewsForTicker(stock.ticker),
             getAnalystActivity(stock.ticker),
-            getEarningsQualityScore(stock.ticker, []),
+            Promise.resolve({ signal:"neutral" }),
             (function() {
               const cached = getCached('beta:' + stock.ticker);
               if (cached) return Promise.resolve(cached);
@@ -1661,10 +1182,7 @@ async function runScan() {
             })(),
             getWeeklyTrend(stock.ticker),
           ]);
-          if (liveBeta && liveBeta > 0) {
-            stock._liveBeta = liveBeta;
-            setCache('beta:' + stock.ticker, liveBeta);
-          }
+          if (liveBeta && liveBeta > 0) { stock._liveBeta = liveBeta; setCache('beta:' + stock.ticker, liveBeta); }
           if (weeklyTrend) stock._weeklyTrend = weeklyTrend;
           return { stock, price, bars, intradayBars, sectorResult, preMarket, newsArticles, analystData, eqScore };
         } catch(e) {
@@ -1675,73 +1193,45 @@ async function runScan() {
     stockData.push(...results);
   }
 
-  if (_zeroScoreCount > 0) logEvent("filter", `[OPT-4] ${_zeroScoreCount} stocks scored 0 (no price/filtered before scoring) -- skipped verbose logs`);
-  logEvent("scan", `Prefetch complete in ${((Date.now()-prefetchStart)/1000).toFixed(1)}s for ${WATCHLIST.length} instruments`);
+  logEvent("scan", `Prefetch complete in ${((Date.now()-prefetchStart)/1000).toFixed(1)}s`);
+
   for (const { stock, price, bars, intradayBars, sectorResult, preMarket, newsArticles, analystData, eqScore } of stockData) {
-    // SKIP FIX: entryBlocked separates "score for context" from "allow entry".
-    // SKIPped instruments still run full scoring/logging — only scored.push is gated.
     let entryBlocked = false;
-    // Skip if already at max positions for this ticker
     const maxPerTicker = stock.isIndex ? 3 : 2;
     const existingForTicker = state.positions.filter(p => p.ticker === stock.ticker);
     const logicalExisting = new Set(existingForTicker.map(p => `${p.optionType}|${p.expDate}`)).size;
-    // Bug13 FIX: maxCombined was 2 for index (same as risk.js maxPerTicker=3 discrepancy).
-    // A ghost TLT position (logicalExisting=2) would skip TLT scoring entirely here.
-    // Align with risk.js: index instruments allow up to 3 logical positions.
-    // The heat cap and risk.js maxPerTicker are the real enforcers.
     const maxCombined = stock.isIndex ? 3 : 2;
     if (logicalExisting >= maxCombined) continue;
 
-    // - F14: Check ticker blacklist -
     if ((state.tickerBlacklist || []).includes(stock.ticker)) {
       logEvent("filter", `${stock.ticker} blacklisted - skipping`);
       continue;
     }
 
-    // Cooldown removed: the scoring system, regime check, and R/R gate already prevent
-    // re-entering bad setups. An arbitrary timer adds no value and blocks valid credit put
-    // entries after stops (underlying dropped = short strike further OTM = better setup).
-
-    // Wash sale detection - IRS disallows loss if same security re-entered within 30 days
-    // Options on same underlying = "substantially identical" security under wash sale rules
-    const WASH_SALE_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
+    const WASH_SALE_MS = 30 * 24 * 60 * 60 * 1000;
     const washSaleClose = (state.closedTrades || []).filter(t => t.reason !== "reconcile-removed").find(t =>
-      t.ticker === stock.ticker &&
-      t.pnl < 0 &&               // was a loss
-      t.closeTime &&
-      (Date.now() - t.closeTime) < WASH_SALE_MS
+      t.ticker === stock.ticker && t.pnl < 0 && t.closeTime && (Date.now() - t.closeTime) < WASH_SALE_MS
     );
     if (washSaleClose) {
       const daysAgo = ((Date.now() - washSaleClose.closeTime) / MS_PER_DAY).toFixed(0);
-      const daysRemaining = Math.ceil((WASH_SALE_MS - (Date.now() - washSaleClose.closeTime)) / MS_PER_DAY);
-      logEvent("filter", `${stock.ticker} wash sale warning - loss of $${Math.abs(washSaleClose.pnl).toFixed(0)} closed ${daysAgo}d ago - ${daysRemaining}d remaining - entering anyway but flagging`);
-      // Flag on the trade journal but don't block - trader may want to re-enter
-      // The wash sale only matters for tax purposes, not trading logic
+      logEvent("filter", `${stock.ticker} wash sale warning - loss closed ${daysAgo}d ago - entering anyway but flagging`);
       stock._washSaleWarning = true;
     }
 
     if (!price || price < MIN_STOCK_PRICE) {
       _zeroScoreCount++;
-      if (state._scoreDebug?.[stock.ticker]) logEvent("filter", `${stock.ticker} price $${price||0} unavailable or below min - skip`);
       if (!state._scoreDebug) state._scoreDebug = {};
       state._scoreDebug[stock.ticker] = { ts: Date.now(), price: price||0, putScore: 0, callScore: 0, effectiveMin: MIN_SCORE, putReasons: [], callReasons: [], signals: {}, blocked: ["no price data"] };
       continue;
     }
 
-    // GLD-1: Gap check BEFORE passesFilter - prevents vol gap FAVORABLE logging on skipped tickers
     if (bars.length >= 2) {
       const overnightGap = Math.abs(bars[bars.length-1].o - bars[bars.length-2].c) / bars[bars.length-2].c;
-      // Bug2 FIX: gap skip exempts credit put mode.
-      // Gap UP: underlying moved away from short strike = credit put is safer, not a reason to skip.
-      // Gap DOWN: underlying moved toward short strike = genuinely dangerous, always skip.
       const _gapDir = bars[bars.length-1].o - bars[bars.length-2].c;
-      const _isCreditPutMode = false; // APEX: no credit mode
-      // Fix 3: Gap-down is a PUT entry signal in APEX — don't skip, let scoring decide.
-      // Only skip on gap-UP (stock moved away from put strike = puts less attractive).
-      // Gap-down: flag it, allow scoring to run. Gap-up on a put: scoring will suppress via RSI/MACD.
-      const _skipForGap = overnightGap > MAX_GAP_PCT && _gapDir > 0; // gap UP skips (not gap down)
+      const _isCreditPutMode = false;
+      const _skipForGap = overnightGap > MAX_GAP_PCT && _gapDir > 0;
       if (_skipForGap) {
-        logEvent("filter", `${stock.ticker} gap UP ${(overnightGap*100).toFixed(1)}% overnight - skip (puts not chasing gap up)`);
+        logEvent("filter", `${stock.ticker} gap UP ${(overnightGap*100).toFixed(1)}% overnight - skip`);
         continue;
       }
       if (overnightGap > MAX_GAP_PCT && _gapDir < 0) {
@@ -1749,30 +1239,23 @@ async function runScan() {
       }
       const intradayCrash = (bars[bars.length-1].o - price) / bars[bars.length-1].o;
       if (intradayCrash > 0.15) {
-        logEvent("filter", `${stock.ticker} intraday crash ${(intradayCrash*100).toFixed(1)}% below open - skip (broken options market)`);
+        logEvent("filter", `${stock.ticker} intraday crash ${(intradayCrash*100).toFixed(1)}% below open - skip`);
         continue;
       }
     }
 
-    // Check for opposite sector bets before filtering
     const sectorPositions = state.positions.filter(p => p.sector === stock.sector);
     const hasSectorCall   = sectorPositions.some(p => p.optionType === "call");
     const hasSectorPut    = sectorPositions.some(p => p.optionType === "put");
 
-    // Get filter result - even on fail, collect weakness signals for put scoring
-    const filterResult = await checkAllFilters(stock, price, bars); // OPT3: pass prefetched bars
+    const filterResult = await checkAllFilters(stock, price, bars);
 
-    // Collect weakness signals that boost put scores
-    // CAP: max +20 total weakness boost - prevents whole-sector selloffs
-    // from pushing every stock to 100 with no differentiation
     let weaknessBoost = 0;
     const weaknessReasons = [];
     const MAX_WEAKNESS_BOOST = 20;
 
     const avgVol      = bars.length ? bars.slice(0,-1).reduce((s,b)=>s+b.v,0)/Math.max(bars.length-1,1) : 0;
     const todayVol    = bars.length ? bars[bars.length-1].v : 0;
-
-    // Relative strength vs SPY - declared early so weakness boost can use it
     const stockReturn = bars.length >= 5 ? (bars[bars.length-1].c - bars[0].o) / bars[0].o : 0;
     const relStrength = spyReturn !== 0 ? (1 + stockReturn) / (1 + spyReturn) : 1;
 
@@ -1785,35 +1268,22 @@ async function runScan() {
         state._scoreDebug[stock.ticker] = { ts: Date.now(), price: price||0, putScore: 0, callScore: 0, effectiveMin: MIN_SCORE, putReasons: [], callReasons: [], signals: {}, blocked: [`pre-score filter: ${filterResult.reason}`] };
         continue;
       }
-      // Sector ETF boost - scaled by how much this stock lags its ETF
-      // If stock and ETF both down equally = market risk, not stock-specific weakness
       const etfReturn  = sectorResult.etfReturn || 0;
       const stockVsEtf = etfReturn !== 0 ? (1 + stockReturn) / (1 + etfReturn) - 1 : 0;
-      const etfBoost   = stockVsEtf < -0.02 ? 15  // stock down 2%+ more than ETF = real weakness
-                       : stockVsEtf < 0      ? 8   // stock lagging ETF slightly
-                       : 5;                         // keeping pace = sector-wide move only
+      const etfBoost   = stockVsEtf < -0.02 ? 15 : stockVsEtf < 0 ? 8 : 5;
       weaknessBoost += etfBoost;
       weaknessReasons.push(`Sector ETF down, stock ${stockVsEtf < 0 ? "lagging" : "in line"} (+${etfBoost})`);
       if (filterResult.reason?.includes("support")) { weaknessBoost += 10; weaknessReasons.push(`Near support breakdown (+10)`); }
     }
 
-    // Relative weakness vs sector peers - only meaningful edge if stock is lagging ITS sector
-    // If everything scores 100 because the whole market is down, that's not signal
-    // Calculate average return of same-sector stocks and compare this stock against it
     const sectorPeers  = stockData.filter(d => d.stock.sector === stock.sector && d.stock.ticker !== stock.ticker && d.bars && d.bars.length >= 5);
     const sectorAvgRet = sectorPeers.length
       ? sectorPeers.reduce((s, d) => s + (d.bars[d.bars.length-1].c - d.bars[0].o) / d.bars[0].o, 0) / sectorPeers.length
       : stockReturn;
     const relToSector  = sectorAvgRet !== 0 ? (1 + stockReturn) / (1 + sectorAvgRet) : 1;
-    // Store on liveStock for use in scoring
-    // relToSector < 1.0 = underperforming peers = genuine relative weakness
 
-    // Gap check moved above checkAllFilters (GLD-1 fix)
-
-    // Anomaly detection - skip if price is zero or clearly bad data
     if (!price || price <= 0 || price > 100000) { logEvent("filter", `${stock.ticker} price anomaly: invalid price $${price} - skip`); continue; }
 
-    // Dynamic signals - calculated live from real price bars
     if (bars.length < 10) {
       logEvent("filter", `${stock.ticker} insufficient bars (${bars.length}) - skip`);
       if (!state._scoreDebug) state._scoreDebug = {};
@@ -1822,125 +1292,64 @@ async function runScan() {
     }
     const signals = await getDynamicSignals(stock.ticker, bars, intradayBars, stock._realIV || null);
 
-    // Earnings quality score
-    // eqScore already prefetched in parallel above
-
-    // VWAP - use intraday VWAP from signals (available before liveStock is built)
     const vwap = signals.intradayVWAP > 0 ? signals.intradayVWAP : calcVWAP(bars.slice(-5));
-    // 1D: VWAP as entry timing soft filter
-    // Bear call entries: prefer when price is BELOW VWAP (confirms bearish intraday bias)
-    // Bull put / debit put entries: prefer when price is below VWAP (momentum aligned)
-    // This is a soft filter - logged but doesn't hard-block
     if (vwap > 0) {
       const vwapBias = price < vwap ? "below_vwap" : "above_vwap";
       const vwapPct  = ((price - vwap) / vwap * 100).toFixed(1);
-      if (Math.abs(price - vwap) / vwap > 0.005) { // only log if >0.5% from VWAP
+      if (Math.abs(price - vwap) / vwap > 0.005) {
         logEvent("scan", `[VWAP] ${stock.ticker} $${price.toFixed(2)} vs VWAP $${vwap.toFixed(2)} (${vwapPct}%) - ${vwapBias}`);
       }
-      // V2.89: Hard gate for MR call entries below VWAP.
-      // If price is more than 1% below VWAP, the instrument is having a sustained down day.
-      // MR calls below VWAP = catching a falling knife, not buying a dip in an uptrend.
-      // Only applies when isMeanReversion is likely (RSI < 40 = probable MR path).
-      // Exception: first 30min of session (VWAP not yet reliable — needs price history).
-      const _etMinutes = (etHourNow % 1) * 60;
       const _sessionMinutes = etHourNow >= 9.5 ? (etHourNow - 9.5) * 60 : 0;
-      const _vwapReliable = _sessionMinutes >= 30; // VWAP needs 30min to stabilize
-      // optionType not yet declared at this point in the loop — use callScore proxy check instead.
-      // _callLikelyWins: if RSI < 40 we're on the MR call path; block if below VWAP.
-      // Full optionType check happens at execution gate below (~line 2860) as well.
+      const _vwapReliable = _sessionMinutes >= 30;
       const _callLikelyPath = signals.rsi !== null && signals.rsi < 40;
       if (_vwapReliable && _callLikelyPath && price < vwap * 0.99) {
-        logEvent("filter", `[VWAP] ${stock.ticker} MR call path blocked — price ${((price/vwap-1)*100).toFixed(1)}% below VWAP (down day, not dip)`);
+        logEvent("filter", `[VWAP] ${stock.ticker} MR call path blocked — price ${((price/vwap-1)*100).toFixed(1)}% below VWAP`);
         continue;
       }
-      // Bear call credit: strongly prefer below VWAP (market already weak intraday)
-      // putSetup/callSetup not yet initialized here -- creditCallModeActive already implies call direction
       const _putsOnBounceActive = rb.gates.putsOnBounceMode && rb.isBearRegime;
-      if (false && price > vwap * 1.03 && !_putsOnBounceActive) { // APEX: credit call mode removed
-        // Block credit calls when price is extended above VWAP — UNLESS puts_on_bounces is active
-        // (in that case, the above-VWAP condition is exactly what we want for a put fade entry)
-        logEvent("filter", `[VWAP] ${stock.ticker} bear call skipped - price ABOVE VWAP by ${vwapPct}% (wait for intraday weakness)`);
-        continue;
-      }
-      // Bounce mode: above VWAP is a PUT SIGNAL not a block — boost put score
       if (_putsOnBounceActive && price > vwap * 1.02) {
         const _bounceVwapPct = ((price - vwap) / vwap * 100).toFixed(1);
         const _bounceBoost   = price > vwap * 1.04 ? 15 : price > vwap * 1.02 ? 10 : 5;
         weaknessBoost += _bounceBoost;
-        weaknessReasons.push(`Bounce: $${_bounceVwapPct}% above VWAP — fade opportunity (+${_bounceBoost})`);
-        logEvent("filter", `[BOUNCE] ${stock.ticker} ${_bounceVwapPct}% above VWAP in puts_on_bounces mode — put fade boost +${_bounceBoost}`);
+        weaknessReasons.push(`Bounce: ${_bounceVwapPct}% above VWAP (+${_bounceBoost})`);
       }
     }
     if (vwap > 0 && price < vwap * 0.99) {
-      // Scale VWAP boost by how far below - more below = stronger signal
       const vwapGap   = (vwap - price) / vwap;
       const vwapPts   = vwapGap > 0.03 ? 10 : vwapGap > 0.01 ? 6 : 3;
-      logEvent("filter", `${stock.ticker} price $${price} below ${signals.intradayVWAP > 0 ? 'intraday' : 'daily'} VWAP $${vwap} (${(vwapGap*100).toFixed(1)}% gap) - put boost +${vwapPts}`);
+      logEvent("filter", `${stock.ticker} below VWAP (${(vwapGap*100).toFixed(1)}%) - put boost +${vwapPts}`);
       weaknessBoost += vwapPts;
       weaknessReasons.push(`Below VWAP ${(vwapGap*100).toFixed(1)}% (+${vwapPts})`);
     }
 
-    // Pre-market gap - logged for context, direction-aware penalty applied after optionType resolved
-    // Gap day context log (Richard/panel): explicit line when gap >4% so dashboard is readable at a glance
     if (preMarket && Math.abs(preMarket.gapPct || 0) > 4) {
-      logEvent("scan", `[GAP DAY] ${stock.ticker} ${(preMarket.gapPct > 0 ? 'gap-up' : 'gap-down')} ${Math.abs(preMarket.gapPct).toFixed(1)}% — bear calls need intraday confirmation`);
+      logEvent("scan", `[GAP DAY] ${stock.ticker} ${(preMarket.gapPct > 0 ? 'gap-up' : 'gap-down')} ${Math.abs(preMarket.gapPct).toFixed(1)}%`);
     }
     if (preMarket && Math.abs(preMarket.gapPct) > 3) {
       logEvent("filter", `${stock.ticker} pre-market gap ${preMarket.gapPct > 0 ? "+" : ""}${preMarket.gapPct}%`);
     }
 
-    // ── V2.95: GAP-DAY VWAP GATE ─────────────────────────────────────────
-    // Panel recommendation (7/7 unanimous): if underlying gapped >1.5% from
-    // prior close, CALL entries only permitted when price <= VWAP.
-    // Rationale: buying calls into a gap-up day means paying elevated IV at
-    // the top of the intraday range. QQQ +7.7% May 11 → options lost -26%
-    // overnight via IV crush even as underlying held. The MR thesis requires
-    // entering into weakness — above VWAP on a gap day is the opposite of that.
-    // ── V2.97: GAP-DAY DIRECTIONAL GATE ──────────────────────────────────────
-    // Trading panel finding: AM entries on gap-up days lose because RSI appears
-    // oversold from gap-digestion, not genuine selling. Every AM loss in APEX
-    // history was on a gap-up day with RSI crushed by digestion, not real selloff.
-    //
-    // Rules:
-    //   Gap UP > 2%: calls require price < VWAP (price must have genuinely pulled back)
-    //                calls require RSI < 32 (stricter than normal 38 — gap artifact RSI 33-38 blocked)
-    //                puts get +10 score boost (gap-up extended = fade opportunity)
-    //   Gap DOWN > 2%: puts require price > VWAP (symmetric)
-    //                  calls get +10 score boost (genuine oversold from gap-down)
-    //
-    // Also updates state._todayMaxGap for stagger gate dynamic cooldown.
     const _gapPctForGate  = parseFloat(preMarket?.gapPct || 0);
     const _absGap         = Math.abs(_gapPctForGate);
     const _priceAboveVWAP = vwap > 0 && price > vwap;
     const _priceBelowVWAP = vwap > 0 && price < vwap;
 
-    // Update today's max gap tracker (used by stagger gate and gate enforcement below)
     if (_absGap > Math.abs(state._todayMaxGap || 0)) {
       state._todayMaxGap       = _gapPctForGate;
       state._todayGapDirection = _gapPctForGate > 0 ? 'up' : 'down';
-      // Update gap-reversal day using TODAY's gap (not yesterday's close-to-close)
       if (_absGap >= 2.0) {
         state._gapReversalDay = true;
-        logEvent("filter", `[GAP-REVERSAL] Today's pre-market gap ${_gapPctForGate > 0 ? '+' : ''}${_gapPctForGate.toFixed(1)}% on ${stock.ticker} — gap-reversal mode ACTIVE. Calls require RSI < 32 + price < VWAP`);
+        logEvent("filter", `[GAP-REVERSAL] Today's pre-market gap ${_gapPctForGate > 0 ? '+' : ''}${_gapPctForGate.toFixed(1)}% — gap-reversal mode ACTIVE`);
       }
     }
 
-    // V2.98 FIX (Bug 2): Use the MAX of live gap and today's recorded max for gate enforcement.
-    // Scenario: QQQ gaps +2.1% at open (recorded in _todayMaxGap = 2.1).
-    //           By 9:24 AM, price pulls back — live gapPct reads +0.1%.
-    //           Without this fix: gate uses 0.1% → below threshold → gate silent.
-    //           With this fix: gate uses max(0.1, 2.1) = 2.1% → threshold exceeded → gate fires.
-    // Direction: preserve the direction of the max gap, not the live reading.
     const _todayMaxGapAbs  = Math.abs(state._todayMaxGap || 0);
     const _todayMaxGapDir  = state._todayGapDirection || 'up';
     const _effectiveGapAbs = Math.max(_absGap, _todayMaxGapAbs);
-    // If effective gap comes from _todayMaxGap (not live), reconstruct signed value
     const _effectiveGapPct = _effectiveGapAbs > _absGap
       ? (_todayMaxGapDir === 'up' ? _effectiveGapAbs : -_effectiveGapAbs)
       : _gapPctForGate;
 
-    // Per-stock gap gate flags — computed here, assigned to liveStock AFTER it's declared below
-    // Using temp variables because liveStock doesn't exist yet at this point in the loop.
     let _tmpGapCallBlocked  = false;
     let _tmpGapPutBlocked   = false;
     let _tmpGapCallBoost    = 0;
@@ -1948,49 +1357,37 @@ async function runScan() {
     let _tmpGapCallStrictRSI = false;
 
     if (_effectiveGapPct >= 2.0) {
-      // Gap-UP day — use effective gap (max of live and today's recorded max)
       const _gapSource = _effectiveGapAbs > _absGap ? `session-high ${_effectiveGapAbs.toFixed(1)}%` : `live ${_gapPctForGate.toFixed(1)}%`;
       if (_priceAboveVWAP) {
         _tmpGapCallBlocked = true;
-        logEvent("filter", `[GAP-VWAP] ${stock.ticker} gap-up (${_gapSource}) + price $${price.toFixed(2)} > VWAP $${vwap.toFixed(2)} — calls BLOCKED (gap not digested)`);
+        logEvent("filter", `[GAP-VWAP] ${stock.ticker} gap-up (${_gapSource}) + price > VWAP — calls BLOCKED`);
       } else {
         _tmpGapCallStrictRSI = true;
-        logEvent("filter", `[GAP-VWAP] ${stock.ticker} gap-up (${_gapSource}) but below VWAP — calls need RSI < 37 (strict gap mode)`);
+        logEvent("filter", `[GAP-VWAP] ${stock.ticker} gap-up (${_gapSource}) below VWAP — calls need RSI < 37`);
       }
       _tmpGapPutBoost = 10;
-      logEvent("filter", `[GAP-PUT-BOOST] ${stock.ticker} gap-up (${_gapSource}) — put score +10 (gap fade)`);
-
     } else if (_effectiveGapPct <= -2.0) {
-      // Gap-DOWN day (symmetric)
       const _gapSource = _effectiveGapAbs > _absGap ? `session-low ${_effectiveGapAbs.toFixed(1)}%` : `live ${_gapPctForGate.toFixed(1)}%`;
       if (_priceBelowVWAP) {
         _tmpGapPutBlocked = true;
-        logEvent("filter", `[GAP-VWAP] ${stock.ticker} gap-down (${_gapSource}) + price < VWAP — puts BLOCKED (gap not digested)`);
+        logEvent("filter", `[GAP-VWAP] ${stock.ticker} gap-down (${_gapSource}) + price < VWAP — puts BLOCKED`);
       }
       _tmpGapCallBoost = 10;
-      logEvent("filter", `[GAP-CALL-BOOST] ${stock.ticker} gap-down (${_gapSource}) — call score +10 (genuine oversold)`);
     }
-    // ── END GAP-DAY DIRECTIONAL GATE (flags assigned to liveStock below after declaration) ──
 
-    // Short interest - computed from prefetched bars
-    const shortSignal = { signal: "neutral", modifier: 0 }; // short interest disabled
-
-    // News sentiment - already prefetched
+    const shortSignal = { signal: "neutral", modifier: 0 };
     const newsSentiment = analyzeNews(newsArticles);
-
-    // Merge live signals into stock object - intraday signals override static seed values
-    // Attempt live beta fetch - use watchlist beta as fallback
     const liveBeta  = stock._liveBeta || stock.beta || 1.0;
 
     const liveStock = {
       ...stock,
-      price:         price,
-      rsi:           signals.rsi,       // intraday RSI -- display/timing only
-      dailyRsi:      (signals && signals.dailyRsi != null) ? parseFloat(signals.dailyRsi) : parseFloat(signals?.rsi || 50), // V2.94 FIX: typeof check replaced with null check + explicit parseFloat. typeof failed when dailyRsi arrived as string "99.6", causing fallback to intraday RSI (41.2) and bypassing the dailyRSI > 80 call block.
+      price,
+      rsi:           signals.rsi,
+      dailyRsi:      (signals && signals.dailyRsi != null) ? parseFloat(signals.dailyRsi) : parseFloat(signals?.rsi || 50),
       macd:          signals.macd,
-      momentum:      signals.momentum,  // now intraday momentum when available
+      momentum:      signals.momentum,
       ivr:           signals.ivr,
-      beta:          liveBeta,          // live beta overrides static watchlist value
+      beta:          liveBeta,
       newsSentiment: newsSentiment.signal,
       intradayVWAP:  signals.intradayVWAP || 0,
       atrPct:        signals.atrPct || null,
@@ -1999,98 +1396,61 @@ async function runScan() {
       ivPercentile:  signals.ivPercentile || 50,
     };
 
-    // Assign gap gate flags computed before liveStock was available
     liveStock._gapDayCallBlocked  = _tmpGapCallBlocked;
     liveStock._gapDayPutBlocked   = _tmpGapPutBlocked;
     liveStock._gapCallBoost       = _tmpGapCallBoost;
     liveStock._gapPutBoost        = _tmpGapPutBoost;
     liveStock._gapCallStrictRSI   = _tmpGapCallStrictRSI;
 
-    // V2.98 FIX E: record live daily RSI for position injection before checkExits
     if (liveStock.dailyRsi != null) {
       _liveDailyRsiMap[stock.ticker] = liveStock.dailyRsi;
     }
 
-    // V2.87 FIX: When intraday bars are insufficient (first 5 min of session or API failure),
-    // use the last known daily RSI from _rsiHistory as fallback instead of skipping or using 50.
-    // Yesterday's daily RSI is real data — XLE at 26.5 or QQQ at 81 is directionally valid
-    // at 9:30am. Much better than either skipping the instrument or fabricating RSI:50.
     if (signals.rsi === null || signals.dailyRsi === null) {
       const _rsiHist = (state._rsiHistory || {})[stock.ticker] || [];
       const _lastKnownRsi = _rsiHist.length > 0 ? _rsiHist[_rsiHist.length - 1].rsi : null;
       if (_lastKnownRsi !== null) {
-        // Patch null values with last known daily RSI — real data, not fabricated
         if (signals.rsi    === null) signals.rsi    = _lastKnownRsi;
         if (signals.dailyRsi === null) signals.dailyRsi = _lastKnownRsi;
-        logEvent("filter", `${stock.ticker} RSI fallback — using last known daily RSI ${_lastKnownRsi.toFixed(1)} (insufficient bars this scan)`);
+        logEvent("filter", `${stock.ticker} RSI fallback — using last known daily RSI ${_lastKnownRsi.toFixed(1)}`);
       } else {
-        // No history at all (first ever scan of this ticker) — skip rather than fabricate
-        logEvent("filter", `${stock.ticker} scan skipped — no RSI data and no history to fall back to`);
+        logEvent("filter", `${stock.ticker} scan skipped — no RSI data`);
         continue;
       }
     }
 
-    // Log intraday data quality -- show both RSI values for transparency
     if (signals.hasIntraday) {
-      logEvent("filter", `${stock.ticker} intraday RSI:${signals.rsi} dailyRSI:${signals.dailyRsi} MACD:${signals.macd} MOM:${signals.momentum} VWAP:$${signals.intradayVWAP?.toFixed(2)} VolPace:${signals.volPaceRatio?.toFixed(1)}x`);
-      // V2.81: oversold tracker now uses daily RSI -- panel fix (scan-level was seconds, not days)
-      // Daily RSI <=35 increments once per day via date-gated logic below
+      logEvent("filter", `${stock.ticker} intraday RSI:${signals.rsi} dailyRSI:${signals.dailyRsi} MACD:${signals.macd} MOM:${signals.momentum}`);
       updateOversoldTracker(stock.ticker, signals.dailyRsi);
 
-      // V2.81: RSI history tracker for velocity penalty (3-session window)
-      // Stores up to 5 daily RSI readings per ticker to detect fast RSI moves
       if (!state._rsiHistory) state._rsiHistory = {};
-      // Always keep as array of objects {date, rsi} -- never flatten to numbers in place
-      // Flatten only happens when passing to scoreIndexSetup (read-only, not stored)
       let rsiHist = state._rsiHistory[stock.ticker] || [];
-      // Migrate legacy flat number arrays from previous builds
-      if (rsiHist.length > 0 && typeof rsiHist[0] !== 'object') {
-        rsiHist = []; // reset malformed history -- will rebuild correctly
-      }
+      if (rsiHist.length > 0 && typeof rsiHist[0] !== 'object') rsiHist = [];
       const todayStr = getETTime().toISOString().slice(0, 10);
-      // Only add one reading per day
       if (rsiHist.length === 0 || rsiHist[rsiHist.length - 1]?.date !== todayStr) {
-        // V2.81 null guard: signals.dailyRsi can be undefined when bars are empty
         const dailyRsiVal = (signals && typeof signals.dailyRsi === "number") ? signals.dailyRsi : null;
         if (dailyRsiVal !== null) {
           rsiHist.push({ date: todayStr, rsi: dailyRsiVal });
-          if (rsiHist.length > 5) rsiHist.shift(); // keep last 5 days only
+          if (rsiHist.length > 5) rsiHist.shift();
         }
       }
-      // Store as objects -- scoreIndexSetup reads rsiHist.map(r => r.rsi) at call time
       state._rsiHistory[stock.ticker] = rsiHist;
 
-      // V2.89 FIX: MR stabilization gate overhaul.
-      // Previous logic counted consecutive scans with RSI <=35. This is BACKWARDS:
-      // instruments in sustained downtrends spend minutes/hours with RSI 14-20 and
-      // scored +25 (highest bonus in the system). "Stabilized 17 scans" = "declining for 170 seconds."
-      //
-      // Real mean reversion requires a BOUNCE, not continued oversold.
-      // New logic:
-      //   1. Track session low RSI for each instrument (reset at open via daily reset)
-      //   2. mrStabilized = session low RSI was <=30 AND current RSI has recovered to >=38
-      //   3. This means: "was oversold AND is now bouncing" — actual mean reversion signal
-      //   4. _intradayOversoldScans now tracks scans-since-bounce (for scoring context)
-      //      rather than scans-of-continued-oversold
       if (!state._intradayOversoldScans)  state._intradayOversoldScans  = {};
       if (!state._sessionLowRSI)          state._sessionLowRSI          = {};
       if (!state._sessionLowRSIAt)        state._sessionLowRSIAt        = {};
 
       const curRSI = signals.rsi;
-      // Track session minimum RSI
       if (curRSI !== null && curRSI !== undefined) {
         const prevLow = state._sessionLowRSI[stock.ticker] ?? 100;
         if (curRSI < prevLow) {
           state._sessionLowRSI[stock.ticker]   = curRSI;
           state._sessionLowRSIAt[stock.ticker] = Date.now();
         }
-        // Count scans since the instrument was last at its session low (bounce counter)
         const sessionLow = state._sessionLowRSI[stock.ticker] ?? 100;
         if (curRSI <= sessionLow + 2) {
-          // Still at/near session low — reset bounce counter
           state._intradayOversoldScans[stock.ticker] = 0;
         } else if (sessionLow <= 30 && curRSI >= 38) {
-          // Bouncing from oversold — increment bounce counter
           state._intradayOversoldScans[stock.ticker] = (state._intradayOversoldScans[stock.ticker] || 0) + 1;
         } else {
           state._intradayOversoldScans[stock.ticker] = 0;
@@ -2098,136 +1458,55 @@ async function runScan() {
       }
     }
 
-    // Time of day adjustment - panel fix (V2.82)
-    // Entry window: normal entries close at 3:00pm, MR calls allowed until 3:30pm
-    // Score gate: replace 0.80x multiplier with flat min score (cleaner, no cliff effect)
-    //   VIX 25-30 after 2:30pm: min score 85
-    //   VIX 30+   after 2:30pm: min score 90
-    // IV expansion into close makes last-hour options more expensive in high-VIX environments
-    // Execution algo: spread partial fill risk rises significantly after 3:30pm
-    // etHour/isLastHour/isLateDay use scan-level vars (etHourNow/isLastHour/isLateDay)
     const volDecline  = todayVol < avgVol * 0.7;
-
-    // Panel fix: flat min score replaces 0.80x multiplier
-    // timeOfDayMult kept at 1.0 - score penalty is now applied via timeOfDayMinScore gate below
-    const timeOfDayMult = 1.0; // no longer used as multiplier - kept for compatibility
-    // Entry window gate: block new entries after 3:30pm ET (2:30pm CT)
-    // Normal entries: 3:30pm cutoff — was incorrectly 3:00pm, fixed
-    // Mean reversion calls: also 3:30pm cutoff (capitulation has genuine overnight edge)
-    const entryWindowClosed = etHourNow >= 15.5; // scan-level etHourNow
-    // Afternoon minimum handled by evaluateEntry via rb.gates.afternoonMinActive
-
-    // - F7: Weekly trend filter -
-    // Fetch cached weekly trend (60-min cache, no extra API call)
+    const timeOfDayMult = 1.0;
+    const entryWindowClosed = etHourNow >= 15.5;
     const weeklyTrend = stock._weeklyTrend || { trend: 'neutral', above10wk: null };
 
-    // Score both call and put setups using live signals
-    // Index instruments (SPY/QQQ) use dedicated macro-driven scoring
+    // Score both put and call setups
     let callSetup, putSetup;
     if (stock.isIndex) {
       const agentMacro  = state._agentMacro || {};
-      // V2.81: use daily RSI for scoring thresholds (panel fix -- 1-min RSI is noise at regime level)
-      // intraday RSI (liveStock.rsi) retained for VWAP/timing logs only
-      // Overnight instrument bias — skip instrument if flagged
-      // Overnight instrumentBias SKIP removed — no all-day instrument blockers.
-      // The scoring + RSI/MACD gates decide entries. Overnight context is advisory only.
-
-      // V2.85: RSI split by direction.
-      // Puts score on dailyRSI — need to know if instrument is GENUINELY overbought on multi-day basis.
-      //   dailyRSI 90 = truly extended, valid fade. intraday RSI is noise for put thesis.
-      // Calls score on intradayRSI — MR calls triggered by intraday capitulation (RSI 22-35).
-      //   dailyRSI 90 on a day SPY dipped intraday was killing all call scores.
-      //   Directional calls also use intraday RSI for timing (45-58 healthy dip in bull trend).
-      const spyRSIPut   = liveStock.dailyRsi || liveStock.rsi || 50;  // daily for puts
-      const spyRSICall  = liveStock.rsi || liveStock.dailyRsi || 50;  // intraday for calls
-      const spyRSI      = spyRSIPut; // default for legacy refs below (put path uses this)
+      const spyRSIPut   = liveStock.dailyRsi || liveStock.rsi || 50;
+      const spyRSICall  = liveStock.rsi || liveStock.dailyRsi || 50;
       const spyMACD     = liveStock.macd || "neutral";
       const spyMomentum = liveStock.momentum || "steady";
-      // FIX B: breadth is now an object {breadthPct, advancing, declining, breadthStrength}
-      // Previous code returned NaN→50 because parseFloat({object}) = NaN
       const breadthVal  = typeof marketContext?.breadth === "number"
         ? marketContext.breadth * 100
         : marketContext?.breadth?.breadthPct ?? 50;
-      // Pass credit mode to scoreIndexSetup so RSI block and scoring adjust correctly
-      // Scoring uses authRegimeName (price-based, computed once at scan top)
-      // Agent signal/confidence/entryBias used for magnitude -- regime overridden by price classifier
-      const scoringMacroBase  = { ...(agentMacro || {}), regime: authRegimeName, spyGapUp: !!spyGapUp };
-      // APEX: no credit mode injection — scoring uses optionType directly
-      const scoringMacro = scoringMacroBase;
+      const scoringMacro  = { ...(agentMacro || {}), regime: authRegimeName, spyGapUp: !!spyGapUp };
       const putResult  = scoreIndexSetup(liveStock, "put",  spyRSIPut,  spyMACD, spyMomentum, breadthVal, state.vix, scoringMacro);
       const callResult = scoreIndexSetup(liveStock, "call", spyRSICall, spyMACD, spyMomentum, breadthVal, state.vix, scoringMacro);
 
-      // NAKED OPTIONS: use scoreIndexSetup directly for put and call.
-      // No spread-specific scoring — tradeType is always 'put' or 'call'.
-      putSetup  = { score: putResult.score,  reasons: putResult.reasons,  tradeType: "put",  isMeanReversion: false,
-                   _isOverboughtMRPut: !!putResult._isOverboughtMRPut };  // V2.99: propagate for gate exemptions
+      putSetup  = { score: putResult.score,  reasons: putResult.reasons,  tradeType: "put",  isMeanReversion: false, _isOverboughtMRPut: !!putResult._isOverboughtMRPut };
       callSetup = { score: callResult.score, reasons: callResult.reasons, tradeType: "call", isMeanReversion: false };
-      // Correlation suppression: QQQ correlated to SPY (0.90+)
-      // Panel decision (7/8): allow both simultaneously at score -80 same direction
-      // High conviction overrides correlation block - both signals are independently strong
-      // Keep block when: score <80 OR directions are opposite
-      // Combined heat cap enforced separately via heat % check
+
       if (stock.ticker === "QQQ") {
         const spyPutOpen  = state.positions.some(p => p.ticker === "SPY" && p.optionType === "put");
         const spyCallOpen = state.positions.some(p => p.ticker === "SPY" && p.optionType === "call");
-        // V2.98 PUT AUDIT: log raw put/call scores BEFORE correlation suppression.
-        // Previously these were silently suppressed to 30 — total blind spot on put scoring.
-        logEvent("filter", `[PUT-AUDIT] QQQ pre-corr scores: put=${putSetup.score} call=${callSetup.score} | dailyRSI:${(liveStock.dailyRsi||0).toFixed(0)} MACD:${liveStock.macd||'?'}`);
-        // Only suppress if score is below 80 - high conviction entries allowed through
-        // Same-direction suppression threshold lowered: 80 → MIN_SCORE_CREDIT (65).
-        // Old threshold (80) was correlation-cap thinking — raise the bar on the second position.
-        // Now heat cap governs concentration; QQQ just needs to clear the normal minimum independently.
-        // Opposite-direction suppression kept — SPY put + QQQ call is a contradictory thesis.
-        if (spyPutOpen  && putSetup.score  < MIN_SCORE_CREDIT) { putSetup.score  = Math.min(putSetup.score,  30); logEvent("filter", `QQQ corr-block: SPY put open, QQQ put score below minimum — suppressed`); }
-        if (spyCallOpen && callSetup.score < MIN_SCORE_CREDIT) { callSetup.score = Math.min(callSetup.score, 30); logEvent("filter", `QQQ corr-block: SPY call open, QQQ call score below minimum — suppressed`); }
-        // V2.99 PUT AUDIT: Opposite-direction suppression REMOVED.
-        // SPY call + QQQ put is a hedge, not a contradiction — overbought MR puts
-        // are specifically designed to fade a rally while a call holds a different thesis.
-        // Same-direction suppression above stays — two calls on correlated instruments
-        // is concentration risk. Opposite direction is a legitimate hedge.
-        // Lines removed: spyPutOpen→callSetup cap, spyCallOpen→putSetup cap
+        logEvent("filter", `[PUT-AUDIT] QQQ pre-corr scores: put=${putSetup.score} call=${callSetup.score} | dailyRSI:${(liveStock.dailyRsi||0).toFixed(0)}`);
+        if (spyPutOpen  && putSetup.score  < MIN_SCORE_CREDIT) { putSetup.score  = Math.min(putSetup.score,  30); logEvent("filter", `QQQ corr-block: SPY put open, QQQ put score below minimum`); }
+        if (spyCallOpen && callSetup.score < MIN_SCORE_CREDIT) { callSetup.score = Math.min(callSetup.score, 30); logEvent("filter", `QQQ corr-block: SPY call open, QQQ call score below minimum`); }
       }
-      // Symmetric: suppress SPY at <80 when QQQ is open in same direction
       if (stock.ticker === "SPY") {
         const qqqPutOpen  = state.positions.some(p => p.ticker === "QQQ" && p.optionType === "put");
         const qqqCallOpen = state.positions.some(p => p.ticker === "QQQ" && p.optionType === "call");
-        // V2.98 PUT AUDIT: log raw scores before suppression
-        logEvent("filter", `[PUT-AUDIT] SPY pre-corr scores: put=${putSetup.score} call=${callSetup.score} | dailyRSI:${(liveStock.dailyRsi||0).toFixed(0)} MACD:${liveStock.macd||'?'}`);
-        if (qqqPutOpen  && putSetup.score  < MIN_SCORE_CREDIT) { putSetup.score  = Math.min(putSetup.score,  30); logEvent("filter", `SPY corr-block: QQQ put open, SPY put score below minimum — suppressed`); }
-        if (qqqCallOpen && callSetup.score < MIN_SCORE_CREDIT) { callSetup.score = Math.min(callSetup.score, 30); logEvent("filter", `SPY corr-block: QQQ call open, SPY call score below minimum — suppressed`); }
-        // V2.99 PUT AUDIT: Opposite-direction suppression removed (see QQQ block above).
-        // qqqPutOpen→callSetup and qqqCallOpen→putSetup caps removed — hedge, not contradiction.
-        // Update scoreDebug after correlation suppression so tab shows actual scores
+        logEvent("filter", `[PUT-AUDIT] SPY pre-corr scores: put=${putSetup.score} call=${callSetup.score} | dailyRSI:${(liveStock.dailyRsi||0).toFixed(0)}`);
+        if (qqqPutOpen  && putSetup.score  < MIN_SCORE_CREDIT) { putSetup.score  = Math.min(putSetup.score,  30); logEvent("filter", `SPY corr-block: QQQ put open, SPY put score below minimum`); }
+        if (qqqCallOpen && callSetup.score < MIN_SCORE_CREDIT) { callSetup.score = Math.min(callSetup.score, 30); logEvent("filter", `SPY corr-block: QQQ call open, SPY call score below minimum`); }
         if (state._scoreDebug?.[stock.ticker]) {
           state._scoreDebug[stock.ticker].putScore  = putSetup.score;
           state._scoreDebug[stock.ticker].callScore = callSetup.score;
-          if (qqqPutOpen && putSetup.score <= 30) {
-            state._scoreDebug[stock.ticker].blocked = [...(state._scoreDebug[stock.ticker].blocked||[]), "corr-block: QQQ put open, SPY suppressed to 30"];
-          }
         }
       }
 
-      // - GLD entry gate - DXY + SPY momentum + VIX (panel-validated) -
       if (stock.ticker === "GLD") {
         const dxy5d       = marketContext.dxy || { trend: "neutral", change: 0 };
         const spy5dReturn = spyBars.length >= 5 ? (spyBars[spyBars.length-1].c - spyBars[0].c) / spyBars[0].c : 0;
-
-        // V2.97: gldMA20Live — fallback to intraday bars if state._gldBars not populated
-        const _gldBarsForMA = (state._gldBars?.length >= 20) ? state._gldBars
-                            : (bars?.length >= 20) ? bars : null;
-        const gldMA20Live   = _gldBarsForMA
-          ? _gldBarsForMA.slice(-20).reduce((s,b) => s + b.c, 0) / 20
-          : 0;
-
-        // V2.97: GLD 5-day price change — freefall gate (> -4% required)
-        const _gldBarsFor5d = (state._gldBars?.length >= 5) ? state._gldBars
-                            : (bars?.length >= 5) ? bars : null;
-        const gld5dReturn   = _gldBarsFor5d
-          ? (_gldBarsFor5d[_gldBarsFor5d.length-1].c - _gldBarsFor5d[_gldBarsFor5d.length-5].c)
-            / _gldBarsFor5d[_gldBarsFor5d.length-5].c
-          : null;
-
-        // V2.98: args for isGLDEntryAllowed
+        const _gldBarsForMA = (state._gldBars?.length >= 20) ? state._gldBars : (bars?.length >= 20) ? bars : null;
+        const gldMA20Live   = _gldBarsForMA ? _gldBarsForMA.slice(-20).reduce((s,b) => s + b.c, 0) / 20 : 0;
+        const _gldBarsFor5d = (state._gldBars?.length >= 5) ? state._gldBars : (bars?.length >= 5) ? bars : null;
+        const gld5dReturn   = _gldBarsFor5d ? (_gldBarsFor5d[_gldBarsFor5d.length-1].c - _gldBarsFor5d[_gldBarsFor5d.length-5].c) / _gldBarsFor5d[_gldBarsFor5d.length-5].c : null;
         const _gldSessionMins = _sessionMinsNow;
         const _gldMomentum    = liveStock.momentum || signals.momentum || 'steady';
         const _gldDailyRSI    = parseFloat(liveStock.dailyRsi || liveStock.dailyRSI || 0) || null;
@@ -2235,80 +1514,33 @@ async function runScan() {
         const _gldMacdNow     = (liveStock.macd || signals.macd || '').toLowerCase();
         const _gldVWAP        = signals.intradayVWAP || 0;
 
-        // V2.98 GATE 7: Track MACD crossover timestamp
-        // When GLD MACD transitions TO bullish crossover, stamp the time.
-        // Reset if MACD is no longer bullish (crossed back bearish).
         if (_gldMacdNow.includes('bullish') && !state._gldMacdWasBullish) {
           state._gldMacdCrossoverAt  = Date.now();
           state._gldMacdWasBullish   = true;
-          logEvent('filter', `[GLD MACD] Bullish crossover detected — stamping recency timer`);
         } else if (!_gldMacdNow.includes('bullish')) {
           state._gldMacdWasBullish   = false;
-          // Don't reset _gldMacdCrossoverAt — keep it so we can measure staleness
         }
-        const _gldMacdCrossoverDays = state._gldMacdCrossoverAt
-          ? (Date.now() - state._gldMacdCrossoverAt) / 86400000
-          : null; // null = never tracked = no block
+        const _gldMacdCrossoverDays = state._gldMacdCrossoverAt ? (Date.now() - state._gldMacdCrossoverAt) / 86400000 : null;
 
-        const gldCallGate = isGLDEntryAllowed("call", dxy5d, spy5dReturn, state.vix, liveStock.rsi, liveStock.price || 0, gldMA20Live,
-                                              _gldSessionMins, _gldMomentum, gld5dReturn, _gldDailyRSI,
-                                              _gldMacdCrossoverDays, _gldVolPace, _gldVWAP, gldMA20Live);
-        // Pass tradeIntent type so GLD gate can bypass RSI check for credit puts
-        // In bear regime, credit mode routes to credit_call (sell calls above market)
-        // In choppy/bull, credit mode routes to credit_put (sell puts below market)
-        // APEX: GLD uses put/call directly
-        // Fix: use best available score to determine GLD credit intent
-        // In bear trend, creditCallModeActive → check callSetup.score; in bull/choppy → putSetup.score
+        const gldCallGate = isGLDEntryAllowed("call", dxy5d, spy5dReturn, state.vix, liveStock.rsi, liveStock.price || 0, gldMA20Live, _gldSessionMins, _gldMomentum, gld5dReturn, _gldDailyRSI, _gldMacdCrossoverDays, _gldVolPace, _gldVWAP, gldMA20Live);
         const _gldBestScore   = isBearTrend ? callSetup.score : putSetup.score;
         const _gldCreditMode  = creditCallModeActive || creditModeActive;
-        // Bug12 FIX: was using MIN_SCORE (70) — GLD credit puts at score 65-69 were misclassified as debit_put
-        // and blocked by DXY gate unnecessarily. Use MIN_SCORE_CREDIT (65) for correct classification.
-        const _gldIntentType  = (_gldCreditMode && _gldBestScore >= MIN_SCORE_CREDIT) ? _gldCreditType : "debit_put";
-        const gldPutGate  = isGLDEntryAllowed("put",  dxy5d, spy5dReturn, state.vix, liveStock.rsi, liveStock.price || 0, gldMA20Live,
-                                              _gldSessionMins, _gldMomentum, gld5dReturn, _gldDailyRSI,
-                                              _gldMacdCrossoverDays, _gldVolPace, _gldVWAP, gldMA20Live);
+        const _gldIntentType  = (_gldCreditMode && _gldBestScore >= MIN_SCORE_CREDIT) ? "credit_put" : "debit_put";
+        const gldPutGate  = isGLDEntryAllowed("put",  dxy5d, spy5dReturn, state.vix, liveStock.rsi, liveStock.price || 0, gldMA20Live, _gldSessionMins, _gldMomentum, gld5dReturn, _gldDailyRSI, _gldMacdCrossoverDays, _gldVolPace, _gldVWAP, gldMA20Live);
         if (!gldCallGate.allowed) { callSetup.score = 0; logEvent("filter", gldCallGate.reason); }
         if (!gldPutGate.allowed)  { putSetup.score  = 0; logEvent("filter", gldPutGate.reason);  }
-
-        // V2.98 GATE 2 soft: VIX > 32 = IV too expensive, penalize call score
-        if (callSetup.score > 0 && state.vix > 32) {
-          callSetup.score = Math.max(0, callSetup.score - 10);
-          callSetup.reasons.push(`VIX ${state.vix.toFixed(1)} > 32 — IV expensive, call premium inflated (-10)`);
-          logEvent('filter', `[GLD VIX-HIGH] VIX ${state.vix.toFixed(1)} > 32 — call score -10 (buying inflated premium)`);
-        }
-
-        // V2.98 GATE 8 soft: VolPace modifier — institutional buying signal
+        if (callSetup.score > 0 && state.vix > 32) { callSetup.score = Math.max(0, callSetup.score - 10); }
         if (callSetup.score > 0) {
-          if (_gldVolPace < 0.7) {
-            callSetup.score = Math.max(0, callSetup.score - 10);
-            callSetup.reasons.push(`VolPace ${_gldVolPace.toFixed(1)}x < 0.7 — no institutional buying (-10)`);
-            logEvent('filter', `[GLD VOL] VolPace ${_gldVolPace.toFixed(1)}x — below 0.7, institutions not stepping in, score -10`);
-          } else if (_gldVolPace > 1.2) {
-            callSetup.score += 10;
-            callSetup.reasons.push(`VolPace ${_gldVolPace.toFixed(1)}x > 1.2 — institutional accumulation (+10)`);
-            logEvent('filter', `[GLD VOL] VolPace ${_gldVolPace.toFixed(1)}x — above 1.2, institutional buying confirmed, score +10`);
-          }
+          if (_gldVolPace < 0.7) { callSetup.score = Math.max(0, callSetup.score - 10); }
+          else if (_gldVolPace > 1.2) { callSetup.score += 10; }
         }
-
-        if (callSetup.score > 0 && callSetup.score < 85) { callSetup.score = 0; logEvent("filter", `GLD call score ${callSetup.score} below 85 minimum - hedge instrument requires high conviction (raised from 75 after pattern analysis)`); }
+        if (callSetup.score > 0 && callSetup.score < 85) { callSetup.score = 0; logEvent("filter", `GLD call score ${callSetup.score} below 85 minimum`); }
         if (putSetup.score > 0  && putSetup.score  < 75) { putSetup.score  = 0; logEvent("filter", `GLD put score ${putSetup.score} below 75 minimum`); }
-
-        // V2.97 NOTE: old daily trend gate removed — was blocking valid oversold entries.
-        // DailyRSI < 35 + below MA20 IS the correct GLD call setup (washed out and turning).
-        // The isGLDEntryAllowed() now handles this correctly:
-        //   - freefall gate: blocks when 5d trend < -4% (accelerating decline)
-        //   - dailyRSI gate: blocks neutral zone 32-55, allows < 32 (oversold) or >= 55 (bullish)
-        //   - momentum gate: blocks MOM:bearish (active decline)
-        // GLD put uptrend block still valid — keep:
         const _gldAboveMA20 = gldMA20Live > 0 && (liveStock.price || price) > gldMA20Live;
         const _gldDailyRsi  = _gldDailyRSI || parseFloat(liveStock.dailyRsi || 50);
-        if (putSetup.score > 0 && _gldDailyRsi > 65 && _gldAboveMA20) {
-          putSetup.score = 0;
-          logEvent("filter", `GLD put blocked — dailyRSI ${_gldDailyRsi.toFixed(1)} > 65 AND above 20MA — daily uptrend intact`);
-        }
+        if (putSetup.score > 0 && _gldDailyRsi > 65 && _gldAboveMA20) { putSetup.score = 0; logEvent("filter", `GLD put blocked — dailyRSI ${_gldDailyRsi.toFixed(1)} > 65 AND above 20MA`); }
       }
 
-      // - TLT entry gate - SPY 50MA + TLT own signals -
       if (stock.ticker === "TLT") {
         const spy5dReturn = spyBars.length >= 5 ? (spyBars[spyBars.length-1].c - spyBars[0].c) / spyBars[0].c : 0;
         const spyPriceNow = spyBars.length ? spyBars[spyBars.length-1].c : 0;
@@ -2320,55 +1552,21 @@ async function runScan() {
         if (!tltPutGate.allowed)  { putSetup.score  = 0; logEvent("filter", tltPutGate.reason);  }
       }
 
-      // - XLE entry gate - oil trend + RSI extremes -
       if (stock.ticker === "XLE") {
-        const xleMA20Live = (state._xleBars && state._xleBars.length >= 20)
-          ? state._xleBars.slice(-20).reduce((s,b) => s + b.c, 0) / 20
-          : 0;
+        const xleMA20Live = (state._xleBars && state._xleBars.length >= 20) ? state._xleBars.slice(-20).reduce((s,b) => s + b.c, 0) / 20 : 0;
         const xleCallGate = isXLEEntryAllowed("call", liveStock.rsi, liveStock.momentum, state.vix, liveStock.price || 0, xleMA20Live, liveStock.dailyRsi);
-        const xlePutGate  = isXLEEntryAllowed("put",  liveStock.rsi, liveStock.momentum, state.vix, liveStock.price || 0, xleMA20Live, liveStock.dailyRsi); // panel M4: passes dailyRsi for dual-condition block
+        const xlePutGate  = isXLEEntryAllowed("put",  liveStock.rsi, liveStock.momentum, state.vix, liveStock.price || 0, xleMA20Live, liveStock.dailyRsi);
         if (!xleCallGate.allowed) { callSetup.score = 0; logEvent("filter", xleCallGate.reason); }
         if (!xlePutGate.allowed)  { putSetup.score  = 0; logEvent("filter", xlePutGate.reason);  }
-
-        // V2.94 Change 4: XLE dailyRSI gate for calls.
-        // Daily RSI must confirm oversold (< 45) for a call entry to be valid.
-        // Intraday RSI can be oversold while daily trend is still neutral/overbought.
-        // XLE at intraday RSI 29 but dailyRSI 35 is a valid setup (confirmed multi-day weakness).
-        // XLE at intraday RSI 29 but dailyRSI 55 is NOT — intraday noise in a neutral trend.
-        // Today's loss: XLE entered at intraday RSI 31.8, dailyRSI 31.8 — both confirmed.
-        // Gate kept for future protection when dailyRSI diverges from intraday.
         const _xleDailyRsi = parseFloat(liveStock.dailyRsi || 50);
-        if (callSetup.score > 0 && _xleDailyRsi >= 45) {
-          callSetup.score = 0;
-          logEvent("filter", `XLE call blocked — dailyRSI ${_xleDailyRsi.toFixed(1)} not oversold daily (need < 45 for confirmed MR setup)`);
-        }
-
-        // V2.94 Change 5: XLE gap-down > 3% call block.
-        // Entering a call into a gap-down on a sector ETF is momentum chasing, not MR.
-        // A gap-down means sellers are aggressive overnight — options premium is distorted
-        // by elevated IV from the gap move, and the bounce (if it comes) may not
-        // recover the option cost before IV compresses.
-        // XLE today: -3.45% gap, entered call, lost -$174. This gate would have blocked it.
+        if (callSetup.score > 0 && _xleDailyRsi >= 45) { callSetup.score = 0; logEvent("filter", `XLE call blocked — dailyRSI ${_xleDailyRsi.toFixed(1)} not oversold`); }
         const _xleGap = parseFloat(preMarket?.gapPct || 0);
-        if (callSetup.score > 0 && _xleGap < -3) {
-          callSetup.score = 0;
-          logEvent("filter", `XLE call blocked — pre-market gap ${_xleGap.toFixed(1)}% (gap-down > 3% = distorted IV, not MR entry)`);
-        }
-
-        // XLE is NOT correlated with SPY/QQQ group - independent oil driver
+        if (callSetup.score > 0 && _xleGap < -3) { callSetup.score = 0; logEvent("filter", `XLE call blocked — gap ${_xleGap.toFixed(1)}%`); }
       }
 
-      // IYR removed from watchlist 5/8/2026 — 0 wins, -$702 total losses.
-      // Dead code block kept as tombstone but IYR will never appear in stock loop.
-
-      // P3: HYG (High Yield Bonds) — credit stress entry gates
       if (stock.ticker === "HYG") {
-        // V2.87 FIX 8: Early HYG minimum premium screen before chain fetch.
-        // HYG options at VIX < 30 are structurally below the $0.50 minimum premium —
-        // bond ETF IV is too low. Skip entirely at VIX < 30 to avoid wasting the chain fetch.
-        // Heuristic: HYG $80 × 10% IV × √(38/365) × 0.6 ≈ $0.14 at VIX 27. Always below floor.
         if ((state.vix || 20) < 30) {
-          logEvent("filter", `HYG skipped — VIX ${(state.vix||20).toFixed(1)} < 30, HYG options structurally below $0.50 minimum (bond ETF low IV)`);
+          logEvent("filter", `HYG skipped — VIX ${(state.vix||20).toFixed(1)} < 30`);
           callSetup.score = 0; putSetup.score = 0;
         } else {
           const hygRelStr   = state._sectorRelStr?.HYG?.relStr || 0;
@@ -2381,399 +1579,184 @@ async function runScan() {
         }
       }
     } else {
-      // Individual stocks: use scorePutSetup/scoreCallSetup
-      // scoreSetup removed - scoreIndexSetup handles SPY/QQQ, scorePutSetup handles individual stocks
       callSetup = { score: 0, reasons: ["Individual stocks disabled"], tradeType: "none" };
       putSetup  = scorePutSetup(liveStock, relStrength, signals.adx, todayVol, avgVol, state.vix);
     }
 
-    // Fix 1: Weekly trend external adjustment REMOVED — double-counting with scoreIndexSetup.
-    // scoreIndexSetup already applies trendCtx bonuses (+12/-10) and above10wk (+5/-5).
-    // Keeping only the _weeklyTrend assignment so scoreIndexSetup can read it.
-    if (weeklyTrend.above10wk !== null) {
-      liveStock._weeklyTrend = weeklyTrend;
-    }
+    if (weeklyTrend.above10wk !== null) liveStock._weeklyTrend = weeklyTrend;
 
-    // Track relative weakness points to enforce group cap below
     let relWeaknessPoints = 0;
-
-    // Volume scoring - applies to BOTH puts and calls, direction-aware
     const volRatio = avgVol > 0 ? todayVol / avgVol : 1;
-
-    // Call volume scoring - accumulation days boost calls, distribution days penalize
     const priceAboveOpen = liveStock.price > (liveStock.intradayOpen || liveStock.price);
+
     if (callSetup.score > 0) {
-      if (volRatio > 1.5 && priceAboveOpen) {
-        callSetup.score = Math.min(100, callSetup.score + 10);
-        callSetup.reasons.push(`High volume UP day - accumulation signal (+10)`);
-      } else if (volRatio < 0.7 && !priceAboveOpen) {
-        callSetup.score = Math.min(100, callSetup.score + 8);
-        callSetup.reasons.push(`Low volume pullback - healthy dip, call entry (+8)`);
-      } else if (volRatio > 1.5 && !priceAboveOpen) {
-        callSetup.score = Math.max(0, callSetup.score - 8);
-        callSetup.reasons.push(`High volume DOWN day - distribution, wrong for calls (-8)`);
-      }
+      if (volRatio > 1.5 && priceAboveOpen) { callSetup.score = Math.min(100, callSetup.score + 10); callSetup.reasons.push(`High volume UP day (+10)`); }
+      else if (volRatio < 0.7 && !priceAboveOpen) { callSetup.score = Math.min(100, callSetup.score + 8); callSetup.reasons.push(`Low volume pullback (+8)`); }
+      else if (volRatio > 1.5 && !priceAboveOpen) { callSetup.score = Math.max(0, callSetup.score - 8); callSetup.reasons.push(`High volume DOWN day (-8)`); }
     }
 
-    // Put volume context - high volume confirms distribution, but capitulation
-    // (extreme high volume) can signal reversal. Use nuanced scoring.
-    if (volRatio > 2.0) {
-      // Extreme volume - could be capitulation (reversal) or panic (continuation)
-      // Slight put boost but less than moderate high volume
-      putSetup.score = Math.min(100, putSetup.score + 5);
-      putSetup.reasons.push(`Extreme volume - possible capitulation (+5)`);
-    } else if (volRatio > 1.3) {
-      // Above average volume - confirms selling pressure
-      putSetup.score = Math.min(100, putSetup.score + 8);
-      putSetup.reasons.push(`High volume confirms selling pressure (+8)`);
-    } else if (volRatio < 0.6) {
-      // Low volume selloff - exempt Regime B: low vol pullbacks are normal in bear trends
+    if (volRatio > 2.0) { putSetup.score = Math.min(100, putSetup.score + 5); putSetup.reasons.push(`Extreme volume (+5)`); }
+    else if (volRatio > 1.3) { putSetup.score = Math.min(100, putSetup.score + 8); putSetup.reasons.push(`High volume confirms selling (+8)`); }
+    else if (volRatio < 0.6) {
       const inBearForVol = ["B","C"].includes(state._regimeClass);
-      if (!inBearForVol) {
-        putSetup.score = Math.max(0, putSetup.score - 3);
-        putSetup.reasons.push(`Low volume selloff (-3)`);
-      } else {
-        putSetup.reasons.push(`Low volume selloff - Regime B exempt (+0)`);
-      }
+      if (!inBearForVol) { putSetup.score = Math.max(0, putSetup.score - 3); putSetup.reasons.push(`Low volume selloff (-3)`); }
     }
 
-    // V2.82: time of day multiplier replaced by flat min score gate (see timeOfDayMinScore above)
-    // Scores are no longer modified - the gate is applied in finalMinScore below
-
-    // Unusual options activity boost - high vol/OI ratio means big money is moving
-    // This uses today's options volume vs open interest on the selected contract
-    // Applied after contract selection since volOIRatio comes from executeTrade context
-    // Note: logged in executeTrade when volOIRatio > 3
-
-    // SPY recovery suppresses puts - market bouncing = puts fighting the tape
-    // BYPASS: when agent says puts_on_bounces, the gap-up IS the entry signal - don't penalize
-    // The agent already assessed the bounce and determined it's a fade opportunity
-    // BYPASS: credit puts - SPY recovering is GOOD for credit puts (short put moves further OTM)
-    //   selling premium above the market, recovery = more cushion, not a headwind
     const putsOnBouncesBias  = (state._agentMacro || {}).entryBias === "puts_on_bounces";
-    const bearRegimeRecovery = ["trending_bear","breakdown"].includes(state._regimeClass === "B" ? "trending_bear" : state._regimeClass === "C" ? "breakdown" : "other");
-    const isCreditPutMode    = creditModeActive; // credit put = sell premium, recovery = good
-    if (spyRecovering && !(putsOnBouncesBias && bearRegimeRecovery) && !isCreditPutMode) {
+    const isCreditPutMode    = creditModeActive;
+    if (spyRecovering && !(putsOnBouncesBias) && !isCreditPutMode) {
       putSetup.score = Math.max(0, putSetup.score - 20);
-      putSetup.reasons.push("SPY recovering - tape fighting puts (-20)");
-    } else if (spyRecovering && putsOnBouncesBias) {
-      putSetup.reasons.push("SPY recovering but agent says puts_on_bounces - bounce fade thesis (+0)");
-    } else if (spyRecovering && isCreditPutMode) {
-      putSetup.reasons.push("SPY recovering - credit put benefits (short put moves further OTM) (+0)");
+      putSetup.reasons.push("SPY recovering (-20)");
     }
 
-    // Relative sector weakness - real edge vs just broad market selloff
-    // GROUP CAP: SPY weakness + sector peer weakness + weekly MA together capped at 25pts
-    // Prevents broad selloffs from adding 38+ pts of undifferentiated market weakness
     const SPY_WEAKNESS_GROUP_CAP = 25;
-
     if (relToSector < 0.97) {
       const relBoost = relToSector < 0.93 ? 15 : 8;
       const cappedRelBoost = Math.min(relBoost, Math.max(0, SPY_WEAKNESS_GROUP_CAP - relWeaknessPoints));
       if (cappedRelBoost > 0) {
         putSetup.score = Math.min(95, putSetup.score + cappedRelBoost);
-        putSetup.reasons.push(`Weak vs sector peers: ${((relToSector-1)*100).toFixed(1)}% (+${cappedRelBoost})`);
+        putSetup.reasons.push(`Weak vs sector peers (+${cappedRelBoost})`);
         relWeaknessPoints += cappedRelBoost;
-      } else {
-        putSetup.reasons.push(`Weak vs sector peers: ${((relToSector-1)*100).toFixed(1)}% (+0 - group cap reached)`);
       }
     } else if (relToSector > 1.03) {
       putSetup.score = Math.max(0, putSetup.score - 10);
-      putSetup.reasons.push(`Outperforming sector peers (+${((relToSector-1)*100).toFixed(1)}%) - sector-wide move (-10)`);
+      putSetup.reasons.push(`Outperforming sector peers (-10)`);
     }
 
-    // Volume pace boost - if running 2x+ expected volume, strong signal either direction
     if (signals.volPaceRatio > 2.0 && signals.hasIntraday) {
-      putSetup.score  = Math.min(100, putSetup.score + 8);
-      putSetup.reasons.push(`Volume running ${signals.volPaceRatio.toFixed(1)}x pace (+8)`);
-      callSetup.score = Math.min(100, callSetup.score + 8);
-      callSetup.reasons.push(`Volume running ${signals.volPaceRatio.toFixed(1)}x pace (+8)`);
+      putSetup.score  = Math.min(100, putSetup.score + 8); putSetup.reasons.push(`Volume ${signals.volPaceRatio.toFixed(1)}x pace (+8)`);
+      callSetup.score = Math.min(100, callSetup.score + 8); callSetup.reasons.push(`Volume ${signals.volPaceRatio.toFixed(1)}x pace (+8)`);
     } else if (signals.volPaceRatio < 0.4 && signals.hasIntraday) {
-      // Quiet tape - reduce conviction on both sides
       putSetup.score  = Math.max(0, putSetup.score - 5);
       callSetup.score = Math.max(0, callSetup.score - 5);
     }
 
-    // Apply weakness boost to puts - filters that block calls become put signals
     if (weaknessBoost > 0) {
-      // Hard cap at MAX_WEAKNESS_BOOST (20pts) - prevents market-wide selloffs
-      // from pushing every stock to 100 with no differentiation
-      // Raw boost can be 5-35 (sector ETF + VWAP + support) - always capped to 20
       const cappedBoost = Math.min(weaknessBoost, MAX_WEAKNESS_BOOST);
       putSetup.score  = Math.min(100, putSetup.score + cappedBoost);
       putSetup.reasons.push(...weaknessReasons);
       callSetup.score = Math.max(0, callSetup.score - cappedBoost);
-      logEvent("filter", `${stock.ticker} weakness signals - put boost +${cappedBoost}${cappedBoost < weaknessBoost ? " (capped from +" + weaknessBoost + ")" : ""}`);
+      logEvent("filter", `${stock.ticker} weakness signals - put boost +${cappedBoost}`);
     }
 
-    // VIX boost for puts - scaled, not flat
-    // Flat +10 for all stocks when VIX>30 is undifferentiated - every stock gets same boost
-    // Use a smaller base boost (max +5) so individual stock signals still matter
     if (state.vix >= 25) {
       const vixPutBoost = state.vix >= 35 ? 5 : state.vix >= 30 ? 3 : 2;
       putSetup.score = Math.min(100, putSetup.score + vixPutBoost);
       putSetup.reasons.push(`VIX ${state.vix.toFixed(1)} environment (+${vixPutBoost})`);
     }
 
-    // Apply stock-level news modifier
     callSetup.score = Math.min(100, Math.max(0, callSetup.score + (newsSentiment.modifier || 0)));
     putSetup.score  = Math.min(100, Math.max(0, putSetup.score  - (newsSentiment.modifier || 0)));
+    if (newsSentiment.signal !== "neutral") logEvent("news", `${stock.ticker} news: ${newsSentiment.signal} | modifier: ${newsSentiment.modifier > 0 ? "+" : ""}${newsSentiment.modifier}`);
 
-    if (newsSentiment.signal !== "neutral") {
-      logEvent("news", `${stock.ticker} news: ${newsSentiment.signal} | modifier: ${newsSentiment.modifier > 0 ? "+" : ""}${newsSentiment.modifier}`);
-    }
-
-    // Apply analyst modifier
     if (analystData.modifier !== 0) {
       callSetup.score = Math.min(100, Math.max(0, callSetup.score + analystData.modifier));
       putSetup.score  = Math.min(100, Math.max(0, putSetup.score  - analystData.modifier));
-      if (analystData.signal !== "neutral") {
-        logEvent("news", `${stock.ticker} analyst: ${analystData.signal} | ${analystData.upgrades.length} upgrades / ${analystData.downgrades.length} downgrades`);
-      }
     }
 
-    // Earnings quality modifier
-    if (eqScore.signal === "positive") { callSetup.score = Math.min(100, callSetup.score + 8);  callSetup.reasons.push("Positive earnings history (+8)"); }
-    if (eqScore.signal === "negative") { callSetup.score = Math.max(0,   callSetup.score - 8);  putSetup.score = Math.min(100, putSetup.score + 8); }
+    if (eqScore.signal === "positive") { callSetup.score = Math.min(100, callSetup.score + 8); callSetup.reasons.push("Positive earnings history (+8)"); }
+    if (eqScore.signal === "negative") { callSetup.score = Math.max(0, callSetup.score - 8); putSetup.score = Math.min(100, putSetup.score + 8); }
 
-    // Factor model cross-check - use as secondary confirmation
     const factorResult = calcFactorScore(liveStock, signals, relStrength, newsSentiment.modifier, analystData.modifier);
     if (factorResult.total >= 70 && callSetup.score >= MIN_SCORE) {
       callSetup.score = Math.min(100, callSetup.score + 5);
       callSetup.reasons.push(`Factor model: ${factorResult.total}/100 (+5)`);
     }
 
-    // Apply short squeeze signal
-    if (shortSignal.modifier > 0) {
-      callSetup.score = Math.min(100, Math.max(0, callSetup.score + shortSignal.modifier));
-      logEvent("filter", `${stock.ticker} squeeze potential: ${shortSignal.squeezeRisk} (+${shortSignal.modifier})`);
-    }
+    if (shortSignal.modifier > 0) callSetup.score = Math.min(100, Math.max(0, callSetup.score + shortSignal.modifier));
 
-    // Apply macro calendar modifier
     const calMod = (marketContext.macroCalendar || {}).modifier || 0;
-    if (calMod !== 0) {
-      // FOMC/macro calendar reduces calls only - puts are unaffected
-      // FOMC day weakness = valid put opportunity, don't suppress it
-      callSetup.score = Math.min(100, Math.max(0, callSetup.score + calMod));
-      // puts: no penalty on macro event days - market weakness is the signal
-    }
+    if (calMod !== 0) callSetup.score = Math.min(100, Math.max(0, callSetup.score + calMod));
 
-    // Apply global market signal modifier
-    const globalMod   = (marketContext.globalMarket || {}).modifier || 0;
+    const globalMod = (marketContext.globalMarket || {}).modifier || 0;
     if (globalMod !== 0) {
       callSetup.score = Math.min(100, Math.max(0, callSetup.score + globalMod));
       putSetup.score  = Math.min(100, Math.max(0, putSetup.score  - globalMod));
     }
 
-    // P1 FIX: External getRegimeModifier removed — scoreIndexSetup handles regime internally.
-    // Double-counting was: +20 (internal) + 15 (external) = +35 for puts in Regime B.
-    // Regime bonuses now live exclusively inside scoreIndexSetup where they belong.
-    // regimeMod kept for MR bypass logic below (checks if regime is bear before applying).
-    const regimeMod   = getRegimeModifier(marketContext.regime?.regime || "neutral", "call");
-    // (not applied to scores — informational only for MR bypass below)
+    const regimeMod = getRegimeModifier(marketContext.regime?.regime || "neutral", "call");
 
-    // Mean reversion call scoring - runs AFTER regime so bypass works correctly
-    // MR fires here so isMeanReversion flag is set before regime penalty check below
     const mrSetup = scoreMeanReversionCall(liveStock, relStrength, signals.adx, bars, state.vix);
-    // MR call gates — two blocking conditions:
-    // 1. mrBearishTrend: dailyRSI < 40 AND MACD bearish = trending crash, not intraday capitulation.
-    //    V2.87: threshold tightened from 35→40. XLE at 26.5 daily RSI was blocked at 35 — correct.
-    //    But instruments at 37-40 daily RSI with bearish MACD are also in trend crash mode.
-    //    Genuine MR: intraday RSI compressed BUT daily trend still intact (dailyRSI 45+).
-    // 2. mrDailyOverbought: dailyRSI > 75 = already extended daily.
-    //    SPY/QQQ at dailyRSI 90+ with intraday dip at 37 → score 75 MR call.
-    //    But the daily trend is stretched — the "oversold" intraday signal is noise within
-    //    a strong daily uptrend. MR calls require the stock to actually be oversold on some timeframe.
-    //    If daily RSI is 90, the stock is overbought daily — entering a MR call here is
-    //    purely momentum chasing, not mean reversion. Block when dailyRSI > 75.
     const _mrDailyRsi       = liveStock.dailyRsi || 50;
-    // V2.89: Tightened mrBearishTrend gate.
-    // Old: required BOTH daily RSI < 40 AND bearish MACD (too narrow — missed XLE today)
-    // New: block MR calls when daily RSI < 45 OR (daily RSI < 50 AND bearish MACD)
-    // Rationale: daily RSI < 45 means the instrument has been weak for multiple days.
-    // Entering MR calls on multi-day downtrends is not mean reversion — it's catching knives.
-    // A single bad intraday session in an otherwise healthy instrument has daily RSI 45-55.
-    const mrBearishTrend    = _mrDailyRsi < 45 ||
-                              (_mrDailyRsi < 52 && (liveStock.macd || "").includes("bearish"));
-    const mrDailyOverbought = _mrDailyRsi > 75; // daily RSI overbought = no MR thesis
+    const mrBearishTrend    = _mrDailyRsi < 45 || (_mrDailyRsi < 52 && (liveStock.macd || "").includes("bearish"));
+    const mrDailyOverbought = _mrDailyRsi > 75;
     if (mrSetup.score > callSetup.score && !mrBearishTrend && !mrDailyOverbought) {
-      // MR liquidity check - contract not yet fetched at this stage
-      // Use stock-level proxy: beta > 1.2 and sector with active options = liquid enough
-      // Real OI/spread check happens at execution time via _cachedContract after prefetch
-      const mrBeta    = stock.beta || 1.0;
-      const mrSector  = stock.sector || "";
-      // Index instruments (SPY/QQQ) are always liquid - most active options market in the world
-      // For individual stocks: require beta >= 1.2 and non-Financial sector
-      const mrLiquid  = stock.isIndex || (mrBeta >= 1.2 && mrSector !== "Financial");
+      const mrBeta   = stock.beta || 1.0;
+      const mrSector = stock.sector || "";
+      const mrLiquid = stock.isIndex || (mrBeta >= 1.2 && mrSector !== "Financial");
       if (mrLiquid) {
         callSetup.score   = mrSetup.score;
         callSetup.reasons = mrSetup.reasons;
         callSetup.isMeanReversion = true;
-        // V2.87 FIX 5: VIX premium context log for MR calls.
-        // At VIX 27+ the option premium is 40-60% elevated vs VIX 18 baseline.
-        // The underlying needs a proportionally larger move to overcome the premium paid.
-        // This is informational — logged so post-trade analysis can track VIX-adjusted win rate.
-        // Future sprint: apply score penalty when VIX > 28 on MR calls (needs backtest calibration).
-        const _mrVixContext = state.vix >= 28 ? ` | VIX ${state.vix?.toFixed(1)} elevated — premium ~${Math.round((state.vix/18-1)*100)}% above baseline` : "";
-        logEvent("filter", `${stock.ticker} MEAN REVERSION: score ${mrSetup.score} | beta:${mrBeta} | liquidity check deferred to execution${_mrVixContext}`);
-      } else {
-        logEvent("filter", `${stock.ticker} MEAN REVERSION skipped - beta:${mrBeta} sector:${mrSector} (low liquidity proxy)`);
+        const _mrVixContext = state.vix >= 28 ? ` | VIX ${state.vix?.toFixed(1)} elevated` : "";
+        logEvent("filter", `${stock.ticker} MEAN REVERSION: score ${mrSetup.score}${_mrVixContext}`);
       }
     }
 
-    // P1 FIX: Call regime modifier also removed — scoreIndexSetup handles this internally.
-    // MR calls already bypass regime inside scoreIndexSetup (mrCapitulationActive path).
-    // Non-MR calls get the correct regime penalty inside scoreIndexSetup.
-
-    // Apply drawdown protocol min score
     const ddProtocol  = marketContext.drawdownProtocol || { minScore: MIN_SCORE, sizeMultiplier: 1.0 };
-    if (ddProtocol.pauseEntries) {
-      logEvent("filter", `[DRAWDOWN] Entries paused - drawdown critical (${ddProtocol.message})`);
-      continue;
-    }
+    if (ddProtocol.pauseEntries) { logEvent("filter", `[DRAWDOWN] Entries paused`); continue; }
     const _circuit = getCircuitState();
-    if (_circuit.open) {
-      logEvent("filter", `[CIRCUIT] Entries paused - Alpaca API degraded (${_circuit.consecFails} consecutive failures)`);
-      continue;
-    }
-    // BF-W4: Block entries when spiral is active for the same type
+    if (_circuit.open) { logEvent("filter", `[CIRCUIT] Entries paused - Alpaca API degraded`); continue; }
+
     if (state._spiralActive) {
       const spiralType = state._spiralActive;
-      const spiralCount = (state._spiralTracker || {})[spiralType] || 0;
-      logEvent("filter", `[SPIRAL] ${spiralType} spiral active (${spiralCount} consecutive losses) - ${spiralType} entries blocked. Fix thesis before re-entering.`);
       if (spiralType === "call") { callSetup = { score: 0, reasons: ["Spiral block"] }; }
       if (spiralType === "put")  { putSetup  = { score: 0, reasons: ["Spiral block"] }; }
     }
 
-    // Apply macro modifier - boosts or suppresses all entries based on current events
-    const macro       = marketContext.macro || { scoreModifier: 0, sectorBearish: [], sectorBullish: [] };
-    // macro.sectorBearish/sectorBullish existed on keyword macro — agent macro may not have them
+    const macro = marketContext.macro || { scoreModifier: 0, sectorBearish: [], sectorBullish: [] };
     const _macroSectorBearish = macro.sectorBearish || [];
     const _macroSectorBullish = macro.sectorBullish || [];
 
-    // ── FIX: Agent modifier scoped to regime confirmation only ────────────────
-    // The agent's ±modifier was originally applied as a directional score adjustment
-    // (mild bearish → -5 on puts in Regime A, etc.). Panel audit (4/24/2026) showed
-    // this was suppressing bull put scores by 5-18 points based on a signal with
-    // 10.6% directional accuracy on 30-min horizons — worse than a coin flip.
-    //
-    // New logic: the modifier is ONLY applied when agent and regime AGREE on direction.
-    // - Regime B + bearish agent: bear call scores get boost, put redirect gets boost.
-    // - Regime A + bullish agent: call scores get small boost.
-    // - Disagreement or neutral: modifier = 0. The regime classifier (price-based,
-    //   computed every scan) is authoritative. Agent is a timing refinement, not a veto.
-    //
-    // Sector signals are kept — they're aggregate, not directional noise.
     const agentMacroForScoring = (state._agentMacro || {}).signal || "neutral";
-    const regimeClass = state._regimeClass || "A";
-    const agentAlignsBear = ["bearish","strongly bearish","mild bearish"].includes(agentMacroForScoring) && ["B","C"].includes(regimeClass);
-    const agentAlignsBull = ["bullish","strongly bullish","mild bullish"].includes(agentMacroForScoring) && regimeClass === "A";
-    const putsOnBouncesFade = (state._agentMacro || {}).entryBias === "puts_on_bounces"
-      && agentMacroForScoring === "mild bullish" && ["B","C"].includes(regimeClass);
-
-    // Only apply modifier when agent confirms the regime direction
+    const _regimeClass = state._regimeClass || "A";
+    const agentAlignsBear = ["bearish","strongly bearish","mild bearish"].includes(agentMacroForScoring) && ["B","C"].includes(_regimeClass);
+    const agentAlignsBull = ["bullish","strongly bullish","mild bullish"].includes(agentMacroForScoring) && _regimeClass === "A";
+    const putsOnBouncesFade = (state._agentMacro || {}).entryBias === "puts_on_bounces" && agentMacroForScoring === "mild bullish" && ["B","C"].includes(_regimeClass);
     const alignedModifier = agentAlignsBear || agentAlignsBull ? Math.abs(macro.scoreModifier || 0) : 0;
     let macroCallMod = agentAlignsBear ? alignedModifier : agentAlignsBull ? Math.round(alignedModifier * 0.5) : 0;
-    let macroPutMod  = agentAlignsBear ? alignedModifier : putsOnBouncesFade ? 0 : 0;
+    let macroPutMod  = agentAlignsBear ? alignedModifier : 0;
 
-    // V3.00: STRONGLY BEARISH headwind in Regime A
-    // Design intent: don't suppress MR oversold calls with mild bearish noise.
-    // Gap: "strongly bearish" with real triggers (downgrade, war) = macro headwind
-    //      even in bull regime. Zero penalty was leaving calls fully unpenalized.
-    // Fix: "strongly bearish" → -10 call penalty in ANY regime.
-    //      "bearish" (plain) → -8 call penalty in any regime.
-    //      "mild bearish" → 0 (noise, no change — original intent preserved).
-    // These are score reductions, not blocks. High-conviction entries still pass.
-    if (!agentAlignsBear) { // only apply if the aligned-bear path didn't already fire
+    if (!agentAlignsBear) {
       const _agentTriggers = (state._agentMacro || {}).triggers || [];
       const _hasRealTrigger = _agentTriggers.length > 0;
-      if (agentMacroForScoring === "strongly bearish") {
-        macroCallMod -= 10;
-        if (macroCallMod !== 0 || -10 !== 0) logEvent("filter", `[MACRO-HEADWIND] ${stock.ticker} strongly bearish macro in Regime A — call penalty -10`);
-      } else if (agentMacroForScoring === "bearish" && _hasRealTrigger) {
-        macroCallMod -= 8;
-        logEvent("filter", `[MACRO-HEADWIND] ${stock.ticker} bearish macro with triggers in Regime A — call penalty -8`);
-      }
+      if (agentMacroForScoring === "strongly bearish") { macroCallMod -= 10; }
+      else if (agentMacroForScoring === "bearish" && _hasRealTrigger) { macroCallMod -= 8; }
     }
 
-    // Extra sector-specific adjustment (kept — aggregate signal, not directional noise)
     if (_macroSectorBearish.includes(stock.sector)) { macroCallMod -= 10; macroPutMod += 10; }
     if (_macroSectorBullish.includes(stock.sector)) { macroCallMod += 8;  macroPutMod -= 8; }
 
     callSetup.score = Math.min(100, Math.max(0, callSetup.score + macroCallMod));
     putSetup.score  = Math.min(100, Math.max(0, putSetup.score  + macroPutMod));
 
-    if (macroCallMod !== 0 || macroPutMod !== 0) {
-      if (macroCallMod !== 0) callSetup.reasons.push(`Macro ${agentMacroForScoring} (regime-aligned): ${macroCallMod > 0 ? "+" : ""}${macroCallMod}`);
-      if (macroPutMod  !== 0) putSetup.reasons.push(`Macro ${agentMacroForScoring} (regime-aligned): ${macroPutMod > 0 ? "+" : ""}${macroPutMod}`);
-    }
-
-    // ── V2.95: IVR PENALTY FOR CALL BUYERS ───────────────────────────────
-    // Panel recommendation (6/7): when IVR > 50, buying options is negative
-    // edge. Elevated IV means you're paying a premium that reverts against you
-    // the moment volatility normalizes — even if the underlying holds its move.
-    // QQQ May 11: IVR ~46, VIX 27 — borderline. Had IVR been 55+, this gate
-    // would have reduced score by 10, making entry less likely.
-    //
-    // Penalty applies to CALLS only (we buy calls in MR strategy).
-    // Puts benefit from high IV (sellers of premium), so no put penalty.
-    // Threshold: IVR > 50 = -10 call score. Logged for visibility.
-    // Note: liveStock.ivr populated from signals.ivr (live scan each cycle).
     const _liveIVR = parseFloat(liveStock.ivr || state._ivRank || 0);
     if (_liveIVR > 50 && callSetup.score > 0) {
-      const _ivrPenalty = _liveIVR > 65 ? 15 : 10; // steeper penalty at very high IV
+      const _ivrPenalty = _liveIVR > 65 ? 15 : 10;
       callSetup.score = Math.max(0, callSetup.score - _ivrPenalty);
       callSetup.reasons.push(`High IV penalty: IVR ${_liveIVR.toFixed(0)} > 50 (-${_ivrPenalty})`);
-      logEvent("filter", `[IVR] ${stock.ticker} IVR ${_liveIVR.toFixed(0)} elevated — call score penalized -${_ivrPenalty} (buying expensive options)`);
     }
 
-    // ── GAP-DAY CALL BLOCK: apply flag set in VWAP gate above ────────────
-    if (liveStock._gapDayCallBlocked) {
-      callSetup.score = 0;
-      callSetup.reasons.push('Gap-day VWAP block: price above VWAP on gap-up day');
-    }
+    if (liveStock._gapDayCallBlocked) { callSetup.score = 0; callSetup.reasons.push('Gap-day VWAP block'); }
 
-    // ── GATE A: SAME-DAY THESIS RE-ENTRY BLOCK (V2.98) ──────────────────────
-    // Panel finding (May 19): APEX re-entered QQQ at 1:57 PM with RSI 30.6,
-    // only 1.1pts below the entry RSI of the thesis-complete that closed at 12:52 PM.
-    // The thesis was already extracted — the afternoon dip was PM distribution not bounce.
-    // Gate: if ticker had a thesis-complete close today, block call re-entry unless
-    // RSI has dropped at least 15pts below the closed position's entry RSI.
-    // Resets at daily reset. Only applies to same optionType (call→call).
     const _gateARecord = (state._dailyThesisComplete || {})[stock.ticker];
     if (_gateARecord && _gateARecord.optionType === 'call' && callSetup.score > 0) {
       const _gateARSIFloor  = (_gateARecord.entryRSI || 50) - 15;
       const _gateARSICurrent = liveStock.rsi || signals.rsi || 50;
       if (_gateARSICurrent > _gateARSIFloor) {
         callSetup.score = 0;
-        callSetup.reasons.push(`Gate A: thesis-complete closed today (entry RSI ${(_gateARecord.entryRSI||50).toFixed(0)}) — need RSI < ${_gateARSIFloor.toFixed(0)}, currently ${_gateARSICurrent.toFixed(0)}`);
-        logEvent("filter", `[GATE-A] ${stock.ticker} call blocked — thesis extracted today at RSI ${(_gateARecord.entryRSI||50).toFixed(0)}, need RSI < ${_gateARSIFloor.toFixed(0)} (currently ${_gateARSICurrent.toFixed(0)})`);
-      } else {
-        logEvent("filter", `[GATE-A] ${stock.ticker} call PERMITTED — RSI ${_gateARSICurrent.toFixed(0)} < ${_gateARSIFloor.toFixed(0)} (new thesis level after thesis-complete close)`);
+        logEvent("filter", `[GATE-A] ${stock.ticker} call blocked — thesis extracted today at RSI ${(_gateARecord.entryRSI||50).toFixed(0)}`);
       }
     }
-    // ── END GATE A ────────────────────────────────────────────────────────
 
-    // ── GATE C ENFORCEMENT (V2.98) ─────────────────────────────────────────
-    // PM call gate on gap-up days — requires RSI < 28 after 1PM when session gap >= 2%
-    // Applied AFTER gap-day VWAP block so it only fires if price is below VWAP
-    // (above VWAP already blocked by gap gate above)
     if (_gateCActive && callSetup.score > 0) {
       const _gateCRSI = liveStock.rsi || signals.rsi || 50;
       if (_gateCRSI >= GATE_C_RSI_FLOOR) {
         callSetup.score = 0;
-        callSetup.reasons.push(`Gate C: PM gap-up day RSI ${_gateCRSI.toFixed(0)} >= ${GATE_C_RSI_FLOOR} — need RSI < ${GATE_C_RSI_FLOOR} after 1PM on gap days`);
-        logEvent("filter", `[GATE-C] ${stock.ticker} call blocked — PM gap-up day, RSI ${_gateCRSI.toFixed(0)} (need < ${GATE_C_RSI_FLOOR})`);
-      } else {
-        logEvent("filter", `[GATE-C] ${stock.ticker} call PERMITTED — RSI ${_gateCRSI.toFixed(0)} < ${GATE_C_RSI_FLOOR} (genuine PM capitulation on gap day)`);
+        logEvent("filter", `[GATE-C] ${stock.ticker} call blocked — PM gap-up day, RSI ${_gateCRSI.toFixed(0)}`);
       }
     }
-    // ── END GATE C ENFORCEMENT ────────────────────────────────────────────
 
-    // ── FIX 3b: GAP-REVERSAL DAY GATE ────────────────────────────────────
-    // Day after a 3%+ SPY move: require RSI < 35 AND price < VWAP for call entries.
-    // Standard RSI threshold is 45 — this tightens to 35 on hangover days.
-    // Both conditions must pass. Either failing blocks the call.
     if (state._gapReversalDay && callSetup.score > 0) {
       const _grRSI       = liveStock.rsi || signals.rsi || 50;
       const _grVWAP      = signals.intradayVWAP || 0;
@@ -2781,524 +1764,247 @@ async function runScan() {
       const _grRSITooHigh = _grRSI >= 35;
       if (_grRSITooHigh || _grAboveVWAP) {
         callSetup.score = 0;
-        const _grReason = _grRSITooHigh
-          ? `Gap-reversal day: RSI ${_grRSI.toFixed(0)} >= 35 (need < 35 on day-after-gap)`
-          : `Gap-reversal day: price $${price.toFixed(2)} above VWAP $${_grVWAP.toFixed(2)} (need pullback)`;
-        callSetup.reasons.push(_grReason);
-        logEvent("filter", `[GAP-REVERSAL] ${stock.ticker} call blocked — ${_grReason}`);
-      } else {
-        logEvent("filter", `[GAP-REVERSAL] ${stock.ticker} call permitted — RSI ${_grRSI.toFixed(0)} < 35 AND price below VWAP (genuine oversold on reversal day)`);
+        logEvent("filter", `[GAP-REVERSAL] ${stock.ticker} call blocked`);
       }
     }
-    // ── END V2.95/V2.96 SCORE ADJUSTMENTS ────────────────────────────────
 
-    // ── V2.97: GAP BOOST APPLICATION ──────────────────────────────────────
-    // Apply directional gap boosts set in gap gate above.
-    // Gap-up: puts get +10 (fade the extension), calls get strict RSI requirement.
-    // Gap-down: calls get +10 (genuine oversold), puts get no additional boost.
-    // V2.99 FIX: Remove putSetup.score > 0 guard — under Regime A put scoring,
-    // scores were always ≤ 0, so this condition silently nullified the gap-up put boost
-    // every single time it was set. The boost is already gated by gap detection upstream
-    // (_gapPutBoost only > 0 on genuine gap-up days ≥ 1.5%). Safe to apply unconditionally.
     if (liveStock._gapPutBoost > 0) {
       putSetup.score += liveStock._gapPutBoost;
-      putSetup.reasons.push(`Gap-up ${parseFloat(preMarket?.gapPct||0).toFixed(1)}% put fade boost (+${liveStock._gapPutBoost})`);
-      logEvent("filter", `[GAP-BOOST] ${stock.ticker} put score +${liveStock._gapPutBoost} (gap-up fade)`);
+      putSetup.reasons.push(`Gap-up put fade boost (+${liveStock._gapPutBoost})`);
     }
     if (liveStock._gapCallBoost > 0 && callSetup.score > 0) {
-      // V3.00: Suppress gap-down call boost when market breadth confirms broad weakness.
-      // Breadth < 30% means >70% of stocks are declining — the gap-down is market-wide
-      // selling, not an instrument-specific dip ripe for mean reversion.
-      // Boosting calls into a broad sell-off adds conviction against the tape.
       const _breadthNow = marketContext?.breadth ?? 50;
       const _broadWeakness = _breadthNow < 30;
-      if (_broadWeakness) {
-        logEvent("filter", `[GAP-BOOST-SUPPRESSED] ${stock.ticker} gap-down call boost suppressed — breadth ${_breadthNow}% < 30% (broad market weakness)`);
-      } else {
+      if (!_broadWeakness) {
         callSetup.score += liveStock._gapCallBoost;
-        callSetup.reasons.push(`Gap-down ${parseFloat(preMarket?.gapPct||0).toFixed(1)}% call boost (+${liveStock._gapCallBoost})`);
-        logEvent("filter", `[GAP-BOOST] ${stock.ticker} call score +${liveStock._gapCallBoost} (gap-down genuine oversold)`);
+        callSetup.reasons.push(`Gap-down call boost (+${liveStock._gapCallBoost})`);
       }
     }
-    // Stricter RSI requirement when gap-up but below VWAP (partial signal)
     if (liveStock._gapCallStrictRSI && callSetup.score > 0) {
       const _strictRSI = liveStock.rsi || signals.rsi || 50;
-      if (_strictRSI >= 37) {
-        callSetup.score = 0;
-        callSetup.reasons.push(`Gap-up strict RSI: RSI ${_strictRSI.toFixed(0)} >= 37 (need RSI < 37 when gap-up + below VWAP)`);
-        logEvent("filter", `[GAP-STRICT-RSI] ${stock.ticker} call blocked — gap-up day, below VWAP but RSI ${_strictRSI.toFixed(0)} >= 37 (need RSI < 37)`);
-      }
+      if (_strictRSI >= 37) { callSetup.score = 0; logEvent("filter", `[GAP-STRICT-RSI] ${stock.ticker} call blocked — RSI ${_strictRSI.toFixed(0)}`); }
     }
-    // ── END GAP BOOST APPLICATION ─────────────────────────────────────────
 
-    // ── V2.97: MOMENTUM SCORING MODIFIER ──────────────────────────────────
-    // Momentum confirmation for call entries. Trading panel finding:
-    // a call entry with MOM:bearish in the RSI 25-38 zone is low quality —
-    // RSI appears oversold but price is still declining actively.
-    // MOM:recovering in same zone is high quality — bounce is starting.
-    // Extreme oversold (RSI < 25) overrides bearish momentum (too far down to ignore).
     const _liveRSIForMom  = liveStock.rsi || signals.rsi || 50;
     const _liveMomentum   = liveStock.momentum || signals.momentum || 'steady';
     if (callSetup.score > 0) {
-      if (_liveMomentum === 'recovering' && _liveRSIForMom < 45) {
-        callSetup.score += 5;
-        callSetup.reasons.push('MOM:recovering confirmation (+5)');
-        logEvent("filter", `[MOM] ${stock.ticker} MOM:recovering + RSI ${_liveRSIForMom.toFixed(0)} — call quality confirmed (+5)`);
-      } else if (_liveMomentum === 'bearish' && _liveRSIForMom >= 25 && _liveRSIForMom <= 38) {
-        callSetup.score -= 10;
-        callSetup.reasons.push('MOM:bearish in RSI 25-38 zone — still declining (-10)');
-        logEvent("filter", `[MOM] ${stock.ticker} MOM:bearish + RSI ${_liveRSIForMom.toFixed(0)} — entry into active decline, score -10`);
-      }
+      if (_liveMomentum === 'recovering' && _liveRSIForMom < 45) { callSetup.score += 5; callSetup.reasons.push('MOM:recovering confirmation (+5)'); }
+      else if (_liveMomentum === 'bearish' && _liveRSIForMom >= 25 && _liveRSIForMom <= 38) { callSetup.score -= 10; callSetup.reasons.push('MOM:bearish in RSI 25-38 zone (-10)'); }
     }
     if (putSetup.score > 0 && _liveMomentum === 'recovering' && _liveRSIForMom > 55) {
-      // Put entries on recovering momentum from overbought = quality fade signal
-      putSetup.score += 5;
-      putSetup.reasons.push('MOM:recovering from overbought — put quality confirmed (+5)');
+      putSetup.score += 5; putSetup.reasons.push('MOM:recovering from overbought (+5)');
     }
-    // ── END MOMENTUM MODIFIER ─────────────────────────────────────────────
 
-    // ── V2.97: _premarketBoost CONSUMED ───────────────────────────────────
-    // _premarketBoost was previously set in risk.js but never used (cosmetic flag).
-    // Now wired: gap-up boost is directionally anti-call, pro-put.
-    // Note: _gapPutBoost above already handles this via preMarket.gapPct.
-    // _premarketBoost is an additional penalty for calls on strong gap-up days
-    // that didn't get caught by the 2% threshold (covers 1.5-2% range).
     if (stock._premarketBoost && callSetup.score > 0) {
       const _pmGap = parseFloat(preMarket?.gapPct || 0);
-      if (_pmGap > 0 && _pmGap < 2.0) {
-        // Sub-2% gap: apply softer penalty (-5) since hard block didn't fire
-        callSetup.score = Math.max(0, callSetup.score - 5);
-        callSetup.reasons.push(`Pre-market gap-up ${_pmGap.toFixed(1)}% call penalty (-5)`);
-        logEvent("filter", `[PM-BOOST] ${stock.ticker} pre-market gap-up ${_pmGap.toFixed(1)}% — call score -5 (gap-up is anti-call signal)`);
-      }
+      if (_pmGap > 0 && _pmGap < 2.0) { callSetup.score = Math.max(0, callSetup.score - 5); }
     }
     if (stock._premarketBoost && putSetup.score > 0) {
       const _pmGap = parseFloat(preMarket?.gapPct || 0);
-      if (_pmGap > 0 && _pmGap < 2.0) {
-        putSetup.score += 5;
-        putSetup.reasons.push(`Pre-market gap-up ${_pmGap.toFixed(1)}% put bonus (+5)`);
-      }
+      if (_pmGap > 0 && _pmGap < 2.0) { putSetup.score += 5; }
     }
-    // ── END _premarketBoost CONSUMPTION ──────────────────────────────────
 
-    // Apply gap direction constraint
     let callScore = callSetup.score;
     let putScore  = putSetup.score;
-    // Gap direction filter: only applies in Regime A (bull market mean reversion)
-    // In Regime B (bear trend), a gap UP is the puts_on_bounces entry signal - do NOT zero puts
-    const inBearRegimeForGap = rb.isBearRegime; // from entryEngine rulebook
+
+    const inBearRegimeForGap = rb.isBearRegime;
     const agentWantsPutsOnBounce = (state._agentMacro || {}).entryBias === "puts_on_bounces";
     if (marketGapDirection === "down" && !inBearRegimeForGap) { callScore = 0; recordGateBlock(stock.ticker, "gap_direction_down", authRegimeName, callScore); }
-    // V2.99 PUT AUDIT FIX 1 — CRITICAL: Gap-up direction gate exempts overbought MR puts.
-    // The gap direction filter was designed to block trend-following puts on gap-up days.
-    // But overbought MR puts ARE the fade-the-gap thesis — zeroing putScore kills the
-    // primary put use case. Exempt when _isOverboughtMRPut is set (RSI≥65 + dailyRSI≥75).
-    // The gap-up put boost (+10 from _gapPutBoost) correctly fires before this gate —
-    // without this exemption that boost was immediately discarded by putScore = 0.
     const _gapExemptMRPut = putSetup._isOverboughtMRPut;
     if (marketGapDirection === "up" && !inBearRegimeForGap && !agentWantsPutsOnBounce && !_gapExemptMRPut) {
-      putScore = 0;
-      recordGateBlock(stock.ticker, "gap_direction_up", authRegimeName, putScore);
-    } else if (marketGapDirection === "up" && _gapExemptMRPut) {
-      logEvent("filter", `[GAP-MR-PUT] ${stock.ticker} gap-up direction gate EXEMPTED — overbought MR put (RSI≥65 dailyRSI≥75)`);
+      putScore = 0; recordGateBlock(stock.ticker, "gap_direction_up", authRegimeName, putScore);
     }
-    // Apply entry window constraint
     if (!callsAllowed) { callScore = 0; recordGateBlock(stock.ticker, "calls_not_allowed", authRegimeName, callScore); }
-    // APEX: simple — puts blocked only when putsAllowed is false
     if (!putsAllowed) { putScore = 0; recordGateBlock(stock.ticker, "puts_not_allowed", authRegimeName, putScore); }
 
-    // - Persist scores for dashboard watchlist ticker display -
     if (!state._lastScanScores) state._lastScanScores = {};
-    state._lastScanScores[stock.ticker] = {
-      call:      callScore,
-      put:       putScore,
-      best:      Math.max(callScore, putScore),
-      direction: putScore >= callScore ? "put" : "call",
-      rsi:       signals.rsi,
-      macd:      signals.macd,
-      momentum:  signals.momentum,
-      price:     price,
-      vwap:      signals.intradayVWAP || 0,
-      updatedAt: Date.now(),
-    };
-    // Save score snapshot AFTER all zeroing/adjustments - reflects actual execution scores
-    if (!state._scoreDebug) state._scoreDebug = {};
-    // Determine effective score from the setup that was actually used
-    const _creditCallScore  = (creditCallModeActive && isBearTrend) ? callSetup.score : null;
-    const _creditPutScore   = (creditModeActive && !isBearTrend)    ? putSetup.score  : null;
-    const _debitCallScore   = (!isBearTrend && !creditCallModeActive) ? callSetup.score : null;
-    const _creditScore      = _creditCallScore ?? _creditPutScore ?? null;
-    const _creditType       = (creditCallModeActive && isBearTrend) ? "credit_call"
-                            : (creditModeActive && !isBearTrend)    ? "credit_put" : null;
-    const _debitCallActive  = (!isBearTrend && !creditCallModeActive && _debitCallScore !== null);
-    const _effectiveMin     = _creditType ? MIN_SCORE_CREDIT : (_debitCallActive ? 75 : MIN_SCORE);
+    state._lastScanScores[stock.ticker] = { call: callScore, put: putScore, best: Math.max(callScore, putScore), direction: putScore >= callScore ? "put" : "call", rsi: signals.rsi, macd: signals.macd, momentum: signals.momentum, price, vwap: signals.intradayVWAP || 0, updatedAt: Date.now() };
 
-    // Use real market R/R from last execution attempt — far more accurate than any estimate
-    // _lastCreditRR is written by execution.js every time the R/R gate fires
-    const _rrEst = (state._lastCreditRR && state._lastCreditRR[stock.ticker])
-      ? state._lastCreditRR[stock.ticker]
-      : null;
+    if (!state._scoreDebug) state._scoreDebug = {};
+    const _creditScore   = null;
+    const _creditType    = null;
+    const _debitCallScore = (!isBearTrend) ? callSetup.score : null;
+    const _debitCallActive = (!isBearTrend && _debitCallScore !== null);
+    const _effectiveMin  = _creditType ? MIN_SCORE_CREDIT : (_debitCallActive ? 75 : MIN_SCORE);
+    const _rrEst = (state._lastCreditRR && state._lastCreditRR[stock.ticker]) ? state._lastCreditRR[stock.ticker] : null;
 
     state._scoreDebug[stock.ticker] = {
       ts: Date.now(), price, putScore, callScore,
-      creditScore: _creditScore,      // from scoreCreditSpread (dedicated scorer)
-      creditType:  _creditType,       // credit_call or credit_put
-      debitCallScore: _debitCallScore, // from scoreDebitCallSpread (Regime A)
-      debitCallActive: _debitCallActive,
-      effectiveMin: _effectiveMin,    // 65 credits, 75 debit_call, 70 debits
-      rrEstimate:  _rrEst,         // analytical R/R viability check
+      creditScore: _creditScore, creditType: _creditType,
+      debitCallScore: _debitCallScore, debitCallActive: _debitCallActive,
+      effectiveMin: _effectiveMin, rrEstimate: _rrEst,
       putReasons: putSetup.reasons, callReasons: callSetup.reasons,
-      signals: { rsi: signals.rsi, dailyRsi: signals.dailyRsi, macd: signals.macd,
-        momentum: signals.momentum, ivPercentile: signals.ivPercentile,
-        volPaceRatio: signals.volPaceRatio, intradayVWAP: signals.intradayVWAP },
+      signals: { rsi: signals.rsi, dailyRsi: signals.dailyRsi, macd: signals.macd, momentum: signals.momentum, ivPercentile: signals.ivPercentile, volPaceRatio: signals.volPaceRatio, intradayVWAP: signals.intradayVWAP },
       blocked: [],
     };
-    // Bug 3 FIX: Defensive mode zeros calls EXCEPT mean reversion calls.
-    // MR calls are specifically designed for strongly bearish macro — that's the entry signal.
-    // RSI 22 + VIX 28 + "strongly bearish" macro = textbook MR call setup.
-    // callSetup.isMeanReversion is set before this point (line ~2062).
-    if (effectiveDefensive && !callSetup.isMeanReversion) callScore = 0; // Bug 4 FIX: stale agent skipped
+
+    if (effectiveDefensive && !callSetup.isMeanReversion) callScore = 0;
 
     const bestScore = Math.max(callScore, putScore);
     const optionType = putScore > callScore ? "put" : "call";
 
-    // Bug 3 FIX: Skip defensive calls EXCEPT mean reversion — MR calls exempt from defensive block.
-    // A genuine capitulation (RSI 22, VIX spike) is exactly when MR calls should fire.
-    if (effectiveDefensive && optionType === "call" && !callSetup.isMeanReversion) { // Bug 4 FIX
+    if (effectiveDefensive && optionType === "call" && !callSetup.isMeanReversion) {
       logEvent("filter", `${stock.ticker} - macro defensive mode - skipping non-MR calls`);
       continue;
     }
-    // Log MR call proceeding despite defensive mode
-    if (effectiveDefensive && optionType === "call" && callSetup.isMeanReversion) { // MR exempt
-      logEvent("filter", `${stock.ticker} - MR call proceeds despite defensive mode (RSI capitulation is the signal)`);
+    if (effectiveDefensive && optionType === "call" && callSetup.isMeanReversion) {
+      logEvent("filter", `${stock.ticker} - MR call proceeds despite defensive mode`);
     }
     const bestReasons = optionType === "put" ? putSetup.reasons : callSetup.reasons;
 
-    // Score debug snapshot saved BELOW after gap/gate adjustments so it reflects actual execution scores
-    // Score debug snapshot saved after gap/gate adjustments below
-
-    // Pre-market gap direction-aware penalty - applied after optionType is known
-    // Gap >3% up on a put entry = fading into rally = -8 conviction penalty
-    // Gap >3% down on a call entry = buying into gap-down = -8 conviction penalty
     if (preMarket && Math.abs(preMarket.gapPct) > 3) {
-      if ((optionType === "put" && preMarket.gapPct > 3) ||
-          (optionType === "call" && preMarket.gapPct < -3)) {
+      if ((optionType === "put" && preMarket.gapPct > 3) || (optionType === "call" && preMarket.gapPct < -3)) {
         const chosenSetup = optionType === "put" ? putSetup : callSetup;
         chosenSetup.score = Math.max(0, chosenSetup.score - 8);
-        chosenSetup.reasons.push(`Pre-market gap ${preMarket.gapPct > 0 ? "+" : ""}${preMarket.gapPct}% - entry into gap (-8)`);
+        chosenSetup.reasons.push(`Pre-market gap penalty (-8)`);
       }
     }
 
-    // Agent/regime minimums owned by entryEngine rulebook
-    // etHourNow/isLateDay/isLastHour use scan-level vars declared at top of runScan
     const agentConf     = (state._agentMacro || {}).confidence || "low";
     const agentSig      = (state._agentMacro || {}).signal || "neutral";
     const agentLastRun  = (state._agentMacro || {}).timestamp || null;
     const agentStale    = !agentLastRun || ((Date.now() - new Date(agentLastRun).getTime()) / 60000) > 30;
-    // Instrument-specific min scores - IWM removed (3yr net loser)
-    // GLD uses 80+ with DXY/SPY gates applied upstream
-    // below200MAPutMin REMOVED - regimeProfile already handles this via trending_bear/crash minScore
-    // Keeping it created a conflict where isBearishHigh (score 65) was silently overridden to 80
-    // - IVR floor gate - debit entries require elevated vol environment -
-    // IVR < 15: options are historically cheap - buying premium has near-zero edge
-    //           seen in 2023 Q2 where VIX<18 had 0% win rate across all instruments
-    // IVR 15-25: options cheap - require higher conviction (80+ score) for debit entries
-    // IVR >= 25: normal operating range - no extra gate
-    // Credit spreads are EXEMPT - they benefit from selling in low-vol environments
-    //
-    // - BYPASS: VIX - 25 or Regime B/C -
-    // Panel unanimous (7/7): the IVR gate was designed to prevent buying debit
-    // options in calm, low-vol markets (VIX 12-18). It has no valid application
-    // when VIX is already elevated (-25) or regime is already confirmed bear (B/C).
-    // Problem: rolling window includes COVID spike (VIX 68), making VIX 31 appear
-    // as the 3rd percentile. Gate fires incorrectly, blocking ideal put entries.
-    // Fix: bypass entirely when vol is objectively elevated or regime is bear/crisis.
-    // Panel fix: VIX - 25 alone is not sufficient - a single-day spike in Regime A
-    // would bypass the floor, then IV collapses and the debit spread loses vega.
-    // Require VIX - 25 AND regime not A (structural, not just a spike).
-    // IVR diagnostics (gate logic owned by entryEngine rulebook)
+
     const ivrNow          = ivRankNow;
     const ivrDebitFloor   = 15;
     const ivrDebitCaution = 25;
     const ivrBypass       = rb.ivElevated || rb.isBearRegime || rb.isCrisis;
-    if (!ivrBypass && ivrNow < ivrDebitFloor && !dryRunMode)
-      logEvent("filter", `${stock.ticker} IVR ${ivrNow} low - debit options cheap (entryEngine gates)`);
-    else if (!ivrBypass && ivrNow < ivrDebitCaution && !dryRunMode)
-      logEvent("filter", `${stock.ticker} IVR ${ivrNow} below caution threshold`);
-    const effectiveMinScore = MIN_SCORE; // stub -- entryEngine is min score authority
+
+    const effectiveMinScore = MIN_SCORE;
+
     if (agentStale && !dryRunMode) {
-      const agentStaleMins = agentLastRun
-        ? ((Date.now() - new Date(agentLastRun).getTime()) / 60000)
-        : 999;
-      logEvent("filter", `Agent macro stale (${agentStaleMins.toFixed(0)}min) - using keyword fallback. Last signal: ${agentSig || "none"}`);
+      const agentStaleMins = agentLastRun ? ((Date.now() - new Date(agentLastRun).getTime()) / 60000) : 999;
       if (agentStaleMins > 90 && isMarketHours()) {
-        // Rate-limit to once per 15 minutes — fires per-instrument so can flood logs
         if (!state._lastAgentStaleWarn || Date.now() - state._lastAgentStaleWarn > 15 * 60 * 1000) {
-          logEvent("warn", `[AGENT] Macro analysis has not run in ${agentStaleMins.toFixed(0)} minutes - using keyword fallback`);
+          logEvent("warn", `[AGENT] Macro analysis stale ${agentStaleMins.toFixed(0)}min`);
           state._lastAgentStaleWarn = Date.now();
         }
       }
     }
 
-    // Stagger gate -- now owned by evaluateEntry (entryEngine.js)
-    // evaluateEntry receives recentSameDir + existingProfitPct in context and handles blocking
-    // BF-W2: Per-ticker macro-defensive cooldown kept here (separate from stagger -- ticker-level)
     if (state._macroDefensiveCooldown && state._macroDefensiveCooldown[stock.ticker]) {
       const cooldownMins = (Date.now() - state._macroDefensiveCooldown[stock.ticker]) / 60000;
-      if (cooldownMins < 30) {
-        logEvent("filter", `${stock.ticker} defensive cooldown ${cooldownMins.toFixed(0)}/30min - skipping re-entry`);
-        continue;
-      }
+      if (cooldownMins < 30) { logEvent("filter", `${stock.ticker} defensive cooldown ${cooldownMins.toFixed(0)}/30min`); continue; }
     }
-    // sameTickerSameDir still needed to pass stagger context to evaluateEntry below
     const sameTickerSameDir = state.positions.filter(p => p.ticker === stock.ticker && p.optionType === optionType);
-    // Credit spreads: hard limit 1 per ticker per direction (premium exposure management)
-    if (creditModeActive && sameTickerSameDir.length >= 1) {
-      logEvent("filter", `${stock.ticker} already have ${sameTickerSameDir.length} position(s) in this direction`);
-      continue;
-    }
-    // FIX BUG1: Naked options — same hard limit 1 per ticker per direction.
-    // Previously this gate only fired for credit spreads, allowing APEX to open
-    // GLD $455C while GLD $451C was already open, and IYR $106C despite recent loss.
-    // Gate checks by TICKER not contractSymbol — different strikes = same underlying = blocked.
-    if (!creditModeActive && sameTickerSameDir.length >= 1) {
-      logEvent("filter", `${stock.ticker} already have ${sameTickerSameDir.length} position(s) in this direction`);
-      continue;
-    }
+    if (creditModeActive && sameTickerSameDir.length >= 1) { logEvent("filter", `${stock.ticker} already have ${sameTickerSameDir.length} position(s)`); continue; }
+    if (!creditModeActive && sameTickerSameDir.length >= 1) { logEvent("filter", `${stock.ticker} already have ${sameTickerSameDir.length} position(s)`); continue; }
 
-    // MACD contradiction  -- rulebook handles regime-awareness (A only, bypass in B via gate flag)
     const macdSignal    = liveStock.macd || "neutral";
     const macdBullish   = macdSignal.includes("bullish");
     const macdBearish   = macdSignal.includes("bearish");
     const isMRCall      = callSetup.isMeanReversion && optionType === "call";
     const dailyRsiNow   = liveStock.dailyRsi || liveStock.rsi || 50;
-    // [Regime A only] gate  -- rb.gates.macdContradictsGate is false in B/C (bypassed)
-    // MS panel: genuine contradiction requires MACD opposing AND RSI < 65 (not extended)
     const macdContradicts = rb.gates.macdContradictsGate && !creditModeActive &&
-      ((optionType === "put" && macdBullish && dailyRsiNow < 65) ||
-       (optionType === "call" && macdBearish && !isMRCall));
-    // macdContradicts: server.js applies its own MACD check here (evaluateEntry gate removed)
-    if (!rb.gates.macdContradictsGate && optionType === "put" && macdBullish && dailyRsiNow >= 68)
-      logEvent("filter", `${liveStock.ticker} MACD bypass - RSI ${dailyRsiNow.toFixed(0)} overbought + bullish MACD in Regime B = bounce fade`);
-    if (macdContradicts) logEvent("filter", `${liveStock.ticker} MACD ${macdSignal} contradicts ${optionType} - evaluateEntry raises minimum`);
+      ((optionType === "put" && macdBullish && dailyRsiNow < 65) || (optionType === "call" && macdBearish && !isMRCall));
 
-    // Sizing modifier logged after EE_scoreCandidate runs (eeCandidate declared below)
-
-    // V2.82: entry window gate - block new entries after 3pm (MR exception below)
-    // Mean reversion calls (capitulation bounce) allowed until 3:30pm
     const isMREntry = (callSetup.isMeanReversion || putSetup.isMeanReversion);
-    const mrWindowOpen = etHourNow < 15.5; // scan-level etHourNow
+    const mrWindowOpen = etHourNow < 15.5;
     if (entryWindowClosed && !dryRunMode) {
-      if (!isMREntry) {
-        logEvent("filter", `${stock.ticker} entry window closed (after 3:30pm ET) - normal entries blocked`);
-        continue;
-      } else if (!mrWindowOpen) {
-        logEvent("filter", `${stock.ticker} MR entry window closed (after 3:30pm) - all entries blocked`);
-        continue;
-      }
+      if (!isMREntry) { logEvent("filter", `${stock.ticker} entry window closed`); continue; }
+      else if (!mrWindowOpen) { logEvent("filter", `${stock.ticker} MR entry window closed`); continue; }
     }
-    // finalMinScore gate removed -- evaluateEntry (entryEngine.js) is the single authority
-    // scoreDebug effectiveMin updated by entryEngine result below
-    // macdMinScore / timeOfDayMinScore passed to evaluateEntry via context
 
-    // FIX 8: VWAP timing gate for PUT entries
-    // Don't enter a put while price is above VWAP and making intraday higher lows — wait for rejection.
-    // This improves entry timing: the overbought DAILY signal is valid, but intraday
-    // strength means the move hasn't stalled yet. Wait for VWAP rejection.
-    // Gate applies only in Regime A (bull market) where mean reversion is the put thesis.
-    // In Regime B (confirmed bear), below-VWAP is common and not a timing signal.
-    // MR calls are exempt — you want to enter AT the low, not wait for rejection.
     if (optionType === "put" && rb.isBullRegime && !isMREntry && !dryRunMode) {
       const putVWAP  = liveStock.intradayVWAP || signals.intradayVWAP || 0;
       const putPrice = liveStock.price || price;
       if (putVWAP > 0 && putPrice > 0) {
         const aboveVWAP = putPrice > putVWAP;
         const pctAbove  = ((putPrice - putVWAP) / putVWAP) * 100;
-        // Block put entries when price is >1.5% above VWAP with strong intraday momentum
-        // <1.5% above VWAP is within normal noise — don't over-filter
-        // V2.99 PUT AUDIT FIX 3: Exempt overbought MR puts from VWAP timing gate.
-        // On gap-up days price is above VWAP for the first hour — this gate would block
-        // overbought MR puts during exactly when they should enter. The overbought MR
-        // put thesis requires price to be elevated (above VWAP) — that's the condition.
         if (aboveVWAP && pctAbove > 1.5 && liveStock.momentum === "recovering" && !putSetup._isOverboughtMRPut) {
-          logEvent("filter", `${stock.ticker} VWAP timing: ${pctAbove.toFixed(1)}% above VWAP ($${putVWAP.toFixed(2)}) with recovering momentum — wait for rejection`);
+          logEvent("filter", `${stock.ticker} VWAP timing: ${pctAbove.toFixed(1)}% above VWAP — wait`);
           continue;
-        } else if (aboveVWAP && pctAbove > 1.5 && putSetup._isOverboughtMRPut) {
-          logEvent("filter", `${stock.ticker} VWAP timing: above VWAP EXEMPTED — overbought MR put (price above VWAP is the condition, not a block)`);
         }
       }
     }
 
-    // FIX 7 cont: Portfolio delta cap — block low-conviction puts when delta is maxed
     if (optionType === "put" && state._portfolioDeltaCapped && optionType === "put") {
       const effectiveScore = Math.max(putSetup.score, callSetup.score);
-      if (effectiveScore < 85) {
-        logEvent("filter", `${stock.ticker} portfolio delta capped — score ${effectiveScore} below 85 required when delta maxed`);
-        continue;
-      }
+      if (effectiveScore < 85) { logEvent("filter", `${stock.ticker} portfolio delta capped`); continue; }
     }
 
-    // - Correlation-aware directional heat cap -
-    // SPY/QQQ/IWM are highly correlated - count combined as single direction
-    // GLD has negative beta - call spreads on GLD during equity selloff = hedge
-    // Don't count GLD toward put heat cap (it's an uncorrelated asset)
-    // Directional heat cap matches overall heat cap — in Regime A (all puts), one direction fills all.
-    // The total heat cap (40% at VIX 25+) is the true concentration governor.
     const MAX_DIR_HEAT = effectiveHeatCap();
     const isGLDHedge = stock.ticker === "GLD" && optionType === "call";
-    const dirCost = state.positions
-      .filter(p => {
-        if (p.ticker === "GLD") return false; // GLD is a hedge, exclude from heat
-        return p.optionType === optionType;
-      })
-      .reduce((s,p) => s + p.cost, 0);
+    const dirCost = state.positions.filter(p => { if (p.ticker === "GLD") return false; return p.optionType === optionType; }).reduce((s,p) => s + p.cost, 0);
     const dirHeat = dirCost / totalCap();
-    // GLD call spreads bypass put heat cap - they're hedges not directional bets
     if (!isGLDHedge && dirHeat >= MAX_DIR_HEAT && !dryRunMode) {
-      logEvent("filter", `${stock.ticker} ${optionType} directional heat ${(dirHeat*100).toFixed(0)}% at 40% cap - skip`);
-      continue;
-    }
-    // Correlation cap removed — heat cap (60%) and directional cap (40%) govern concentration.
-    // With 5 instruments and defined-risk spreads, explicit correlation blocking is redundant.
-
-    // Block opposite direction on same ticker - directional strategy only
-    const sameTickerOpposite = state.positions.find(p =>
-      p.ticker === stock.ticker &&
-      p.optionType !== optionType
-    );
-    if (sameTickerOpposite) {
-      logEvent("filter", `${stock.ticker} same ticker opposite direction blocked - already have ${sameTickerOpposite.optionType}`);
+      logEvent("filter", `${stock.ticker} ${optionType} directional heat ${(dirHeat*100).toFixed(0)}% at cap`);
       continue;
     }
 
-    // Fix 3: Same-day loss re-entry gate — _recentLosses was written but never read.
-    // If this instrument was stopped out today in the same direction, require:
-    //   (a) score >= 75 (not just 65) — higher conviction needed after a loss
-    //   (b) RSI has moved at least 10 points since the losing entry RSI
-    // Prevents the pattern of re-entering the same thesis 3x on the same day.
+    const sameTickerOpposite = state.positions.find(p => p.ticker === stock.ticker && p.optionType !== optionType);
+    if (sameTickerOpposite) { logEvent("filter", `${stock.ticker} same ticker opposite direction blocked`); continue; }
+
+    // C1-B: per-instrument loss count check
+    const _instrLossCount = (state._instrumentLossCount || {})[stock.ticker] || 0;
+    const _c1bMinScore = _instrLossCount >= 2 ? 90 : MIN_SCORE;
+    if (_instrLossCount >= 2 && bestScore < 90 && !dryRunMode) {
+      logEvent("filter", `[C1-B] ${stock.ticker} ${_instrLossCount} losses today — require score 90 (have ${bestScore})`);
+      continue;
+    }
+
     const recentLoss = (state._recentLosses || {})[stock.ticker];
-    // Only block re-entry in the SAME direction as the loss — opposite direction has a different thesis
-    // recentLossSameDir = true → gate triggers → re-entry requires score>=75 + RSI delta
-    // !recentLoss.optionType = direction unknown → conservative: treat as same direction (block)
-    // V2.87 FIX 7: Maximum daily RSI gate for calls.
-    // Entering calls when dailyRSI > 80 = stock already extended daily.
-    // SPY at dailyRSI 90.2, QQQ at 94.1 — these are not call entry conditions,
-    // they are conditions for PUTS or no trade. A "dip" in an overbought-daily
-    // instrument is not mean reversion — it's noise within an extended trend.
-    // Applied to ALL calls (not just MR) — daily RSI > 80 means the intraday
-    // oversold signal is structurally unreliable as a reversal indicator.
     if (optionType === "call" && (stock.dailyRsi || 50) > 80) {
-      logEvent("filter", `${stock.ticker} call blocked — dailyRSI ${(stock.dailyRsi||50).toFixed(1)} overbought daily (>80). Intraday dip is noise, not MR signal.`);
+      logEvent("filter", `${stock.ticker} call blocked — dailyRSI overbought daily (>80)`);
       continue;
     }
 
-    // --- Same-day close cooldown gate (30 min) ---
-    // Blocks re-entry for 30 minutes after ANY close (win or loss) on the same instrument.
-    // Prevents: GLD wins at 9:23am → system re-enters at 9:27am same direction, worse strike.
-    // Losses already have a 24-hour gate via _recentLosses. This 30-min gate covers wins too.
     const recentClose = (state._recentCloses || {})[stock.ticker];
     const recentCloseSameDir = recentClose && (!recentClose.optionType || recentClose.optionType === optionType);
     if (recentCloseSameDir) {
       const minsSinceClose = (Date.now() - recentClose.closedAt) / 60000;
       const _closePnl = parseFloat(recentClose.pnl) || 0;
-      // V3.01: Split cooldown — wins cool 10min (thesis complete, fresh setups valid soon)
-      //        losses cool 20min (let market settle before reconsidering same direction)
-      //        Previously flat 30min for all closes regardless of outcome.
       const CLOSE_COOLDOWN_MINS = _closePnl > 0 ? 10 : 20;
       if (minsSinceClose < CLOSE_COOLDOWN_MINS) {
         const wasWin = _closePnl > 0 ? `win (+$${_closePnl.toFixed(0)})` : _closePnl < 0 ? `loss (-$${Math.abs(_closePnl).toFixed(0)})` : 'cooldown';
-        logEvent("filter", `${stock.ticker} re-entry cooldown — ${wasWin} closed ${minsSinceClose.toFixed(0)}min ago, need ${CLOSE_COOLDOWN_MINS}min`);
+        logEvent("filter", `${stock.ticker} re-entry cooldown — ${wasWin} closed ${minsSinceClose.toFixed(0)}min ago`);
         continue;
       }
     }
 
-    // recentLoss.optionType !== optionType = opposite direction → don't block (different thesis)
     const recentLossSameDir = recentLoss && (!recentLoss.optionType || recentLoss.optionType === optionType);
-    if (recentLossSameDir && (Date.now() - recentLoss.closedAt) < 4 * 3600 * 1000) { // V3.01: reduced from 24h → 4h (score>=75 + RSI delta gates already prevent bad re-entries)
+    if (recentLossSameDir && (Date.now() - recentLoss.closedAt) < 4 * 3600 * 1000) {
       const hoursSinceLoss = ((Date.now() - recentLoss.closedAt) / 3600000).toFixed(1);
-      // SPRINT-08: Use exitRSI (RSI when position closed) not entryRSI.
-      // Re-entry gate asks: has RSI moved 10pts since we CLOSED the position?
-      // entryRSI caused drift because it's a stale reference from the open time.
-      // exitRSI is the stable snapshot captured at close time.
-      const lossRSI    = recentLoss.exitRSI || recentLoss.entryRSI || 50; // prefer exitRSI
-      const currentRSI = liveStock.rsi || signals.rsi || 50; // use liveStock for freshness
+      const lossRSI    = recentLoss.exitRSI || recentLoss.entryRSI || 50;
+      const currentRSI = liveStock.rsi || signals.rsi || 50;
       const rsidelta   = Math.abs(currentRSI - lossRSI);
-      const instrMin75 = Math.max(75, stock.minScore || 65); // raise floor to 75 after a loss
-      if (bestScore < instrMin75) {
-        logEvent("filter", `${stock.ticker} re-entry blocked — loss ${hoursSinceLoss}h ago, need score ${instrMin75} (have ${bestScore})`);
-        continue;
-      }
-      if (rsidelta < 10) {
-        logEvent("filter", `${stock.ticker} re-entry blocked — RSI only moved ${rsidelta.toFixed(0)}pts since loss (need 10pt shift for new thesis)`);
-        continue;
-      }
-      // V2.97: Direction check — RSI shift must be consistent with the new thesis.
-      // A call re-entry requires RSI to have DROPPED further (more oversold than at loss).
-      // A put re-entry requires RSI to have RISEN further (more overbought than at loss).
-      // This blocks the gap-digestion pattern where RSI swings 50→21→50→21 repeatedly
-      // (RSI moved 29pts but it's the same gap-artifact oscillation, not a new thesis).
-      const _rsiDirectionOk = optionType === "call"
-        ? currentRSI <= lossRSI   // for calls: RSI must have dropped (more oversold)
-        : currentRSI >= lossRSI;  // for puts: RSI must have risen (more overbought)
-      if (!_rsiDirectionOk) {
-        logEvent("filter", `${stock.ticker} re-entry blocked — RSI moved ${rsidelta.toFixed(0)}pts but wrong direction (${optionType} thesis requires RSI ${optionType === 'call' ? '<=' : '>='} ${lossRSI.toFixed(0)}, currently ${currentRSI.toFixed(0)})`);
-        continue;
-      }
-      logEvent("filter", `${stock.ticker} re-entry allowed — loss ${hoursSinceLoss}h ago, score ${bestScore} >= ${instrMin75}, RSI moved ${rsidelta.toFixed(0)}pts`);
+      const instrMin75 = Math.max(75, stock.minScore || 65);
+      if (bestScore < instrMin75) { logEvent("filter", `${stock.ticker} re-entry blocked — loss ${hoursSinceLoss}h ago, need score ${instrMin75}`); continue; }
+      if (rsidelta < 10) { logEvent("filter", `${stock.ticker} re-entry blocked — RSI only moved ${rsidelta.toFixed(0)}pts`); continue; }
+      const _rsiDirectionOk = optionType === "call" ? currentRSI <= lossRSI : currentRSI >= lossRSI;
+      if (!_rsiDirectionOk) { logEvent("filter", `${stock.ticker} re-entry blocked — RSI wrong direction`); continue; }
+      logEvent("filter", `${stock.ticker} re-entry allowed — loss ${hoursSinceLoss}h ago, score ${bestScore}, RSI moved ${rsidelta.toFixed(0)}pts`);
     }
 
-    // Fast RSI move gate - rapid RSI moves signal potential reversals for DEBIT entries
-    // Credit spreads: fast RSI crash = ideal (max fear premium) - bypass gate
-    // TODO #2 FIX: Regime B exception — in bear regime, a fast RSI drop IS the puts_on_bounces setup
-    // not a warning sign. Lower required score from 85→75 when entryBias=puts_on_bounces and RSI falling.
     const prevRSI = bars.length >= 2 ? calcRSI(bars.slice(0, -1)) : signals.rsi;
-    const rsiMove = Math.abs(signals.rsi - prevRSI);  // intraday RSI move
-    // Credit-only instruments (TLT) benefit from fast RSI moves — high IV = rich premium
+    const rsiMove = Math.abs(signals.rsi - prevRSI);
     const instrAllowedTypes = (INSTRUMENT_CONSTRAINTS[stock.ticker] || {}).allowedTypes || [];
     const isCreditOnlyInstr = instrAllowedTypes.length > 0 && instrAllowedTypes.every(t => t.startsWith("credit"));
-    // Fast RSI gate uses INTRADAY RSI which is noisy. Exempt when dailyRSI is in valid range.
-    // V2.81 established daily RSI as the regime signal — a fast intraday drop with healthy
-    // daily RSI (35-65) is the puts_on_bounces setup, not a warning sign.
-    // Panel HIGH #2: tightened exemption band from 35-65 to 40-60.
-    // At daily RSI edges (35-40 or 60-65), a fast intraday drop is more likely
-    // trend-confirming than noise — the gate should still enforce there.
     const dailyRsiValid = (stock.dailyRsi || 50) >= 40 && (stock.dailyRsi || 50) <= 60;
     const fastRSIMove = rsiMove >= 15 && !creditModeActive && !isCreditOnlyInstr && !dailyRsiValid;
     if (fastRSIMove) {
-      const putsOnBouncesBias = (state._agentMacro || {}).entryBias === "puts_on_bounces";
-      const rsiIsFalling      = signals.rsi < prevRSI; // reversal, not momentum chase
-      // Regime B bounce-fade: fast RSI drop + puts_on_bounces = exactly the setup
-      const regimeBException  = putsOnBouncesBias && rsiIsFalling && optionType === "put";
+      const putsOnBouncesBias2 = (state._agentMacro || {}).entryBias === "puts_on_bounces";
+      const rsiIsFalling      = signals.rsi < prevRSI;
+      const regimeBException  = putsOnBouncesBias2 && rsiIsFalling && optionType === "put";
       const fastRSIMin = regimeBException ? 75 : 85;
-      if (bestScore < fastRSIMin) {
-        logEvent("filter", `${stock.ticker} fast RSI move ${prevRSI.toFixed(0)}-${signals.rsi.toFixed(0)} (+${rsiMove.toFixed(0)}pts) - need score ${fastRSIMin}${regimeBException ? " (Regime B exception)" : ""}, have ${bestScore} - skip`);
-        continue;
-      }
-      logEvent("filter", `${stock.ticker} fast RSI move ${rsiMove.toFixed(0)}pts - requiring high conviction (score ${bestScore} >= ${fastRSIMin}${regimeBException ? " Regime B" : ""})`);
+      if (bestScore < fastRSIMin) { logEvent("filter", `${stock.ticker} fast RSI move ${rsiMove.toFixed(0)}pts - need ${fastRSIMin}, have ${bestScore}`); continue; }
     }
-    logEvent("filter", `${stock.ticker} best setup: ${optionType.toUpperCase()} score ${bestScore} | RSI:${signals.rsi} MACD:${signals.macd} MOM:${signals.momentum}${entryBlocked ? " [CONTEXT ONLY — entry blocked]" : ""}`);
-    // Queue for execution - heat is rechecked live in the execution loop below
-    // SKIP FIX: entryBlocked instruments contribute scoring context but don't enter scored[]
-    if (entryBlocked) continue; // scoring + logging done — skip execution queue
+
+    logEvent("filter", `${stock.ticker} best setup: ${optionType.toUpperCase()} score ${bestScore} | RSI:${signals.rsi} MACD:${signals.macd} MOM:${signals.momentum}`);
+    if (entryBlocked) continue;
     const isMR = optionType === "call" && callSetup.isMeanReversion;
-    // BUG A FIX: stamp isMR on liveStock so prefetch can read it for correct DTE/delta.
-    // callSetup.isMeanReversion is set but was never copied to stock object.
-    // Prefetch iterated scored[] and read stock._isMeanReversion → always false → wrong DTE.
     liveStock._isMeanReversion = isMR;
-    // ENTRY ENGINE: score candidate  -- locks tradeIntent at score time
+
     const eeCandidate = EE_scoreCandidate(
       { ...liveStock, isMeanReversion: isMR },
       putSetup.score, callSetup.score,
       putSetup.reasons, callSetup.reasons,
-      { rsi: signals.rsi, dailyRsi: signals.dailyRsi, macd: signals.macd,
-        spyRecovering: !!(spyRecovering) },
+      { rsi: signals.rsi, dailyRsi: signals.dailyRsi, macd: signals.macd, spyRecovering: !!(spyRecovering) },
       rb, state
     );
-    // Size modifier log (eeCandidate now declared above)
     if (eeCandidate.sizeMod < 1.0) {
-      logEvent("filter", `${stock.ticker} size modifier ${eeCandidate.sizeMod.toFixed(2)}x (entryEngine: oversold/crisis/IV)`);
+      logEvent("filter", `${stock.ticker} size modifier ${eeCandidate.sizeMod.toFixed(2)}x`);
     }
-    // Merge entry engine result with scan data
     scored.push({
       stock: liveStock, price,
       score:           eeCandidate.score,
@@ -3309,54 +2015,30 @@ async function runScan() {
       sizeMod:         eeCandidate.sizeMod,
       constraintPass:  eeCandidate.constraintPass,
       constraintReason: eeCandidate.constraintReason || null,
-      heatMultiplier:  eeCandidate.heatMultiplier || 1.0, // Bug 3 fix: was missing, execution loop destructures this
+      heatMultiplier:  eeCandidate.heatMultiplier || 1.0,
     });
   }
 
-  // Sort by score descending
   scored.sort((a,b) => b.score - a.score);
 
-  // Score ranking cutoff removed — all instruments scoring above minimum are viable entries.
-  // With only 5 instruments, the heat cap (60%) and directional cap (40%) govern concentration
-  // far more precisely than a blunt percentage cutoff. Scored list is already sorted best-first
-  // so execution loop processes highest-conviction entries first and stops at heat cap.
   if (scored.length > 0) {
-    logEvent("filter", `Score ranking: ${scored.length} candidate(s) above minimum — proceeding (heat cap governs concentration)`);
+    logEvent("filter", `Score ranking: ${scored.length} candidate(s) above minimum`);
   }
 
-  // - PARALLEL OPTIONS PREFETCH -
-  // Fetch options chains for all scored stocks simultaneously before executing
-  // Bug 1 FIX: choppyDebitBlock removed from skipPrefetch.
-  // Agent saying "choppy/none" should not blind the options data layer.
-  // creditModeActive is always false in APEX — previous condition always skipped on choppy.
-  // MR calls in particular need options data even when agent is bearish/choppy.
-  // Only skip on heat cap — entry scoring will handle directional filtering.
   const skipPrefetch = _heatPct >= effectiveHeatCap();
-  if (skipPrefetch && !dryRunMode) {
-    logEvent("filter", `Heat ${_heatPctPc}% at cap - skipping options prefetch`);
-  }
+  if (skipPrefetch && !dryRunMode) logEvent("filter", `Heat ${_heatPctPc}% at cap - skipping options prefetch`);
   if (scored.length > 0 && !skipPrefetch) {
-    logEvent("scan", `Prefetching options chains for ${scored.length} candidates in parallel...`);
+    logEvent("scan", `Prefetching options chains for ${scored.length} candidates...`);
     const optPrefetchStart = Date.now();
-    // Process in batches of 5 to avoid exhausting Railway connection pool
-    // 5 concurrent options fetches - up to 40 snapshot batches each = 200 max connections
     const BATCH_SIZE = 5;
     for (let i = 0; i < scored.length; i += BATCH_SIZE) {
       const batch = scored.slice(i, i + BATCH_SIZE);
       await Promise.all(batch.map(async ({ stock, price, optionType, score }) => {
         try {
-          // Bug 6 FIX: Prefetch DTE/delta must match execution.js Fix 5 targets.
-        // MR calls: 14 DTE / 0.42 delta (short-dated, need fast move, higher gamma)
-        // Directional: 38 DTE / 0.35 delta (time for thesis to play out)
-        // Mismatch was: prefetch used 21/28 DTE, execution used 14/38 → wrong contract cached.
-        // V2.89 BUG FIX: was reading stock._isMeanReversion (WATCHLIST entry, always undefined)
-        // Fix: read from liveStock._isMeanReversion (set correctly at line ~2676)
-        const isMR = optionType === "call" && (liveStock._isMeanReversion || false);
-        const contract = await findContract(stock.ticker, optionType, isMR ? 0.42 : 0.35, isMR ? 14 : 38, state.vix, stock);
+          const isMR = optionType === "call" && (liveStock._isMeanReversion || false);
+          const contract = await findContract(stock.ticker, optionType, isMR ? 0.42 : 0.35, isMR ? 14 : 38, state.vix, stock);
           if (contract) {
             stock._cachedContract = contract;
-            // Store real IV from options market for use in scoring
-            // This replaces the approximated IV from price bars
             if (contract.iv && contract.iv > 0) stock._realIV = contract.iv;
           }
         } catch(e) {}
@@ -3365,38 +2047,21 @@ async function runScan() {
     logEvent("scan", `Options prefetch complete in ${((Date.now()-optPrefetchStart)/1000).toFixed(1)}s`);
   }
 
-  // Enter trades - sorted by score, best first
-  // heatPct() is live and updates after every executeTrade call
   for (const { stock, price, score, reasons, optionType, isMeanReversion, tradeIntent, constraintPass, constraintReason, sizeMod } of scored) {
-    // Heat cap — panel: correlation multiplier removed (heat cap handles concentration)
     if (heatPct() >= effectiveHeatCap()) break;
     if (state.cash <= CAPITAL_FLOOR) break;
 
-    // Tag stock with credit mode so checkAllFilters can exempt credit puts from debit-era blocks
-    // _creditPutMode removed — APEX trades naked options only, no credit put routing
-    // BUG5 FIX: was passing tradeIntent.type as prefetchedBars arg (wrong). Pass null.
     const { pass, reason } = await checkAllFilters(stock, price, null);
     if (!pass) {
       const putBypassReasons = ["sector ETF", "support", "VWAP", "breakdown"];
       const canBypassForPut  = optionType === "put" && putBypassReasons.some(r => reason?.includes(r));
-      if (!canBypassForPut) {
-        logEvent("filter", `${stock.ticker} - ${reason}`);
-        continue;
-      }
+      if (!canBypassForPut) { logEvent("filter", `${stock.ticker} - ${reason}`); continue; }
       logEvent("filter", `${stock.ticker} - bypassing filter for PUT: ${reason}`);
     }
 
-    // High-beta limit removed (panel: irrelevant for 5 index ETFs — SPY/QQQ/GLD/TLT/XLE)
-
-    // Liquidity pre-check removed (panel: bid-ask gate in executeCreditSpread handles this)
-    // Pre-entry agent check removed (panel: redundant API cost — score provides signal quality)
-
-    // ENTRY ENGINE: evaluateEntry  -- single gate check using locked tradeIntent
     const intent     = tradeIntent || {};
-    // BUG C FIX: fallback was "debit_put"/"debit_call" — blocked by INSTRUMENT_CONSTRAINTS allowedTypes ["put","call"].
-    const intentType = intent.type || optionType; // APEX: always "put" or "call"
+    const intentType = intent.type || optionType;
 
-    // Build stagger context
     const sameTickerSameDirPos = state.positions.filter(p =>
       p.ticker === stock.ticker &&
       ((intentType.includes("put") && p.optionType === "put") ||
@@ -3408,36 +2073,25 @@ async function runScan() {
     const existingProfitPct = sameTickerSameDirPos.length > 0
       ? Math.max(...sameTickerSameDirPos.map(p => parseFloat(p.pnlPct || 0)))
       : 0;
-    // Panel M3: credit spread profit % = (premium - currentSpreadValue) / maxProfit
-    // pnlPct for credit is negative when profitable (inverted), so compute separately
     const existingCreditProfitPct = sameTickerSameDirPos.length > 0
       ? Math.max(...sameTickerSameDirPos.map(p => {
           if (!p.isCreditSpread) return 0;
           const earned = (p.premium || 0) - (p.currentPrice || p.premium || 0);
           const maxP   = p.maxProfit || p.premium || 0;
-          return maxP > 0 ? Math.min(1, Math.max(-1, earned / maxP)) : 0; // clamped -100% to +100%, 0.01 fallback removed (unsafe)
+          return maxP > 0 ? Math.min(1, Math.max(-1, earned / maxP)) : 0;
         }))
       : 0;
     const ddProtocol = marketContext.drawdownProtocol || { minScore: MIN_SCORE };
-
-    // volDecline is per-stock (today vol < 70% avg) -- not available at execution scope
-    // Pass false as safe default; evaluateEntry only uses it for afternoon gate edge case
     const _volDeclineExec = false;
+
     const eeResult = evaluateEntry(
-      { ticker: stock.ticker, optionType, tradeType: intentType, score,
-        constraintPass: constraintPass !== false,
-        constraintReason: constraintReason || null,
-        tradeIntent: intent },
+      { ticker: stock.ticker, optionType, tradeType: intentType, score, constraintPass: constraintPass !== false, constraintReason: constraintReason || null, tradeIntent: intent },
       rb, state,
       { etHour: etHourNow, isLateDay, isLastHour, volDecline: _volDeclineExec,
-        signals: { dailyRsi: stock.dailyRsi || stock.rsi || 50,
-                   macd: stock.macd || "neutral" },
-        recentSameDir:          recentSameDirMins,
-        existingProfitPct,
-        existingCreditProfitPct,
-        drawdownMinScore:    ddProtocol.minScore || MIN_SCORE,
-        drawdownLevel:       ddProtocol.level || "normal",  // BUG3 FIX: pass level so entryEngine only applies when in actual drawdown
-        agentSignal:         (state._agentMacro || {}).signal || "neutral" }
+        signals: { dailyRsi: stock.dailyRsi || stock.rsi || 50, macd: stock.macd || "neutral" },
+        recentSameDir: recentSameDirMins, existingProfitPct, existingCreditProfitPct,
+        drawdownMinScore: ddProtocol.minScore || MIN_SCORE, drawdownLevel: ddProtocol.level || "normal",
+        agentSignal: (state._agentMacro || {}).signal || "neutral" }
     );
     if (!eeResult.pass) {
       logEvent("filter", `${stock.ticker} entry blocked - ${eeResult.reason}`);
@@ -3445,159 +2099,92 @@ async function runScan() {
       continue;
     }
 
-    // Derive execution path from locked intentType
-    // Richard/Gilfoyle: log intentType immediately after pass — makes the dark gap visible
-    // V2.87 FIX: Check circuit halt flag here (not at top of scan) so exits above still ran.
-    // _circuitEntryHalt = daily circuit tripped OR weekly circuit open.
-    if (_circuitEntryHalt) {
-      logEvent("filter", `${stock.ticker} entry blocked — circuit halt active (daily P&L limit reached)`);
-      continue;
-    }
-    // V2.88: VIX full halt — all entries blocked above VIX_PAUSE (35)
-    if (_vixFullHalt) {
-      logEvent("filter", `${stock.ticker} entry blocked — VIX ${state.vix?.toFixed(1)} >= ${VIX_PAUSE} (full halt)`);
-      continue;
-    }
-    // V2.88: VIX call gate — calls blocked when VIX >= 28 AND macro is bearish
-    // Puts still allowed — market weakness is the signal
-    if (_vixCallGate && optionType === "call") {
-      logEvent("filter", `${stock.ticker} call blocked — VIX ${state.vix?.toFixed(1)} >= 28 + bearish macro (high-cost call environment)`);
-      continue;
-    }
-    // V3.00: EOD ENTRY CUTOFF — no new entries at or after 3:00 PM ET
-    // EOD hard close fires at 3:15 PM and closes all existing positions.
-    // Entering after 3:00 PM creates a position that cannot be EOD-closed
-    // and will hold overnight — violating the no-overnight-holds rule.
-    // SPY entered at 3:26 PM on 5/27 after EOD close already fired → gap identified.
-    // Buffer: 15 minutes before EOD close gives the close time to execute cleanly.
-    if (isLastHour) {
-      logEvent("filter", `[EOD-BLOCK] ${stock.ticker} entry blocked — past 3:00 PM ET cutoff (EOD close at 3:15 PM, no new entries)`);
-      continue;
-    }
+    if (_circuitEntryHalt) { logEvent("filter", `${stock.ticker} entry blocked — circuit halt`); continue; }
+    if (_vixFullHalt) { logEvent("filter", `${stock.ticker} entry blocked — VIX ${state.vix?.toFixed(1)} >= ${VIX_PAUSE}`); continue; }
+    if (_vixCallGate && optionType === "call") { logEvent("filter", `${stock.ticker} call blocked — VIX >= 28 + bearish macro`); continue; }
+    if (isLastHour) { logEvent("filter", `[EOD-BLOCK] ${stock.ticker} entry blocked — past 3:00 PM ET cutoff`); continue; }
 
-    // V3.00: TWO-TIER STAGGER GATE — per-stock enforcement
-    // Hard block (0-15 min): no exceptions, always skip
-    if (state._hardBlock) {
-      logEvent("filter", `[STAGGER] ${stock.ticker} entry blocked — hard block (session < 15min, VWAP/IV unstable)`);
-      continue;
-    }
-    // Soft block (15-30 min): score >= 85 bypasses, anything below is blocked
+    if (state._hardBlock) { logEvent("filter", `[STAGGER] ${stock.ticker} entry blocked — hard block`); continue; }
     if (state._softBlock) {
       const _earlyBypassScore = 85;
+      // C1-D: stagger bypass disabled on HIGH RISK days
+      if (_c1dHighRiskDay) {
+        logEvent("filter", `[C1-D] ${stock.ticker} stagger bypass DISABLED — HIGH RISK day plan`);
+        continue;
+      }
       if (score >= _earlyBypassScore) {
-        logEvent("filter", `[STAGGER-BYPASS] ${stock.ticker} score ${score} >= ${_earlyBypassScore} — early entry allowed (9:45-10:00 AM window, 0.75x sizing applies)`);
-        // fall through — entry proceeds with openingMult 0.75x in execution.js
+        logEvent("filter", `[STAGGER-BYPASS] ${stock.ticker} score ${score} >= ${_earlyBypassScore} — early entry allowed`);
       } else {
-        logEvent("filter", `[STAGGER] ${stock.ticker} entry blocked — soft block (score ${score} < ${_earlyBypassScore} needed for 9:45-10:00 AM entry)`);
+        logEvent("filter", `[STAGGER] ${stock.ticker} entry blocked — soft block (score ${score} < ${_earlyBypassScore})`);
         continue;
       }
     }
-    if (state._staggerCooling) {
-      logEvent("filter", `${stock.ticker} entry blocked — stagger cooldown active (last entry ${((Date.now() - (state._lastEntryAt||0))/60000).toFixed(0)}min ago, need 20min)`);
-      continue;
-    }
+    if (state._staggerCooling) { logEvent("filter", `${stock.ticker} entry blocked — stagger cooldown`); continue; }
 
-    // V2.90: Call cap gate — 3-slot system with tiered score threshold
-    if (state._callCapActive && optionType === "call") {
-      logEvent("filter", `${stock.ticker} call blocked — call cap active (${openCalls}/${MAX_SIMULTANEOUS_CALLS} calls open)`);
-      continue;
-    }
-    // V2.96 FIX 2: Slot 2 score escalation
-    // When 1 call is already open, require score >= 75 (vs 70) for second call.
-    // QQQ(77) + SPY(77) both at minimum bar — slightly higher bar reduces marginal entries.
-    // Does NOT block correlated pairs outright (slot3 handles that at slot 3).
+    if (state._callCapActive && optionType === "call") { logEvent("filter", `${stock.ticker} call blocked — call cap`); continue; }
     if (openCalls === 1 && optionType === "call") {
       const SLOT2_MIN_SCORE = 75;
-      if (score < SLOT2_MIN_SCORE) {
-        logEvent("filter", `${stock.ticker} call blocked — slot 2 requires score >= ${SLOT2_MIN_SCORE} (have ${score}, 1 call already open)`);
-        continue;
-      }
+      if (score < SLOT2_MIN_SCORE) { logEvent("filter", `${stock.ticker} call blocked — slot 2 requires score >= ${SLOT2_MIN_SCORE}`); continue; }
     }
-
-    // Slot 3 gate: score >= 85 AND instrument must be from an unoccupied correlation group
     if (state._slot3Active && optionType === "call") {
-      const _ticker3    = stock.ticker;
-      const _group3     = (CORR_GROUPS || {})[_ticker3] || 'other';
-      const _occupied3  = state._occupiedCorrGroups || [];
-      const _groupOk    = !_occupied3.includes(_group3);
-      const _scoreOk    = score >= SLOT3_MIN_SCORE;
-      if (!_scoreOk) {
-        logEvent("filter", `${_ticker3} call blocked — slot 3 requires score >= ${SLOT3_MIN_SCORE} (have ${score})`);
-        continue;
-      }
-      if (!_groupOk) {
-        logEvent("filter", `${_ticker3} call blocked — slot 3 requires uncorrelated group (${_group3} already open: [${_occupied3.join(',')}])`);
-        continue;
-      }
-      logEvent("filter", `${_ticker3} call SLOT 3 APPROVED — score ${score} >= ${SLOT3_MIN_SCORE}, group ${_group3} uncorrelated`);
+      const _ticker3 = stock.ticker;
+      const _group3  = (CORR_GROUPS || {})[_ticker3] || 'other';
+      const _occupied3 = state._occupiedCorrGroups || [];
+      if (score < SLOT3_MIN_SCORE) { logEvent("filter", `${_ticker3} call blocked — slot 3 requires score >= ${SLOT3_MIN_SCORE}`); continue; }
+      if (_occupied3.includes(_group3)) { logEvent("filter", `${_ticker3} call blocked — slot 3 group ${_group3} occupied`); continue; }
     }
-    logEvent("filter", `${stock.ticker} entry approved — intent:${intentType} score:${score} regime:${rb.regimeName}`);
-    // NAKED OPTIONS MODE: single-leg long calls and puts only.
-    // Spreads, iron condors, and multi-leg strategies removed.
-    // All instruments route to executeTrade (limit order, long only).
 
-    // V2.94 CHANGE 4: Minimum delta gate — 0.28 floor.
-    // Target delta is 0.35. Allowing entries as low as 0.23 (SPY today) creates
-    // positions that need large underlying moves to generate option gains.
-    // At delta 0.23, you need 1.5x the underlying move of a 0.35 delta position
-    // for the same option gain. Low delta = slow response = poor risk/reward.
-    // Gate: if contract delta is below 0.28, block entry and log reason.
+    // C1-A: daily loss lock gates entries (catches here in case c1AnyLock was bypassed above in dryRun)
+    if (state._dailyLossLockActive && !dryRunMode) {
+      const _effectiveMin = _computeEffectiveMinScore(MIN_SCORE);
+      if (score < _effectiveMin) {
+        logEvent("filter", `[C1-A] ${stock.ticker} blocked — daily loss lock active, need score ${_effectiveMin} (have ${score})`);
+        continue;
+      }
+      logEvent("filter", `[C1-A] ${stock.ticker} entry PERMITTED — score ${score} >= ${_effectiveMin} despite daily loss lock`);
+    }
+
+    logEvent("filter", `${stock.ticker} entry approved — intent:${intentType} score:${score} regime:${rb.regimeName}`);
+
     const _contractDelta = parseFloat(stock._cachedContract?.delta || 0.35);
     const MIN_ENTRY_DELTA = 0.28;
     if (_contractDelta > 0 && _contractDelta < MIN_ENTRY_DELTA) {
-      logEvent("filter", `${stock.ticker} entry blocked — delta ${_contractDelta.toFixed(3)} below minimum ${MIN_ENTRY_DELTA} (need stronger delta for efficient option leverage)`);
+      logEvent("filter", `${stock.ticker} entry blocked — delta ${_contractDelta.toFixed(3)} below minimum`);
       continue;
     }
 
     let entered = false;
     state._lastEntryType = isMeanReversion ? `mr_${optionType}` : `naked_${optionType}`;
 
-    // ── V2.96: VIX CALL QUALITY GATE ────────────────────────────────────
-    // At VIX >= 25: call entries require RSI < 38 (deeply oversold).
-    // Evidence: May 12 — AM losses had RSI 46-50 (blocked), PM wins had RSI 33-36 (pass).
-    // At VIX >= 30: calls fully blocked regardless of RSI.
-    // Puts are never blocked by this gate.
     const _entryRSI_now = stock.rsi || stock.liveRSI || 50;
-    // RSI gate: at VIX >= 25, only allow calls when RSI is deeply oversold (< 38).
-    // Score threshold handled upstream. This gate is RSI-only.
-    // May 12 evidence: AM losses RSI 46-50 blocked, PM wins RSI 33-36 pass.
-    const _callRSIOk = _entryRSI_now < VIX_HIGH_CALL_RSI; // RSI < 38
+    const _callRSIOk = _entryRSI_now < VIX_HIGH_CALL_RSI;
 
     if (optionType === "call" && _vixCallsBlocked) {
       logEvent("filter", `${stock.ticker} call BLOCKED — VIX ${_vixNow.toFixed(1)} >= ${VIX_CALLS_BLOCKED}`);
       continue;
-
     } else if (optionType === "call" && _vixCreditMode && !_callRSIOk) {
-      logEvent("filter", `${stock.ticker} call BLOCKED — VIX ${_vixNow.toFixed(1)} >= ${VIX_CREDIT_PRIMARY}, RSI ${_entryRSI_now.toFixed(0)} >= ${VIX_HIGH_CALL_RSI} (need RSI < ${VIX_HIGH_CALL_RSI} for high-vol entry)`);
+      logEvent("filter", `${stock.ticker} call BLOCKED — VIX ${_vixNow.toFixed(1)} >= ${VIX_CREDIT_PRIMARY}, RSI ${_entryRSI_now.toFixed(0)} >= ${VIX_HIGH_CALL_RSI}`);
       continue;
-
     } else {
       if (optionType === "call" && _vixCreditMode && _callRSIOk) {
-        logEvent("filter", `${stock.ticker} call PERMITTED — VIX ${_vixNow.toFixed(1)} high but RSI ${_entryRSI_now.toFixed(0)} deeply oversold`);
+        logEvent("filter", `${stock.ticker} call PERMITTED — VIX high but RSI ${_entryRSI_now.toFixed(0)} deeply oversold`);
       }
-      logEvent("filter", `${stock.ticker} execution branch: naked_${optionType} (MR:${isMeanReversion}) delta:${_contractDelta.toFixed(3)}`);
+      logEvent("filter", `${stock.ticker} execution: naked_${optionType} (MR:${isMeanReversion}) delta:${_contractDelta.toFixed(3)}`);
       const _sizeModNaked = sizeMod || 1.0;
       entered = await executeTrade(stock, price, score, reasons, state.vix, optionType, isMeanReversion, _sizeModNaked);
     }
-    // ── END VIX CALL QUALITY GATE ─────────────────────────────────────────
 
     if (entered) {
-      // V2.96 FIX 1: stamp _lastEntryAt on confirmed fill for stagger gate
       state._lastEntryAt = Date.now();
       markDirty();
       await new Promise(r=>setTimeout(r,500));
     }
   }
 
-  // Individual stock buys disabled - SPY/QQQ only
-
   } // end else (no pending order)
 
-  // SE-W4/SE-C2: Track actual scan interval for frequency drift monitoring
   const scanNow = Date.now();
   const lastScanMs = state.lastScan ? scanNow - new Date(state.lastScan).getTime() : 0;
-  // Only record intervals that are plausible scan gaps (5s-120s)
-  // Excludes: first boot gap (hours since last Redis write), hung scans >2min
   const isPlausibleInterval = lastScanMs >= 5000 && lastScanMs <= 120000;
   if (lastScanMs > 0 && isPlausibleInterval) {
     if (!state._scanIntervals) state._scanIntervals = [];
@@ -3605,153 +2192,43 @@ async function runScan() {
     if (state._scanIntervals.length > 30) state._scanIntervals = state._scanIntervals.slice(-30);
     const avgInterval = state._scanIntervals.reduce((s,v)=>s+v,0) / state._scanIntervals.length;
     state._avgScanIntervalMs = Math.round(avgInterval);
-    // Alert if average scan interval >15s - only log once per boot to avoid spam
-    if (avgInterval > 15000 && state._scanIntervals.length >= 5 && !state._perfWarnedThisBoot) {
-      state._perfWarnedThisBoot = true;
-      logEvent("warn", `[PERF] Scan frequency degraded - avg ${(avgInterval/1000).toFixed(1)}s (target: 10s)`);
-    } else if (avgInterval <= 12000 && state._perfWarnedThisBoot) {
-      // Clear flag once performance recovers
-      state._perfWarnedThisBoot = false;
-    }
   } else if (lastScanMs > 120000) {
-    // Gap > 2min - log but don't pollute interval stats (restart gap, not scan drift)
-    logEvent("scan", `[PERF] Scan gap ${(lastScanMs/1000/60).toFixed(1)}min since last scan (boot/restart)`);
-  }
-  // TODO #10: Data-only scoring pass for individual stocks
-  // Scores all panel-approved stocks every scan but NEVER executes trades on them
-  // Purpose: (1) validation data on scoring model, (2) surface manual opportunities,
-  //          (3) provide scoring context signals (NVDA leading QQQ, JPM credit stress, etc.)
-  // Panel hard cap: 10 stocks max. dataOnly:true stocks are always excluded from execution.
-  const DATA_ONLY_STOCKS = INDIVIDUAL_STOCK_WATCHLIST.filter(s =>
-    ["NVDA","JPM","TSLA","META","AMZN","PLTR","CRWD","UNH","CAT","COIN"].includes(s.ticker)
-  );
-  if (DATA_ONLY_STOCKS.length > 0 && isMarketHours()) {
-    (async () => {
-      try {
-        if (!state._dataOnlyScores) state._dataOnlyScores = {};
-        const agentMacro   = state._agentMacro || {};
-        const regime       = agentMacro.regime || "neutral";
-        const entryBias    = agentMacro.entryBias || "neutral";
-        const dataFetches  = await Promise.all(
-          DATA_ONLY_STOCKS.map(async stock => {
-            try {
-              const [price, bars, intradayBars] = await Promise.all([
-                getStockQuote(stock.ticker),
-                getStockBars(stock.ticker, 14).catch(() => []),
-                getIntradayBars(stock.ticker, 78).catch(() => []),
-              ]);
-              if (!price || !bars || bars.length < 5) return null;
-              const signals  = await getLiveSignals(stock.ticker, bars, intradayBars).catch(() => null);
-              if (!signals) return null;
-              const optionType  = entryBias === "calls_on_dips" ? "call" : "put";
-              const spyRelStr   = price && state._liveSPY
-                ? price / state._liveSPY
-                : 1.0;
-              // Use simplified scoring — no sector ETF fetch, just RSI/MACD/momentum
-              const baseScore   = optionType === "put"
-                ? scorePutSetup(stock, spyRelStr, signals.adx || 25, 1, 1, state.vix || 20)
-                : scoreMeanReversionCall(stock, spyRelStr, signals.adx || 25, bars, state.vix || 20);
-              const scoreVal    = baseScore?.score || 0;
-              state._dataOnlyScores[stock.ticker] = {
-                score: scoreVal,
-                optionType,
-                rsi:   signals.rsi,
-                macd:  signals.macd,
-                momentum: signals.momentum,
-                updatedAt: Date.now(),
-              };
-              if (scoreVal >= 70) {
-                logEvent("scan", `[DATA] ${stock.ticker} ${optionType.toUpperCase()} score ${scoreVal} — data-only signal (not trading)`);
-              }
-            } catch(e) { /* non-critical — don't let data pass crash main scan */ }
-          })
-        );
-        // Wire key individual stock signals into scoring context
-        // NVDA vs QQQ: if NVDA underperforms QQQ significantly, tech weakness is leading
-        const nvdaScore = state._dataOnlyScores?.NVDA;
-        const jpmScore  = state._dataOnlyScores?.JPM;
-        if (nvdaScore?.rsi && nvdaScore.rsi < 35) {
-          state._nvdaWeakness = true;
-          logEvent("scan", `[DATA] NVDA RSI ${nvdaScore.rsi.toFixed(0)} — AI capex weakness signal, QQQ puts more valid`);
-        } else { state._nvdaWeakness = false; }
-        if (jpmScore?.rsi && jpmScore.rsi < 35) {
-          state._jpmStress = true;
-          logEvent("scan", `[DATA] JPM RSI ${jpmScore.rsi.toFixed(0)} — credit/banking stress signal`);
-        } else { state._jpmStress = false; }
-      } catch(e) { /* non-critical */ }
-    })();
+    logEvent("scan", `[PERF] Scan gap ${(lastScanMs/1000/60).toFixed(1)}min since last scan`);
   }
 
   state.lastScan    = new Date().toISOString();
   state._scanFailures = 0;
-  // Single Redis write at scan end - with timeout so a Redis hang can't block the scanner
-  // If Redis is slow, markDirty() ensures the periodic flush interval catches it
   await Promise.race([
     saveStateNow(),
-    new Promise(r => setTimeout(r, 3000)), // 3s timeout - don't let Redis block next scan
-  ]).catch(() => { markDirty(); }); // on timeout: mark dirty, periodic flush will handle it
+    new Promise(r => setTimeout(r, 3000)),
+  ]).catch(() => { markDirty(); });
   } catch(e) {
     logEvent("error", `runScan crashed: ${e.message} | stack: ${e.stack?.split("\n")[1]?.trim() || "unknown"}`);
-    // Track consecutive scan failures
     state._scanFailures = (state._scanFailures || 0) + 1;
     const n = state._scanFailures;
-    // Email throttle: send on failures 1, 2, 3 (so you know immediately), then every 30
-    // Prevents inbox flooding during extended crashes (7 emails per crash was too many)
     const shouldEmail = (n <= 3) || (n % 30 === 0);
     if (shouldEmail && RESEND_API_KEY && GMAIL_USER && isMarketHours()) {
-      const subject = n <= 3
-        ? `APEX ALERT - Scanner crash #${n} (${e.message.slice(0,50)})`
-        : `APEX ALERT - Scanner still failing (${n} consecutive errors)`;
       Promise.race([
         sendResendEmail(
-          subject,
-          `<div style="font-family:monospace;background:#07101f;color:#ff5555;padding:20px">
-          <h2>!! APEX Scanner Error</h2>
-          <p>Consecutive scan failures: <strong>${n}</strong></p>
-          <p>Last error: ${e.message}</p>
-          <p>Stack: ${e.stack?.split("\n")[1]?.trim() || "unknown"}</p>
-          <p>Time: ${new Date().toISOString()}</p>
-          <p>Open positions: ${state.positions.length}</p>
-          <p>Cash: $${state.cash?.toFixed(2)}</p>
-          ${n > 3 ? `<p style="color:#ffaa00">Note: emails suppressed between failure #4 and this one to avoid inbox flooding. Alerting every 30 failures.</p>` : ''}
-          <p><strong>Check Railway logs immediately.</strong></p>
-        </div>`
+          `APEX ALERT - Scanner crash #${n} (${e.message.slice(0,50)})`,
+          `<div style="font-family:monospace;background:#07101f;color:#ff5555;padding:20px"><h2>!! APEX Scanner Error</h2><p>Consecutive scan failures: <strong>${n}</strong></p><p>Last error: ${e.message}</p><p>Time: ${new Date().toISOString()}</p><p>Open positions: ${state.positions.length}</p></div>`
         ),
         new Promise(r => setTimeout(r, 5000)),
       ]).catch(() => {});
-      logEvent("warn", `Scan failure alert sent - ${n} consecutive errors`);
-    } else if (!shouldEmail) {
-      logEvent("warn", `Scan failure #${n} - email suppressed (next alert at #${Math.ceil(n/30)*30})`);
     }
   } finally {
-    // Reset failure counter on successful scan completion
     if (!state._scanFailures) state._scanFailures = 0;
-    // Always release the lock — the generation guard was causing permanent deadlocks
-    // when a crash in catch() allowed a new scan to start and increment _scanGen
-    // before finally ran, leaving scanRunning=true forever.
     scanRunning = false;
   }
 }
 
-// - TA-W2: ATR (Average True Range) calculation -
-// Normalizes RSI/MACD signals by whether the current move is within normal range
-// A 2% SPY move with ATR=0.5% is extreme; same 2% with ATR=2% is noise
-
-// - ADX Calculation -
-
-// - Email System -
-// - F12: Enhanced morning briefing -
-
-
 module.exports = {
   runScan,
-  // Export mutable scanner state for server.js dashboard and API endpoints
   getScannerState: () => ({
     scanRunning, dryRunMode, marketContext,
     lastScanStart: _lastScanStart,
     circuit: getCircuitState(),
   }),
-  // Watchdog escape hatch — called by server.new.js if scan is stuck > 90s
   forceResetScanLock: () => {
     logEvent('warn', '[WATCHDOG] Force-resetting stuck scanRunning lock');
     scanRunning = false;
