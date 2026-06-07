@@ -5,45 +5,46 @@
 
 const { alpacaGet } = require('./broker');
 const { updateJournalExit, writeJournalEntry, loadJournalDay } = require('./state');
-const { WATCHLIST ,
+const { WATCHLIST,
   ALPACA_KEY, INDIVIDUAL_STOCKS_ENABLED, MS_PER_DAY, STOP_LOSS_PCT, TAKE_PROFIT_PCT
-}  = require('./constants');
-const { findContract } = require('./execution'); // Naked options: no spread functions
+} = require('./constants');
+const { findContract } = require('./execution');
 
 // ─── Injected dependencies (set by server.js at boot) ────────────
-let _state         = null;
-let _log           = (type, msg) => console.log(`[reconciler][${type}] ${msg}`);
-let _redisSave     = async () => {};
-// _calcTP removed: naked options mode, no credit spread take-profit calculation
-let _indStockList  = [];
-let _markDirty     = () => {};    // injected by initReconciler
+let _state        = null;
+let _log          = (type, msg) => console.log(`[reconciler][${type}] ${msg}`);
+let _redisSave    = async () => {};
+let _indStockList = [];
+let _markDirty    = () => {};
 
 function initReconciler({ state, logFn, redisSaveFn, calcCreditSpreadTP, indStockList, markDirtyFn }) {
   _state        = state;
-  if (logFn)           _log       = logFn;
-  if (redisSaveFn)     _redisSave = redisSaveFn;
-  // calcCreditSpreadTP removed: naked options mode
-  if (indStockList)    _indStockList = indStockList;
+  if (logFn)        _log          = logFn;
+  if (redisSaveFn)  _redisSave    = redisSaveFn;
+  if (indStockList) _indStockList = indStockList;
+  if (markDirtyFn)  _markDirty    = markDirtyFn;
+  // calcCreditSpreadTP removed: APEX trades naked options only
 }
 
 async function runReconciliation() {
   if (!ALPACA_KEY) return;
+  // FIX: Guard against being called before initReconciler() injects _state
+  if (!_state || !_state.positions) {
+    _log("warn", "[RECONCILE] Skipped — _state not yet initialized (called before initReconciler?)");
+    return;
+  }
   try {
     const alpacaPositions = await alpacaGet("/positions");
     if (!alpacaPositions || !Array.isArray(alpacaPositions)) return;
 
-    const alpacaSymbols = new Set(alpacaPositions.map(p => p.symbol));
-    // Build symbol lookup — used by credit/debit correction and broken-spread passes
+    const alpacaSymbols  = new Set(alpacaPositions.map(p => p.symbol));
     const alpacaBySymbol = {};
     for (const ap of alpacaPositions) alpacaBySymbol[ap.symbol] = ap;
     let ghosts = 0, orphans = 0;
 
-    // BUG2 FIX Part B: Deduplicate state.positions by contractSymbol.
-    // The addon bug creates two position records with the same contractSymbol
-    // (e.g. QQQ260612C00720000 from original entry AND from the addon).
-    // Keep only the record with the highest contracts count. If tied, keep
-    // the one with the most recent openDate (latest addon record).
-    // This runs before price updates so deduplication is clean.
+    // ── Deduplicate state.positions by contractSymbol ────────────────────────
+    // Addon bug can create two records with the same contractSymbol.
+    // Keep the one with highest contracts; if tied, keep the more recent openDate.
     const _symSeen = new Map();
     for (const pos of _state.positions) {
       const sym = pos.contractSymbol || pos.buySymbol || `${pos.ticker}_${pos.optionType}`;
@@ -54,7 +55,6 @@ async function runReconciliation() {
         const existing = _symSeen.get(sym);
         const existContracts = existing.contracts || 0;
         const posContracts   = pos.contracts || 0;
-        // Keep whichever has more contracts; if equal, keep more recent openDate
         if (posContracts > existContracts ||
            (posContracts === existContracts && new Date(pos.openDate||0) > new Date(existing.openDate||0))) {
           _symSeen.set(sym, pos);
@@ -63,13 +63,11 @@ async function runReconciliation() {
     }
     const _dedupedPositions = Array.from(_symSeen.values());
     if (_dedupedPositions.length < _state.positions.length) {
-      _log("warn",
-        `[RECONCILE] Deduped ${_state.positions.length - _dedupedPositions.length} duplicate position(s) by contractSymbol`
-      );
+      _log("warn", `[RECONCILE] Deduped ${_state.positions.length - _dedupedPositions.length} duplicate position(s)`);
       _state.positions = _dedupedPositions;
     }
 
-    // - Update currentPrice on existing positions from Alpaca data -
+    // ── Update currentPrice on existing positions from Alpaca ────────────────
     for (const pos of _state.positions) {
       const alpPos = alpacaPositions.find(p =>
         p.symbol === pos.contractSymbol ||
@@ -77,19 +75,20 @@ async function runReconciliation() {
         p.symbol === pos.sellSymbol
       );
       if (alpPos) {
-        const mktVal  = parseFloat(alpPos.market_value || 0);
-        const qty     = Math.abs(parseInt(alpPos.qty || 1));
-        const curP    = qty > 0 && mktVal > 0 ? parseFloat((mktVal / (qty * 100)).toFixed(2)) : pos.currentPrice;
-        if (curP > 0) pos.currentPrice = curP;
-        // Update POP from live delta (market maker: track current not entry POP)
+        const mktVal = parseFloat(alpPos.market_value || 0);
+        const qty    = Math.abs(parseInt(alpPos.qty || 1));
+        const curP   = qty > 0 && mktVal > 0 ? parseFloat((mktVal / (qty * 100)).toFixed(2)) : pos.currentPrice;
+        if (curP > 0) {
+          pos.currentPrice = curP;
+          pos._currentPriceUpdatedAt = Date.now();
+        }
         if (alpPos.greeks?.delta) {
           pos.probabilityOfProfit = parseFloat(((1 - Math.abs(parseFloat(alpPos.greeks.delta))) * 100).toFixed(1));
         }
       }
     }
 
-    // - Credit/debit label correction for existing spread positions -
-    // Fixes positions entered with wrong isCreditSpread flag before the fix
+    // ── Credit/debit label correction ────────────────────────────────────────
     for (const pos of _state.positions) {
       if (!pos.isSpread || !pos.buySymbol || !pos.sellSymbol) continue;
       const buyLeg  = alpacaBySymbol[pos.buySymbol];
@@ -100,12 +99,10 @@ async function runReconciliation() {
       if (buyEntry <= 0 || sellEntry <= 0) continue;
       const shouldBeCredit = sellEntry > buyEntry;
       if (pos.isCreditSpread !== shouldBeCredit) {
-        _log("warn", `[RECONCILE] Correcting ${pos.ticker} isCreditSpread: ${pos.isCreditSpread} → ${shouldBeCredit} (sell avg $${sellEntry} vs buy avg $${buyEntry})`);
+        _log("warn", `[RECONCILE] Correcting ${pos.ticker} isCreditSpread: ${pos.isCreditSpread} → ${shouldBeCredit}`);
         pos.isCreditSpread = shouldBeCredit;
-        // Recalculate premium as net credit/debit from actual fill prices
         const netPremium = parseFloat(Math.abs(sellEntry - buyEntry).toFixed(2));
         if (netPremium > 0) pos.premium = netPremium;
-        // Recalculate max profit/loss
         const width = Math.abs((pos.buyStrike || 0) - (pos.sellStrike || 0));
         if (width > 0) {
           pos.maxProfit = shouldBeCredit
@@ -116,17 +113,13 @@ async function runReconciliation() {
             : parseFloat((pos.premium * 100 * (pos.contracts || 1)).toFixed(2));
         }
       }
-      // Correct contracts from Alpaca — use MIN of both legs
-      // A spread can only have as many matched pairs as the smaller leg allows
-      // e.g. 4x long $745 / 1x short $739 = 1x spread (not 4x)
       const alpacaContracts = Math.min(
         Math.abs(parseInt(buyLeg.qty || 1)),
         Math.abs(parseInt(sellLeg.qty || 1))
       );
       if (alpacaContracts > 0 && alpacaContracts !== pos.contracts) {
-        _log("warn", `[RECONCILE] Correcting ${pos.ticker} contracts: ${pos.contracts} → ${alpacaContracts} (min of both legs)`);
+        _log("warn", `[RECONCILE] Correcting ${pos.ticker} contracts: ${pos.contracts} → ${alpacaContracts}`);
         pos.contracts = alpacaContracts;
-        // Recalculate maxProfit/maxLoss with corrected contracts
         const width = Math.abs((pos.buyStrike || 0) - (pos.sellStrike || 0));
         if (width > 0 && pos.premium > 0) {
           pos.maxProfit = pos.isCreditSpread
@@ -139,20 +132,19 @@ async function runReconciliation() {
       }
     }
 
-    // - Broken spread correction: if spread has only one leg in Alpaca, convert to naked -
+    // ── Broken spread → naked conversion ─────────────────────────────────────
     for (const pos of _state.positions) {
       if (!pos.isSpread) continue;
       const hasOnlyOneSym = (pos.buySymbol && !pos.sellSymbol) || (!pos.buySymbol && pos.sellSymbol);
       if (!hasOnlyOneSym) continue;
       const sym = pos.buySymbol || pos.sellSymbol;
       const alpacaLeg = alpacaBySymbol[sym];
-      if (!alpacaLeg) continue; // ghost detection will handle it
-      // Only one leg exists in Alpaca — convert to naked position
+      if (!alpacaLeg) continue;
       _log("warn", `[RECONCILE] ${pos.ticker} spread missing one leg (${sym}) — converting to naked`);
       const _prevBuyStrike  = pos.buyStrike;
       const _prevSellStrike = pos.sellStrike;
       pos.isSpread       = false;
-      pos.isCreditSpread = false;  // critical: clear so dashboard renders as naked, not spread
+      pos.isCreditSpread = false;
       const legQty = parseInt(alpacaLeg.qty || 1);
       pos.contracts      = Math.abs(legQty);
       pos.contractSymbol = sym;
@@ -161,79 +153,71 @@ async function runReconciliation() {
       pos.premium        = parseFloat(alpacaLeg.avg_entry_price || pos.premium || 0);
       pos.maxLoss        = null;
       pos.maxProfit      = null;
-      // Preserve both strikes for display context even as naked position
       pos.buyStrike      = _prevBuyStrike  || null;
       pos.sellStrike     = _prevSellStrike || null;
     }
 
-    // - Ghost detection - ARGO has position, Alpaca doesn't -
+    // ── Ghost detection — APEX has position, Alpaca doesn't ─────────────────
     for (const pos of [..._state.positions]) {
-      const symbols = [pos.contractSymbol, pos.buySymbol, pos.sellSymbol].filter(Boolean);
-      // A spread is a ghost only if BOTH legs are missing from Alpaca
+      const symbols    = [pos.contractSymbol, pos.buySymbol, pos.sellSymbol].filter(Boolean);
       const allMissing = symbols.length > 0 && symbols.every(s => !alpacaSymbols.has(s));
-      // V2.84 fix: positions with NO symbols stored (estimated entries, pre-spread architecture)
-      // cannot be matched by symbol -- fall back to checking if Alpaca has ANY option on this ticker
       const noSymbolsStored = symbols.length === 0;
       const alpacaHasTickerOption = alpacaPositions.some(p => {
         const underlying = p.symbol?.match(/^([A-Z]+)\d{6}[CP]/)?.[1];
         return underlying === pos.ticker;
       });
       const symbollessGhost = noSymbolsStored && !alpacaHasTickerOption;
+
       if (allMissing || symbollessGhost) {
-        const ghostReason = symbollessGhost ? "no contract symbols stored + Alpaca empty for ticker" : "closed externally";
+        const ghostReason = symbollessGhost
+          ? "no contract symbols stored + Alpaca empty for ticker"
+          : "closed externally";
         _log("warn", `[RECONCILE] Ghost: ${pos.ticker} ${pos.contractSymbol||pos.buySymbol||"(no symbol)"} - ${ghostReason}`);
         const idx = _state.positions.indexOf(pos);
-        if (idx === -1) { _log("warn", `[RECONCILE] splice guard: ${pos.ticker} not found in positions array`); continue; }
+        if (idx === -1) { _log("warn", `[RECONCILE] splice guard: ${pos.ticker} not found`); continue; }
         _state.positions.splice(idx, 1);
         _state.closedTrades.push({
           ticker: pos.ticker, pnl: 0, pct: "0", reason: "reconcile-removed",
           date: new Date().toLocaleDateString(), score: pos.score || 0, closeTime: Date.now(),
-          tradeType: pos.isCreditSpread ? "credit_spread" : pos.isSpread ? "debit_spread" : "naked",
+          tradeType: "naked",
         });
 
-        // V2.94 FIX: Write loss record when ghost position is removed externally.
-        // Previously, manually closed positions (via Alpaca UI or dashboard) bypassed
-        // closePosition() entirely so no _recentLosses entry was written.
-        // This allowed immediate re-entry — APEX re-entered IYR 17min after manual close
-        // and lost $405 in 68 seconds on a bad fill (IYR $107C @ $1.50, stopped at $0.15).
-        // Fix: write the loss record here so the re-entry gate fires correctly.
+        // Write _recentLosses so re-entry gate fires correctly
         const _ghostCurrentPrice = pos.currentPrice || pos.premium || 0;
         const _ghostPnlEstimate  = (_ghostCurrentPrice - pos.premium) * 100 * (pos.contracts || 1);
         if (_ghostPnlEstimate < 0 || pos.premium > _ghostCurrentPrice) {
-          // Position was closed at a loss (or unknown — default to treating as loss for safety)
           _state._recentLosses = _state._recentLosses || {};
           _state._recentLosses[pos.ticker] = {
-            closedAt:    Date.now(),
-            reason:      'reconcile-removed',
+            closedAt:   Date.now(),
+            reason:     'reconcile-removed',
             agentSignal: (_state._agentMacro || {}).signal || 'neutral',
-            price:       _ghostCurrentPrice,
-            pnlPct:      pos.premium > 0
+            price:      _ghostCurrentPrice,
+            pnlPct:     pos.premium > 0
               ? parseFloat((((_ghostCurrentPrice - pos.premium) / pos.premium) * 100).toFixed(1))
               : -100,
-            exitRSI:     pos._prevRSI || pos.rsi || pos.entryRSI || 50,
-            optionType:  pos.optionType || null,
+            exitRSI:    pos._prevRSI || pos.rsi || pos.entryRSI || 50,
+            optionType: pos.optionType || null,
           };
-          _log('warn', `[RECONCILE] Loss record written for ${pos.ticker} (removed externally) — re-entry cooldown active`);
+          _log('warn', `[RECONCILE] Loss record written for ${pos.ticker} — re-entry cooldown active`);
         }
-        // Also write 30-minute same-instrument cooldown regardless of P&L
+        // 30-min same-instrument cooldown regardless of P&L
         _state._recentCloses = _state._recentCloses || {};
         _state._recentCloses[pos.ticker] = {
-          closedAt:   Date.now(),
-          direction:  pos.optionType || 'call',
-          reason:     'reconcile-removed',
+          closedAt:  Date.now(),
+          direction: pos.optionType || 'call',
+          reason:    'reconcile-removed',
+          pnl:       _ghostPnlEstimate,
         };
-        // SPRINT-02: Dashboard close P&L from Alpaca fills.
-        // When position is closed via dashboard (bypasses closePosition), query Alpaca
-        // activities to find the actual fill price and compute real P&L for the journal.
+
+        // Try to resolve actual fill price from Alpaca activities
         if (!_state.tradeJournal) _state.tradeJournal = [];
         let _ghostPnl = 0;
         let _ghostEp  = pos.currentPrice || pos.premium || 0;
-        let _ghostReasoning = `Position closed externally (dashboard/manual). P&L not available from APEX — check Alpaca fills.`;
+        let _ghostReasoning = `Position closed externally. Check Alpaca fills.`;
         try {
           const today = new Date().toISOString().split('T')[0];
           const acts  = await alpacaGet(`/account/activities?activity_type=FILL&date=${today}&direction=desc&page_size=50`);
           if (Array.isArray(acts)) {
-            // Find the most recent sell fill for this contract symbol
             const sym = pos.contractSymbol || pos.buySymbol;
             const sellFill = acts.find(a =>
               a.symbol === sym && a.side === 'sell' &&
@@ -242,77 +226,55 @@ async function runReconciliation() {
             if (sellFill) {
               _ghostEp  = parseFloat(sellFill.price || _ghostEp);
               _ghostPnl = parseFloat(((_ghostEp - pos.premium) * 100 * (pos.contracts || 1)).toFixed(2));
-              _ghostReasoning = `Closed externally (dashboard/manual) @ $${_ghostEp} via Alpaca fill. P&L computed from fill data.`;
-              _log("info", `[SPRINT-02] ${pos.ticker} dashboard-close P&L resolved from Alpaca fill: $${_ghostPnl}`);
-            // V2.94 JOURNAL: Update pnl_alpaca on the journal entry with the real fill proceeds
-            const _ghostProceeds = parseFloat((parseFloat(sellFill.price || 0) * 100 * (pos.contracts || 1)).toFixed(2));
-            // V2.99 FIX Bug 2: If updateJournalExit can't find the OPEN entry
-            // (e.g. date boundary, missing contractSymbol, stale key), write a
-            // standalone CLOSED entry so the trade is never lost from the journal.
-            const _ghostExitFields = {
-              actualFillProceeds: _ghostProceeds,
-              pnl_alpaca:         parseFloat((_ghostProceeds - (pos.premium * 100 * (pos.contracts || 1))).toFixed(2)),
-              exitPrice:          _ghostEp,
-              exitReason:         'reconcile-removed',
-              closeDate:          new Date().toISOString(),
-              closeDateET:        new Date().toLocaleString('en-US', {timeZone:'America/New_York'}),
-              isWin:              _ghostPnl > 0,
-              status:             'CLOSED',
-            };
-            updateJournalExit(sym, _ghostExitFields).then(found => {
-              if (!found) {
-                // OPEN entry not found — write standalone closed record
-                _log('warn', `[JOURNAL] reconciler could not find OPEN entry for ${pos.ticker} (${sym}) — writing standalone exit`);
-                writeJournalEntry({
-                  id:             `${sym}_reconcile_${Date.now()}`,
-                  contractSymbol: sym,
-                  ticker:         pos.ticker,
-                  optionType:     pos.optionType,
-                  strike:         pos.strike,
-                  expDate:        pos.expDate,
-                  tradeType:      'naked',
-                  openDate:       pos.openDate || new Date().toISOString(),
-                  openDateET:     pos.openDate
-                    ? new Date(pos.openDate).toLocaleString('en-US', {timeZone:'America/New_York'})
-                    : new Date().toLocaleString('en-US', {timeZone:'America/New_York'}),
-                  entryPrice:     pos.premium,
-                  entryContracts: pos.contracts || 1,
-                  entryCost:      pos.cost || 0,
-                  entryScore:     pos.score || 0,
-                  entryRSI:       pos.entryRSI || null,
-                  _reconstructed: true,
-                  ..._ghostExitFields,
-                }).catch(e => _log('warn', `[JOURNAL] standalone exit write failed: ${e.message}`));
-              }
-            }).catch(e => _log('warn', `[JOURNAL] reconciler exit update failed: ${e.message}`));
+              _ghostReasoning = `Closed externally @ $${_ghostEp} via Alpaca fill.`;
+              _log("info", `[RECONCILE] ${pos.ticker} ghost P&L from fill: $${_ghostPnl}`);
+              const _ghostProceeds = parseFloat((parseFloat(sellFill.price || 0) * 100 * (pos.contracts || 1)).toFixed(2));
+              const _ghostExitFields = {
+                actualFillProceeds: _ghostProceeds,
+                pnl_alpaca:  parseFloat((_ghostProceeds - (pos.premium * 100 * (pos.contracts || 1))).toFixed(2)),
+                exitPrice:   _ghostEp,
+                exitReason:  'reconcile-removed',
+                closeDate:   new Date().toISOString(),
+                closeDateET: new Date().toLocaleString('en-US', {timeZone:'America/New_York'}),
+                isWin:       _ghostPnl > 0,
+                status:      'CLOSED',
+              };
+              updateJournalExit(sym, _ghostExitFields).then(found => {
+                if (!found) {
+                  writeJournalEntry({
+                    id: `${sym}_reconcile_${Date.now()}`,
+                    contractSymbol: sym, ticker: pos.ticker, optionType: pos.optionType,
+                    strike: pos.strike, expDate: pos.expDate, tradeType: 'naked',
+                    openDate: pos.openDate || new Date().toISOString(),
+                    openDateET: pos.openDate
+                      ? new Date(pos.openDate).toLocaleString('en-US', {timeZone:'America/New_York'})
+                      : new Date().toLocaleString('en-US', {timeZone:'America/New_York'}),
+                    entryPrice: pos.premium, entryContracts: pos.contracts || 1,
+                    entryCost: pos.cost || 0, entryScore: pos.score || 0,
+                    entryRSI: pos.entryRSI || null, _reconstructed: true,
+                    ..._ghostExitFields,
+                  }).catch(e => _log('warn', `[RECONCILE] standalone exit write failed: ${e.message}`));
+                }
+              }).catch(e => _log('warn', `[RECONCILE] exit update failed: ${e.message}`));
             }
           }
         } catch(e) {
-          _log("warn", `[SPRINT-02] Failed to fetch Alpaca activities for ${pos.ticker}: ${e.message}`);
+          _log("warn", `[RECONCILE] Alpaca activities fetch failed: ${e.message}`);
         }
         _state.tradeJournal.unshift({
-          time:       new Date().toISOString(),
-          ticker:     pos.ticker,
-          action:     "CLOSE",
-          reason:     "reconcile-removed",
-          optionType: pos.optionType,
-          tradeType:  pos.isCreditSpread ? "credit_spread" : pos.isSpread ? "debit_spread" : "naked",
-          strike:     pos.strike || null,
-          expDate:    pos.expDate || null,
-          exitPremium: _ghostEp,
-          pnl:        _ghostPnl,
-          pct:        pos.premium > 0 ? ((_ghostPnl / (pos.premium * 100 * (pos.contracts||1))) * 100).toFixed(1) : "0",
-          reasoning:  _ghostReasoning,
-          score:      pos.score || 0,
+          time: new Date().toISOString(), ticker: pos.ticker, action: "CLOSE",
+          reason: "reconcile-removed", optionType: pos.optionType, tradeType: "naked",
+          strike: pos.strike || null, expDate: pos.expDate || null,
+          exitPremium: _ghostEp, pnl: _ghostPnl,
+          pct: pos.premium > 0 ? ((_ghostPnl / (pos.premium * 100 * (pos.contracts||1))) * 100).toFixed(1) : "0",
+          reasoning: _ghostReasoning, score: pos.score || 0,
         });
         if (_state.tradeJournal.length > 100) _state.tradeJournal = _state.tradeJournal.slice(0, 100);
         ghosts++;
       }
     }
 
-    // - Orphan detection - Alpaca has position, ARGO doesn't -
-    // Only reconstruct orphans for active watchlist tickers - prevents IWM and removed
-    // instruments from being resurrected on every restart causing reconciliation loops
+    // ── Orphan detection — Alpaca has position, APEX doesn't ─────────────────
     const activeTickers = new Set([
       ...WATCHLIST.map(w => w.ticker),
       ...(INDIVIDUAL_STOCKS_ENABLED ? _indStockList.map(w => w.ticker) : []),
@@ -322,94 +284,80 @@ async function runReconciliation() {
       if (!/^[A-Z]+\d{6}[CP]\d{8}$/.test(alpPos.symbol)) return false;
       const underlyingTicker = alpPos.symbol.match(/^([A-Z]+)\d{6}[CP]/)?.[1];
       if (underlyingTicker && !activeTickers.has(underlyingTicker)) {
-        _log("warn", `[RECONCILE] Skipping orphan for removed ticker ${underlyingTicker} (${alpPos.symbol}) - not in active watchlist`);
+        _log("warn", `[RECONCILE] Skipping orphan for inactive ticker ${underlyingTicker} (${alpPos.symbol})`);
         return false;
       }
-      // BUG2 FIX Part A: Only count a state position as "covering" this Alpaca
-      // position if it has contracts > 0. A 0-contract or stale addon ghost with
-      // the same contractSymbol was blocking legitimate orphan reconstruction.
       return !_state.positions.find(p =>
         (p.contractSymbol === alpPos.symbol ||
          p.buySymbol      === alpPos.symbol ||
          p.sellSymbol     === alpPos.symbol) &&
-        (p.contracts || 0) > 0 // must have actual contracts to count as covering
+        (p.contracts || 0) > 0
       );
     });
 
     if (orphanedAlpaca.length > 0) {
       orphans = orphanedAlpaca.length;
-      // Parse each orphan
       const parsed = orphanedAlpaca.map(alpPos => {
-        const sym      = alpPos.symbol;
-        const isCall   = /\d{6}C\d{8}$/.test(sym);
-        const optType  = isCall ? 'call' : 'put';
-        const strikeM  = sym.match(/[CP](\d{8})$/);
-        const strike   = strikeM ? parseFloat(strikeM[1]) / 1000 : 0;
-        const expM     = sym.match(/(\d{2})(\d{2})(\d{2})[CP]/);
-        const expDate  = expM
+        const sym     = alpPos.symbol;
+        const isCall  = /\d{6}C\d{8}$/.test(sym);
+        const optType = isCall ? 'call' : 'put';
+        const strikeM = sym.match(/[CP](\d{8})$/);
+        const strike  = strikeM ? parseFloat(strikeM[1]) / 1000 : 0;
+        const expM    = sym.match(/(\d{2})(\d{2})(\d{2})[CP]/);
+        const expDate = expM
           ? new Date(`20${expM[1]}-${expM[2]}-${expM[3]}`).toLocaleDateString('en-US', {month:'short',day:'2-digit',year:'numeric'})
           : '';
-        const expDays  = expDate ? Math.max(1, Math.round((new Date(expDate) - new Date()) / MS_PER_DAY)) : 30;
-        const qty      = parseInt(alpPos.qty || 1);
+        const expDays = expDate ? Math.max(1, Math.round((new Date(expDate) - new Date()) / MS_PER_DAY)) : 30;
+        const qty     = parseInt(alpPos.qty || 1);
         const avgEntry = parseFloat(alpPos.avg_entry_price || 0);
-        const mktVal   = parseFloat(alpPos.market_value || 0);
-        const ticker   = sym.match(/^([A-Z]+)\d/)?.[1] || 'SPY';
+        const mktVal  = parseFloat(alpPos.market_value || 0);
+        const ticker  = sym.match(/^([A-Z]+)\d/)?.[1] || 'SPY';
         return { sym, ticker, optType, strike, expDate, expDays, qty, avgEntry, mktVal, alpPos };
       });
 
-      // Pair spread legs: long + short, same ticker+expiry, ~$10 apart
+      // Try to pair spread legs: same ticker+expiry+optType, opposite qty, strike within range
       const used = new Set();
       for (let i = 0; i < parsed.length; i++) {
         if (used.has(i)) continue;
         const a = parsed[i];
         let paired = false;
+
         for (let j = i + 1; j < parsed.length; j++) {
           if (used.has(j)) continue;
           const b = parsed[j];
           const sameTickerExp = a.ticker === b.ticker && a.expDate === b.expDate && a.optType === b.optType;
-          // Width cap raised to 25 - spread widths scale with VIX (up to $20 at VIX 35)
-          // Previous cap of 12 caused $14+ wide spreads to be reconciled as individual legs
-          // Width minimum lowered from 5→1: narrow $1-4 spreads must pair correctly.
-          // Previous $5 minimum caused $2 wide spreads (our standard) to reconstruct as 4 individual legs.
           const widthOk = Math.abs(a.strike - b.strike) >= 1 && Math.abs(a.strike - b.strike) <= 100;
           const oppDir  = (a.qty > 0 && b.qty < 0) || (a.qty < 0 && b.qty > 0);
           if (sameTickerExp && widthOk && oppDir) {
             const longLeg  = a.qty > 0 ? a : b;
             const shortLeg = a.qty > 0 ? b : a;
-            // buyLeg = what we own (qty > 0), sellLeg = what we sold (qty < 0)
-            // Do NOT assign by strike order — that inverts credit call spreads
-            // (credit call: short LOWER strike, long HIGHER strike → lower strike has qty < 0)
-            const buyLeg   = longLeg;   // always the qty > 0 leg
-            const sellLeg  = shortLeg;  // always the qty < 0 leg
-            // Credit detection: if we received more for selling than we paid for protection
-            // sellLeg.avgEntry > buyLeg.avgEntry → net credit → isCreditSpread = true
+            const buyLeg   = longLeg;
+            const sellLeg  = shortLeg;
             const netDebit = parseFloat(Math.abs(Math.abs(sellLeg.avgEntry) - buyLeg.avgEntry).toFixed(2));
             const spreadWidth = Math.abs(buyLeg.strike - sellLeg.strike);
-            const _isCredit3a = sellLeg.avgEntry > buyLeg.avgEntry;  // price-based: no strike-order assumption
+            const _isCredit = sellLeg.avgEntry > buyLeg.avgEntry;
             _state.positions.push({
               ticker: a.ticker, optionType: a.optType,
-              isSpread: true, isCreditSpread: _isCredit3a,
+              isSpread: true, isCreditSpread: _isCredit,
               buyStrike: buyLeg.strike, sellStrike: sellLeg.strike,
               spreadWidth, buySymbol: buyLeg.sym, sellSymbol: sellLeg.sym,
               contractSymbol: buyLeg.sym,
-              // D-FIX1a: credit=netDebit is credit received; debit=netDebit is cost paid
-              premium:   Math.max(0.01, netDebit),
-              // Individual leg entry prices from Alpaca avg_entry_price — used by dashboard leg breakdown
+              premium: Math.max(0.01, netDebit),
               buyPremium:  parseFloat((buyLeg.avgEntry || 0).toFixed(2)),
               sellPremium: parseFloat((sellLeg.avgEntry || 0).toFixed(2)),
-              maxProfit: _isCredit3a
-                ? parseFloat((Math.max(0.01, netDebit) * 100 * Math.abs(buyLeg.qty)).toFixed(2))         // credit: maxProfit = credit * 100 * c
-                : parseFloat((spreadWidth - Math.max(0.01, netDebit)).toFixed(2)),                        // debit: maxProfit = width - cost
-              maxLoss:   _isCredit3a
-                ? parseFloat(((spreadWidth - Math.max(0.01, netDebit)) * 100 * Math.abs(buyLeg.qty)).toFixed(2))  // credit: maxLoss = (width-credit)*100*c
-                : Math.max(0.01, netDebit),                                                               // debit: maxLoss = cost paid
+              maxProfit: _isCredit
+                ? parseFloat((Math.max(0.01, netDebit) * 100 * Math.abs(buyLeg.qty)).toFixed(2))
+                : parseFloat((spreadWidth - Math.max(0.01, netDebit)).toFixed(2)),
+              maxLoss: _isCredit
+                ? parseFloat(((spreadWidth - Math.max(0.01, netDebit)) * 100 * Math.abs(buyLeg.qty)).toFixed(2))
+                : Math.max(0.01, netDebit),
               contracts: Math.abs(buyLeg.qty),
               expDate: a.expDate, expDays: a.expDays,
-              cost: _isCredit3a
-                ? parseFloat(((spreadWidth - Math.max(0.01, netDebit)) * 100 * Math.abs(buyLeg.qty)).toFixed(2))  // credit: cost = margin (maxLoss)
-                : parseFloat((Math.max(0.01, netDebit) * 100 * Math.abs(buyLeg.qty)).toFixed(2)),                 // debit: cost = premium paid
+              cost: _isCredit
+                ? parseFloat(((spreadWidth - Math.max(0.01, netDebit)) * 100 * Math.abs(buyLeg.qty)).toFixed(2))
+                : parseFloat((Math.max(0.01, netDebit) * 100 * Math.abs(buyLeg.qty)).toFixed(2)),
               score: 75, reasons: ['Reconstructed spread from Alpaca reconciliation'],
-              openDate: buyLeg.alpPos.created_at || new Date(Date.now() - 86400000).toISOString(), // B10: fallback=yesterday
+              openDate: buyLeg.alpPos.created_at || new Date(Date.now() - 86400000).toISOString(),
               currentPrice: Math.max(0.01, netDebit), peakPremium: Math.max(0.01, netDebit),
               entryRSI: 50, entryMACD: 'neutral', entryMomentum: 'steady', entryMacro: 'neutral',
               entryThesisScore: 100, thesisHistory: [], agentHistory: [],
@@ -418,28 +366,19 @@ async function runReconciliation() {
               partialClosed: false, isMeanReversion: false, trailStop: null,
               breakevenLocked: false, halfPosition: false,
               target: parseFloat((Math.max(0.01, netDebit) * 1.5).toFixed(2)),
-              stop: parseFloat((Math.max(0.01, netDebit) * 0.65).toFixed(2)),
-              takeProfitPct: _isCredit3a ? _calcTP(_state.vix) : TAKE_PROFIT_PCT, // B7a
-              fastStopPct: STOP_LOSS_PCT,
+              stop:   parseFloat((Math.max(0.01, netDebit) * 0.65).toFixed(2)),
+              takeProfitPct: TAKE_PROFIT_PCT, fastStopPct: STOP_LOSS_PCT,
             });
             used.add(i); used.add(j); paired = true;
-            _log("warn", `[RECONCILE] Reconstructed SPREAD: ${a.ticker} \$${buyLeg.strike}/\$${sellLeg.strike} ${a.optType.toUpperCase()} exp ${a.expDate}`);
+            _log("warn", `[RECONCILE] Reconstructed SPREAD: ${a.ticker} $${buyLeg.strike}/$${sellLeg.strike} ${a.optType.toUpperCase()} exp ${a.expDate}`);
             break;
           }
         }
+
         if (!paired) {
           const p = a;
 
-          // V2.99 FIX: Duplicate journal entry prevention.
-          // Problem: when APEX places a sell order (thesis-complete), it removes the
-          // position from state immediately. If the sell order takes >10 seconds to fill
-          // (limit order on low-liquidity options), the next reconciler run sees the
-          // position in Alpaca but not in APEX state → orphan → reconstructs → new OPEN
-          // journal entry. When sell eventually fills, ghost detection writes a second
-          // CLOSED entry. Result: two journal entries for one trade.
-          // Fix: before reconstructing, check if a CLOSED journal entry already exists
-          // today for this contractSymbol. If yes, the position was properly closed by
-          // APEX with a pending fill — skip reconstruction entirely.
+          // Skip if CLOSED journal entry already exists today (pending fill scenario)
           const _today = new Date().toLocaleDateString('en-US', {timeZone:'America/New_York', year:'numeric', month:'2-digit', day:'2-digit'}).split('/');
           const _todayStr = `${_today[2]}-${_today[0]}-${_today[1]}`;
           let _alreadyClosed = false;
@@ -448,50 +387,41 @@ async function runReconciliation() {
             _alreadyClosed = _todayEntries.some(e =>
               e.contractSymbol === p.sym && e.status === 'CLOSED'
             );
-          } catch(_) { /* journal unavailable — proceed with reconstruction */ }
+          } catch(_) {}
 
           if (_alreadyClosed) {
-            _log('warn', `[RECONCILE] Skipping orphan reconstruction for ${p.ticker} (${p.sym}) — CLOSED journal entry exists today. Sell order likely pending fill.`);
-            used.add(Array.from({length: parsed.length}, (_,i)=>i).find(i => parsed[i] === p) ?? -1);
+            _log('warn', `[RECONCILE] Skipping ${p.ticker} (${p.sym}) — CLOSED journal entry exists (sell order pending fill)`);
             continue;
           }
 
           const curP = p.mktVal > 0 ? p.mktVal / (Math.abs(p.qty) * 100) : p.avgEntry;
-          _state.positions.push({
+
+          // ── FIX: Reconstruct the position object FIRST, then reference it ──────
+          // BEFORE (bug): code pushed to _state.positions then did:
+          //   const _reconPos = newPositions[newPositions.length - 1]
+          //   'newPositions' was never declared → ReferenceError → caught silently
+          //   → _redisSave never called → position lost on next restart
+          // FIX: build the object, push it, save it, then write journal entry.
+          const reconPos = {
             ticker: p.ticker, optionType: p.optType, isSpread: false,
             strike: p.strike, contractSymbol: p.sym,
-            buySymbol: p.qty > 0 ? p.sym : null,
+            buySymbol:  p.qty > 0 ? p.sym : null,
             sellSymbol: p.qty < 0 ? p.sym : null,
             premium: p.avgEntry, currentPrice: curP,
+            _currentPriceUpdatedAt: Date.now(),
             breakeven: p.optType === 'put'
               ? parseFloat((p.strike - p.avgEntry).toFixed(2))
               : parseFloat((p.strike + p.avgEntry).toFixed(2)),
             contracts: Math.abs(p.qty), expDate: p.expDate, expDays: p.expDays,
-            // Short legs (qty<0): received premium = cash inflow, cost = 0 for heat calc.
-            // Long legs (qty>0): paid premium = cost basis for heat calc.
             cost: p.qty > 0
-              ? parseFloat((p.avgEntry * 100 * Math.abs(p.qty)).toFixed(2)) // long: cash paid
-              : 0, // short: received premium, no cash outflow (margin handled separately)
+              ? parseFloat((p.avgEntry * 100 * Math.abs(p.qty)).toFixed(2))
+              : 0,
             score: 75, reasons: ['Reconstructed from Alpaca reconciliation'],
-            // V2.87 FIX: Wash trade bug. Reconciler was setting openDate = alpPos.created_at
-            // which on Alpaca paper trading is the API creation timestamp (often current time).
-            // The wash trade guard (60s minimum hold) then blocked every close attempt for 60s.
-            // GLD at -41% could not close: "held only 1s, 11s, 23s..." for 6 consecutive scans.
-            // Fix: try to preserve original openDate from existing state position first.
-            // If no existing state (true orphan), use created_at but backdate by 120s so the
-            // 60s wash trade guard doesn't block immediate closes on positions that are clearly old.
             openDate: (function() {
-              const existingPos = (_state.positions || []).find(ep => ep.contractSymbol === p.symbol || ep.ticker === p.ticker);
-              if (existingPos && existingPos.openDate) return existingPos.openDate;
-              // True orphan: backdate by 120s so wash trade guard doesn't block
               const created = p.alpPos.created_at ? new Date(p.alpPos.created_at) : new Date();
-              const backdated = new Date(created.getTime() - 120000); // -120s
+              const backdated = new Date(created.getTime() - 120000);
               return backdated.toISOString();
             })(),
-            // peakPremium: use current market price if higher than avgEntry.
-            // avgEntry alone misses intraday highs — a position that peaked at 2x entry
-            // gets its trail wiped on reconcile. Use max(avgEntry, curP from snapshot).
-            // If curP unknown, default to avgEntry (trail will re-calibrate as prices come in).
             peakPremium: Math.max(p.avgEntry, curP || 0) || p.avgEntry,
             entryRSI: 50, entryMACD: 'neutral', entryMomentum: 'steady', entryMacro: 'neutral',
             entryThesisScore: 100, thesisHistory: [], agentHistory: [],
@@ -501,37 +431,33 @@ async function runReconciliation() {
             breakevenLocked: false, halfPosition: false,
             target: parseFloat((p.avgEntry * (1 + TAKE_PROFIT_PCT)).toFixed(2)),
             stop:   parseFloat((p.avgEntry * (1 - STOP_LOSS_PCT)).toFixed(2)),
-            takeProfitPct: TAKE_PROFIT_PCT, fastStopPct: STOP_LOSS_PCT, // individual leg: type unknown
-          });
-          used.add(i);
-          _log("warn", `[RECONCILE] Reconstructed leg: ${p.ticker} ${p.optType.toUpperCase()} \$${p.strike} exp ${p.expDate} | ${Math.abs(p.qty)}x @ \$${p.avgEntry}`);
+            takeProfitPct: TAKE_PROFIT_PCT, fastStopPct: STOP_LOSS_PCT,
+          };
 
-          // V2.98: Write OPEN journal entry for reconstructed orphan positions.
-          // Previously reconciler wrote to state only — no journal entry existed.
-          // When position closed, updateJournalExit found no OPEN entry and wrote
-          // a standalone exit record with placeholder values (entryRSI:50, etc.).
-          // Fix: write OPEN journal entry here with whatever data Alpaca gives us.
-          // Fields will be partial (no RSI, no delta at entry time) but at least the
-          // contract, strike, expDate, entry price, and open date will be correct.
-          // This prevents the $undefined / exp? display in the journal.
-          const _reconPos = newPositions[newPositions.length - 1]; // just pushed
-          if (_reconPos && writeJournalEntry) {
+          // Push, save, THEN write journal — all in correct order
+          _state.positions.push(reconPos);
+          _markDirty(); // mark state dirty so periodic flush catches it too
+
+          _log("warn", `[RECONCILE] Reconstructed: ${p.ticker} ${p.optType.toUpperCase()} $${p.strike} exp ${p.expDate} | ${Math.abs(p.qty)}x @ $${p.avgEntry}`);
+
+          // Write OPEN journal entry with whatever Alpaca gave us
+          if (writeJournalEntry) {
             writeJournalEntry({
-              id:             `${p.symbol}_recon_${Date.now()}`,
-              contractSymbol: p.symbol,
+              id:             `${p.sym}_recon_${Date.now()}`,
+              contractSymbol: p.sym,
               ticker:         p.ticker,
               optionType:     p.optType,
-              strike:         _reconPos.strike,
-              expDate:        _reconPos.expDate,
+              strike:         p.strike,
+              expDate:        p.expDate,
               tradeType:      'naked',
-              openDate:       _reconPos.openDate,
-              openDateET:     new Date(_reconPos.openDate).toLocaleString('en-US', {timeZone:'America/New_York'}),
+              openDate:       reconPos.openDate,
+              openDateET:     new Date(reconPos.openDate).toLocaleString('en-US', {timeZone:'America/New_York'}),
               entryPrice:     p.avgEntry,
               entryContracts: Math.abs(p.qty),
-              entryCost:      _reconPos.cost,
+              entryCost:      reconPos.cost,
               entryScore:     75,
               entryReasons:   ['Reconstructed from Alpaca reconciliation'],
-              entryRSI:       null, // not available from Alpaca
+              entryRSI:       null,
               entryDelta:     null,
               entryIV:        null,
               entryVIX:       _state.vix || null,
@@ -548,16 +474,13 @@ async function runReconciliation() {
       }
     }
 
-    // BIL ETF removed - cash parked in spreads instead
-
     if (ghosts > 0 || orphans > 0) {
       _log("warn", `[RECONCILE] ${ghosts} ghost(s) removed, ${orphans} orphan(s) reconstructed`);
       await _redisSave(_state);
+      _markDirty();
     }
 
-    // - Re-pair existing individual legs into spreads -
-    // Handles case where legs were previously reconciled individually
-    // but should be tracked as a spread pair
+    // ── Re-pair individual legs into spreads ──────────────────────────────────
     let pairsFound = 0;
     const toRemove = new Set();
     const toAdd    = [];
@@ -565,24 +488,18 @@ async function runReconciliation() {
     for (let i = 0; i < _state.positions.length; i++) {
       if (toRemove.has(i)) continue;
       const a = _state.positions[i];
-      if (a.isSpread) continue; // already a spread
-      if (!a.contractSymbol) continue;
+      if (a.isSpread || !a.contractSymbol) continue;
 
       for (let j = i + 1; j < _state.positions.length; j++) {
         if (toRemove.has(j)) continue;
         const b = _state.positions[j];
-        if (b.isSpread) continue;
-        if (!b.contractSymbol) continue;
+        if (b.isSpread || !b.contractSymbol) continue;
 
-        // Same ticker, same expiry, same option type, ~$10 apart, opposite direction
         const sameTickerExp = a.ticker === b.ticker && a.expDate === b.expDate && a.optionType === b.optionType;
         const strikeA = a.strike || 0;
         const strikeB = b.strike || 0;
         const width   = Math.abs(strikeA - strikeB);
-        // Width minimum lowered from 5→1: matches orphan reconstruction fix.
-        // $2 wide spreads (our standard) must re-pair correctly.
         const widthOk = width >= 1 && width <= 100;
-        // One should be long (no sellSymbol), one short (has sellSymbol or negative cost)
         const aIsShort = a.sellSymbol && !a.buySymbol;
         const bIsShort = b.sellSymbol && !b.buySymbol;
         const oppDir   = aIsShort !== bIsShort;
@@ -594,40 +511,33 @@ async function runReconciliation() {
           const sellIdx = aIsShort  ? i : j;
           const netDebit = parseFloat((buyLeg.premium - sellLeg.premium).toFixed(2));
           const curNet   = parseFloat(((buyLeg.currentPrice || buyLeg.premium) - (sellLeg.currentPrice || sellLeg.premium)).toFixed(2));
+          const _isCredit = sellLeg.premium > buyLeg.premium;
+          const _credit = _isCredit
+            ? parseFloat(Math.abs(netDebit).toFixed(2))
+            : parseFloat(Math.max(0.01, netDebit).toFixed(2));
 
-          // B3b: detect credit vs debit — price-based (matches B3a fix)
-          // sellLeg.premium > buyLeg.premium → net credit received → isCreditSpread = true
-          const _isCredit3b = sellLeg.premium > buyLeg.premium;
-          // For credit spread: netDebit is NEGATIVE (we received money).
-          // Use absolute value as the credit amount for all calculations.
-          const _credit = _isCredit3b
-            ? parseFloat(Math.abs(netDebit).toFixed(2))   // credit received (positive)
-            : parseFloat(Math.max(0.01, netDebit).toFixed(2)); // debit paid (positive)
           const merged = {
-            ticker:      a.ticker, optionType: a.optionType,
-            isSpread:    true, isCreditSpread: _isCredit3b,
-            buyStrike:   buyLeg.strike, sellStrike: sellLeg.strike,
-            spreadWidth: width,
-            buySymbol:   buyLeg.contractSymbol,
-            sellSymbol:  sellLeg.contractSymbol,
+            ticker: a.ticker, optionType: a.optionType,
+            isSpread: true, isCreditSpread: _isCredit,
+            buyStrike: buyLeg.strike, sellStrike: sellLeg.strike, spreadWidth: width,
+            buySymbol: buyLeg.contractSymbol, sellSymbol: sellLeg.contractSymbol,
             contractSymbol: buyLeg.contractSymbol,
-            premium:     Math.max(0.01, _credit),
-            maxProfit:   _isCredit3b
-              ? parseFloat((_credit * 100 * Math.max(buyLeg.contracts||1, sellLeg.contracts||1)).toFixed(2))  // credit: max profit = credit * 100 * c
-              : parseFloat((width - _credit).toFixed(2)),                                                      // debit: max profit = width - cost
-            maxLoss:     _isCredit3b
-              ? parseFloat(((width - _credit) * 100 * Math.max(buyLeg.contracts||1, sellLeg.contracts||1)).toFixed(2))  // credit: max loss = (width-credit)*100*c
-              : _credit,                                                                                        // debit: max loss = cost paid
-            contracts:   Math.max(buyLeg.contracts || 1, sellLeg.contracts || 1),
-            expDate:     a.expDate, expDays: a.expDays,
-            cost:        _isCredit3b
-              ? parseFloat(((width - _credit) * 100 * Math.max(buyLeg.contracts||1, sellLeg.contracts||1)).toFixed(2))  // credit: cost = margin (maxLoss)
-              : parseFloat((_credit * 100 * Math.max(buyLeg.contracts||1, sellLeg.contracts||1)).toFixed(2)),           // debit: cost = premium paid
-            score:       Math.max(buyLeg.score || 75, sellLeg.score || 75),
-            reasons:     ['Re-paired from individual legs'],
-            openDate:    buyLeg.openDate || new Date().toISOString(),
-            currentPrice: Math.max(0.01, curNet),
-            peakPremium: Math.max(0.01, netDebit),
+            premium: Math.max(0.01, _credit),
+            maxProfit: _isCredit
+              ? parseFloat((_credit * 100 * Math.max(buyLeg.contracts||1, sellLeg.contracts||1)).toFixed(2))
+              : parseFloat((width - _credit).toFixed(2)),
+            maxLoss: _isCredit
+              ? parseFloat(((width - _credit) * 100 * Math.max(buyLeg.contracts||1, sellLeg.contracts||1)).toFixed(2))
+              : _credit,
+            contracts: Math.max(buyLeg.contracts || 1, sellLeg.contracts || 1),
+            expDate: a.expDate, expDays: a.expDays,
+            cost: _isCredit
+              ? parseFloat(((width - _credit) * 100 * Math.max(buyLeg.contracts||1, sellLeg.contracts||1)).toFixed(2))
+              : parseFloat((_credit * 100 * Math.max(buyLeg.contracts||1, sellLeg.contracts||1)).toFixed(2)),
+            score: Math.max(buyLeg.score || 75, sellLeg.score || 75),
+            reasons: ['Re-paired from individual legs'],
+            openDate: buyLeg.openDate || new Date().toISOString(),
+            currentPrice: Math.max(0.01, curNet), peakPremium: Math.max(0.01, netDebit),
             entryRSI: buyLeg.entryRSI || 50, entryMACD: 'neutral',
             entryMomentum: 'steady', entryMacro: 'neutral',
             entryThesisScore: 100, thesisHistory: [], agentHistory: [],
@@ -637,8 +547,7 @@ async function runReconciliation() {
             breakevenLocked: false, halfPosition: false,
             target: parseFloat((Math.max(0.01, netDebit) * 1.5).toFixed(2)),
             stop:   parseFloat((Math.max(0.01, netDebit) * 0.65).toFixed(2)),
-            takeProfitPct: _isCredit3b ? _calcTP(_state.vix) : TAKE_PROFIT_PCT, // B7c
-            fastStopPct: STOP_LOSS_PCT,
+            takeProfitPct: TAKE_PROFIT_PCT, fastStopPct: STOP_LOSS_PCT,
           };
           toRemove.add(buyIdx);
           toRemove.add(sellIdx);
@@ -655,20 +564,21 @@ async function runReconciliation() {
       _state.positions.push(...toAdd);
       _log("warn", `[RECONCILE] Re-paired ${pairsFound} spread(s) from individual legs`);
       await _redisSave(_state);
+      _markDirty();
     }
 
-    _state.lastReconcile    = new Date().toISOString();
-    _state.reconcileStatus  = ghosts === 0 && orphans === 0 && pairsFound === 0 ? "ok" : "warning";
-    _state.orphanCount      = orphans;
+    _state.lastReconcile   = new Date().toISOString();
+    _state.reconcileStatus = ghosts === 0 && orphans === 0 && pairsFound === 0 ? "ok" : "warning";
+    _state.orphanCount     = orphans;
 
   } catch(e) {
-    _log("error", `[RECONCILE] Failed: ${e.message}`);
+    _log("error", `[RECONCILE] Failed: ${e.message}\n${e.stack?.split('\n')[1]?.trim() || ''}`);
   }
 }
 
 async function syncPositionPnLFromAlpaca() {
-  // NAKED OPTIONS: simple single-leg P&L sync from Alpaca current_price
   if (!ALPACA_KEY) return;
+  if (!_state || !_state.positions) return;
   try {
     const alpacaPositions = await alpacaGet('/positions');
     if (!alpacaPositions || !Array.isArray(alpacaPositions)) return;
@@ -678,29 +588,21 @@ async function syncPositionPnLFromAlpaca() {
     for (const pos of _state.positions) {
       const ap = alpacaBySymbol[pos.contractSymbol];
       if (!ap) continue;
-
-      // Current price from Alpaca — authoritative
-      const qty = Math.abs(parseInt(ap.qty || 1));
+      const qty    = Math.abs(parseInt(ap.qty || 1));
       const mktVal = parseFloat(ap.market_value || 0);
       if (qty > 0 && mktVal > 0) {
         pos.currentPrice = parseFloat((mktVal / (qty * 100)).toFixed(2));
+        pos._currentPriceUpdatedAt = Date.now();
         pos.realData = true;
       }
-
-      // Contracts sync
       const alpacaQty = Math.abs(parseInt(ap.qty || 1));
       if (alpacaQty !== pos.contracts) {
         _log('scan', `[ALPACA SYNC] ${pos.ticker} contracts: ${pos.contracts} → ${alpacaQty}`);
         pos.contracts = alpacaQty;
       }
-
-      // P&L from Alpaca leg prices: (currentPrice - entryPremium) * 100 * contracts
-      // For long options: profit when price rises
       if (pos.currentPrice > 0 && pos.premium > 0) {
         pos.unrealizedPnL = parseFloat(((pos.currentPrice - pos.premium) * 100 * pos.contracts).toFixed(2));
       }
-
-      // Peak premium for trailing stop
       if (pos.currentPrice > (pos.peakPremium || 0)) {
         pos.peakPremium = pos.currentPrice;
       }
@@ -709,7 +611,6 @@ async function syncPositionPnLFromAlpaca() {
     _log('warn', `[SYNC] syncPositionPnLFromAlpaca error: ${e.message}`);
   }
 }
-
 
 module.exports = {
   initReconciler,
