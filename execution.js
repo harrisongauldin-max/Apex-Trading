@@ -6,19 +6,7 @@
 let dryRunMode = false; // set by scanner via setDryRunMode()
 function setDryRunMode(v) { dryRunMode = v; }
 const fmt = (n) => '$' + (n||0).toFixed(2);
-// V2.99 FIX: MAX_LOSS_PER_TRADE raised from 500 to 900.
-// At 500: riskCap = 500/0.35 = $1,428 → QQQ at $763/contract gives floor(1428/763) = 1 contract always.
-// At 900: riskCap = 900/0.35 = $2,571 → QQQ at $763/contract gives floor(2571/763) = 3 contracts.
-// QQQ options are inherently more expensive than SPY — the old cap was treating QQQ
-// as if it were too risky to size properly, when the real issue was the dollar threshold.
-// 900 aligns QQQ sizing with SPY (both get 3 contracts at typical premiums and Kelly).
 const MAX_LOSS_PER_TRADE = 900;
-// V2.99: Hard contract ceiling independent of premium price.
-// Dollar-based riskCap alone produces wildly different contract counts:
-//   SPY $4/contract → 6 contracts, QQQ $9/contract → 2 contracts (same risk cap).
-// MAX_CONTRACTS ensures consistent sizing across all instruments regardless of premium.
-// Panel decision: 3 contracts max — enough size to matter, not so much that a fast-stop
-// is catastrophic. SPY fast-stop at 3x = $420 max loss vs $575 at 4x.
 const MAX_CONTRACTS = 3;
 const VIX_REDUCE50 = 35;
 const VIX_REDUCE25 = 28;
@@ -57,15 +45,11 @@ function initExecution({ dryRunMode, sendAlert, syncCash,
 }
 
 function bsStrikeForDelta(price, targetDelta, T, sigma, optionType = "put", r = 0.05) {
-  // Put:  |delta| = N(-d1) = targetDelta  =>  d1 = -normInv(targetDelta)
-  // Call: |delta| = N(d1)  = targetDelta  =>  d1 = +normInv(targetDelta)
-  // normInv via Beasley-Springer-Moro rational approximation
   const d = Math.max(0.01, Math.min(0.99, targetDelta));
   const q = Math.min(d, 1 - d);
   const t = Math.sqrt(-2 * Math.log(q));
   const normInvD = (d < 0.5 ? -1 : 1) * (t - (2.515517 + 0.802853*t + 0.010328*t*t) /
                    (1 + 1.432788*t + 0.189269*t*t + 0.001308*t*t*t));
-  // d1: negative for puts (strike below spot), positive for calls (strike above spot)
   const d1 = optionType === "put" ? -normInvD : normInvD;
   const lnSK = d1 * sigma * Math.sqrt(T) - (r + sigma*sigma/2) * T;
   const strikeRaw = price * Math.exp(-lnSK);
@@ -91,25 +75,16 @@ async function findContract(ticker, optionType, targetDelta, targetDTE, vix, sto
     const sigma = (stock && stock._realIV && stock._realIV > 0.05) ? stock._realIV : vix / 100;
     const T     = Math.max(0.01, targetDTE / 365);
 
-    // Step 1: compute target strike via B-S inversion
     const targetStrike = bsStrikeForDelta(stock ? stock.price || 0 : 0, targetDelta, T, sigma, optionType);
     if (!targetStrike || targetStrike <= 0) return null;
 
-    // Step 2: fetch contract list
-    // If fixedExpiry: fetch only that single expiry (for protection legs)
-    // Otherwise: fetch [targetDTE-7, targetDTE+14] window
     let fetchMin, fetchMax;
     if (fixedExpiry) {
       fetchMin = fixedExpiry;
       fetchMax = fixedExpiry;
     } else {
-      // Expanded DTE window — don't lock into a single monthly expiry.
-      // MR calls (14 DTE): search 7–35 days (catch weeklies + next monthly)
-      // Directional (38 DTE): search 21–90 days (monthly + skip-month options)
-      // Cap raised from 60→120: SPY/QQQ 60-90 DTE contracts are liquid with tight spreads.
-      // The scorer picks the closest match to targetDTE within this window.
       const minDays = Math.max(7, targetDTE - 7);
-      const maxDays = Math.min(120, targetDTE + 21); // was min(60, +14) — now 120d cap, +21d window
+      const maxDays = Math.min(120, targetDTE + 21);
       fetchMin = new Date(today.getTime() + minDays * 86400000).toISOString().split("T")[0];
       fetchMax = new Date(today.getTime() + maxDays * 86400000).toISOString().split("T")[0];
     }
@@ -129,7 +104,6 @@ async function findContract(ticker, optionType, targetDelta, targetDTE, vix, sto
       return null;
     }
 
-    // Step 3: sort by strike proximity (tiebreak: DTE proximity to targetDTE)
     allC.sort((a, b) => {
       const da = Math.abs(parseFloat(a.strike_price) - targetStrike);
       const db = Math.abs(parseFloat(b.strike_price) - targetStrike);
@@ -139,7 +113,6 @@ async function findContract(ticker, optionType, targetDelta, targetDTE, vix, sto
       return Math.abs(aDTE - targetDTE) - Math.abs(bDTE - targetDTE);
     });
 
-    // Step 4: batch-fetch snapshots for top 50 candidates
     const symbols = allC.slice(0, 50).map(c => c.symbol);
     const batches = [];
     for (let i = 0; i < symbols.length; i += 25) batches.push(symbols.slice(i, i+25).join(","));
@@ -148,7 +121,6 @@ async function findContract(ticker, optionType, targetDelta, targetDTE, vix, sto
     );
     const snaps = snapResults.reduce((acc, r) => ({ ...acc, ...(r?.snapshots || {}) }), {});
 
-    // Step 5: pick first contract with price and delta in acceptable range
     const deltaMin = Math.max(0.05, targetDelta - 0.12);
     const deltaMax = Math.min(0.65, targetDelta + 0.12);
 
@@ -165,14 +137,6 @@ async function findContract(ticker, optionType, targetDelta, targetDTE, vix, sto
       if (delta < deltaMin || delta > deltaMax) continue;
       const strike = parseFloat(c.strike_price);
       const expDTE = Math.round((new Date(c.expiration_date) - today) / 86400000);
-      const otm    = Math.abs((targetStrike - strike) / targetStrike * 100);
-      // V2.98: Hard DTE cap at 45 days. Contracts above this threshold are swing
-      // instruments with different theta/vega profile. APEX's entry/exit logic is
-      // calibrated for 21-45 DTE intraday-to-2day holds. A 58 DTE entry managed
-      // with intraday thesis-complete exits misuses the instrument. Until a full
-      // Tier 3 swing framework is built, reject contracts > 45 DTE at entry.
-      // The selector will continue iterating and either find a shorter-dated
-      // contract or return null (skip instrument) — preventing accidental swing entries.
       const DTE_ENTRY_CAP = 45;
       if (expDTE > DTE_ENTRY_CAP) {
         logEvent("filter", `${ticker} findContract: skipping $${strike} ${expDTE}DTE — exceeds ${DTE_ENTRY_CAP}DTE entry cap (Tier 3 framework not yet implemented)`);
@@ -205,14 +169,9 @@ async function findContract(ticker, optionType, targetDelta, targetDTE, vix, sto
 }
 
 function calcPositionSize(premium, score, vix) {
-  // Step 1: Kelly base from actual trade history (dynamic)
   const recentTrades = (state.closedTrades || []).slice(0, 30);
   let kellyBase;
 
-  // FIX 2: Kelly bootstrap — paper fills count toward calibration threshold.
-  // realTrades increments on every confirmed fill (paper or live).
-  // Pre-calibration: conviction-based sizing (1-3 contracts) instead of hard 1-contract cap.
-  // Unlocks full Kelly after 30 fills.
   const totalFills = (state.dataQuality || {}).realTrades || 0;
   const preCalibration = totalFills < 30;
 
@@ -226,56 +185,34 @@ function calcPositionSize(premium, score, vix) {
     const kelly   = winRate - (1 - winRate) / payoff;
     kellyBase     = Math.max(0.05, Math.min(preCalibration ? 0.12 : 0.25, kelly * 0.5));
   } else {
-    // Pre-calibration bootstrap: score-tiered sizing (not hard 1 contract)
-    // High conviction setups (score >= 85) get 2-3 contracts even before 30 fills
-    kellyBase = preCalibration ? 0.07 : 0.08; // slightly larger than before to allow 2 contracts on high conviction
+    kellyBase = preCalibration ? 0.07 : 0.08;
   }
 
-  // Pre-calibration cap: max 3 contracts until 30 fills recorded
-  // Replaces the hard 1-contract cap — lets conviction drive sizing within tight bounds
   const preCalibCap = preCalibration ? 3 : 99;
-
-  // Step 2: Score conviction multiplier
-  // Higher score = more conviction = size up within Kelly bounds
   const convictionMult = score >= 85 ? 1.25 : score >= 75 ? 1.0 : score >= 70 ? 0.80 : 0.60;
 
-  // Time of day sizing — reduce in first 30 mins (wide spreads, price discovery)
-  // Pros size down at open — market makers widen spreads until order flow stabilizes
   const etNow  = getETTime();
   const minsSinceOpen = (etNow.getHours() - 9) * 60 + etNow.getMinutes() - 30;
-  const openingMult   = minsSinceOpen < 30 ? 0.75 : 1.0; // 25% smaller in first 30 mins
+  const openingMult   = minsSinceOpen < 30 ? 0.75 : 1.0;
 
-  // FIX 1: VIX sizing — G&W penalty only applies at extreme VIX (>40).
-  // APEX buys naked options (long premium). At VIX 25-35 premium is elevated but
-  // not absurd — the directional move thesis can still overcome theta.
-  // Removed: 0.75x penalty at VIX 25-35 (was permanently choking sizing at current VIX 28).
-  // Kept: 0.50x at VIX 35-40 (premium getting expensive), 0.35x at VIX 40+ (G&W threshold).
-  const vixMult = vix >= 40  ? 0.35   // G&W: VIX>40 options genuinely overpriced for debit
-                : vix >= 35  ? 0.60   // elevated but still directional — modest reduction
-                : 1.0;                 // VIX <35: no sizing penalty on naked longs
+  const vixMult = vix >= 40  ? 0.35
+                : vix >= 35  ? 0.60
+                : 1.0;
 
-  // Step 4: Drawdown protocol — use injected _getDrawdown() not marketContext (not in scope here)
   const ddMult = (_getDrawdown()?.sizeMultiplier) || (_getDrawdown()?.sizeMult) || 1.0;
 
-  // Step 5: Combine into single sizing decision
   const effectiveFraction = kellyBase * convictionMult * vixMult * ddMult * openingMult;
   const maxCost           = Math.min(
     state.cash * effectiveFraction,
-    state.cash * 0.20,                     // hard cap: never more than 20% per trade
-    MAX_LOSS_PER_TRADE / STOP_LOSS_PCT     // risk-based cap
+    state.cash * 0.20,
+    MAX_LOSS_PER_TRADE / STOP_LOSS_PCT
   );
 
-  // V2.99: Use MAX_CONTRACTS (3) as hard ceiling — replaces the old hardcoded 5.
   const contracts = Math.max(1, Math.min(Math.min(MAX_CONTRACTS, preCalibCap), Math.floor(maxCost / (premium * 100))));
 
-  // If even 1 contract exceeds the risk-based cap, return 0 to signal skip
-  // Exception: high-conviction (score >= 85) always gets 1 contract if premium is under $25
-  // Prevents 0-return on expensive instruments (SMH $15+) due to negative Kelly clamping
-  // when the position cost ($1,500-2,500) is still within acceptable risk limits.
   const singleContractCost = premium * 100;
-  const riskCap = MAX_LOSS_PER_TRADE / STOP_LOSS_PCT; // e.g. $900/0.35 = $2,571
+  const riskCap = MAX_LOSS_PER_TRADE / STOP_LOSS_PCT;
   if (singleContractCost > riskCap) {
-    // High conviction override: allow 1 contract if cost < 20% of cash and premium < $25
     if (score >= 85 && singleContractCost < state.cash * 0.20 && premium < 25) {
       return 1;
     }
@@ -285,39 +222,24 @@ function calcPositionSize(premium, score, vix) {
   return contracts;
 }
 
-
-// ═══════════════════════════════════════════════════════════════════════════════
-// NAKED OPTIONS MODE: Spread execution functions removed.
-// Only executeTrade() is used for all entries.
-// ═══════════════════════════════════════════════════════════════════════════════
-
 async function executeTrade(stock, price, score, scoreReasons, vix, optionType = "call", isMeanReversion = false, sizeMod = 1.0) {
-  // Quick cash pre-check before expensive API calls
-  // Use conservative estimate: assume at least $200 premium * 1 contract = $200 min cost
-  const estimatedMinCost = price * 0.03 * 100; // ~3% OTM premium estimate * 100
+  const estimatedMinCost = price * 0.03 * 100;
   if (state.cash - estimatedMinCost < CAPITAL_FLOOR) {
     logEvent("skip", `${stock.ticker} - insufficient cash pre-check (est. min cost ${fmt(estimatedMinCost)})`);
     return false;
   }
 
-  // Use cached contract from parallel prefetch if available, else fetch now
-  // FIX 5: DTE by trade type. MR calls need speed (14-21 DTE, higher gamma).
-  // Directional puts/calls need time for the thesis to play out (35-45 DTE).
-  const targetDelta = isMeanReversion ? 0.42 : 0.35; // MR: slightly more ATM for faster move
-  const targetDTE   = isMeanReversion ? 14   : 38;   // MR: 14 DTE (fast), Directional: 38 DTE
+  const targetDelta = isMeanReversion ? 0.42 : 0.35;
+  const targetDTE   = isMeanReversion ? 14   : 38;
   let contract = stock._cachedContract || await findContract(stock.ticker, optionType, targetDelta, targetDTE, vix, stock);
-  delete stock._cachedContract; // clean up cache after use
+  delete stock._cachedContract;
 
-  // Fallback to estimated contract if real data unavailable
-  // NOTE: If the chain exists but no liquid contracts found, estimation is unreliable
-  // Only estimate if we got no chain data at all (API failure)
   if (!contract) {
     logEvent("warn", `- ${stock.ticker} - NO REAL OPTIONS DATA - using Black-Scholes estimate. Check Alpaca Pro subscription.`);
     if (!state.dataQuality) state.dataQuality = { realTrades: 0, estimatedTrades: 0, totalTrades: 0 };
     state.dataQuality.estimatedTrades++;
     state.dataQuality.totalTrades++;
     const iv       = 0.25 + stock.ivr * 0.003;
-    // Simple fallback DTE: 28 days for directional, 21 for MR
     const expDays = isMeanReversion ? 21 : 28;
     const _expDate = new Date(Date.now() + expDays * 86400000);
     const expDate = _expDate.toLocaleDateString('en-US', { month: 'short', day: '2-digit', year: 'numeric' });
@@ -333,25 +255,16 @@ async function executeTrade(stock, price, score, scoreReasons, vix, optionType =
       premium, bid: premium * 0.95, ask: premium * 1.05,
       greeks, iv, oi: 0, vol: 0, optionType };
   } else {
-    // Real data - track totalTrades for stats only
-    // realTrades is incremented AFTER a confirmed live fill (see below)
-    // Never increment in dry run - would bypass the 1-contract cap
     if (!state.dataQuality) state.dataQuality = { realTrades: 0, estimatedTrades: 0, totalTrades: 0 };
     state.dataQuality.totalTrades++;
   }
 
-  // Minimum premium gate — reject penny options before sizing
-  // MIN_OPTION_PREMIUM = $0.50. Options below this have spreads that eat 25-50% of value instantly.
-  // HYG at $0.11 premium is effectively untradeable — bid/ask spread alone exceeds stop loss.
   if (contract.premium < MIN_OPTION_PREMIUM) {
     logEvent("skip", `${stock.ticker} - premium $${contract.premium} below minimum $${MIN_OPTION_PREMIUM} (penny option — spread risk too high)`);
     return false;
   }
 
-  // Position sizing based on real premium
-  // Unified Kelly-primary sizing - single call, all adjustments inside
   let contracts = calcPositionSize(contract.premium, score, vix);
-  // V2.84: apply Regime B oversold sizing modifier (0.75x when RSI <=40 in bear trend)
   if (sizeMod < 1.0) {
     contracts = Math.max(1, Math.floor(contracts * sizeMod));
     logEvent("scan", `[SIZING] ${stock.ticker} sizeMod ${sizeMod}x applied - ${contracts} contracts (oversold bear trend)`);
@@ -368,27 +281,21 @@ async function executeTrade(stock, price, score, scoreReasons, vix, optionType =
     ? parseFloat((contract.strike - contract.premium).toFixed(2))
     : parseFloat((contract.strike + contract.premium).toFixed(2));
 
-  // Ensure liquid cash
-
   if (cost > state.cash - CAPITAL_FLOOR) {
     logEvent("skip", `${stock.ticker} - insufficient cash after floor (need ${fmt(cost)})`);
     return false;
   }
 
-  // Delta check - already filtered in getRealOptionsContract but double check estimate fallback
   const delta = parseFloat(contract.greeks.delta || 0);
   if (Math.abs(delta) < TARGET_DELTA_MIN || Math.abs(delta) > TARGET_DELTA_MAX) {
     logEvent("filter", `${stock.ticker} - delta ${delta} outside target range`);
     return false;
   }
 
-  // Duplicate guard — if a pending order exists for this ticker, skip.
   if (!_dryRunMode && state._pendingOrder && state._pendingOrder.ticker === stock.ticker) {
     logEvent("filter", `${stock.ticker} pending order exists - skipping naked/MR submission`);
     return false;
   }
-  // Set lightweight _pendingOrder for the duration of the 10s poll
-  // Prevents a concurrent scan from submitting the same ticker during fill wait
   if (!_dryRunMode) {
     state._pendingOrder = {
       orderId:        `argo-naked-${stock.ticker}-${Date.now()}`,
@@ -398,9 +305,6 @@ async function executeTrade(stock, price, score, scoreReasons, vix, optionType =
       isNaked:        true,
       submittedAt:    Date.now(),
       _preSubmit:     true,
-      // V2.94 FIX: Copy all fields needed for journal entry at fill confirmation.
-      // Previously these were undefined in _pendingOrder causing $undefined strike
-      // and exp ? in journal display.
       strike:         contract.strike,
       expDate:        contract.expDate || contract.exp,
       expDays:        contract.dte || contract.expDays,
@@ -419,16 +323,12 @@ async function executeTrade(stock, price, score, scoreReasons, vix, optionType =
     };
     markDirty();
   }
-  // Submit order to Alpaca - fill confirmation happens inside
-  // Only submit if we have a real contract symbol (not an estimate)
   let alpacaOrderId = null;
   if (contract.symbol && contract.ask > 0 && !_dryRunMode) {
     try {
-      // FIX 6: Limit price concession — try ask, then mid if unfilled, then bid+spread
-      // MR entries need fills urgently — don't miss the bounce waiting for a perfect price
       const askPrice = parseFloat(contract.ask.toFixed(2));
       const midPrice = contract.bid > 0 ? parseFloat(((contract.bid + contract.ask) / 2).toFixed(2)) : askPrice;
-      const concessionPrices = [askPrice, midPrice]; // ask first, mid as fallback
+      const concessionPrices = [askPrice, midPrice];
       let limitPrice = askPrice;
       let fillConfirmed = false;
       let fillPrice = null;
@@ -446,7 +346,7 @@ async function executeTrade(stock, price, score, scoreReasons, vix, optionType =
           type:            "limit",
           time_in_force:   "day",
           limit_price:     limitPrice,
-          position_intent: "buy_to_open", // Required for options — tells Alpaca this is a new long position, not a closing buy
+          position_intent: "buy_to_open",
         };
         const orderResp = await alpacaPost("/orders", orderBody);
         if (!orderResp || !orderResp.id) {
@@ -456,7 +356,6 @@ async function executeTrade(stock, price, score, scoreReasons, vix, optionType =
         alpacaOrderId = orderResp.id;
         logEvent("trade", `Alpaca order submitted: ${orderResp.id} | ${contract.symbol} | ${contracts}x @ $${limitPrice} (attempt ${attempt+1})`);
 
-        // Poll up to 8s per attempt (total max ~16s across both attempts)
         const FILL_TIMEOUT  = attempt === 0 ? 6000 : 8000;
         const POLL_INTERVAL = 1000;
         const pollStart = Date.now();
@@ -493,7 +392,7 @@ async function executeTrade(stock, price, score, scoreReasons, vix, optionType =
           markDirty();
           alpacaOrderId = null;
       } else if (fillPrice) {
-          contract.premium = fillPrice; // use actual fill price
+          contract.premium = fillPrice;
           state._pendingOrder = null;
           markDirty();
           if (!state.dataQuality) state.dataQuality = { realTrades: 0, estimatedTrades: 0, totalTrades: 0 };
@@ -505,28 +404,21 @@ async function executeTrade(stock, price, score, scoreReasons, vix, optionType =
     }
   }
 
-  // Abort if order was not confirmed filled - don't update state on unfilled orders
   if (contract.symbol && !_dryRunMode && alpacaOrderId === null && contract.symbol) {
     logEvent("skip", `${stock.ticker} - trade aborted, order not filled`);
     return false;
   }
 
-  // Recalculate cost/target/stop using final premium (may have been updated by fill)
   const finalCost     = parseFloat((contract.premium * 100 * contracts).toFixed(2));
-  // Use DTE-tiered exit params - short-dated options need faster exits
-  // V2.98 FIX A: pass optionType so getDTEExitParams applies direction-correct vixTPMult.
-  // Puts get higher TP at elevated VIX (more room to run); calls get lower TP (take faster).
-  const exitParams    = getDTEExitParams(contract.expDays || 30, 0, optionType); // 0 days open - fresh entry
+  const exitParams    = getDTEExitParams(contract.expDays || 30, 0, optionType);
   const finalTarget   = parseFloat((contract.premium * (1 + exitParams.takeProfitPct)).toFixed(2));
   const finalStop     = parseFloat((contract.premium * (1 - exitParams.stopLossPct)).toFixed(2));
   const finalBreakeven = optionType === "put"
     ? parseFloat((contract.strike - contract.premium).toFixed(2))
     : parseFloat((contract.strike + contract.premium).toFixed(2));
 
-  // Re-check cash with final cost (fill might be slightly different from ask)
   if (finalCost > state.cash - CAPITAL_FLOOR) {
     logEvent("skip", `${stock.ticker} - insufficient cash after fill price adjustment`);
-    // Cancel the Alpaca order if we submitted one
     if (alpacaOrderId) {
       try {
         await alpacaDelete(`/orders/${alpacaOrderId}`);
@@ -536,14 +428,11 @@ async function executeTrade(stock, price, score, scoreReasons, vix, optionType =
     return false;
   }
 
-  // In dry run - log what would happen but don't mutate state
   if (_dryRunMode) {
     logEvent("dryrun", `WOULD BUY ${stock.ticker} ${optionType.toUpperCase()} $${contract.strike} | ${contracts}x @ $${contract.premium} | cost ${fmt(finalCost)} | score ${score} | delta ${contract.greeks.delta}`);
     return true;
   }
 
-  // Final heat check - projected heat AFTER this position is added
-  // This catches the scan-level blindness where multiple positions queue before any are entered
   const projectedHeat = (openRisk() + finalCost) / totalCap();
   if (projectedHeat > effectiveHeatCap()) {
     logEvent("filter", `${stock.ticker} - projected heat ${(projectedHeat*100).toFixed(0)}% would exceed ${MAX_HEAT*100}% max - skipping`);
@@ -575,9 +464,6 @@ async function executeTrade(stock, price, score, scoreReasons, vix, optionType =
     fastStopPct:    exitParams.fastStopPct,
     dteLabel:       exitParams.label,
     isMeanReversion: isMeanReversion,
-    // V2.99 PURE INTRADAY: isTier3 requires both DTE > 45 AND !isMeanReversion.
-    // A mean reversion entry is always intraday regardless of contract DTE.
-    // isTier3=true only for future deliberate swing mode entries (isMeanReversion=false).
     isTier3:        (contract.expDays || contract.dte || 0) > 45 && !isMeanReversion,
     entryVIX:       vix,
     partialClosed:  false,
@@ -600,25 +486,21 @@ async function executeTrade(stock, price, score, scoreReasons, vix, optionType =
     bid:             contract.bid,
     ask:             contract.ask,
     realData:        !!contract.symbol,
-    entryRSI:        stock.rsi || 52,        // intraday RSI at entry (call thesis-complete)
-    // V2.98 PUT FIX: puts score on dailyRSI not intradayRSI.
-    // _putFulfilled must check dailyRSI was overbought at entry, not intraday.
-    // entryDailyRSI stored separately so exitEngine can use the correct value.
-    entryDailyRSI:   stock.dailyRsi || stock.rsi || 52, // daily RSI at entry (put thesis-complete)
+    entryRSI:        stock.rsi || 52,
+    entryDailyRSI:   stock.dailyRsi || stock.rsi || 52,
     entryMomentum:   stock.momentum || "steady",
     entryMACD:       stock.macd || "neutral",
     entryMacro:      (state._agentMacro || {}).signal || "neutral",
-    entryRegime:     state._regimeClass || "A",   // regime at entry — for journal post-mortem
+    entryRegime:     state._regimeClass || "A",
     entryRelStr:     stock._relStrength || 1.0,
     entryADX:        stock._adx || 0,
-    entryThesisScore: 100, // starts at 100, degrades over time
-    thesisHistory:   [], // [{time, score, notes}] - tracks degradation
-    agentHistory:    [], // last 5 rescore results
+    entryThesisScore: 100,
+    thesisHistory:   [],
+    agentHistory:    [],
   };
 
   state.positions.push(position);
 
-  // - Paper slippage estimate -
   const _singleSlipEst = parseFloat((0.08 * (contract.contracts || 1)).toFixed(2));
   if (!state._paperSlippage) state._paperSlippage = { trades: 0, totalEst: 0 };
   state._paperSlippage.trades++;
@@ -639,7 +521,7 @@ async function executeTrade(stock, price, score, scoreReasons, vix, optionType =
     contracts,
     cost:          finalCost,
     score,
-    scoreReasons:  scoreReasons, // F13: full list for dashboard transparency
+    scoreReasons:  scoreReasons,
     delta:         contract.greeks.delta,
     iv:            parseFloat(((contract.iv||0.3)*100).toFixed(1)),
     vix,
@@ -651,19 +533,15 @@ async function executeTrade(stock, price, score, scoreReasons, vix, optionType =
   const typeLabel = optionType === "put" ? "P" : "C";
   const dataLabel = contract.symbol ? "REAL" : "EST";
 
-  // - LIQUIDITY HARD GATES -
-  // OI < MIN_OI (5) = essentially no market - unfillable in live trading
   if (!_dryRunMode && contract.oi > 0 && contract.oi < MIN_OI) {
     logEvent("filter", `${stock.ticker} BLOCKED - OI:${contract.oi} below minimum ${MIN_OI} - unfillable in live trading`);
     return false;
   }
-  // Spread > MAX_SPREAD_PCT (30%) = slippage destroys the trade
   if (!_dryRunMode && contract.spread > MAX_SPREAD_PCT) {
     const slippageEst = parseFloat((contract.premium * contract.spread * 0.5 * 100 * contracts).toFixed(2));
-    logEvent("filter", `${stock.ticker} BLOCKED - spread ${(contract.spread*100).toFixed(0)}% exceeds ${(MAX_SPREAD_PCT*100).toFixed(0)}% max - est. slippage $${slippageEst}`);
+    logEvent("filter", `[WIDE-SPREAD] ${stock.ticker} BLOCKED — spread ${(contract.spread*100).toFixed(0)}% exceeds ${(MAX_SPREAD_PCT*100).toFixed(0)}% max - est. slippage $${slippageEst}`);
     return false;
   }
-  // Warn on borderline OI (5-50) and spread (15-30%) - don't block but flag
   if (contract.oi > 0 && contract.oi < 50) {
     logEvent("warn", `- ${stock.ticker} LOW OI: ${contract.oi} - fill may be slow`);
   } else if (contract.oi === 0) {
@@ -674,12 +552,8 @@ async function executeTrade(stock, price, score, scoreReasons, vix, optionType =
     logEvent("warn", `- ${stock.ticker} WIDE SPREAD: ${(contract.spread*100).toFixed(0)}% - est. slippage $${slippageEst}`);
   }
 
-  await saveStateNow(); // critical - persist trade immediately
+  await saveStateNow();
 
-  // V2.98: Write OPEN journal entry at fill time with full entry data.
-  // Previously journal was written only at CLOSE (standalone exit record)
-  // which lacked strike, expDate, entryRSI, entryDelta etc → showed $undefined.
-  // Now we write the OPEN entry here while all data is in scope.
   writeJournalEntry({
     id:             `${contract.symbol}_${Date.now()}`,
     contractSymbol: contract.symbol,
@@ -696,12 +570,9 @@ async function executeTrade(stock, price, score, scoreReasons, vix, optionType =
     entryCost:      finalCost,
     entryScore:     score,
     entryReasons:   scoreReasons || [],
-    // V2.98 PUT FIX: journal shows the RSI that actually drove the score.
-    // Put scoring uses dailyRSI — journal should reflect that for accurate post-mortem.
-    // Call scoring uses intraday RSI — keep that for calls.
     entryRSI:       optionType === 'put'
-                      ? (stock.dailyRsi || stock.rsi || null)   // put: daily RSI scored
-                      : (stock.rsi || stock.liveRSI || null),   // call: intraday RSI scored
+                      ? (stock.dailyRsi || stock.rsi || null)
+                      : (stock.rsi || stock.liveRSI || null),
     entryDailyRSI:  stock.dailyRsi || null,
     entryDelta:     contract.greeks?.delta || contract.delta || null,
     entryIV:        contract.iv || null,
@@ -710,7 +581,7 @@ async function executeTrade(stock, price, score, scoreReasons, vix, optionType =
     entryMACD:      stock.macd || null,
     entryMomentum:  stock.momentum || null,
     macroSignal:    (state._agentMacro || {}).signal || 'neutral',
-    _isGapDayEntry: (state._todayGapAbs || 0) >= 1.5, // V3.01: stamp gap-day flag for progress check timing
+    _isGapDayEntry: (state._todayGapAbs || 0) >= 1.5,
     regimeAtEntry:  (state._marketRegime || {}).regime || 'unknown',
     peakPrice:      contract.premium,
     peakPct:        0,
@@ -731,7 +602,7 @@ async function executeTrade(stock, price, score, scoreReasons, vix, optionType =
     hoursHeld:      null,
     isWin:          null,
     status:         'OPEN',
-  }).catch(e => {}); // non-blocking — position is already in state
+  }).catch(e => {});
 
   logEvent("trade",
     `BUY ${stock.ticker} $${contract.strike}${typeLabel} exp ${contract.expDate} | ${contracts}x @ $${contract.premium} | ` +
@@ -741,12 +612,6 @@ async function executeTrade(stock, price, score, scoreReasons, vix, optionType =
   return true;
 }
 
-
-
-// ============================================================
-// Spread execution functions removed — APEX trades naked options only.
-// executeDebitCallSpread and executeCreditSpread are stubbed to prevent
-// TypeError when server.new.js destructures them from require('./execution').
 function executeCreditSpread() {
   logEvent("warn", "executeCreditSpread called but APEX trades naked options only — returning null");
   return null;
@@ -754,7 +619,7 @@ function executeCreditSpread() {
 
 module.exports = {
   executeTrade,
-  executeCreditSpread,   // stub — prevents TypeError in server.new.js /force-entry endpoint
+  executeCreditSpread,
   findContract, bsStrikeForDelta, getOptionsPrice,
   initExecution,
   calcPositionSize,
