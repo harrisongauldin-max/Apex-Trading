@@ -92,10 +92,10 @@ function getDTEExitParams(dte, daysOpen = 0, optionType = "call") {
   // PUTS:  V2.98 FIX A — vixTPMult is INVERTED for puts. Elevated VIX means underlying is
   //        falling and puts are performing. Reducing TP exits winning puts early on exactly
   //        the days when they have the most room to run. Puts get a HIGHER TP at elevated VIX.
-  //   Calls VIX 25-29: 0.80x (32% MONTHLY) — take faster, options expensive
-  //   Calls VIX 30+:   0.65x (26% MONTHLY) — take much faster
-  //   Puts  VIX 25-29: 1.20x (48% MONTHLY) — give more room, thesis intact in volatile env
-  //   Puts  VIX 30+:   1.30x (52% MONTHLY) — most room, strong directional move underway
+  //   Calls VIX 25-29: 0.80x (28% MONTHLY) — take faster, options expensive
+  //   Calls VIX 30+:   0.65x (22.75% MONTHLY) — take much faster
+  //   Puts  VIX 25-29: 1.20x (42% MONTHLY) — give more room, thesis intact in volatile env
+  //   Puts  VIX 30+:   1.30x (45.5% MONTHLY) — most room, strong directional move underway
   const vix = state.vix || 22;
   const isPut      = optionType === "put";
   const vixTPMult  = vix >= 30 ? (isPut ? 1.30 : 0.65)
@@ -114,7 +114,7 @@ function getDTEExitParams(dte, daysOpen = 0, optionType = "call") {
              trailStop: 0.07, // SPRINT-04: PDT dead code removed
              label: "SHORT-DTE" + overnightLabel + vixLabel };
   } else if (dte <= 45) {
-    const base = 0.40; // SPRINT-04: PDT_RULE_ACTIVE=false, pdtLocked/pdtTight always false
+    const base = 0.35; // trail floor governs exits — TP is gap-scenario ceiling only
     const tp   = parseFloat((base * overnightMult * vixTPMult).toFixed(3));
     return { takeProfitPct: tp, partialPct: parseFloat((tp*0.55).toFixed(3)),
              ridePct: parseFloat((tp*1.40).toFixed(3)), stopLossPct: 0.35, fastStopPct: 0.20,
@@ -128,7 +128,7 @@ function getDTEExitParams(dte, daysOpen = 0, optionType = "call") {
     // behave like MONTHLY in terms of delta/theta/vega dynamics. Higher TP just
     // caused over-holding into vega compression. MONTHLY params apply universally
     // for all positions > 45 DTE.
-    const base = 0.40; // SPRINT-04: PDT_RULE_ACTIVE=false, pdtLocked/pdtTight always false
+    const base = 0.35; // trail floor governs exits — TP is gap-scenario ceiling only
     const tp   = parseFloat((base * overnightMult * vixTPMult).toFixed(3));
     return { takeProfitPct: tp, partialPct: parseFloat((tp*0.55).toFixed(3)),
              ridePct: parseFloat((tp*1.40).toFixed(3)), stopLossPct: 0.35, fastStopPct: 0.20,
@@ -172,7 +172,10 @@ async function fetchPositionData(positions) {
   return { posSnapshots, posQuotes, posNewsCache };
 }
 
-// ─── Main exit decision function ─────────────────────────────────────
+// ─── Bar cache for RSI checks (per scan cycle) ────────────────────────
+const _posBarCache = new Map();
+
+// ─── Main exit decision function ─────────────────────────────────────────────
 // Returns: ExitDecision[] = [{pi, ticker, action, reason, exitPremium, contractSym}]
 // Never mutates state. Never calls closePosition. Pure decision function.
 async function checkExits(positions, posSnapshots, posQuotes, posNewsCache, ctx) {
@@ -186,23 +189,14 @@ async function checkExits(positions, posSnapshots, posQuotes, posNewsCache, ctx)
 
   const decisions = [];
   // V2.98 FIX: Per-cycle close dedup set.
-  // Prevents profit-lock-partial AND thesis-complete both queuing for the same
-  // position in the same scan cycle — which caused the 42210000 intent mismatch.
-  // Once a 'close' is queued for pi, all further decisions for that pi are skipped.
-  const _closedThisCycle  = new Set(); // tracks pi indices that got a close decision
-  const _partialThisCycle = new Set(); // tracks pi indices that got a partial decision
+  const _closedThisCycle  = new Set();
+  const _partialThisCycle = new Set();
 
   for (let pi = 0; pi < positions.length; pi++) {
     const pos   = positions[pi];
     const price = posQuotes[pi];
     if (!price) continue;
-    if (pos._dryRunWouldClose) continue; // already flagged for close this scan - skip
-    // V2.88: permissionBlocked cooldown — 40310000 was treated as permanent but can be transient.
-    // Evidence: APEX opened a new option position on the same account that got the 40310000,
-    // proving the account CAN trade options. The block may have been a momentary reject
-    // (wrong order format, stale session, Alpaca rate limit).
-    // Fix: 15-minute cooldown, then retry. If it fails again, cooldown resets.
-    // NOT permanent — position can still be closed after cooldown expires.
+    if (pos._dryRunWouldClose) continue;
     if (pos._permissionBlocked) {
       const _blockedMins = pos._permissionBlockedAt
         ? (Date.now() - new Date(pos._permissionBlockedAt).getTime()) / 60000
@@ -211,20 +205,17 @@ async function checkExits(positions, posSnapshots, posQuotes, posNewsCache, ctx)
         logEvent("warn", `${pos.ticker} exit skipped — permission blocked (40310000), retrying in ${(15 - _blockedMins).toFixed(0)}min`);
         continue;
       }
-      // Cooldown expired — clear block and retry
       logEvent("warn", `${pos.ticker} permission block cooldown expired (${_blockedMins.toFixed(0)}min) — clearing flag and retrying close`);
       delete pos._permissionBlocked;
       delete pos._permissionBlockedAt;
       delete pos._permBlockReason;
-      // Fall through to normal exit evaluation
     }
-    try { // wrap each position in try/catch - one bad position can't crash the whole scan
+    try {
 
     const dte      = Math.max(1, Math.round((new Date(pos.expDate)-new Date())/MS_PER_DAY));
     const t        = dte / 365;
     let curP;
     if (pos.isSpread && pos.buySymbol && pos.sellSymbol) {
-      // Spread P&L: net value = buy leg mid - sell leg mid
       const buySnap  = posSnapshots[pos.buySymbol];
       const sellSnap = posSnapshots[pos.sellSymbol];
       if (buySnap && sellSnap) {
@@ -238,23 +229,14 @@ async function checkExits(positions, posSnapshots, posQuotes, posNewsCache, ctx)
           : parseFloat(sellSnap?.lastTrade?.p || sellSnap?.latestTrade?.p || 0);
         if (buyMid > 0 && sellMid > 0) {
           if (pos.isCreditSpread) {
-            // Credit spread: we SOLD the sell leg and BOUGHT the buy leg (protection)
-            // Current cost to close = buy back sell leg - sell long leg
-            // = sellMid - buyMid (positive when spread has narrowed = profit)
             curP = parseFloat((sellMid - buyMid).toFixed(2));
           } else {
-            // Debit spread: we BOUGHT the buy leg and SOLD the sell leg
-            // Current value = buy leg value - sell leg value
             curP = parseFloat((buyMid - sellMid).toFixed(2));
           }
           pos.currentPrice = curP;
           pos._currentPriceUpdatedAt = Date.now();
           pos.realData = true;
-          // Store individual leg prices for dashboard display
           pos._legPrices = { buy: parseFloat(buyMid.toFixed(2)), sell: parseFloat(sellMid.toFixed(2)) };
-          // Compute NET spread Greeks = buy leg - sell leg
-          // For credit spreads: short the sell leg (negative delta/vega/gamma, positive theta)
-          // Using buy leg alone gives wrong sign — net must account for both legs
           const buyGreeks  = buySnap?.greeks  || {};
           const sellGreeks = sellSnap?.greeks || {};
           if (buyGreeks.delta || sellGreeks.delta) {
@@ -266,10 +248,6 @@ async function checkExits(positions, posSnapshots, posQuotes, posNewsCache, ctx)
             const sellG = parseFloat(sellGreeks.gamma || 0);
             const buyV  = parseFloat(buyGreeks.vega   || 0);
             const sellV = parseFloat(sellGreeks.vega  || 0);
-            // Net = long (buy) leg minus short (sell) leg
-            // Credit spread: sold sell leg, bought buy leg
-            // net delta = buy delta - sell delta (negative — short call spread has negative delta)
-            // net theta = buy theta - sell theta (positive — short leg theta dominates, positive for credit)
             pos.greeks = {
               delta: (buyD - sellD).toFixed(3),
               theta: (buyT - sellT).toFixed(3),
@@ -289,30 +267,13 @@ async function checkExits(positions, posSnapshots, posQuotes, posNewsCache, ctx)
       const realPrice = bid > 0 && ask > 0 ? parseFloat(((bid + ask) / 2).toFixed(2)) : null;
       if (bid > 0) pos.bid = bid;
       if (ask > 0) pos.ask = ask;
-      // Staleness guard: pos.currentPrice may be hours old if API has been failing.
-      // A stale high price triggers false take-profit (e.g. $12.58 from 9am fires at 10am when real price is $5.50).
-      // Only use pos.currentPrice if it was updated within the last 3 scan cycles (~30 seconds).
       const _staleSecs = pos._currentPriceUpdatedAt ? (Date.now() - pos._currentPriceUpdatedAt) / 1000 : 9999;
       const _freshCurrentPrice = _staleSecs < 30 ? pos.currentPrice : null;
-      // V2.88 ROOT CAUSE FIX: Remove IV formula from curP fallback chain.
-      // The formula `stock_price × IV × sqrt(t) × 0.4` uses the UNDERLYING price (~$674 for QQQ)
-      // and produces option prices in the $10-15 range when the real option is $5.90.
-      // Every time the snapshot API fails, this formula fires and produces a phantom high price
-      // which becomes peakPremium, triggers take-profit, and closes positions at a loss.
-      // This was the ROOT CAUSE of every "target" close that actually booked a loss:
-      //   QQQ +154% phantom → exits at $5.95 vs entry $6.09 = -$28 (real loss)
-      //   SPY +169% phantom → exits at $5.18 vs entry $5.25 = -$14 (real loss)
-      //   GLD +89% phantom  → exits at $6.50 vs entry $6.90 = -$80 (real loss)
-      // Fix: use ONLY realPrice (live bid/ask mid) or _freshCurrentPrice (<30s stale).
-      // If both are unavailable (API down), hold the position — do NOT compute a phantom price.
-      // pos.premium is the last resort only — it produces chg=0, which is neutral and safe.
       curP = realPrice || _freshCurrentPrice || pos.premium;
       if (realPrice) { pos.realData = true; pos._currentPriceUpdatedAt = Date.now(); }
       if (!realPrice && !_freshCurrentPrice) {
         logEvent("warn", `${pos.ticker} no live price available (API down) — using entry premium as price floor`);
       }
-      // - LIVE GREEKS REFRESH -
-      // Update Greeks from live snapshot - entry Greeks become stale quickly
       if (greeks.delta) {
         pos.greeks = {
           delta: parseFloat(greeks.delta || 0).toFixed(3),
@@ -323,82 +284,55 @@ async function checkExits(positions, posSnapshots, posQuotes, posNewsCache, ctx)
         if (snap.impliedVolatility) pos.iv = parseFloat(snap.impliedVolatility);
       }
     } else {
-      // V2.94 FIX: No snapshot available — use currentPrice if set (even without timestamp),
-      // fall back to entry premium only if currentPrice is genuinely missing.
-      // BUG: Reconciled positions have currentPrice set by Alpaca sync but no _currentPriceUpdatedAt
-      // timestamp, causing _noSnapStaleSecs=9999 → curP=entry premium → chg=0 → stops never fire.
-      // Fix: if currentPrice exists and differs from entry premium, trust it regardless of timestamp.
-      // Only fall back to entry premium if currentPrice is literally not set or equals entry premium.
       const _noSnapStaleSecs = pos._currentPriceUpdatedAt
         ? (Date.now() - pos._currentPriceUpdatedAt) / 1000
-        : 0; // V2.94: treat missing timestamp as fresh — currentPrice is Alpaca-sourced
+        : 0;
       const _currentPriceValid = pos.currentPrice > 0 && pos.currentPrice !== pos.premium;
       curP = (_noSnapStaleSecs < 300 && _currentPriceValid ? pos.currentPrice : null)
           || (pos.currentPrice > 0 ? pos.currentPrice : null)
           || pos.premium;
     }
-    // Credit spreads: curP = sellMid - buyMid (profit when spread narrows)
-    // premium = net credit received at entry (positive)
-    // chg = (curP - premium) / premium is NEGATIVE when profitable (spread narrowed)
-    // Invert so exit logic (positive chg = good) works consistently for all spread types
     const rawChg = (curP > 0 && pos.premium > 0 && !isNaN(curP)) ? (curP - pos.premium) / pos.premium : 0;
     const chg    = pos.isCreditSpread ? -rawChg : rawChg;
     const hoursOpen= (new Date() - new Date(pos.openDate)) / 3600000;
     const daysOpen = hoursOpen / 24;
 
-    // Update peak premium for trailing stop
-    // V2.94: _peakTime stamps when the peak was last updated — used by thesis-failure detection
     if (curP > pos.peakPremium) {
       pos.peakPremium = curP;
-      pos._peakTime = Date.now(); // record when this new peak was reached
+      pos._peakTime = Date.now();
     }
-    // Fallback: if _peakTime never set (pre-existing positions), use openDate
     if (!pos._peakTime) pos._peakTime = new Date(pos.openDate || Date.now()).getTime();
 
-    // Update peak cash for drawdown tracking
     const curCash = state.cash + openRisk() + realizedPnL();
     if (curCash > (state.peakCash || MONTHLY_BUDGET)) state.peakCash = curCash;
 
-    // - TRIGGER 1: Rapid loss - 5%+ drop since last scan -
-    // Most important trigger - catches fast-moving adverse positions
+    // - TRIGGER 1: Rapid loss -
     if (ANTHROPIC_API_KEY && isMarketHours()) {
       const prevChg  = pos._prevScanChg || chg;
-      const scanDrop = chg - prevChg; // how much moved this scan
+      const scanDrop = chg - prevChg;
       if (scanDrop <= -0.05 && chg < 0) {
-        // Non-blocking fire
         triggerRescore(pos, `rapid-loss: ${(scanDrop*100).toFixed(1)}% this scan`);
       }
-      pos._prevScanChg = chg; // store for next scan
+      pos._prevScanChg = chg;
 
-      // - TRIGGER 2: RSI reversal - put thesis degrading -
-      // Only check once per 5 minutes to avoid RSI noise
+      // - TRIGGER 2: RSI reversal -
       const lastRSICheck = pos._lastRSITriggerCheck || 0;
       if (Date.now() - lastRSICheck > 5 * 60 * 1000) {
         pos._lastRSITriggerCheck = Date.now();
         try {
           const rsiB = _posBarCache.get(pos.ticker) || await getStockBars(pos.ticker, 20);
-          if (!_posBarCache.has(pos.ticker) && rsiB.length) _posBarCache.set(pos.ticker, rsiB); // OPT7
+          if (!_posBarCache.has(pos.ticker) && rsiB.length) _posBarCache.set(pos.ticker, rsiB);
           if (rsiB.length >= 14) {
             const liveRSI   = calcRSI(rsiB);
-            // V2.98 FIX F: puts score on dailyRSI — use entryDailyRSI for consistency
             const entryRSI  = pos.optionType === "put"
               ? (pos.entryDailyRSI || pos.entryRSI || 70)
               : (pos.entryRSI || 70);
             const prevRSI   = pos._prevRSI || liveRSI;
             pos._prevRSI    = liveRSI;
-            // V2.98 FIX D: putThesisDegrading was BACKWARDS.
-            // Old condition: liveRSI < 45 && prevRSI >= 50 (RSI FALLING = put WINNING).
-            // Thesis DEGRADES when RSI RISES (underlying recovering = put losing ground).
-            // New condition: liveRSI > 60 && prevRSI <= 55 (RSI recovering toward overbought).
-            // This triggers rescore when the put is LOSING, not when it's winning.
             const putThesisDegrading = pos.optionType === "put" &&
               entryRSI >= 65 && liveRSI > 60 && prevRSI <= 55;
-            // Call thesis degradation checks:
-            // 1. RSI reversal: entered oversold, now overbought (mean reversion played out)
             const callRSIDegrading = pos.optionType === "call" &&
               entryRSI <= 40 && liveRSI > 55 && prevRSI <= 50;
-            // 2. MACD turned bearish on a call position - momentum reversing
-            // liveStock not in scope here -- use pos._lastMACD if available (set during scan scoring)
             const _posLiveMACD = pos._lastMACD || pos.entryMACD || "";
             const callMACDDegrading = pos.optionType === "call" &&
               _posLiveMACD.includes("bearish crossover") &&
@@ -413,21 +347,13 @@ async function checkExits(positions, posSnapshots, posQuotes, posNewsCache, ctx)
       }
     }
 
-    // PDT tier stripped — PDT_RULE_ACTIVE=false (FINRA PDT rule sunset Apr 2026).
-    // All PDT branches evaluated to dead code. Removed V2.87 per Trading Desk recommendation.
-    // pdtProtected variable also removed (was undeclared/undefined = always falsy).
-
     // - DELTA-BASED EXIT for spreads -
-    // Buy leg delta > 0.70 = deep ITM = near max profit - take it
-    // Buy leg delta < 0.05 = far OTM = thesis failed - cut early
     if (pos.isSpread && pos.greeks && pos.greeks.delta) {
       const buyLegDelta = Math.abs(pos.greeks.delta);
       if (buyLegDelta >= 0.70 && chg >= 0.30) {
         logEvent("scan", `${pos.ticker} delta ${buyLegDelta.toFixed(2)} - spread deep ITM, near max profit - closing`);
         decisions.push({ pi, ticker: pos.ticker, action: 'close', reason: "target", exitPremium: null, contractSym: pos.contractSymbol || pos.buySymbol }); continue;
       }
-      // Bug1 FIX: require 5min hold before delta-based exit to prevent same-scan stop-outs.
-      // Greeks on a freshly entered position come from a pre-entry stale snapshot.
       const _holdMins = (Date.now() - new Date(pos.openDate).getTime()) / 60000;
       if (buyLegDelta <= 0.05 && chg <= -0.25 && _holdMins >= 5) {
         logEvent("scan", `${pos.ticker} delta ${buyLegDelta.toFixed(2)} - spread far OTM, thesis failed - stopping out`);
@@ -435,324 +361,199 @@ async function checkExits(positions, posSnapshots, posQuotes, posNewsCache, ctx)
       }
     }
 
-    // - PIN RISK CHECK (McMillan) - close if price near short strike at 5 DTE -
-    // "Pin risk" = spread expires exactly at short strike = max risk scenario
-    // Professional rule: close or roll when within $2 of short strike inside 5 DTE
+    // - PIN RISK CHECK -
     if (pos.isSpread && pos.sellStrike && !isDayTrade(pos)) {
       const dteLeft   = Math.max(0, Math.round((new Date(pos.expDate) - new Date()) / MS_PER_DAY));
       const shortStrike = pos.sellStrike || pos.shortStrike || 0;
       const distToShort  = Math.abs(price - shortStrike);
-      const pinThreshold = price * 0.005; // 0.5% of underlying - scales with instrument price
+      const pinThreshold = price * 0.005;
       if (dteLeft <= 5 && distToShort <= pinThreshold && shortStrike > 0) {
-        logEvent("warn", `[PIN RISK] ${pos.ticker} price $${price} within ${(distToShort/price*100).toFixed(2)}% of short strike $${shortStrike} (threshold 0.5%) with ${dteLeft}d DTE - closing`);
+        logEvent("warn", `[PIN RISK] ${pos.ticker} price $${price} within ${(distToShort/price*100).toFixed(2)}% of short strike $${shortStrike} with ${dteLeft}d DTE - closing`);
         decisions.push({ pi, ticker: pos.ticker, action: 'close', reason: "pin-risk", exitPremium: null, contractSym: pos.contractSymbol || pos.buySymbol }); continue;
       }
     }
 
-    // - EARLY ASSIGNMENT RISK (McMillan) - credit spread short leg ITM near expiry -
-    // Short ITM options risk early assignment, especially near ex-dividend dates
-    // For PDT accounts: early assignment creates a naked long/short = catastrophic
+    // - EARLY ASSIGNMENT RISK -
     if (pos.isCreditSpread && pos.sellStrike && !isDayTrade(pos)) {
       const dteLeft    = Math.max(0, Math.round((new Date(pos.expDate) - new Date()) / MS_PER_DAY));
       const shortStr   = pos.sellStrike || pos.shortStrike || 0;
-      const shortITM   = pos.optionType === "put"  ? price < shortStr  // put short ITM if price below
-                       : pos.optionType === "call" ? price > shortStr  // call short ITM if price above
+      const shortITM   = pos.optionType === "put"  ? price < shortStr
+                       : pos.optionType === "call" ? price > shortStr
                        : false;
       if (dteLeft <= 3 && shortITM) {
-        logEvent("warn", `[ASSIGNMENT RISK] ${pos.ticker} short leg $${shortStr} is ITM with ${dteLeft}d DTE - closing to prevent early assignment`);
+        logEvent("warn", `[ASSIGNMENT RISK] ${pos.ticker} short leg $${shortStr} is ITM with ${dteLeft}d DTE - closing`);
         decisions.push({ pi, ticker: pos.ticker, action: 'close', reason: "assignment-risk", exitPremium: null, contractSym: pos.contractSymbol || pos.buySymbol }); continue;
       }
     }
 
-    // - EXIT HIERARCHY -
-    // Order matters - earlier checks take priority over later ones
-    // Applies to: overnight positions (opened previous day or earlier)
-    // OR: same-day positions on accounts above $25k
-
-    // Refresh exit params based on current daysOpen - targets tighten overnight
     const currentExitParams = getDTEExitParams(pos.expDays || 30, daysOpen);
-    // DTE-aware exits - as expiry approaches, lower the profit target
-    // Carr & Wu: respect pos.takeProfitPct if it was explicitly set (harvest window)
-    // pos.takeProfitPct = 0.30 during 5-day harvest window (tighter initial target)
     if (pos.takeProfitPct && pos.takeProfitPct < currentExitParams.takeProfitPct) {
-      currentExitParams.takeProfitPct = pos.takeProfitPct; // harvest window overrides DTE params
+      currentExitParams.takeProfitPct = pos.takeProfitPct;
     }
-    // Theta accelerates dramatically inside 10 DTE - take profit sooner
     const dteLeft = Math.max(1, Math.round((new Date(pos.expDate) - new Date()) / MS_PER_DAY));
 
     // ── 21 DTE gamma review ───────────────────────────────────────────────────
-    // Inside 21 DTE, gamma accelerates dramatically — a position that was safe at
-    // 35 DTE can move to max loss in a single session at 15 DTE. Flag once when
-    // a credit spread first crosses below 21 DTE to force a human/agent review.
-    // _gammaCrossedFlag prevents the log from firing on every subsequent scan.
     if (pos.isCreditSpread && dteLeft <= 21 && dteLeft > 0 && !pos._gammaCrossedFlag) {
       pos._gammaCrossedFlag = true;
-      // Credit spread entry premium is stored as pos.premium (not pos.netCredit)
       const entryPremium = pos.premium || pos.netCredit || 0;
       const pnlPct = pos.currentPrice && entryPremium
         ? ((entryPremium - pos.currentPrice) / entryPremium * 100).toFixed(0)
         : "--";
       logEvent("warn", `[GAMMA] ${pos.ticker} crossed 21 DTE (${dteLeft}d remaining) — gamma risk accelerating. P&L: ${pnlPct}%. Consider closing if thesis weakened.`);
-      // If position is losing 30%+ at 21 DTE, tighten stop-loss — don't let gamma run it to max loss
       if (pos.currentPrice && entryPremium && pos.currentPrice > entryPremium * 1.3) {
         logEvent("warn", `[GAMMA] ${pos.ticker} is at ${((pos.currentPrice/entryPremium - 1)*100).toFixed(0)}% loss at 21 DTE — gamma stop engaged (35% stop tightened to 25%)`);
         pos._gammaStopEngaged = true;
       }
     }
 
-    // Natenberg: theta decay is exponential not linear
-    // DEBIT spreads: tighten targets as DTE drops - theta eating premium fast
-    // CREDIT spreads: theta works FOR you - EXPAND targets at low DTE (let it expire worthless)
     const originalDTE = pos.expDays || 30;
     let dteMult;
     if (pos.isCreditSpread) {
-      // Credit: theta erosion = profit - relax targets inside 10 DTE
-      // Exception: if gamma stop engaged at 21 DTE crossing, use tighter params
-      dteMult = dteLeft <= 3  ? 1.30  // <3 DTE: theta almost fully decayed, hold for max
-              : dteLeft <= 7  ? 1.15  // <7 DTE: theta working hard, expand target
-              : dteLeft <= 14 ? 1.05  // <14 DTE: mild expansion
+      dteMult = dteLeft <= 3  ? 1.30
+              : dteLeft <= 7  ? 1.15
+              : dteLeft <= 14 ? 1.05
               : 1.0;
-      if (pos._gammaStopEngaged) currentExitParams.stopLossPct = 0.25; // tighter stop for losing 21 DTE positions
+      if (pos._gammaStopEngaged) currentExitParams.stopLossPct = 0.25;
     } else {
-      // Debit: theta is the enemy - tighten targets as expiry approaches
-      dteMult = dteLeft <= 3  ? 0.45  // <3 DTE: take what's there
-              : dteLeft <= 5  ? 0.55  // <5 DTE: theta burning fast
-              : dteLeft <= 10 ? 0.70  // <10 DTE: acceleration zone
-              : dteLeft <= 14 ? 0.82  // <14 DTE: entering acceleration
-              : dteLeft <= 21 ? 0.92  // <21 DTE: slight acceleration
+      dteMult = dteLeft <= 3  ? 0.45
+              : dteLeft <= 5  ? 0.55
+              : dteLeft <= 10 ? 0.70
+              : dteLeft <= 14 ? 0.82
+              : dteLeft <= 21 ? 0.92
               : 1.0;
     }
-    // - Dynamic Take Profit for credit spreads (V2.3) -
-    // Base TP = 50%. Scale DOWN when thesis is degrading AND position has aged.
-    // Formula: TP = max(0.25, 0.50 - (liveScore / entryScore))
-    // Conditions: credit spread + used >10% of position life + score available
-    // Hard floor at 40%+ profit: always exit regardless of score (don't hold a near-winner)
-    // Score < 40: thesis collapsed - handled by hard exit above, so TP is moot
     let activeTakeProfitPct;
     if (pos.isCreditSpread && pos.expDays > 0) {
       const lifePctUsed = daysOpen / pos.expDays;
-      // Use freshest score: _liveRescore if <30min old, otherwise integrity score
-      // Take the lower (more conservative) if both are available
       const liveRescoreAge = (pos._liveRescore && pos._liveRescore.updatedAt)
         ? (Date.now() - new Date(pos._liveRescore.updatedAt).getTime()) / 60000 : 999;
       const liveScore = (liveRescoreAge < 30 && pos._liveRescore && pos._liveRescore.score)
         ? Math.min(pos._liveRescore.score, pos.entryThesisScore || 100)
         : (pos.entryThesisScore || 100);
-      const entryScore = pos._originalEntryScore || 100; // stamped at confirm - never changes
+      const entryScore = pos._originalEntryScore || 100;
       if (lifePctUsed > 0.10 && liveScore < entryScore) {
-        // Thesis has degraded and position has used >10% of its life
         const scaledTP = Math.max(0.25, 0.50 * (liveScore / entryScore));
         activeTakeProfitPct = parseFloat((scaledTP * dteMult).toFixed(3));
         if (liveScore < 60) logEvent("scan", `${pos.ticker} dynamic TP: ${(activeTakeProfitPct*100).toFixed(0)}% (score ${liveScore}/${entryScore}, life ${(lifePctUsed*100).toFixed(0)}% used)`);
       } else {
         activeTakeProfitPct = parseFloat((currentExitParams.takeProfitPct * dteMult).toFixed(3));
       }
-      // Hard floor: always exit at 40%+ regardless of score - don't hold a near-winner
       if (chg >= 0.40 && activeTakeProfitPct > 0.40) {
         activeTakeProfitPct = 0.40;
       }
     } else {
-      // V2.94 CHANGE 2: Thesis-aware TP for naked options.
-      // Two-phase exit logic:
-      //   Phase 1 (thesis active)   — RSI not yet normalized → standard TP
-      //   Phase 2 (thesis fulfilled) — RSI crossed 55 (calls) / 45 (puts) → TP drops
-      //     to protect current gain. Trail tightens to 3% from peak. No longer
-      //     seeking the full target — protecting what the bounce produced.
-      //
-      // RSI normalization thresholds:
-      //   Calls: entryRSI <= 40 AND curRSI > 55 → bounce complete
-      //   Puts:  entryRSI >= 60 AND curRSI < 45 → reversal complete
       // ── V2.97: GLD CALL SPECIFIC EXIT LOGIC ─────────────────────────────
-      // GLD does NOT mean-revert intraday like QQQ/SPY. The thesis is daily-timeframe:
-      // dailyRSI recovery + DXY weakening playing out over days, not minutes.
-      // Standard thesis-complete (intraday RSI → 55) never fires for GLD because
-      // intraday RSI barely moves when the catalyst is macro-driven.
-      //
-      // GLD-specific exits (calls only):
-      //   EXIT A: Option gains +20% from entry (price target — take the win)
-      //   EXIT B: DailyRSI recovers to ≥ 45 (daily thesis fulfilled)
-      //   EXIT C: 5 trading days elapsed without target or stop (time backstop)
-      //   UNCHANGED: fast-stop at 20% loss (handled by stop logic below)
       if (pos.ticker === "GLD" && pos.optionType === "call") {
-        // chg is already computed above (line ~316) using full curP resolution chain
-        const _gldChgPct   = chg; // use the same chg that fast-stop uses — consistent
+        const _gldChgPct   = chg;
         const _gldDailyRSI = parseFloat(pos._curDailyRSI || pos.dailyRSI || 0) || null;
-        const _gldDaysOpen = hoursOpen / 6.5; // approximate trading days (6.5hr session)
+        const _gldDaysOpen = hoursOpen / 6.5;
 
-        // EMERGENCY STOP: if position is down > 35% and fast-stop hasn't fired
-        // (handles case where curP snapshot is stale but loss is clearly catastrophic)
-        // Uses Alpaca position data if available via pos._alpacaUnrealizedPct
         const _alpacaLoss = pos._alpacaUnrealizedPct ? pos._alpacaUnrealizedPct : null;
         const _emergencyStop = (_gldChgPct <= -0.35) || (_alpacaLoss && _alpacaLoss <= -0.35);
         if (_emergencyStop && !pos._gldExitFired) {
           pos._gldExitFired = true;
-          logEvent("warn", `[GLD EMERGENCY STOP] ${pos.ticker} down ${(_gldChgPct*100).toFixed(1)}% — fast-stop may have failed (snapshot issue), forcing close`);
+          logEvent("warn", `[GLD EMERGENCY STOP] ${pos.ticker} down ${(_gldChgPct*100).toFixed(1)}% — fast-stop may have failed, forcing close`);
           decisions.push({ pi, ticker: pos.ticker, action: 'close', reason: 'gld-emergency-stop', exitPremium: null, contractSym: pos.contractSymbol || pos.buySymbol || null });
         }
-        // EXIT A: +20% gain target
         else if (_gldChgPct >= 0.20 && !pos._gldExitFired) {
           pos._gldExitFired = true;
-          logEvent("scan", `[GLD EXIT A] ${pos.ticker} +${(_gldChgPct*100).toFixed(1)}% gain target hit — closing (daily thesis playing out)`);
+          logEvent("scan", `[GLD EXIT A] ${pos.ticker} +${(_gldChgPct*100).toFixed(1)}% gain target hit — closing`);
           decisions.push({ pi, ticker: pos.ticker, action: 'close', reason: 'gld-target', exitPremium: null, contractSym: pos.contractSymbol || pos.buySymbol || null });
         }
-        // EXIT B: DailyRSI recovered to 45+ (daily MR thesis complete)
         else if (_gldDailyRSI && _gldDailyRSI >= 45 && !pos._gldExitFired && hoursOpen >= 4) {
           pos._gldExitFired = true;
           logEvent("scan", `[GLD EXIT B] ${pos.ticker} dailyRSI recovered to ${_gldDailyRSI.toFixed(1)} (≥45) after ${hoursOpen.toFixed(1)}h — daily thesis fulfilled`);
           decisions.push({ pi, ticker: pos.ticker, action: 'close', reason: 'gld-daily-rsi', exitPremium: null, contractSym: pos.contractSymbol || pos.buySymbol || null });
         }
-        // EXIT C: 5 trading days elapsed (time backstop)
         else if (_gldDaysOpen >= 5 && !pos._gldExitFired) {
           pos._gldExitFired = true;
-          logEvent("scan", `[GLD EXIT C] ${pos.ticker} ${_gldDaysOpen.toFixed(1)} trading days elapsed — time backstop, closing position`);
+          logEvent("scan", `[GLD EXIT C] ${pos.ticker} ${_gldDaysOpen.toFixed(1)} trading days elapsed — time backstop`);
           decisions.push({ pi, ticker: pos.ticker, action: 'close', reason: 'gld-time-limit', exitPremium: null, contractSym: pos.contractSymbol || pos.buySymbol || null });
         }
         else {
           logEvent("scan", `[GLD HOLD] ${pos.ticker} ${(_gldChgPct*100).toFixed(1)}% | dailyRSI ${_gldDailyRSI?.toFixed(1)||'?'} | ${_gldDaysOpen.toFixed(1)}d open — waiting for daily thesis`);
         }
-        // Fast-stop still applies (handled by stop block later in this loop)
       }
-      // ── END GLD CALL SPECIFIC EXIT ────────────────────────────────────────
 
       const _entryRSI  = pos.entryRSI || 50;
-      const _curRSI    = pos._prevRSI || _entryRSI; // _prevRSI updated every scan at line ~339
-      // V2.99 FIX: Reconciled positions get entryRSI=50 by default (reconciler has no RSI data).
-      // entryRSI=50 fails the _callFulfilled check (_entryRSI <= 45) so thesis-complete never fires.
-      // Fix: for positions flagged _reconstructed=true, use a chg-based fallback instead.
-      // A reconstructed call is thesis-complete if up >= 8% and RSI has normalized above 52.
-      // This captures the "+9% on a reconciled position" scenario the panel identified.
+      const _curRSI    = pos._prevRSI || _entryRSI;
       const _isReconstructed = pos._reconstructed === true;
       const _reconCallFulfilled = _isReconstructed
         && pos.optionType === "call"
         && pos.ticker !== "GLD"
-        && chg >= 0.08              // up 8%+ — meaningful gain, thesis realized in price
-        && _curRSI > 52;            // RSI has normalized from oversold — bounce confirmed
+        && chg >= 0.08
+        && _curRSI > 52;
       const _callFulfilled = pos.ticker !== "GLD" && pos.optionType === "call" && (
-        (!_isReconstructed && _entryRSI <= 45 && _curRSI > 55) || // normal path
-        _reconCallFulfilled                                          // reconciled fallback
-      ); // GLD handled above
-      // V2.98 PUT FIX: _putFulfilled must use dailyRSI — the RSI that drove put scoring.
-      // Bug: previously used pos.entryRSI (intraday) and pos._prevRSI (intraday).
-      // Put thesis: entered because dailyRSI was overbought (>=65), exits when
-      // dailyRSI normalizes below 50. Intraday RSI is noise for this thesis.
-      // entryDailyRSI: stored at fill time from stock.dailyRsi (execution.js V2.98).
-      // pos.dailyRsi: updated each scan from Alpaca snapshot (live daily RSI).
-      // Falls back to intraday if dailyRsi not available (reconciled/old positions).
+        (!_isReconstructed && _entryRSI <= 45 && _curRSI > 55) ||
+        _reconCallFulfilled
+      );
       const _entryDailyRSI = pos.entryDailyRSI || pos.entryRSI || 50;
-      const _curDailyRSI   = pos.dailyRsi || _curRSI; // dailyRsi on pos updated by scanner
+      const _curDailyRSI   = pos.dailyRsi || _curRSI;
       const _putFulfilled  = pos.optionType === "put"
-        && _entryDailyRSI >= 65   // was genuinely overbought on daily when entered
-        && _curDailyRSI   < 50;   // daily RSI has normalized — put thesis complete
-      // ── TIER 3 EXIT FRAMEWORK (V2.99) ──────────────────────────────────────
-      // V2.99 PURE INTRADAY: Tier 3 exit framework is DISABLED for mean reversion
-      // positions. APEX is a pure intraday system — isMeanReversion=true positions
-      // always use intraday exit logic regardless of DTE. A 57 DTE contract entered
-      // on an intraday RSI thesis is still an intraday trade. The Tier 3 overnight
-      // hold on SPY $770 (May 21) cost -$150 vs +$70 if closed intraday.
-      // Tier 3 framework preserved for future deliberate swing mode (isMeanReversion=false).
-      if (pos.isTier3 && !pos.isMeanReversion) {
-        const _t3DTE      = pos.expDays || Math.round((new Date(pos.expDate || Date.now()) - new Date()) / 86400000);
-        const _t3HrsOpen  = hoursOpen;
-        const _t3Chg      = chg;
-        const _t3DailyRSI = pos.dailyRsi || pos.entryDailyRSI || 50;
-        const _t3FastStop = -0.25; // 25% stop for Tier 3 (vs 15-20% Tier 2)
-        const _t3MinHold  = 24;    // 24h minimum before any non-emergency exit
-        const _t3DailyRSITarget = 55; // dailyRSI normalization target for Tier 3 exits
+        && _entryDailyRSI >= 65
+        && _curDailyRSI   < 50;
 
-        // Emergency stop only before 24h hold — deeper threshold than Tier 2
+      // ── TIER 3 EXIT FRAMEWORK ───────────────────────────────────────────
+      if (pos.isTier3 && !pos.isMeanReversion) {
+        const _t3Chg      = chg;
+        const _t3FastStop = -0.25;
+        const _t3MinHold  = 24;
+        const _t3DailyRSITarget = 55;
+        const _t3DailyRSI = pos.dailyRsi || pos.entryDailyRSI || 50;
+
         if (_t3Chg <= _t3FastStop) {
-          logEvent("scan", `${pos.ticker} [TIER3] emergency stop ${(_t3Chg*100).toFixed(0)}% <= ${(_t3FastStop*100).toFixed(0)}% — closing`);
+          logEvent("scan", `${pos.ticker} [TIER3] emergency stop ${(_t3Chg*100).toFixed(0)}% — closing`);
           decisions.push({ pi, ticker: pos.ticker, action: 'close', reason: 'tier3-emergency-stop', exitPremium: null, contractSym: pos.contractSymbol || pos.buySymbol || null });
           continue;
         }
-
-        // Before 24h minimum — hold unless emergency stop
-        if (_t3HrsOpen < _t3MinHold) {
-          logEvent("scan", `${pos.ticker} [TIER3] holding — ${_t3HrsOpen.toFixed(1)}h open (min ${_t3MinHold}h), chg ${(_t3Chg*100).toFixed(0)}%`);
+        if (hoursOpen < _t3MinHold) {
+          logEvent("scan", `${pos.ticker} [TIER3] holding — ${hoursOpen.toFixed(1)}h open (min ${_t3MinHold}h)`);
           continue;
         }
-
-        // After 24h: exit when dailyRSI normalizes to 55+ (swing thesis complete)
         if (_t3DailyRSI >= _t3DailyRSITarget && _t3Chg > 0) {
-          logEvent("scan", `${pos.ticker} [TIER3] swing thesis complete — dailyRSI ${_t3DailyRSI.toFixed(0)} >= ${_t3DailyRSITarget}, chg +${(_t3Chg*100).toFixed(0)}%`);
+          logEvent("scan", `${pos.ticker} [TIER3] swing thesis complete — dailyRSI ${_t3DailyRSI.toFixed(0)} >= ${_t3DailyRSITarget}`);
           decisions.push({ pi, ticker: pos.ticker, action: 'close', reason: 'tier3-thesis-complete', exitPremium: null, contractSym: pos.contractSymbol || pos.buySymbol || null });
           continue;
         }
-
-        // After 24h: exit if position is a stuck loser (down > 15% with no recovery)
         const _t3Peak = pos.premium > 0 ? (pos.peakPremium - pos.premium) / pos.premium : 0;
         if (_t3Chg < -0.15 && _t3Peak < 0.05) {
-          logEvent("scan", `${pos.ticker} [TIER3] stuck loser after ${_t3HrsOpen.toFixed(0)}h — closing`);
+          logEvent("scan", `${pos.ticker} [TIER3] stuck loser — closing`);
           decisions.push({ pi, ticker: pos.ticker, action: 'close', reason: 'tier3-stuck-loser', exitPremium: null, contractSym: pos.contractSymbol || pos.buySymbol || null });
           continue;
         }
-
-        // Otherwise hold — swing position needs time
-        logEvent("scan", `${pos.ticker} [TIER3] holding swing position — dailyRSI ${_t3DailyRSI.toFixed(0)} (target ${_t3DailyRSITarget}), chg ${(_t3Chg*100).toFixed(0)}%`);
+        logEvent("scan", `${pos.ticker} [TIER3] holding — dailyRSI ${_t3DailyRSI.toFixed(0)} (target ${_t3DailyRSITarget})`);
         continue;
       }
-      // ── END TIER 3 EXIT FRAMEWORK ───────────────────────────────────────
 
       const _thesisFulfilled = _callFulfilled || _putFulfilled;
 
-      // ── THESIS COMPLETION AUTO-EXIT (V2.95) ──────────────────────────────
-      // Dependency chart: entryRSI ← _pendingOrder.rsi (fixed in execution.js)
-      //                   curRSI   ← pos._prevRSI (live bars, updated each scan)
-      //
-      // CASE A (chg >= +3%): RSI normalized AND position profitable → CLOSE NOW.
-      //   The MR bounce is complete. Don't wait for the trail to catch a reversal.
-      //   Real traders exit when the thesis resolves, not when price peaks.
-      //   Guard: hoursOpen >= 0.5 prevents misfires at open on stale RSI.
-      //   Guard: !pos._thesisAutoClose prevents double-fire across scans.
-      //
-      // CASE B (-5% < chg < +3%): RSI normalized but no meaningful gain yet.
-      //   Thesis is done but the option didn't move. Set a 4-hour countdown.
-      //   If still flat after 4h, close — the trade failed to capitalize on the bounce.
-      //   Trail tightened to 6% (not 3% — too tight for a position at/near entry).
-      //
-      // CASE C (chg < -5%): RSI normalized, position underwater.
-      //   Stop is still the active protection. Log divergence, don't interfere.
-      //   The stop will handle it; auto-closing a losing position here just
-      //   bypasses the stop and creates an unnecessary market order.
-      // ──────────────────────────────────────────────────────────────────────
-
       if (_thesisFulfilled && !pos._thesisFulfilled) {
         pos._thesisFulfilled    = true;
-        pos._thesisFulfilledAt  = Date.now(); // timestamp for Case B window
+        pos._thesisFulfilledAt  = Date.now();
         const _gainPct = (chg * 100).toFixed(1);
         logEvent("scan", `[THESIS FULFILLED] ${pos.ticker} RSI ${_entryRSI}→${_curRSI.toFixed(0)} | gain: ${_gainPct >= 0 ? '+' : ''}${_gainPct}% — evaluating auto-exit`);
       }
 
       if (pos._thesisFulfilled && !pos._thesisAutoClose && hoursOpen >= 0.5) {
         if (chg >= 0.03) {
-          // ── CASE A: Profitable + thesis complete ─────────────────────────────
-          // V2.99 TIERED EXIT T2: If T1 already fired and contracts > 1, partial close 1.
-          // Leave the runner (last contract) for T3 (+20%) or EOD sweep.
-          // If T1 never fired (position went straight to thesis-complete), full close all.
-          // If only 1 contract remains (after T1), full close as normal.
           pos._thesisAutoClose = true;
           const _t2Contracts = pos.contracts || 1;
           const _t2UsePartial = pos._tier1Closed && _t2Contracts > 1;
           if (_t2UsePartial) {
-            logEvent("scan", `[THESIS COMPLETE T2] ${pos.ticker} RSI normalized (${_entryRSI}→${_curRSI.toFixed(0)}) | gain: +${(chg*100).toFixed(1)}% | T1 fired — closing 1/${_t2Contracts} contracts, leaving runner`);
+            logEvent("scan", `[THESIS COMPLETE T2] ${pos.ticker} RSI normalized | gain: +${(chg*100).toFixed(1)}% | T1 fired — closing 1/${_t2Contracts}, leaving runner`);
             pos._tier2Closed = true;
             if (!_closedThisCycle.has(pi) && !_partialThisCycle.has(pi)) {
               _partialThisCycle.add(pi);
               decisions.push({ pi, ticker: pos.ticker, action: 'partial-n', contractsToClose: 1, reason: 'partial-profit-t2', exitPremium: null, contractSym: pos.contractSymbol || pos.buySymbol || null });
             }
           } else {
-            logEvent("scan", `[THESIS COMPLETE] ${pos.ticker} RSI normalized (${_entryRSI}→${_curRSI.toFixed(0)}) | gain: +${(chg*100).toFixed(1)}% — closing all ${_t2Contracts} contract(s)`);
+            logEvent("scan", `[THESIS COMPLETE] ${pos.ticker} RSI normalized (${_entryRSI}→${_curRSI.toFixed(0)}) | gain: +${(chg*100).toFixed(1)}% — closing all`);
             if (!_closedThisCycle.has(pi)) {
               _closedThisCycle.add(pi);
               decisions.push({ pi, ticker: pos.ticker, action: 'close', reason: 'thesis-complete', exitPremium: null, contractSym: pos.contractSymbol || pos.buySymbol || null });
             }
           }
-          // V2.98 Gate A: record thesis-complete exit for same-day re-entry block
-          // Stores entryRSI so scanner can require RSI 15pts deeper before re-entry
           if (!state._dailyThesisComplete) state._dailyThesisComplete = {};
-          // V2.98 FIX C: Gate A re-entry floor uses dailyRSI for puts (matches scoring basis).
-          // Put entries score on dailyRSI — the floor for blocking re-entry should too.
-          // Calls use intraday entryRSI (unchanged).
           const _gateAEntryRSI = pos.optionType === "put"
             ? (pos.entryDailyRSI || pos.entryRSI || 50)
             : (pos.entryRSI || 50);
@@ -762,42 +563,36 @@ async function checkExits(positions, posSnapshots, posQuotes, posNewsCache, ctx)
             optionType: pos.optionType,
           };
           markDirty();
-          logEvent("scan", `[GATE-A] ${pos.ticker} thesis-complete recorded — re-entry requires RSI < ${(_gateAEntryRSI - 15).toFixed(0)} (entry was ${_gateAEntryRSI.toFixed(0)})`);
+          logEvent("scan", `[GATE-A] ${pos.ticker} thesis-complete recorded — re-entry requires RSI < ${(_gateAEntryRSI - 15).toFixed(0)}`);
           continue;
 
         } else if (chg > -0.05) {
-          // ── CASE B: Flat (±5%) + thesis complete → 4h countdown then close ─
           if (!pos._thesisFulfilledAt) pos._thesisFulfilledAt = Date.now();
           const _hrsAfterFulfill = (Date.now() - pos._thesisFulfilledAt) / 3600000;
           if (_hrsAfterFulfill >= 4) {
-            // 4 hours past thesis completion with no gain — exit
             pos._thesisAutoClose = true;
-            logEvent("scan", `[THESIS COMPLETE] ${pos.ticker} RSI normalized ${_hrsAfterFulfill.toFixed(1)}h ago, position flat at ${(chg*100).toFixed(1)}% — closing (thesis resolved, no follow-through)`);
+            logEvent("scan", `[THESIS COMPLETE] ${pos.ticker} RSI normalized ${_hrsAfterFulfill.toFixed(1)}h ago, flat at ${(chg*100).toFixed(1)}% — closing`);
             if (!_closedThisCycle.has(pi)) {
               _closedThisCycle.add(pi);
               decisions.push({ pi, ticker: pos.ticker, action: 'close', reason: 'thesis-no-follow', exitPremium: null, contractSym: pos.contractSymbol || pos.buySymbol || null });
             }
             continue;
           } else {
-            // Still within 4h window — tighten trail, keep watching
             if (pos.trailPct > 0.06) {
               pos.trailPct = 0.06;
-              logEvent("scan", `[THESIS COMPLETE] ${pos.ticker} RSI normalized, flat position — trail tightened to 6%, ${(4 - _hrsAfterFulfill).toFixed(1)}h until auto-close if no gain`);
+              logEvent("scan", `[THESIS COMPLETE] ${pos.ticker} RSI normalized, flat — trail tightened to 6%, ${(4 - _hrsAfterFulfill).toFixed(1)}h until auto-close`);
             }
           }
 
         } else {
-          // ── CASE C: Underwater + thesis complete → log only, stop handles it ─
           if (!pos._thesisCaseCLogged) {
             pos._thesisCaseCLogged = true;
-            logEvent("warn", `[THESIS COMPLETE] ${pos.ticker} RSI normalized but position is ${(chg*100).toFixed(1)}% — stop ($${(pos.premium * (1 - (pos.fastStopPct || 0.35))).toFixed(2)}) active`);
+            logEvent("warn", `[THESIS COMPLETE] ${pos.ticker} RSI normalized but position is ${(chg*100).toFixed(1)}% — stop active`);
           }
         }
       }
 
       if (pos._thesisFulfilled && chg > 0 && !pos._thesisAutoClose) {
-        // Standard phase 2 protection for positions still open after thesis fulfills
-        // (e.g. Case B position still in 4h window with some gain)
         activeTakeProfitPct = parseFloat(Math.max(chg - 0.01, currentExitParams.takeProfitPct * 0.70).toFixed(3));
         if (!pos._trail4Active && pos.trailPct > 0.03) {
           pos.trailPct = 0.03;
@@ -808,54 +603,33 @@ async function checkExits(positions, posSnapshots, posQuotes, posNewsCache, ctx)
         activeTakeProfitPct = parseFloat((currentExitParams.takeProfitPct * dteMult).toFixed(3));
       }
 
-      // V2.94 CHANGE 3: Vega stress check.
-      // If more than 25% of current position value is at risk from a 3-point VIX drop,
-      // the position is vega-dominant — apply phase 2 exit logic regardless of RSI.
-      // Formula: vegaRisk = |pos.greeks.vega| × 3 VIX points / pos.cost
-      // This catches positions like SPY where vega expansion inflated gains artificially.
       if (chg > 0.10 && !pos._thesisFulfilled) {
         const _posVega   = Math.abs(parseFloat(pos.greeks?.vega || 0));
-        const _vegaRisk3 = _posVega * 3 * 100 * (pos.contracts || 1); // $ risk from 3pt VIX drop
+        const _vegaRisk3 = _posVega * 3 * 100 * (pos.contracts || 1);
         const _vegaRatio = pos.cost > 0 ? _vegaRisk3 / (pos.currentPrice * 100 * (pos.contracts || 1)) : 0;
         if (_vegaRatio > 0.25) {
           pos._thesisFulfilled = true;
           if (pos.trailPct > 0.03) pos.trailPct = 0.03;
           activeTakeProfitPct = parseFloat(Math.max(chg - 0.01, currentExitParams.takeProfitPct * 0.70).toFixed(3));
-          logEvent("scan", `[VEGA DOMINANT] ${pos.ticker} vega risk ${(_vegaRatio*100).toFixed(0)}% of value at VIX-3 — entering profit protection mode`);
+          logEvent("scan", `[VEGA DOMINANT] ${pos.ticker} vega risk ${(_vegaRatio*100).toFixed(0)}% of value — entering profit protection mode`);
         }
       }
     }
-    // partialPct already derived from tp (which has overnightMult) - don't apply dteMult again
-    // Partial should fire at 60% of the DTE-adjusted take profit target
     const activePartialPct    = parseFloat((activeTakeProfitPct * 0.60).toFixed(3));
 
-    // SPRINT-05: Store VIX-adjusted runtime target on position for dashboard display.
-    // Dashboard was showing pos.target (entry × TAKE_PROFIT_PCT constant = e.g. $6.84)
-    // instead of the actual exit engine target (entry × activeTakeProfitPct = e.g. $5.99).
-    // Now dashboard reads pos.activeTarget which is always the live adjusted value.
     pos.activeTarget = parseFloat((pos.premium * (1 + activeTakeProfitPct)).toFixed(2));
     const activeRidePct       = currentExitParams.ridePct || (activeTakeProfitPct * 1.30);
     if (dteMult < 1.0 && pos.isSpread) logEvent("scan", `${pos.ticker} DTE-adjusted target: ${(activeTakeProfitPct*100).toFixed(0)}% (${dteLeft}d remaining)`);
 
-    // - THESIS INTEGRITY CHECK - proactive exit on thesis degradation -
-    // V2.87: Now fires at 1 hour open for intraday positions (was 2 days).
-    // Rationale: XLE entered oversold at RSI 26, recovered to RSI 72 intraday —
-    // the MR thesis was COMPLETE at RSI 55-60. System held waiting for price target
-    // when the thesis had already resolved. 1h threshold catches same-day reversals.
-    const _thesisCheckHours = (hoursOpen < 24) ? 1 : 48; // intraday: 1h, multiday: 2d
+    // - THESIS INTEGRITY CHECK -
+    const _thesisCheckHours = (hoursOpen < 24) ? 1 : 48;
     if (hoursOpen >= _thesisCheckHours && pos.optionType) {
-      // Bug 2 FIX: WATCHLIST has static init values (rsi:50, macd:"neutral") — not live data.
-      // Use live values cached on pos during this scan's trailing stop / RSI trigger checks.
-      // pos._prevRSI: set by trailing stop block using live bars (best available live RSI).
-      // pos._lastMACD: set during RSI reversal trigger check.
-      // Fall back to entry values if live hasn't been cached yet (first 2 days).
       const curRSI      = pos._prevRSI      || pos.entryRSI      || 52;
       const curMACD     = pos._lastMACD     || pos.entryMACD     || "neutral";
       const curMomentum = pos._lastMomentum || pos.entryMomentum || "steady";
       const curMacro    = (state._agentMacro || {}).signal || "neutral";
       const integrity   = calcThesisIntegrity(pos, curRSI, curMACD, curMomentum, curMacro);
 
-      // Update thesis score on position for dashboard display
       pos.entryThesisScore = integrity.score;
       if (!pos.thesisHistory) pos.thesisHistory = [];
       if (pos.thesisHistory.length === 0 || pos.thesisHistory[pos.thesisHistory.length-1]?.score !== integrity.score) {
@@ -863,21 +637,17 @@ async function checkExits(positions, posSnapshots, posQuotes, posNewsCache, ctx)
         if (pos.thesisHistory.length > 10) pos.thesisHistory = pos.thesisHistory.slice(-10);
       }
 
-      // Hard exit: thesis completely collapsed and not PDT protected
       if (integrity.score < 20 ) {
-        logEvent("warn", `[THESIS] ${pos.ticker} integrity collapsed ${integrity.score}/100 - ${integrity.reasons.slice(0,2).join(", ")} - closing`);
+        logEvent("warn", `[THESIS] ${pos.ticker} integrity collapsed ${integrity.score}/100 - closing`);
         decisions.push({ pi, ticker: pos.ticker, action: 'close', reason: "thesis-collapsed", exitPremium: null, contractSym: pos.contractSymbol || pos.buySymbol || null }); continue;
       } else if (integrity.score < 40) {
-        logEvent("warn", `[THESIS] ${pos.ticker} integrity degraded ${integrity.score}/100 - ${integrity.reasons.slice(0,2).join(", ")}`);
-        // INVALID score - tighten stop to 25% so a losing position exits sooner
-        // Thesis is broken; holding at 50% stop means taking max loss on a bad trade
+        logEvent("warn", `[THESIS] ${pos.ticker} integrity degraded ${integrity.score}/100`);
         if ((pos.fastStopPct || FAST_STOP_PCT) > 0.25) {
           pos.fastStopPct = 0.25;
           logEvent("warn", `[THESIS] ${pos.ticker} stop tightened to 25% (thesis INVALID)`);
         }
       }
 
-      // Time-adjusted stop - tightens as position ages
       const adjStop = getTimeAdjustedStop(pos);
       if (adjStop < STOP_LOSS_PCT && chg < -adjStop ) {
         logEvent("warn", `[THESIS] ${pos.ticker} time-adjusted stop ${(adjStop*100).toFixed(0)}% hit after ${daysOpen.toFixed(1)} days`);
@@ -885,8 +655,7 @@ async function checkExits(positions, posSnapshots, posQuotes, posNewsCache, ctx)
       }
     }
 
-    // 0b. DTE EXPIRY URGENCY - close positions in danger near expiry
-    // OT-W4: Calendar time stop misses options-specific expiry risk
+    // DTE EXPIRY URGENCY
     const dteDaysLeft = pos.expDate ? Math.max(0, Math.round((new Date(pos.expDate) - new Date()) / MS_PER_DAY)) : 30;
     if (pos.isSpread && dteDaysLeft <= 1) {
       logEvent("warn", `${pos.ticker} DTE=1 - closing spread to avoid pin/assignment risk`);
@@ -897,115 +666,77 @@ async function checkExits(positions, posSnapshots, posQuotes, posNewsCache, ctx)
       decisions.push({ pi, ticker: pos.ticker, action: 'close', reason: "dte-urgency", exitPremium: null, contractSym: pos.contractSymbol || pos.buySymbol || null }); continue;
     }
 
-    // V2.87: PANEL ADDITIONS — Trading Desk recommendations implemented
-
-    // [NEW] 50% premium floor stop — professional options rule.
-    // If option has lost 50% of its entry premium, structural recovery is unlikely.
-    // Applies before fast stop to catch compression early.
-    // MONTHLY: $6.40 call → close at $3.20. XLE: $1.05 call → close at $0.52.
+    // 50% premium floor stop
     if (!pos.isSpread && pos.premium > 0 && curP > 0) {
       const premiumFloor = pos.premium * 0.50;
       if (curP <= premiumFloor) {
-        logEvent("scan", `${pos.ticker} 50% premium floor stop — entry $${pos.premium} floor $${premiumFloor.toFixed(2)} cur $${curP} — exiting (professional options rule)`);
+        logEvent("scan", `${pos.ticker} 50% premium floor stop — entry $${pos.premium} floor $${premiumFloor.toFixed(2)} cur $${curP}`);
         decisions.push({ pi, ticker: pos.ticker, action: 'close', reason: "premium-floor", exitPremium: null, contractSym: pos.contractSymbol || pos.buySymbol || null }); continue;
       }
     }
 
-    // [NEW] Delta compression stop for naked options.
-    // When live delta < 0.12, the option has lost leverage — needs 3x larger underlying move to recover.
-    // Only applies to naked options (spreads have delta-based exit already).
-    // Spread-only delta exit exists below; this is the naked equivalent.
+    // Delta compression stop
     if (!pos.isSpread && pos.contractSymbol) {
       const liveSnap = posSnapshots[pos.contractSymbol];
       if (liveSnap && liveSnap.greeks) {
         const liveDelta = Math.abs(parseFloat(liveSnap.greeks.delta || 0));
         if (liveDelta > 0 && liveDelta < 0.12 && chg <= -0.15) {
-          logEvent("scan", `${pos.ticker} delta compression stop — live delta ${liveDelta.toFixed(3)} < 0.12 AND down ${(chg*100).toFixed(0)}% — option has lost leverage, exiting`);
+          logEvent("scan", `${pos.ticker} delta compression stop — live delta ${liveDelta.toFixed(3)} < 0.12 AND down ${(chg*100).toFixed(0)}%`);
           decisions.push({ pi, ticker: pos.ticker, action: 'close', reason: "delta-compression", exitPremium: null, contractSym: pos.contractSymbol || pos.buySymbol || null }); continue;
         }
       }
     }
 
-    // [NEW] Overnight carry stop tightener.
-    // Overnight positions already down >10% get stop tightened from 35% → 28%.
-    // Rationale: overnight carry compounds losses from theta + adverse gap risk.
-    // The overnight mult already reduces TP — now it also tightens the stop.
     const _isOvernightCarry = hoursOpen >= 16 && pos.premium > 0;
     const _overnightStopPct = (_isOvernightCarry && chg <= -0.10) ? 0.28 : STOP_LOSS_PCT;
 
-    // [NEW] Macro-adverse stop tightener.
-    // When agent is bearish AND position is a call already down >10%,
-    // tighten fast stop to 12% (from 20%) — macro is working against the thesis.
     const _agentBearish = (state._agentMacro?.signal || "").includes("bearish");
     const _macroFastStop = (!pos.isSpread && pos.optionType === "call" && _agentBearish && chg <= -0.10)
-      ? 0.12  // tightened: macro working against call thesis
+      ? 0.12
       : (pos.fastStopPct || FAST_STOP_PCT);
 
-    // 1. FAST STOP - tighter window for weeklies, wider for monthlies
-    // Weeklies: 2-48hrs (theta racing, exit fast on loss)
-    // Monthlies: 2-120hrs (5 days - thesis needs time to play out)
-    // V2.87: MONTHLY fast stop tightened from -20% to -15% (panel recommendation)
-    // At -20% premium loss the underlying move required for recovery often exceeds DTE capacity.
+    // 1. FAST STOP
     const isWeeklyPos    = (pos.expiryType === "weekly" || (pos.expDays || 30) <= 21);
     const fastStopWindow = isWeeklyPos ? FAST_STOP_HOURS : 120;
     const activeFastStop = isWeeklyPos
-      ? _macroFastStop                              // weeklies: use macro-adjusted
-      : Math.min(0.15, _macroFastStop);             // monthlies: cap at 15% (tightened from 20%)
+      ? _macroFastStop
+      : Math.min(0.15, _macroFastStop);
     const fastStopEligible = hoursOpen >= 2 && hoursOpen <= fastStopWindow;
     if (fastStopEligible && chg <= -activeFastStop) {
-      logEvent("scan", `${pos.ticker} fast-stop ${(chg*100).toFixed(0)}% in ${hoursOpen.toFixed(1)}hrs (${isWeeklyPos ? 'weekly' : 'monthly'}, threshold ${(activeFastStop*100).toFixed(0)}%${_agentBearish && activeFastStop === 0.12 ? ' macro-tightened' : ''})`);
+      logEvent("scan", `${pos.ticker} fast-stop ${(chg*100).toFixed(0)}% in ${hoursOpen.toFixed(1)}hrs (threshold ${(activeFastStop*100).toFixed(0)}%)`);
       decisions.push({ pi, ticker: pos.ticker, action: 'close', reason: "fast-stop", exitPremium: null, contractSym: pos.contractSymbol || pos.buySymbol || null }); continue;
     }
 
-    // 1b. CREDIT SPREAD MAX LOSS STOP - panel unanimous: 50% of max loss OR 2x credit
-    // Checks actual dollar loss against max loss rather than relying on fastStopPct alone
-    // This is the primary stop for credit spreads - more precise than percentage-based
-    // D-FIX3: guard min premium — prevents immediate stop fire on reconciled spreads with bad avgEntry data
+    // Credit spread max loss stop
     if (pos.isCreditSpread && pos.maxLoss > 0 && curP > 0 && pos.premium > 0.05) {
-      const creditLossDollar = (curP - pos.premium) * 100 * (pos.contracts || 1); // $ lost so far
-      const halfMaxLoss      = pos.maxLoss * 100 * (pos.contracts || 1) * 0.50; // 50% of max loss in dollars (×100 to match creditLossDollar units)
-      const twiceCredit      = pos.premium * 2 * 100 * (pos.contracts || 1); // lose 2x what you could gain
-      const creditStopDollar = Math.min(halfMaxLoss, twiceCredit); // stricter of the two
+      const creditLossDollar = (curP - pos.premium) * 100 * (pos.contracts || 1);
+      const halfMaxLoss      = pos.maxLoss * 100 * (pos.contracts || 1) * 0.50;
+      const twiceCredit      = pos.premium * 2 * 100 * (pos.contracts || 1);
+      const creditStopDollar = Math.min(halfMaxLoss, twiceCredit);
       if (creditLossDollar >= creditStopDollar ) {
-        logEvent("warn", `[CREDIT STOP] ${pos.ticker} credit spread stop triggered - loss $${creditLossDollar.toFixed(0)} exceeds ${(creditStopDollar===halfMaxLoss?'50% max loss':'2x credit')} ($${creditStopDollar.toFixed(0)}) - closing`);
+        logEvent("warn", `[CREDIT STOP] ${pos.ticker} credit spread stop triggered - loss $${creditLossDollar.toFixed(0)} - closing`);
         decisions.push({ pi, ticker: pos.ticker, action: 'close', reason: "credit-stop", exitPremium: null, contractSym: pos.contractSymbol || pos.buySymbol || null }); continue;
       }
     }
 
-    // FIX 4: IV COLLAPSE EXIT — close when IV drops 30%+ from entry
-    // Long options lose value from IV crush even when direction is correct.
-    // Classic scenario: buy put before event, event passes, IV collapses, put loses value.
-    // Entry IV stored at position creation; current IV updated from live snapshot.
-    // Only fires when: position has entry IV data, current IV drops 30%+ from entry, position profitable or neutral
-    // Don't fire if already down 20%+ (stop will handle it) — this is for IV-specific exits
+    // IV COLLAPSE EXIT
     if (!pos.isSpread && pos.entryIV && pos.iv && pos.iv > 0) {
       const ivDrop = (pos.entryIV - pos.iv) / pos.entryIV;
-      // V2.98 FIX B: IV collapse exit is direction-unaware. A PUT can be profitable
-      // (underlying falling) while IV compresses (VIX falling). Exiting a winning put
-      // because IV dropped destroys value — the delta gain far outweighs vega loss.
-      // Skip iv-collapse exit entirely for puts where position is profitable (chg > 0).
       const _ivCollapseSkip = pos.optionType === "put" && chg > 0;
       if (_ivCollapseSkip) {
-        logEvent("scan", `${pos.ticker} iv-collapse skipped — put is profitable (+${(chg*100).toFixed(0)}%), IV drop ${(ivDrop*100).toFixed(0)}% irrelevant while thesis intact`);
+        logEvent("scan", `${pos.ticker} iv-collapse skipped — put is profitable (+${(chg*100).toFixed(0)}%)`);
       } else if (ivDrop >= IV_COLLAPSE_PCT && chg > -0.20) {
-        logEvent("warn", `${pos.ticker} IV collapse: entry ${(pos.entryIV*100).toFixed(0)}% → current ${(pos.iv*100).toFixed(0)}% (${(ivDrop*100).toFixed(0)}% drop) — exiting to prevent further vega bleed`);
+        logEvent("warn", `${pos.ticker} IV collapse: entry ${(pos.entryIV*100).toFixed(0)}% → current ${(pos.iv*100).toFixed(0)}% (${(ivDrop*100).toFixed(0)}% drop)`);
         decisions.push({ pi, ticker: pos.ticker, action: 'close', reason: "iv-collapse", exitPremium: null, contractSym: pos.contractSymbol || pos.buySymbol || null }); continue;
       }
     }
 
-    // 2. HARD STOP - unconditional. Uses tighter overnight stop for carry positions.
-    // V2.87: overnight positions already down >10% use 28% stop (vs 35% standard).
-    // Rationale: overnight mult already tightens TP; stop must match to avoid asymmetry.
+    // 2. HARD STOP
     const _activeHardStop = _isOvernightCarry && chg <= -0.10 ? _overnightStopPct : STOP_LOSS_PCT;
     if (chg <= -_activeHardStop) {
-      // V2.89 GUARD: Skip stop if position < 2 minutes old AND loss > 50%.
-      // Options snapshots can return yesterday's close price for newly-entered positions.
-      // A -50% loss within 2 minutes of entry is almost certainly stale data, not a real move.
-      // Real options don't lose 50% in 2 minutes from a valid entry. Hold and re-evaluate.
       const _minsOpen = hoursOpen * 60;
       if (_minsOpen < 2 && chg <= -0.50) {
-        logEvent("warn", `${pos.ticker} stop skipped — position only ${_minsOpen.toFixed(1)}min old, ${(chg*100).toFixed(0)}% likely stale options snapshot (re-evaluating next scan)`);
-        // Fall through — don't fire stop on likely stale data
+        logEvent("warn", `${pos.ticker} stop skipped — position only ${_minsOpen.toFixed(1)}min old, ${(chg*100).toFixed(0)}% likely stale snapshot`);
       } else {
         const _stopLabel = _activeHardStop < STOP_LOSS_PCT ? `overnight-tightened-stop (${(_activeHardStop*100).toFixed(0)}%)` : `stop-loss`;
         logEvent("scan", `${pos.ticker} ${_stopLabel} ${(chg*100).toFixed(0)}%`);
@@ -1013,40 +744,22 @@ async function checkExits(positions, posSnapshots, posQuotes, posNewsCache, ctx)
       }
     }
 
-    // 3. TRAILING STOP - activates at tier threshold, tightens on signal decay
-    // TRAIL LATCH FIX: if peakPremium already exceeded entry × (1 + trailActivate),
-    // trail is permanently active — don't check chg again (position may have pulled back).
-    // Prevents: spike to +72%, pull back to -5%, trail never fires because chg = -5%.
+    // 3. TRAILING STOP / FLOOR SYSTEM
     const peakChg = pos.premium > 0 ? (pos.peakPremium - pos.premium) / pos.premium : 0;
     const trailActivated = chg >= (pos.trailActivate || TRAIL_ACTIVATE_PCT)
                         || peakChg >= (pos.trailActivate || TRAIL_ACTIVATE_PCT);
 
-    // ── V3.01: PROGRESS CHECK (replaces thesis failure detection) ──────────────
-    // Panel decision 5/28/2026: complex thesis failure (earlyPeak+sustainedDecay)
-    // was firing too late and inconsistently. Replace with a simple time-based check:
-    //
-    // At checkMins post-entry: if peakChg < 5%, the thesis hasn't gained traction.
-    // Exit at market rather than holding all day through theta decay.
-    //
-    // checkMins tuning:
-    //   90 min (base):  standard MR setup — 40% resolve in 60-90min empirically
-    //   120 min: entryRSI < 20 (genuine capitulation needs more time to bounce)
-    //   60 min:  macro bearish OR gap-day entry (tighter window, more headwinds)
-    //
-    // Today's trades that would have been saved:
-    //   SPY 12:39 PM: peaked +3.8%, check at 2:09 PM → exit ~flat vs -$39 actual
-    //   QQQ 11:47 AM: peaked +1.7%, check at 1:17 PM → exit ~flat vs -$13 actual
+    // ── V3.01: PROGRESS CHECK ──────────────────────────────────────────────
     if (!pos._progressCheckFired) {
       const _entryTime      = new Date(pos.openDate || pos.entryTime || Date.now()).getTime();
       const _minsOpen       = (Date.now() - _entryTime) / 60000;
       const _entryRSI       = pos.entryRSI || 50;
-      const _macroIsBearish = (pos.macroSignal || '').includes('bearish'); // V3.01 FIX: field is macroSignal not _macroSignal
+      const _macroIsBearish = (pos.macroSignal || '').includes('bearish');
       const _isGapDayEntry  = pos._isGapDayEntry || false;
 
-      // Determine check window
       let _checkMins = 90;
-      if (_entryRSI < 20) _checkMins = 120;              // capitulation needs time
-      else if (_macroIsBearish || _isGapDayEntry) _checkMins = 60; // tighter window
+      if (_entryRSI < 20) _checkMins = 120;
+      else if (_macroIsBearish || _isGapDayEntry) _checkMins = 60;
 
       if (_minsOpen >= _checkMins && peakChg < 0.05) {
         pos._progressCheckFired = true;
@@ -1063,38 +776,30 @@ async function checkExits(positions, posSnapshots, posQuotes, posNewsCache, ctx)
       }
     }
 
-    // ── V3.01: FLOOR-BASED TRAILING STOP (replaces tier system) ────────────────
-    // Panel decision 5/28/2026: T1/T2/T3 partials are dead at 1 contract.
-    // The old trail% system (trailPct) requires peakPremium tracking but doesn't
-    // protect gains that haven't reached the +15% profit lock threshold.
-    // Today: SPY peaked +10%, fell back to -1%, no exit fired. -$39 loss.
-    //
-    // New system: floor-based. As peakChg rises, a hard dollar floor rises with it.
-    // If current price falls BELOW the floor, exit immediately.
-    // Works at 1 contract. Simple. Auditable.
-    //
-    // Floor schedule:
-    //   peakChg 0-5%:   no floor (hard stop governs at entry × 0.65)
-    //   peakChg 5-10%:  floor = entry × 1.00 (breakeven — can't lose money now)
-    //   peakChg 10-15%: floor = entry × 1.05 (locked in +5%)
-    //   peakChg 15-20%: floor = entry × 1.08 (locked in +8%)
-    //   peakChg 20%+:   floor = entry × 1.12 (locked in +12%)
-    //
-    // Simulation vs today:
-    //   SPY peaked +10% → floor = entry (breakeven). Fell back → EXIT at breakeven.
-    //   QQQ peaked +1.7% → no floor. Progress check handles it at 90min.
+    // ── V3.01 SPRINT 6/8/2026: FLOOR-BASED TRAILING STOP — 7-TIER RATCHET ──
+    // Tiers above +17.5% use 2.5pt width to protect large runners.
+    // Ratchet is implicit: peakPremium only increases, so floor only moves up.
+    // Simulation: QQQ peaked +22% → old floor +12%, new floor +17.5% → +$57 more captured.
     const contracts = pos.contracts || 1;
     const _entryPremium = pos.premium || curP;
 
-    // Calculate floor based on peak gain
     let _trailFloor = null;
     let _trailLabel = null;
-    if (peakChg >= 0.20) {
-      _trailFloor = _entryPremium * 1.12;
-      _trailLabel = '+12% lock (peak 20%+)';
+    if (peakChg >= 0.25) {
+      _trailFloor = _entryPremium * 1.225;
+      _trailLabel = '+22.5% lock (peak 25%+)';
+    } else if (peakChg >= 0.225) {
+      _trailFloor = _entryPremium * 1.20;
+      _trailLabel = '+20% lock (peak 22.5-25%)';
+    } else if (peakChg >= 0.20) {
+      _trailFloor = _entryPremium * 1.175;
+      _trailLabel = '+17.5% lock (peak 20-22.5%)';
+    } else if (peakChg >= 0.175) {
+      _trailFloor = _entryPremium * 1.15;
+      _trailLabel = '+15% lock (peak 17.5-20%)';
     } else if (peakChg >= 0.15) {
-      _trailFloor = _entryPremium * 1.08;
-      _trailLabel = '+8% lock (peak 15-20%)';
+      _trailFloor = _entryPremium * 1.10;
+      _trailLabel = '+10% lock (peak 15-17.5%)';
     } else if (peakChg >= 0.10) {
       _trailFloor = _entryPremium * 1.05;
       _trailLabel = '+5% lock (peak 10-15%)';
@@ -1104,13 +809,11 @@ async function checkExits(positions, posSnapshots, posQuotes, posNewsCache, ctx)
     }
     // peakChg < 5%: no floor — hard stop governs
 
-    // Log when floor level changes (new peak tier reached)
     if (_trailFloor && !pos[`_floorLogged_${_trailLabel}`]) {
       pos[`_floorLogged_${_trailLabel}`] = true;
       logEvent("scan", `[TRAIL-FLOOR] ${pos.ticker} peak +${(peakChg*100).toFixed(1)}% — floor set at $${_trailFloor.toFixed(2)} (${_trailLabel})`);
     }
 
-    // Fire trail exit if current price drops below floor
     if (_trailFloor && curP <= _trailFloor && !_closedThisCycle.has(pi)) {
       logEvent("scan",
         `[TRAIL-EXIT] ${pos.ticker} cur $${curP.toFixed(2)} <= floor $${_trailFloor.toFixed(2)} ` +
@@ -1123,40 +826,30 @@ async function checkExits(positions, posSnapshots, posQuotes, posNewsCache, ctx)
     }
     // ── END FLOOR-BASED TRAILING STOP ────────────────────────────────────────
 
-    // V3.01: Old trail% system REMOVED. Replaced by floor-based trailing stop above.
-    // The old system (peakPremium × (1-trailPct)) was redundant and masked trail-floor exits.
-    // Floor-based system handles all trailing stop logic — no fallthrough needed.
-
-    // 4. PARTIAL CLOSE - at 60% of active take profit target
-    // Uses live overnight-adjusted params - tighter targets on older positions
-    // Guard: don't fire partial if trail is already active (trail takes over above trailActivate)
+    // 4. PARTIAL CLOSE
     const trailAlreadyActive = chg >= (pos.trailActivate || TRAIL_ACTIVATE_PCT);
     if (!pos.partialClosed && !trailAlreadyActive && chg >= activePartialPct && chg < activeTakeProfitPct) {
-      logEvent("scan", `${pos.ticker} partial close at +${(chg*100).toFixed(0)}% [${currentExitParams.label}] (partial threshold: +${(activePartialPct*100).toFixed(0)}%)`);
+      logEvent("scan", `${pos.ticker} partial close at +${(chg*100).toFixed(0)}% [${currentExitParams.label}]`);
       if (!_closedThisCycle.has(pi) && !_partialThisCycle.has(pi)) {
         _partialThisCycle.add(pi);
         decisions.push({ pi, ticker: pos.ticker, action: 'partial', reason: 'partial', exitPremium: null, contractSym: pos.contractSymbol || pos.buySymbol || null });
-      } else if (_closedThisCycle.has(pi)) {
-        logEvent("scan", `[DEDUP] ${pos.ticker} partial skipped — close already queued this cycle`);
       }
-      continue; // don't evaluate take profit in same scan as partial - wait for next cycle
+      continue;
     }
 
-    // 4b. NEAR-MAX-PROFIT EXIT - close when spread reaches 88%+ of theoretical max
-    // OT-W3: At near-max, remaining upside is tiny vs gamma/pin risk of holding
+    // Near-max-profit for spreads
     if (pos.isSpread && !pos.partialClosed) {
       const nearMaxProfit = pos.isCreditSpread
-        ? chg >= 0.88  // collected 88%+ of max credit - close to lock in
+        ? chg >= 0.88
         : (pos.maxProfit > 0 && pos.currentPrice > 0 && pos.premium > 0 &&
            (pos.currentPrice - pos.premium) >= 0.88 * (pos.maxProfit / 100 / Math.max(pos.contracts || 1, 1)));
       if (nearMaxProfit) {
-        logEvent("scan", `${pos.ticker} near max profit (chg:${(chg*100).toFixed(0)}%) - closing to lock in gains before gamma risk`);
+        logEvent("scan", `${pos.ticker} near max profit (chg:${(chg*100).toFixed(0)}%) - closing`);
         decisions.push({ pi, ticker: pos.ticker, action: 'close', reason: "near-max-profit", exitPremium: null, contractSym: pos.contractSymbol || pos.buySymbol || null }); continue;
       }
     }
 
-    // 5. FULL TARGET - take profit
-    // After partial: remainder rides to 130% of target then closes
+    // 5. FULL TARGET
     if (pos.partialClosed && chg >= activeRidePct) {
       logEvent("scan", `${pos.ticker} remainder target +${(chg*100).toFixed(0)}% [${currentExitParams.label}]`);
       decisions.push({ pi, ticker: pos.ticker, action: 'close', reason: "target", exitPremium: null, contractSym: pos.contractSymbol || pos.buySymbol || null }); continue;
@@ -1166,30 +859,11 @@ async function checkExits(positions, posSnapshots, posQuotes, posNewsCache, ctx)
       decisions.push({ pi, ticker: pos.ticker, action: 'close', reason: "target", exitPremium: null, contractSym: pos.contractSymbol || pos.buySymbol || null }); continue;
     }
 
-    // - F10: THESIS DEGRADATION - re-score entry conditions every hour -
-    // If the original entry thesis has weakened significantly, partial close
-    // regardless of price movement - the edge is gone even if position is flat
-    //
-    // V2.91 FIX (panel consensus 5/5/2026):
-    // PUTS and CALLS are fundamentally different here:
-    //   PUT  thesis degradation: RSI recovery IS degradation — entry was overbought,
-    //        recovery means the sell signal is gone. Current logic correct for puts.
-    //   CALL thesis degradation: RSI recovery is thesis FULFILLMENT — entry was
-    //        oversold, recovery means the bounce happened as predicted. The problem
-    //        is option pricing lag — the underlying recovered but the option hasn't
-    //        had time to price it in yet (delta lag + IV normalization takes time).
-    //        GLD example: entered RSI 28, recovered to RSI 71, option still -1%.
-    //        Old code closed it at -$50. Correct behavior: hold — thesis worked,
-    //        option just needs time to catch up.
-    //
-    // Three fixes applied:
-    //   1. Separate call/put partial close thresholds
-    //   2. Calls: only partial close if down > 10% DESPITE RSI recovery (IV crush signal)
-    //   3. Calls: suppress entirely if macro is neutral or bullish (conditions improved)
+    // F10: THESIS DEGRADATION - re-score entry conditions every hour
     if (hoursOpen >= 1 && Math.floor(hoursOpen) > (pos._lastThesisCheck || 0)) {
       pos._lastThesisCheck = Math.floor(hoursOpen);
       try {
-        const tBars  = _posBarCache.get(pos.ticker) || await getStockBars(pos.ticker, 20); // OPT7: reuse cached bars
+        const tBars  = _posBarCache.get(pos.ticker) || await getStockBars(pos.ticker, 20);
         if (!_posBarCache.has(pos.ticker) && tBars.length) _posBarCache.set(pos.ticker, tBars);
         if (tBars.length >= 15) {
           const curRSI   = calcRSI(tBars);
@@ -1198,68 +872,50 @@ async function checkExits(positions, posSnapshots, posQuotes, posNewsCache, ctx)
           const macroIsBullish = curMacro.includes("bullish");
           const macroIsNeutral = curMacro === "neutral";
 
-          // ── PUT thesis degradation (unchanged) ──────────────────────────────
-          // RSI recovery from overbought = put thesis genuinely dead
           const rsiReversed = pos.optionType === "put" && entryRSI >= 65 && curRSI < 50;
           if (rsiReversed && !pos.partialClosed && chg < 0.10) {
             logEvent("scan", `${pos.ticker} PUT thesis degradation — RSI ${entryRSI}→${curRSI.toFixed(0)}, partial close`);
             decisions.push({ pi, ticker: pos.ticker, action: 'partial', reason: 'partial', exitPremium: null, contractSym: pos.contractSymbol || pos.buySymbol || null });
           }
 
-          // ── CALL thesis degradation (v2.91 — much stricter) ─────────────────
-          // RSI recovery for a call = thesis FULFILLED, not degraded.
-          // Only partial close a call when ALL THREE conditions are met:
-          //   1. RSI recovered past 55 (bounce happened)
-          //   2. Option is STILL DOWN > 10% despite the bounce (IV crush confirmed)
-          //   3. Macro is NOT neutral or bullish (conditions haven't improved)
-          // If macro is bullish/neutral, suppress entirely — hold and let it run.
           const callRsiRecovered = pos.optionType === "call" && entryRSI <= 40 && curRSI > 55;
           if (callRsiRecovered && !pos.partialClosed) {
             if (macroIsBullish || macroIsNeutral) {
-              // Macro improved or neutral — RSI bounce is signal working as intended.
-              // Log for visibility but DO NOT close.
               logEvent("scan", `${pos.ticker} CALL RSI recovered ${entryRSI}→${curRSI.toFixed(0)} — thesis fulfilled, macro ${curMacro}, holding`);
             } else if (chg < -0.10) {
-              // Macro is bearish AND option is down 10%+ despite bounce = IV crush confirmed
-              logEvent("scan", `${pos.ticker} CALL RSI recovered but option down ${(chg*100).toFixed(0)}% with bearish macro — IV crush likely, partial close`);
+              logEvent("scan", `${pos.ticker} CALL RSI recovered but down ${(chg*100).toFixed(0)}% with bearish macro — IV crush likely, partial close`);
               decisions.push({ pi, ticker: pos.ticker, action: 'partial', reason: 'partial', exitPremium: null, contractSym: pos.contractSymbol || pos.buySymbol || null });
             } else {
-              // Macro bearish but option not deeply down — log and monitor
-              logEvent("scan", `${pos.ticker} CALL RSI recovered ${entryRSI}→${curRSI.toFixed(0)}, chg ${(chg*100).toFixed(0)}%, bearish macro but not deeply underwater — monitoring`);
+              logEvent("scan", `${pos.ticker} CALL RSI recovered ${entryRSI}→${curRSI.toFixed(0)}, chg ${(chg*100).toFixed(0)}%, bearish macro — monitoring`);
             }
           }
         }
       } catch(e) {}
     }
 
-    // 6. TIME STOP - 7 days with no meaningful move
+    // 6. TIME STOP
     if (daysOpen >= TIME_STOP_DAYS && Math.abs(chg) < TIME_STOP_MOVE) {
       logEvent("scan", `${pos.ticker} time-stop - ${daysOpen.toFixed(0)}d, only ${(chg*100).toFixed(1)}% move`);
       decisions.push({ pi, ticker: pos.ticker, action: 'close', reason: "time-stop", exitPremium: null, contractSym: pos.contractSymbol || pos.buySymbol || null }); continue;
     }
 
-    // Agent rescore handled in parallel batch after scan loop (see runAgentRescore below)
-
-    // 7. EXPIRY ROLL - DTE <= 7, close winners (losers hit stop first)
+    // 7. EXPIRY ROLL
     if (dte <= 7 && chg > 0) {
       logEvent("scan", `${pos.ticker} expiry-roll - ${dte}DTE with profit`);
       decisions.push({ pi, ticker: pos.ticker, action: 'close', reason: "expiry-roll", exitPremium: null, contractSym: pos.contractSymbol || pos.buySymbol || null }); continue;
     }
 
-    // 8. 50MA BREAK - thesis invalidated (real 50-day MA)
-    // Minimum 2 hour hold - open volatility can briefly cross 50MA and recover
-    // Skip for RECONCILED individual legs — these are spread legs, must close as a pair
-    // Individual leg 50MA exits create partial closes and naked positions
+    // 8. 50MA BREAK
     if (hoursOpen >= 2 && !(pos.dteLabel && pos.dteLabel.includes("RECONCIL"))) {
       try {
         const _maCacheKey = `ma55:${pos.ticker}`;
-        const maBars = getCached(_maCacheKey, 10 * 60 * 1000) // OPT-MABARS: 10min — daily bars
+        const maBars = getCached(_maCacheKey, 10 * 60 * 1000)
           || setCache(_maCacheKey, await getStockBars(pos.ticker, 55));
         if (maBars.length >= 50) {
           const ma50 = maBars.slice(-50).reduce((s, b) => s + b.c, 0) / 50;
           const ma50Break = pos.optionType === "put"
-            ? price > ma50 * (1 + MA50_BUFFER)  // put: stock recovered above 50MA
-            : price < ma50 * (1 - MA50_BUFFER); // call: stock broke below 50MA
+            ? price > ma50 * (1 + MA50_BUFFER)
+            : price < ma50 * (1 - MA50_BUFFER);
           if (ma50Break) {
             logEvent("scan", `${pos.ticker} 50ma-break | price $${price.toFixed(2)} | 50MA $${ma50.toFixed(2)} | held ${hoursOpen.toFixed(1)}h`);
             decisions.push({ pi, ticker: pos.ticker, action: 'close', reason: "50ma-break", exitPremium: null, contractSym: pos.contractSymbol || pos.buySymbol || null }); continue;
@@ -1268,7 +924,7 @@ async function checkExits(positions, posSnapshots, posQuotes, posNewsCache, ctx)
       } catch(e) {}
     }
 
-    // 9. EARNINGS CLOSE - approaching earnings = IV crush risk
+    // 9. EARNINGS CLOSE
     if (pos.earningsDate) {
       const daysToE = Math.round((new Date(pos.earningsDate) - new Date()) / MS_PER_DAY);
       if (daysToE >= 0 && daysToE <= EARNINGS_SKIP_DAYS) {
@@ -1277,8 +933,7 @@ async function checkExits(positions, posSnapshots, posQuotes, posNewsCache, ctx)
       }
     }
 
-    // 10. NEWS EXIT - strongly opposite news + position losing (thesis broken)
-    // newsCache prefetched before loop - no per-position API calls
+    // 10. NEWS EXIT
     const newsArts = posNewsCache[pos.ticker] || [];
     const newsSent = analyzeNews(newsArts);
     if (pos.optionType === "put" && newsSent.signal === "strongly bullish" && chg <= -0.15) {
@@ -1290,18 +945,12 @@ async function checkExits(positions, posSnapshots, posQuotes, posNewsCache, ctx)
       decisions.push({ pi, ticker: pos.ticker, action: 'close', reason: "news-exit", exitPremium: null, contractSym: pos.contractSymbol || pos.buySymbol || null }); continue;
     }
 
-    // 11. OVERNIGHT RISK - high VIX, losing position into close
-    // Panel fix (V2.82): two-tier system - close worse positions earlier for better liquidity
-    // Tier 1 (3:00pm): severely losing positions (-20%+) - close while liquidity is healthy
-    // Tier 2 (3:30pm): moderately losing (-8%+) or short DTE (3 or less) - close before final spread widening
-    // Moved from 3:45pm to 3:30pm - execution algo: last 15min has 3-5x wider bid-ask on options
+    // 11. OVERNIGHT RISK
     const etHourNow = scanET.getHours() + scanET.getMinutes() / 60;
-    // Tier 1: severe losses at 3pm - best liquidity window
     if (etHourNow >= 15.0 && state.vix >= 25 && chg <= -0.20) {
-      logEvent("scan", `${pos.ticker} overnight-risk TIER1 - severely losing ${(chg*100).toFixed(0)}% at 3pm - closing at healthy liquidity | VIX ${state.vix}`);
+      logEvent("scan", `${pos.ticker} overnight-risk TIER1 - severely losing ${(chg*100).toFixed(0)}% at 3pm - closing | VIX ${state.vix}`);
       decisions.push({ pi, ticker: pos.ticker, action: 'close', reason: "overnight-risk", exitPremium: null, contractSym: pos.contractSymbol || pos.buySymbol || null }); continue;
     }
-    // Tier 2: moderate losses or short DTE at 3:30pm
     if (etHourNow >= 15.5 && state.vix >= 30) {
       if (chg <= -0.08) {
         logEvent("scan", `${pos.ticker} overnight-risk TIER2 - losing ${(chg*100).toFixed(0)}% into close VIX ${state.vix}`);
@@ -1311,16 +960,11 @@ async function checkExits(positions, posSnapshots, posQuotes, posNewsCache, ctx)
         logEvent("scan", `${pos.ticker} overnight-risk TIER2 - ${dte}DTE too short for overnight hold`);
         decisions.push({ pi, ticker: pos.ticker, action: 'close', reason: "overnight-risk", exitPremium: null, contractSym: pos.contractSymbol || pos.buySymbol || null }); continue;
       }
-      if (dte <= 7) {
-        logEvent("scan", `${pos.ticker} overnight-risk TIER2 - ${dte}DTE elevated overnight theta risk - monitoring`);
-      }
     }
 
-    // Update current price on position so dashboard shows live data
     pos.price        = price;
     pos.currentPrice = curP;
 
-    // V2.82: Close-of-day range position check for hold decisions
     let bars = null;
     if (etHourNow >= 15.5) { try { bars = await getStockBars(pos.ticker, 1); } catch(_) {} }
     if (etHourNow >= 15.5 && bars && bars.length >= 1) {
@@ -1331,21 +975,17 @@ async function checkExits(positions, posSnapshots, posQuotes, posNewsCache, ctx)
       if (dayRange > 0) {
         const closePosition = (price - dayLow) / dayRange;
         const closeLabel = closePosition <= 0.25 ? "WEAK CLOSE - sellers in control" : closePosition >= 0.75 ? "STRONG CLOSE - buyers in control" : "neutral close";
-        if (closePosition <= 0.25 && chg < 0) {
-          logEvent("scan", `${pos.ticker} | chg:${(chg*100).toFixed(1)}% | cur:$${curP} | peak:$${pos.peakPremium.toFixed(2)} | DTE:${dte} | HOLD | ${closeLabel} (${(closePosition*100).toFixed(0)}th pctile of range) - elevated overnight risk`);
-        } else {
-          logEvent("scan", `${pos.ticker} | chg:${(chg*100).toFixed(1)}% | cur:$${curP} | peak:$${pos.peakPremium.toFixed(2)} | DTE:${dte} | HOLD | ${closeLabel}`);
-        }
+        logEvent("scan", `${pos.ticker} | chg:${(chg*100).toFixed(1)}% | cur:$${curP} | peak:$${pos.peakPremium.toFixed(2)} | DTE:${dte} | HOLD | ${closeLabel}`);
       } else {
         logEvent("scan", `${pos.ticker} | chg:${(chg*100).toFixed(1)}% | cur:$${curP} | peak:$${pos.peakPremium.toFixed(2)} | DTE:${dte} | HOLD`);
       }
     } else {
       logEvent("scan", `${pos.ticker} | chg:${(chg*100).toFixed(1)}% | cur:$${curP} | peak:$${pos.peakPremium.toFixed(2)} | DTE:${dte} | HOLD`);
     }
-    markDirty(); // will be flushed at end of scan, not every tick
+    markDirty();
     } catch(posErr) {
       logEvent("error", `Position scan error for ${pos?.ticker || "unknown"}: ${posErr.message}`);
-    } // end per-position try/catch
+    }
   }
 
   return decisions;
