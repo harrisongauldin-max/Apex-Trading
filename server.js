@@ -3,7 +3,7 @@
 // Alpaca Paper Trading Edition
 // -
 const express    = require("express");
-const { getRegimeRulebook, scoreCandidate: EE_scoreCandidate, evaluateEntry } = require("./entryengine.js");
+const { getRegimeRulebook, scoreCandidate: EE_scoreCandidate, evaluateEntry } = require("./entryEngine.js");
 const cron       = require("node-cron");
 const fetch      = require("node-fetch");
 const fs         = require("fs");
