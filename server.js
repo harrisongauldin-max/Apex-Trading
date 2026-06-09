@@ -11,6 +11,7 @@ const path       = require("path");
 
 const app  = express();
 const PORT = process.env.PORT || 3000;
+let isShuttingDown = false;
 
 // - Environment Variables (set in Railway) -
 const ALPACA_KEY        = process.env.ALPACA_API_KEY    || "";
