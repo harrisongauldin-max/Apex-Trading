@@ -300,7 +300,7 @@ async function runScan() {
     return;
   }
 
-  logEvent("scan", `Scan | VIX:${state.vix} | cash:${fmt(state.cash)} | positions:${state.positions.length} | breadth:${marketContext.breadth.breadthPct}% | F&G:${marketContext.fearGreed.score}`);
+  logEvent("scan", `Scan | VIX:${state.vix} | cash:${fmt(state.cash)} | positions:${state.positions.length} | breadth:${marketContext.breadth.breadthPct}% (${marketContext.breadth.advancing ?? '?'}\u2191/${marketContext.breadth.declining ?? '?'}\u2193) | F&G:${marketContext.fearGreed.score}`);
 
   // C1-A: Daily loss lock check at scan top — halt entries if lock active
   if (state._dailyLossLockActive && !dryRunMode) {
@@ -325,6 +325,7 @@ async function runScan() {
     if (!state._breadthHistory) state._breadthHistory = [];
     const bPct = parseFloat((marketContext.breadth.breadthPct || 50).toString());
     state._lastBreadthPct = bPct;
+    state._breadth        = bPct;   // BUGFIX: was never assigned → scorer read a phantom 50
     state._breadthHistory.push({ t: now, v: bPct });
     if (state._breadthHistory.length > 10) state._breadthHistory = state._breadthHistory.slice(-10);
 
