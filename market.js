@@ -630,15 +630,17 @@ async function getMarketBreadth() {
     // Also include new data tickers for richer breadth signal
     const breadthTickers = [...sectors, "SMH", "IWM", "HYG"];
     const allBars = await Promise.all(breadthTickers.map(etf =>
-      getIntradayBars(etf, 1).catch(() => [])
+      getIntradayBars(etf).catch(() => [])   // BUGFIX: full session, not getIntradayBars(etf,1) = last minute only
     ));
     let advancing = 0, declining = 0, strength = 0;
     allBars.forEach(bars => {
       if (bars && bars.length > 0) {
-        const bar = bars[bars.length - 1];
-        if (bar && bar.o > 0 && bar.c > 0) {
-          if (bar.c > bar.o) { advancing++; strength += (bar.c - bar.o) / bar.o; }
-          else { declining++; strength -= (bar.o - bar.c) / bar.o; }
+        const first = bars[0];                   // session open bar
+        const last  = bars[bars.length - 1];     // current bar
+        if (first && last && first.o > 0 && last.c > 0) {
+          // BUGFIX: compare current price to SESSION OPEN (day move), not the last bar's own open (1-min flicker)
+          if (last.c > first.o) { advancing++; strength += (last.c - first.o) / first.o; }
+          else                  { declining++; strength -= (first.o - last.c) / first.o; }
         }
       }
     });
