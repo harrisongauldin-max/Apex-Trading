@@ -762,8 +762,88 @@ async function updateAfterHoursContext() {
 }
 
 
+// ─── Journal period breakdown (daily / weekly / monthly) ─────────────────────
+// Pure function: buckets durable journal entries by period and rolls up P&L,
+// win rate, exit-reason mix, and carries entry reasoning (trade logic) + exit
+// reasoning so each period view answers "what did we trade, why, and how did it end."
+function _isoWeekKey(d) {
+  const date = new Date(Date.UTC(d.getFullYear(), d.getMonth(), d.getDate()));
+  const dayNum = (date.getUTCDay() + 6) % 7;          // Mon=0..Sun=6
+  date.setUTCDate(date.getUTCDate() - dayNum + 3);    // nearest Thursday
+  const firstThursday = new Date(Date.UTC(date.getUTCFullYear(), 0, 4));
+  const ftDayNum = (firstThursday.getUTCDay() + 6) % 7;
+  firstThursday.setUTCDate(firstThursday.getUTCDate() - ftDayNum + 3);
+  const week = 1 + Math.round((date - firstThursday) / (7 * 86400000));
+  return `${date.getUTCFullYear()}-W${String(week).padStart(2, '0')}`;
+}
+
+function buildJournalBreakdown(entries, period = 'daily') {
+  const all    = Array.isArray(entries) ? entries : [];
+  const closed = all.filter(e => e.status === 'CLOSED');
+  const open   = all.filter(e => e.status === 'OPEN');
+  const keyOf  = (e) => {
+    const d = new Date(e.closeDate || e.openDate || Date.now());
+    if (period === 'monthly') return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+    if (period === 'weekly')  return _isoWeekKey(d);
+    return d.toISOString().split('T')[0]; // daily
+  };
+
+  const buckets = {};
+  for (const e of closed) {
+    const k = keyOf(e);
+    if (!buckets[k]) buckets[k] = {
+      period: k, trades: 0, wins: 0, losses: 0, netPnL: 0, grossWins: 0, grossLoss: 0,
+      byExitReason: {}, byTicker: {}, byDirection: { put: 0, call: 0 }, entries: [],
+    };
+    const b   = buckets[k];
+    const pnl = e.pnl_alpaca ?? e.pnl_apex ?? 0;
+    b.trades++;
+    if (e.isWin) { b.wins++;   b.grossWins += pnl; }
+    else         { b.losses++; b.grossLoss += Math.abs(pnl); }
+    b.netPnL += pnl;
+    const r = e.exitReason || 'unknown';
+    if (!b.byExitReason[r]) b.byExitReason[r] = { count: 0, pnl: 0, wins: 0 };
+    b.byExitReason[r].count++; b.byExitReason[r].pnl += pnl; if (e.isWin) b.byExitReason[r].wins++;
+    b.byTicker[e.ticker] = (b.byTicker[e.ticker] || 0) + 1;
+    if (e.optionType === 'put') b.byDirection.put++; else if (e.optionType === 'call') b.byDirection.call++;
+    b.entries.push({
+      ticker: e.ticker, optionType: e.optionType, strike: e.strike, expDate: e.expDate,
+      openDateET: e.openDateET, closeDateET: e.closeDateET, hoursHeld: e.hoursHeld,
+      entryScore: e.entryScore, pnl: parseFloat(Number(pnl).toFixed(2)), pnl_pct: e.pnl_pct, isWin: e.isWin,
+      entryReasons: e.entryReasons || [],   // trade logic / entry reasoning
+      exitReason:   e.exitReason || null,   // exit reasoning
+      entryRSI: e.entryRSI, entryDailyRSI: e.entryDailyRSI, peakPct: e.peakPct,
+      entryVIX: e.entryVIX, entryIVP: e.entryIVP, entryIVR: e.entryIVR,
+      entryBreadth: e.entryBreadth, entryRegimeClass: e.entryRegimeClass,
+      entryRegimeDuration: e.entryRegimeDuration, regimeAtEntry: e.regimeAtEntry,
+    });
+  }
+
+  const bucketList = Object.values(buckets).map(b => ({
+    ...b,
+    netPnL:       parseFloat(b.netPnL.toFixed(2)),
+    grossWins:    parseFloat(b.grossWins.toFixed(2)),
+    grossLoss:    parseFloat(b.grossLoss.toFixed(2)),
+    winRate:      b.trades > 0 ? parseFloat((b.wins / b.trades * 100).toFixed(1)) : 0,
+    avgWin:       b.wins   > 0 ? parseFloat((b.grossWins / b.wins).toFixed(2))   : 0,
+    avgLoss:      b.losses > 0 ? parseFloat((b.grossLoss / b.losses).toFixed(2)) : 0,
+    profitFactor: b.grossLoss > 0 ? parseFloat((b.grossWins / b.grossLoss).toFixed(2)) : null,
+  })).sort((a, b) => (a.period < b.period ? 1 : -1)); // newest period first
+
+  const totalNet = parseFloat(bucketList.reduce((s, b) => s + b.netPnL, 0).toFixed(2));
+  return {
+    period,
+    bucketCount:      bucketList.length,
+    closedTrades:     closed.length,
+    openPositions:    open.length,
+    netPnLAllPeriods: totalNet,
+    buckets:          bucketList,
+  };
+}
+
 module.exports = {
   sendEmail, sendResendEmail, buildEmailHTML, getBenchmarkComparison,
   buildMonthlyReport, sendMorningBriefing, premarketAssessment,
   updateAfterHoursContext, initReporting, setReportingContext,
+  buildJournalBreakdown,
 };
