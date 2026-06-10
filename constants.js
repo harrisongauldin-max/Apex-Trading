@@ -126,62 +126,15 @@ const WATCHLIST = [
     isIndex:   true,
     isPrimary: false,
   },
-  // IWM REMOVED - 3-year backtest confirmed net loser at all score thresholds
-  // 2022: -$1,826 | 2023: -$985 | 2024: -$985 | 3yr @ 75: -$1,305
-  // Panel unanimous 8/8: instrument not compatible with mean-reversion scoring
-  // - HEDGE 1: GLD - gold ETF, inverse correlation in risk-off environments -
-  // Entry gated by: DXY not strengthening + SPY stressed + VIX>20 + Score 80+
-  {
-    ticker:    "GLD",
-    sector:    "Commodity",
-    momentum:  "steady",
-    rsi:       50,
-    macd:      "neutral",
-    catalyst:  "Risk-off flight to gold",
-    ivr:       20,
-    beta:      -0.1,  // negative beta = hedge against equity drawdown
-    earningsDate: null,
-    isIndex:   true,  // treated as index for liquidity/OI purposes
-    isPrimary: false,
-  },
-  // - HEDGE 2: TLT - 20yr Treasury Bond ETF -
-  // Panel unanimous (8/8): best portfolio hedge for equity stress
-  // Negative correlation to SPY (-0.50 in stress), RSI/MACD signals work cleanly
-  // Entry gated by: SPY below 50MA + score 75+ + direction-aware
-  {
-    ticker:    "TLT",
-    isIndex:   true,  // B4: required for credit_put/credit_call tradeType
-    sector:    "Bonds",
-    momentum:  "steady",
-    rsi:       50,
-    macd:      "neutral",
-    catalyst:  "Rate/recession hedge - bonds rally when equities fall",
-    ivr:       20,
-    beta:      -0.5,  // strong negative beta = best equity stress hedge
-    earningsDate: null,
-    isIndex:   true,
-    isPrimary: false,
-  },
-  // - ENERGY: XLE - Energy Select Sector SPDR -
-  // Panel unanimous (9/9): first expansion beyond 4-instrument universe
-  // Driven by oil price + geopolitics - independent of equity sentiment (corr 0.55 vs SPY)
-  // Options ADV 26,153 - liquid enough for spread fills
-  // Entry gated by: oil trend + VIX context + score 75+
-  {
-    ticker:    "XLE",
-    sector:    "Energy",
-    momentum:  "steady",
-    rsi:       50,
-    macd:      "neutral",
-    catalyst:  "Oil price + energy geopolitics - independent macro driver",
-    ivr:       30,
-    beta:      0.80,
-    earningsDate: null,
-    isIndex:   true,   // treated as index - same scoring path as SPY/QQQ
-    isPrimary: false,
-    minScore:  80, // V2.94: raised from 70 — sector ETFs need higher conviction than broad indices
-  },
-];
+  // ───────────────────────────────────────────────────────────────────────
+  // DISABLED 6/10/2026 — APEX trades SPY/QQQ only. GLD/TLT/XLE/HYG removed
+  // from the tradeable watchlist (definitions preserved in the v3.2 archive).
+  // NOTE: XLE & HYG are STILL fetched for market-context data (sector relative
+  // strength + credit-stress signal) via the separate dataSectors fetch in
+  // scanner.js — that path is independent of this list and is unaffected.
+  // Re-enable by restoring the instrument objects here.
+  // ───────────────────────────────────────────────────────────────────────
+];;
 
 // V2.94: SMH REMOVED from WATCHLIST (trading panel unanimous, 5/6/2026)
 // SPRINT-12: SMH wash sale monitoring note.
@@ -199,22 +152,25 @@ const WATCHLIST = [
 // REIT options are illiquid with wide spreads. Rate sensitivity makes thesis
 // unreliable (hawkish Fed = headwind, even pre-market +2% gaps don't translate).
 // HYG: high yield bonds, credit stress leading indicator, already used as data signal — now tradeable
-WATCHLIST.push(
-  {
-    ticker:    "HYG",
-    sector:    "Bonds",
-    momentum:  "steady",
-    rsi:       50,
-    macd:      "neutral",
-    catalyst:  "Credit stress leading indicator — HYG leads equity by 2-3 days",
-    ivr:       18,
-    beta:      0.5,
-    earningsDate: null,
-    isIndex:   true,
-    isPrimary: false,
-    minScore:  75,
-  }
-);
+/* DISABLED 6/10/2026 — HYG removed from tradeable watchlist (SPY/QQQ only).
+   HYG remains a DATA signal via dataSectors in scanner.js (credit stress).
+   WATCHLIST.push(
+     {
+       ticker:    "HYG",
+       sector:    "Bonds",
+       momentum:  "steady",
+       rsi:       50,
+       macd:      "neutral",
+       catalyst:  "Credit stress leading indicator — HYG leads equity by 2-3 days",
+       ivr:       18,
+       beta:      0.5,
+       earningsDate: null,
+       isIndex:   true,
+       isPrimary: false,
+       minScore:  75,
+     }
+   );
+*/
 
 const INDIVIDUAL_STOCK_WATCHLIST = [
   { ticker:"NVDA",  sector:"Technology",  momentum:"strong",     rsi:58, macd:"bullish crossover",  catalyst:"AI infrastructure demand",      ivr:52, beta:1.8, earningsDate:null },
