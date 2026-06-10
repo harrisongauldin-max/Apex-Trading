@@ -12,7 +12,11 @@ const { CAPITAL_FLOOR, MONTHLY_BUDGET, MAX_HEAT, MAX_SECTOR_PCT,
 const { alpacaPost, getStockBars } = require('./broker');
 const { effectiveHeatCap, getBusinessDaysAgo, isEntryWindow } = require('./signals');
 const { checkSectorETF } = require('./scoring');
-const { getOptionsPrice } = require('./execution');
+// NOTE: getOptionsPrice is intentionally NOT required at module top. The
+// execution → closeEngine → risk → execution cycle means a top-level import here
+// captures `undefined` (Node returns execution's partial exports mid-load). It is
+// lazy-required inside checkScaleIns() below, where execution is fully loaded.
+const fmt = (n) => '$' + (n || 0).toFixed(2);
 // ─── Correlation groups (copied from server.js — needed for checkAllFilters) ──
 const CORRELATION_GROUPS = [
   ["NVDA", "AMD", "SMCI", "ARM", "AVGO", "MU"],
@@ -184,6 +188,7 @@ async function checkScaleIns() {
     // Use real options price for scale-in decision
     let curP = pos.currentPrice || pos.premium;
     if (pos.contractSymbol) {
+      const { getOptionsPrice } = require('./execution'); // lazy: avoids circular-dep undefined binding
       const realP = await getOptionsPrice(pos.contractSymbol);
       if (realP) curP = realP;
     }
