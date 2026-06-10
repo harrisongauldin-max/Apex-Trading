@@ -89,6 +89,23 @@ canvas{display:block;width:100%!important}
 .journal-reasoning{font-size:11px;color:var(--text);line-height:1.6;margin-top:6px}
 .journal-meta{font-size:10px;color:var(--muted);margin-top:6px;display:flex;gap:16px;flex-wrap:wrap}
 .jv-btn.active{background:rgba(0,196,255,.15);border-color:var(--blue);color:var(--blue)}
+/* ── Printed trading-ledger styling for the Journal tab ───────────────────── */
+.ledger{background:#fdfdfb;color:#1a1a1a;border:2px solid #1a1a1a;margin-bottom:20px;font-family:'Helvetica Neue',Arial,sans-serif;-webkit-font-smoothing:antialiased}
+.ledger-title{text-align:center;font-family:'Arial Black',Arial,sans-serif;font-weight:900;letter-spacing:3px;font-size:clamp(22px,4.2vw,34px);padding:16px 8px 12px;color:#161616}
+.ledger-band{display:grid;border-top:1.5px solid #1a1a1a}
+.ledger-band .lc{padding:7px 10px;border-right:1px solid #1a1a1a;display:flex;align-items:center;font-size:11px;min-height:30px;color:#1a1a1a;overflow:hidden;text-overflow:ellipsis}
+.ledger-band .lk{font-weight:800;letter-spacing:.5px;background:#fff}
+.ledger-tablewrap{overflow-x:auto;border-top:1.5px solid #1a1a1a}
+.ledger-table{width:100%;min-width:680px;border-collapse:collapse;font-size:11px}
+.ledger-table th{background:#fff;border:1px solid #1a1a1a;padding:7px 5px;font-weight:800;letter-spacing:.3px;text-transform:uppercase;font-size:9.5px;text-align:center;line-height:1.15;color:#161616}
+.ledger-table td{border:1px solid #b0b0b0;padding:6px 6px;text-align:center;height:28px;color:#1a1a1a;white-space:nowrap}
+.ledger-table td.l{text-align:left;white-space:normal}
+.ledger-trow:hover td{background:#f3f6fb}
+.ledger-gain{color:#0a7d36;font-weight:700}
+.ledger-loss{color:#c01f1f;font-weight:700}
+.ledger-empty{color:#999;font-style:italic}
+.ledger-notes-h{background:#d6d6d6;text-align:center;font-weight:800;letter-spacing:1.5px;padding:7px;border-top:1.5px solid #1a1a1a;border-bottom:1px solid #1a1a1a;font-size:11px;color:#161616}
+.ledger-notes{padding:9px 12px;font-size:11px;line-height:1.7;min-height:42px;color:#333}
 .jb-period{display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;cursor:pointer}
 .report-box{background:#050e1a;border:1px solid var(--border);border-radius:8px;padding:16px;white-space:pre-wrap;font-size:11px;color:var(--text);line-height:1.8;max-height:500px;overflow-y:auto}
 .watchlist-row{display:flex;align-items:center;justify-content:space-between;padding:6px 0;border-bottom:1px solid rgba(13,48,80,.4)}
@@ -2393,37 +2410,181 @@ function setJournalView(v){
 function _journalEntryCard(e){
   var open  = e.status === 'OPEN';
   var pnl   = (e.pnl_alpaca != null) ? e.pnl_alpaca : (e.pnl_apex != null ? e.pnl_apex : (e.pnl != null ? e.pnl : null));
+  var pnlPct = (e.pnl_pct != null) ? e.pnl_pct : null;
   var score = e.entryScore;
   var scoreColor = score>=85 ? 'var(--green)' : score>=70 ? 'var(--blue)' : 'var(--orange)';
-  var dirColor   = open ? 'var(--green)' : (pnl>=0 ? 'var(--blue)' : 'var(--red)');
+  var isPut = e.optionType === 'put';
+  var dirColor = isPut ? 'var(--orange)' : 'var(--blue)';
   var reasons = e.entryReasons || [];
-  var reasonsHtml = reasons.length ? ('<div class="journal-reasoning"><span style="color:var(--muted);font-size:9px;letter-spacing:.5px">ENTRY LOGIC</span>' + reasons.map(function(r){
+
+  // Right side of header: the result is the headline. P&L big + colored for closed; OPEN pill otherwise.
+  var resultBlock;
+  if (!open && pnl != null) {
+    var pc = pnl >= 0 ? 'var(--green)' : 'var(--red)';
+    resultBlock = '<span style="font-size:15px;font-weight:700;color:'+pc+'">'+(pnl>=0?'+':'')+'$'+Number(pnl).toFixed(2)
+      + (pnlPct!=null ? ' <span style="font-size:11px;opacity:.8">('+(pnlPct>=0?'+':'')+pnlPct+'%)</span>' : '') + '</span>';
+  } else {
+    resultBlock = '<span style="font-size:10px;font-weight:700;padding:2px 8px;border-radius:10px;background:rgba(0,255,136,.1);color:var(--green)">OPEN</span>';
+  }
+
+  // Exit strip — the "what happened", on its own line for closed trades.
+  var exitStrip = !open ? ('<div style="font-size:11px;margin-top:5px">'
+      + '<span style="color:var(--muted);font-size:9px;letter-spacing:.5px">EXIT </span>'
+      + '<span style="color:var(--text);font-weight:600">'+(e.exitReason||'?')+'</span>'
+      + (e.peakPct!=null ? '<span style="color:var(--muted)"> · peak +'+e.peakPct+'%</span>' : '')
+      + (e.hoursHeld!=null ? '<span style="color:var(--muted)"> · held '+e.hoursHeld+'h</span>' : '')
+      + '</div>') : '';
+
+  // Entry logic — collapsed by default, one tap to expand. Keeps the list scannable.
+  var reasonsHtml = '';
+  if (reasons.length) {
+    var items = reasons.map(function(r){
       var isNeg = r.indexOf('(-')>-1 || r.indexOf('contradicts')>-1 || r.indexOf('wrong')>-1 || r.indexOf('fighting')>-1 || r.indexOf('blocked')>-1;
       var isPos = !isNeg && r.indexOf('(+')>-1 && r.indexOf('+0)')===-1;
-      var col = isNeg ? '#ff7766' : isPos ? '#88dd88' : '#888';
-      return '<span style="font-size:10px;color:'+col+';display:block;line-height:1.5">'+r+'</span>';
-    }).join('') + '</div>') : '';
-  var exitHtml = !open ? ('<div style="margin-top:6px;font-size:11px"><span style="color:var(--muted);font-size:9px;letter-spacing:.5px">EXIT</span> <span style="color:var(--text);font-weight:600">'+(e.exitReason||'?')+'</span>'
-      + (e.peakPct!=null ? ' · peak +'+e.peakPct+'%' : '')
-      + (e.hoursHeld!=null ? ' · held '+e.hoursHeld+'h' : '') + '</div>') : '';
-  var meta = '<div class="journal-meta">'
-      + '<span>'+(e.openDateET || e.openDate || '')+'</span>'
-      + (e.entryVIX!=null ? '<span>VIX '+e.entryVIX+'</span>' : '')
-      + (e.entryIVP!=null ? '<span>IVP '+e.entryIVP+'</span>' : '')
-      + (e.entryRSI!=null ? '<span>RSI '+e.entryRSI+'</span>' : '')
-      + (e.entryRegimeClass ? '<span>Regime '+e.entryRegimeClass+'</span>' : '')
-      + '</div>';
+      var col = isNeg ? 'var(--red)' : isPos ? 'var(--green)' : 'var(--muted)';
+      return '<div style="font-size:10px;color:'+col+';line-height:1.55">'+r+'</div>';
+    }).join('');
+    reasonsHtml = '<div onclick="var c=this.closest(\'.journal-entry\').querySelector(\'.jlogic\');var o=c.style.display===\'none\';c.style.display=o?\'block\':\'none\';this.querySelector(\'.jcaret\').textContent=o?\'\u25be\':\'\u25b8\'" '
+      + 'style="cursor:pointer;font-size:9px;letter-spacing:.5px;color:var(--muted);margin-top:8px;user-select:none">'
+      + '<span class="jcaret">\u25b8</span> ENTRY LOGIC ('+reasons.length+')</div>'
+      + '<div class="jlogic" style="display:none;margin-top:6px;padding-left:8px;border-left:2px solid var(--border)">'+items+'</div>';
+  }
+
+  // Compact context row.
+  var metaParts = [];
+  if (e.openDateET || e.openDate) metaParts.push(e.openDateET || e.openDate);
+  if (e.entryVIX!=null) metaParts.push('VIX '+e.entryVIX);
+  if (e.entryIVP!=null) metaParts.push('IVP '+e.entryIVP);
+  if (e.entryRSI!=null) metaParts.push('RSI '+e.entryRSI);
+  if (e.entryRegimeClass) metaParts.push('Regime '+e.entryRegimeClass);
+  var meta = '<div class="journal-meta">'+metaParts.map(function(m){return '<span>'+m+'</span>';}).join('')+'</div>';
+
   return '<div class="journal-entry">'
-      + '<div class="journal-header"><div style="display:flex;align-items:center;gap:10px">'
-      +   '<span class="journal-ticker">'+e.ticker+'</span>'
-      +   '<span style="font-size:10px;padding:2px 8px;border-radius:10px;background:'+(open?'rgba(0,255,136,.1)':'rgba(0,196,255,.1)')+';color:'+dirColor+'">'+(open?'OPEN':'CLOSED')+'</span>'
-      +   '<span style="font-size:10px;color:var(--muted)">$'+(e.strike||'?')+(e.optionType==='put'?'P':'C')+' · '+(e.expDate||'?')+'</span>'
-      + '</div><div style="display:flex;align-items:center;gap:8px">'
-      +   (score ? '<span class="journal-score" style="background:rgba(0,196,255,.1);color:'+scoreColor+'">'+score+'/100</span>' : '')
-      +   ((!open && pnl!=null) ? '<span style="font-weight:700;color:'+(pnl>=0?'var(--green)':'var(--red)')+'">'+(pnl>=0?'+':'')+'$'+Number(pnl).toFixed(2)+(e.pnl_pct!=null?' ('+e.pnl_pct+'%)':'')+'</span>' : '')
-      + '</div></div>'
-      + reasonsHtml + exitHtml + meta
+      + '<div class="journal-header">'
+      +   '<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">'
+      +     '<span class="journal-ticker">'+e.ticker+'</span>'
+      +     '<span style="font-size:10px;font-weight:700;color:'+dirColor+'">'+(isPut?'PUT':'CALL')+'</span>'
+      +     '<span style="font-size:10px;color:var(--muted)">$'+(e.strike||'?')+(isPut?'P':'C')+' · '+(e.expDate||'?')+'</span>'
+      +     (score ? '<span class="journal-score" style="background:rgba(0,196,255,.1);color:'+scoreColor+'">'+score+'</span>' : '')
+      +   '</div>'
+      +   '<div style="display:flex;align-items:center;gap:8px">'+resultBlock+'</div>'
+      + '</div>'
+      + exitStrip + reasonsHtml + meta
       + '</div>';
+}
+
+// ── Printed trading-ledger renderer ───────────────────────────────────────
+function _ledgerNum(n, dec){ if(n==null||isNaN(n)) return '—'; return Number(n).toLocaleString('en-US',{minimumFractionDigits:dec,maximumFractionDigits:dec}); }
+function _ledgerTime(e){
+  var s = e.openDateET || e.openDate || '';
+  if (s.indexOf(',')>-1){ var p=s.split(','); s = (p[1]||'').trim() || s; }
+  s = s.replace(/(\d{1,2}:\d{2}):\d{2}/, '$1');   // drop seconds
+  return s || '—';
+}
+function _ledgerExp(d){ if(!d) return ''; var p=String(d).split('-'); return p.length===3 ? (parseInt(p[1],10)+'/'+parseInt(p[2],10)) : d; }
+function _ledgerPnl(e){ return (e.pnl_alpaca!=null)?e.pnl_alpaca:(e.pnl_apex!=null?e.pnl_apex:(e.pnl!=null?e.pnl:null)); }
+
+function _ledgerRow(e){
+  var open  = e.status === 'OPEN';
+  var isPut = e.optionType === 'put';
+  var qty   = (e.entryContracts!=null)?e.entryContracts:(e.contracts!=null?e.contracts:(e.contractsAtClose!=null?e.contractsAtClose:1));
+  var price = (e.entryPrice!=null)?e.entryPrice:(e.premium!=null?e.premium:null);
+  var pnl   = _ledgerPnl(e);
+  var cost  = (price!=null)? price*100*qty : null;
+  var proceeds = open ? null : ((cost!=null && pnl!=null) ? cost+pnl : (e.exitPrice!=null ? e.exitPrice*100*qty : null));
+  var pct   = e.pnl_pct;
+  var sym   = e.ticker + ' ' + (e.strike!=null?e.strike:'?') + (isPut?'P':'C') + (e.expDate?(' '+_ledgerExp(e.expDate)):'');
+
+  var glCell  = open ? '<span class="ledger-empty">open</span>'
+                     : (pnl==null?'—':'<span class="'+(pnl>=0?'ledger-gain':'ledger-loss')+'">'+(pnl>=0?'+':'')+'$'+_ledgerNum(pnl,2)+'</span>');
+  var pctCell = open ? '—' : (pct==null?'—':'<span class="'+(pct>=0?'ledger-gain':'ledger-loss')+'">'+(pct>=0?'+':'')+pct+'%</span>');
+
+  // expandable detail (entry logic + exit + context) — tap the row
+  var reasons = e.entryReasons || [];
+  var rHtml = reasons.map(function(r){
+    var neg = r.indexOf('(-')>-1||r.indexOf('wrong')>-1||r.indexOf('blocked')>-1||r.indexOf('contradicts')>-1||r.indexOf('fighting')>-1;
+    var pos = !neg && r.indexOf('(+')>-1 && r.indexOf('+0)')===-1;
+    return '<div style="color:'+(neg?'#c01f1f':pos?'#0a7d36':'#555')+'">'+r+'</div>';
+  }).join('');
+  var ctx=[]; if(e.entryVIX!=null)ctx.push('VIX '+e.entryVIX); if(e.entryIVP!=null)ctx.push('IVP '+e.entryIVP); if(e.entryRSI!=null)ctx.push('RSI '+e.entryRSI); if(e.entryRegimeClass)ctx.push('Regime '+e.entryRegimeClass);
+  var exitLine = !open ? ('<b>EXIT:</b> '+(e.exitReason||'?')+(e.peakPct!=null?' &middot; peak +'+e.peakPct+'%':'')+(e.hoursHeld!=null?' &middot; held '+e.hoursHeld+'h':'')) : '';
+  var detail = '<tr class="ledger-detail" style="display:none"><td colspan="9" class="l" style="background:#f4f4f0;padding:9px 12px;font-size:10px;line-height:1.65">'
+    + (ctx.length?('<div style="color:#777;margin-bottom:4px">'+ctx.join(' &middot; ')+'</div>'):'')
+    + (exitLine?('<div style="color:#1a1a1a;margin-bottom:5px">'+exitLine+'</div>'):'')
+    + (rHtml?('<div style="color:#999;font-size:9px;letter-spacing:.5px;margin-bottom:3px">ENTRY LOGIC</div>'+rHtml):'')
+    + '</td></tr>';
+
+  var row = '<tr class="ledger-trow" onclick="var d=this.nextElementSibling;if(d&&d.classList.contains(\'ledger-detail\'))d.style.display=d.style.display===\'none\'?\'table-row\':\'none\'">'
+    + '<td>'+_ledgerTime(e)+'</td>'
+    + '<td>BUY</td>'
+    + '<td>'+qty+'</td>'
+    + '<td class="l">'+sym+'</td>'
+    + '<td>'+(price!=null?_ledgerNum(price,2):'—')+'</td>'
+    + '<td>'+(cost!=null?'$'+_ledgerNum(cost,2):'—')+'</td>'
+    + '<td>'+(proceeds!=null?'$'+_ledgerNum(proceeds,2):(open?'<span class="ledger-empty">open</span>':'—'))+'</td>'
+    + '<td>'+glCell+'</td>'
+    + '<td>'+pctCell+'</td>'
+    + '</tr>';
+  return row + detail;
+}
+
+function _ledgerMeta(entries, dateLabel){
+  var closed = entries.filter(function(e){ return e.status!=='OPEN'; });
+  var net    = closed.reduce(function(s,e){ return s + (_ledgerPnl(e)||0); }, 0);
+  var wins   = closed.filter(function(e){ return (_ledgerPnl(e)||0) > 0; }).length;
+  var totalCost = entries.reduce(function(s,e){
+    var price=(e.entryPrice!=null)?e.entryPrice:e.premium; var qty=(e.entryContracts!=null)?e.entryContracts:(e.contracts||1);
+    return s + (price!=null?price*100*qty:0);
+  }, 0);
+  var wr = closed.length ? Math.round(wins/closed.length*100) : 0;
+  var rep = entries[0] || {};
+  var cond = ((rep.entryRegimeClass?('Regime '+rep.entryRegimeClass):'') + (rep.entryVIX!=null?(' · VIX '+rep.entryVIX):'')).trim() || 'OPTIONS';
+  var fund = (typeof state!=='undefined' && state.cash!=null) ? fmt(state.cash) : '—';
+  var roiParts = [];
+  if (typeof state!=='undefined' && state.cash) roiParts.push('ROI '+(net/state.cash*100).toFixed(2)+'%');
+  if (totalCost>0) roiParts.push('ROR '+(net/totalCost*100).toFixed(1)+'%');
+  var mix={}; closed.forEach(function(e){ var k=e.exitReason||'?'; mix[k]=(mix[k]||0)+1; });
+  var mixStr = Object.keys(mix).map(function(k){ return k+' '+mix[k]; }).join(' · ');
+  var notes = entries.length
+    ? (closed.length+' closed · '+(entries.length-closed.length)+' open · '+wins+'W/'+(closed.length-wins)+'L · WR '+wr+'% · net '
+        + (net>=0?'+':'')+'$'+net.toFixed(2)+(mixStr?(' · exits: '+mixStr):'')+'  —  tap any row for entry logic & exit reasoning.')
+    : 'No trades logged for this period yet.';
+  return {
+    date: dateLabel || '',
+    condition: cond,
+    fund: fund,
+    targetStop: 'Schedule A trail floor · tiered intraday stop',
+    roi: roiParts.join(' · ') || '—',
+    notes: notes
+  };
+}
+
+function _ledgerBlock(entries, meta){
+  meta = meta || {};
+  var rows = entries.length ? entries.map(_ledgerRow).join('')
+    : '<tr><td colspan="9" class="ledger-empty" style="padding:18px">No trades in this period.</td></tr>';
+  return '<div class="ledger">'
+    + '<div class="ledger-title">TRADING JOURNAL</div>'
+    + '<div class="ledger-band" style="grid-template-columns:1.2fr 1.5fr 1.7fr 2fr">'
+    +   '<div class="lc lk">DATE</div><div class="lc">'+(meta.date||'')+'</div>'
+    +   '<div class="lc lk">MARKET CONDITION</div><div class="lc" style="border-right:none">'+(meta.condition||'')+'</div>'
+    + '</div>'
+    + '<div class="ledger-band" style="grid-template-columns:1.2fr 1.5fr 3.7fr">'
+    +   '<div class="lc lk">AVAILABLE FUND</div><div class="lc">'+(meta.fund||'—')+'</div>'
+    +   '<div class="lc" style="border-right:none;font-size:10px;letter-spacing:.3px">1.STOCK&nbsp;&nbsp; <b>2.OPTIONS</b>&nbsp;&nbsp; 3.FUTURES&nbsp;&nbsp; 4.FOREX&nbsp;&nbsp; 5.CRYPTO</div>'
+    + '</div>'
+    + '<div class="ledger-tablewrap">'
+    +   '<table class="ledger-table"><thead><tr>'
+    +     '<th>TIME</th><th>BUY/SELL</th><th>QTY</th><th>NAME / SYMBOL</th><th>PRICE</th><th>COST</th><th>PROCEEDS</th><th>NET GAIN<br>(LOSS)</th><th>%</th>'
+    +   '</tr></thead><tbody>'+rows+'</tbody></table>'
+    + '</div>'
+    + '<div class="ledger-band" style="grid-template-columns:1.5fr 2fr 2.1fr 2fr">'
+    +   '<div class="lc lk">TARGET / STOP</div><div class="lc" style="font-size:10px">'+(meta.targetStop||'')+'</div>'
+    +   '<div class="lc lk">R.O.I / R.O.R / R.O.C</div><div class="lc" style="border-right:none">'+(meta.roi||'')+'</div>'
+    + '</div>'
+    + '<div class="ledger-notes-h">NOTES</div>'
+    + '<div class="ledger-notes">'+(meta.notes||'')+'</div>'
+    + '</div>';
 }
 
 async function renderJournal(){
@@ -2435,8 +2596,8 @@ async function renderJournal(){
   if (_journalView === 'recent'){
     var entries = [];
     try { var r = await fetch('/api/journal'); if (r.ok) { var j = await r.json(); entries = (j && j.entries) ? j.entries : (Array.isArray(j) ? j : []); } } catch(e) {}
-    if (!entries.length) { wrap.innerHTML = '<div class="no-data">No trades logged today yet.</div>'; return; }
-    wrap.innerHTML = entries.slice(0,40).map(_journalEntryCard).join('');
+    var today = new Date().toLocaleDateString('en-US',{month:'2-digit',day:'2-digit',year:'numeric'});
+    wrap.innerHTML = _ledgerBlock(entries.slice(0,60), _ledgerMeta(entries, today));
     return;
   }
   await renderJournalBreakdown(_journalView);
@@ -2446,26 +2607,12 @@ async function renderJournalBreakdown(period){
   var wrap = document.getElementById('journal-wrap');
   var data = null;
   try { var r = await fetch('/api/journal/breakdown?period='+period); if (r.ok) data = await r.json(); } catch(e) {}
-  if (!data || !data.buckets || !data.buckets.length) { wrap.innerHTML = '<div class="no-data">No closed trades in this '+period+' window yet.</div>'; return; }
-  var head = '<div style="font-size:11px;color:var(--muted);margin-bottom:10px">'+data.closedTrades+' closed · '+data.openPositions+' open · net '+(data.netPnLAllPeriods>=0?'+':'')+'$'+data.netPnLAllPeriods+' across '+data.bucketCount+' '+period+' period(s)</div>';
-  wrap.innerHTML = head + data.buckets.map(function(b){
-    var netColor = b.netPnL>=0 ? 'var(--green)' : 'var(--red)';
-    var exitMix  = Object.keys(b.byExitReason).map(function(k){ return k+':'+b.byExitReason[k].count; }).join(' · ');
-    var trades   = b.entries.map(_journalEntryCard).join('');
-    return '<div class="card" style="margin-bottom:12px">'
-      + '<div class="jb-period" onclick="var t=this.parentElement.querySelector(\'.jb-trades\');t.style.display=(t.style.display===\'none\'?\'block\':\'none\')">'
-      +   '<div style="font-size:15px;font-weight:700;color:var(--blue)">'+b.period+' <span style="font-size:10px;color:var(--muted);font-weight:400">▸ tap to expand</span></div>'
-      +   '<div style="display:flex;gap:14px;align-items:center;flex-wrap:wrap;font-size:12px">'
-      +     '<span>'+b.trades+'T</span>'
-      +     '<span style="color:'+(b.winRate>=50?'var(--green)':'var(--orange)')+'">WR '+b.winRate+'%</span>'
-      +     '<span style="font-weight:700;color:'+netColor+'">'+(b.netPnL>=0?'+':'')+'$'+b.netPnL+'</span>'
-      +     '<span style="color:var(--muted)">PF '+(b.profitFactor==null?'∞':b.profitFactor)+'</span>'
-      +     '<span style="color:var(--muted)">P'+b.byDirection.put+'/C'+b.byDirection.call+'</span>'
-      +   '</div>'
-      + '</div>'
-      + '<div style="font-size:10px;color:var(--muted);margin-top:6px">avg win $'+b.avgWin+' · avg loss $'+b.avgLoss+(exitMix?(' · exits: '+exitMix):'')+'</div>'
-      + '<div class="jb-trades" style="display:none;margin-top:10px">'+trades+'</div>'
-      + '</div>';
+  if (!data || !data.buckets || !data.buckets.length) {
+    wrap.innerHTML = _ledgerBlock([], { date: period.toUpperCase(), condition:'OPTIONS', notes:'No closed trades in this '+period+' window yet.' });
+    return;
+  }
+  wrap.innerHTML = data.buckets.map(function(b){
+    return _ledgerBlock(b.entries||[], _ledgerMeta(b.entries||[], b.period));
   }).join('');
 }
 
@@ -4354,47 +4501,90 @@ async function loadAttribution() {
 }
 
 // ── Copy Journal to clipboard ─────────────────────────────────────────────
+function _copyJournalBtn(ok){
+  var btn = document.getElementById('copy-journal-btn');
+  if (!btn) return;
+  btn.textContent = ok ? '✅ COPIED' : '❌ COPY FAILED — select manually';
+  setTimeout(function(){ btn.textContent = '📋 COPY JOURNAL'; }, ok ? 2000 : 3000);
+}
+
+function _fmtJournalTrade(e, pad){
+  pad = pad || '';
+  var L = [];
+  var open = e.status === 'OPEN';
+  var isPut = e.optionType === 'put';
+  var pnl = (e.pnl_alpaca != null) ? e.pnl_alpaca : (e.pnl_apex != null ? e.pnl_apex : (e.pnl != null ? e.pnl : null));
+  L.push('');
+  L.push(pad + e.ticker + '  ' + (isPut?'PUT':'CALL') + ' · ' + (open?'OPEN':'CLOSED')
+    + '  $' + (e.strike!=null?e.strike:'?') + (isPut?'P':'C') + ' exp ' + (e.expDate||'?'));
+  if (!open && pnl != null) {
+    L.push(pad + '  P&L:   ' + (pnl>=0?'+':'') + '$' + Number(pnl).toFixed(2)
+      + (e.pnl_pct!=null ? '  (' + (e.pnl_pct>=0?'+':'') + e.pnl_pct + '%)' : ''));
+  }
+  if (e.entryScore != null) L.push(pad + '  Score: ' + e.entryScore + '/100');
+  if (!open) {
+    L.push(pad + '  Exit:  ' + (e.exitReason||'?')
+      + (e.peakPct!=null ? '  · peak +' + e.peakPct + '%' : '')
+      + (e.hoursHeld!=null ? '  · held ' + e.hoursHeld + 'h' : ''));
+  }
+  var ctx = [];
+  if (e.openDateET || e.openDate) ctx.push(e.openDateET || e.openDate);
+  if (e.entryVIX!=null) ctx.push('VIX ' + e.entryVIX);
+  if (e.entryIVP!=null) ctx.push('IVP ' + e.entryIVP);
+  if (e.entryRSI!=null) ctx.push('RSI ' + e.entryRSI);
+  if (e.entryRegimeClass) ctx.push('Regime ' + e.entryRegimeClass);
+  if (ctx.length) L.push(pad + '  ' + ctx.join(' · '));
+  var rs = e.entryReasons || [];
+  if (rs.length) {
+    L.push(pad + '  Entry logic:');
+    rs.forEach(function(r){ L.push(pad + '    • ' + r); });
+  }
+  return L;
+}
+
 async function copyJournal() {
-  let journal = state.tradeJournal || [];
-  try { const r = await fetch('/api/journal'); if (r.ok) journal = await r.json(); } catch(e) {}
-  if (!journal || !journal.length) { alert('No journal entries to copy.'); return; }
-  const lines = ['APEX — Trade Journal — ' + new Date().toLocaleString(), '═'.repeat(60)];
-  journal.slice(0, 50).forEach(e => {
+  var view = (typeof _journalView !== 'undefined') ? _journalView : 'recent';
+  var title = 'APEX — Trade Journal — ' + (view === 'recent' ? 'TODAY' : view.toUpperCase()) + ' — ' + new Date().toLocaleString();
+  var lines = [title, '═'.repeat(Math.min(64, title.length))];
+
+  if (view === 'recent') {
+    var entries = [];
+    try { var r = await fetch('/api/journal'); if (r.ok) { var j = await r.json(); entries = (j && j.entries) ? j.entries : (Array.isArray(j) ? j : []); } } catch(e) {}
+    if (!entries.length) { alert('No journal entries to copy.'); return; }
+    entries.slice(0, 80).forEach(function(e){ lines = lines.concat(_fmtJournalTrade(e)); });
+  } else {
+    var data = null;
+    try { var r2 = await fetch('/api/journal/breakdown?period=' + view); if (r2.ok) data = await r2.json(); } catch(e) {}
+    if (!data || !data.buckets || !data.buckets.length) { alert('No closed trades in this ' + view + ' window to copy.'); return; }
     lines.push('');
-    const header = [e.ticker, e.action, e.isSpread ? (e.isCreditSpread?'CREDIT SPREAD':'DEBIT SPREAD') : 'NAKED', e.optionType?.toUpperCase()].filter(Boolean).join(' · ');
-    lines.push(header);
-    if (e.action === 'OPEN') {
-      if (e.buyStrike && e.sellStrike) lines.push('  Strike: $'+e.sellStrike+'/$'+e.buyStrike+' '+e.expDate);
-      if (e.score) lines.push('  Score: '+e.score+'/100');
-    } else {
-      if (e.pnl !== undefined) lines.push('  P&L: '+(e.pnl>=0?'+':'')+e.pnl.toFixed(2)+' | Reason: '+(e.reason||'?'));
-    }
-    if (e.reasoning) lines.push('  '+e.reasoning);
-    if (e.scoreReasons && e.scoreReasons.length) {
-      e.scoreReasons.forEach(r => lines.push('    '+r));
-    }
-    lines.push('  '+new Date(e.time).toLocaleString());
-  });
-  // navigator.clipboard requires HTTPS — use textarea fallback for iframe/HTTP contexts
-  const text = lines.join('\n');
+    lines.push(data.closedTrades + ' closed · ' + data.openPositions + ' open · net '
+      + (data.netPnLAllPeriods>=0?'+':'') + '$' + data.netPnLAllPeriods + ' across ' + data.bucketCount + ' ' + view + ' period(s)');
+    data.buckets.forEach(function(b){
+      lines.push('');
+      lines.push('─'.repeat(52));
+      lines.push(b.period + '   ' + b.trades + 'T · WR ' + b.winRate + '% · net '
+        + (b.netPnL>=0?'+':'') + '$' + b.netPnL + ' · PF ' + (b.profitFactor==null?'∞':b.profitFactor)
+        + ' · P' + b.byDirection.put + '/C' + b.byDirection.call);
+      lines.push('  avg win $' + b.avgWin + ' · avg loss $' + b.avgLoss);
+      (b.entries || []).forEach(function(e){ lines = lines.concat(_fmtJournalTrade(e, '  ')); });
+    });
+  }
+
+  var text = lines.join('\n');
+  // navigator.clipboard requires HTTPS — textarea fallback for iframe/HTTP contexts
   try {
     await navigator.clipboard.writeText(text);
-    const btn = document.getElementById('copy-journal-btn');
-    if (btn) { btn.textContent='✅ COPIED'; setTimeout(()=>btn.textContent='📋 COPY JOURNAL',2000); }
+    _copyJournalBtn(true);
   } catch(e) {
-    // Fallback: create a textarea, select it, execCommand copy
-    const ta = document.createElement('textarea');
+    var ta = document.createElement('textarea');
     ta.value = text;
     ta.style.cssText = 'position:fixed;top:0;left:0;opacity:0;pointer-events:none';
     document.body.appendChild(ta);
     ta.focus(); ta.select();
-    const ok = document.execCommand('copy');
+    var ok = false;
+    try { ok = document.execCommand('copy'); } catch(_) {}
     document.body.removeChild(ta);
-    const btn = document.getElementById('copy-journal-btn');
-    if (btn) {
-      btn.textContent = ok ? '✅ COPIED' : '❌ COPY FAILED — select text manually';
-      setTimeout(()=>btn.textContent='📋 COPY JOURNAL',3000);
-    }
+    _copyJournalBtn(ok);
   }
 }
 
