@@ -91,7 +91,7 @@ const { runBacktest }                                     = require('./backtest'
 const { sendEmail, sendMorningBriefing, sendResendEmail,
         initReporting, setReportingContext,
         buildMonthlyReport, premarketAssessment,
-        updateAfterHoursContext }                         = require('./reporting');
+        updateAfterHoursContext, buildJournalBreakdown }  = require('./reporting');
 const { getAgentMacroAnalysis, initAgent,
         getAgentRescore, getAgentDayPlan, getAgentOvernightScan,
         getAgentPostMarketAssessment, getAgentPreEntryCheck } = require('./agent');
@@ -997,8 +997,8 @@ app.get("/api/score-debug", (req, res) => {
       agentRegime:         agentMacro.regime || "unknown",
       agentTradeType:      agentMacro.tradeType || "spread",
       isChoppyRegime:      _dbRb.gates.choppyDebitBlock,
-      creditModeActive:    _dbRb.gates.creditPutActive,
-      creditCallModeActive:_dbRb.gates.creditCallActive,
+      creditModeActive:    false,
+      creditCallModeActive:false,
       below200MACallBlock: _dbRb.gates.below200MACallBlock,
       macroBullish:        _dbRb.gates.macroBullishBlock,
       vixFallingPause:     _dbRb.gates.vixFallingPause,
@@ -1357,6 +1357,21 @@ app.get("/api/journal/summary", async (req, res) => {
     const byReason = {}; closed.forEach(e => { const r = e.exitReason || 'unknown'; if (!byReason[r]) byReason[r] = { count: 0, pnl: 0, wins: 0 }; byReason[r].count++; byReason[r].pnl += (e.pnl_alpaca || e.pnl_apex || 0); if (e.isWin) byReason[r].wins++; });
     const byTicker = {}; closed.forEach(e => { const t = e.ticker; if (!byTicker[t]) byTicker[t] = { count: 0, pnl: 0, wins: 0 }; byTicker[t].count++; byTicker[t].pnl += (e.pnl_alpaca || e.pnl_apex || 0); if (e.isWin) byTicker[t].wins++; });
     res.json({ period: { from: from.toISOString().split('T')[0], to: to.toISOString().split('T')[0], days: parseInt(days) }, totals: { trades: closed.length, open: entries.filter(e => e.status === 'OPEN').length, wins: wins.length, losses: closed.length - wins.length, winRate: closed.length > 0 ? parseFloat((wins.length / closed.length * 100).toFixed(1)) : 0, grossWins: parseFloat(grossW.toFixed(2)), grossLoss: parseFloat(grossL.toFixed(2)), netPnL: parseFloat((grossW - grossL).toFixed(2)), avgWin: wins.length > 0 ? parseFloat((grossW / wins.length).toFixed(2)) : 0, avgLoss: (closed.length - wins.length) > 0 ? parseFloat((grossL / (closed.length - wins.length)).toFixed(2)) : 0 }, byExitReason: byReason, byTicker });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// Daily / weekly / monthly journal breakdown — period-bucketed P&L + win rate +
+// exit-reason mix, each entry carrying its trade logic (entryReasons) and exit reason.
+// e.g. /api/journal/breakdown?period=weekly&days=90
+app.get("/api/journal/breakdown", async (req, res) => {
+  try {
+    const period = ["daily", "weekly", "monthly"].includes(req.query.period) ? req.query.period : "daily";
+    const defWindow = period === "monthly" ? 365 : period === "weekly" ? 120 : 30;
+    const days = Math.min(400, Math.max(1, parseInt(req.query.days) || defWindow));
+    const to   = new Date();
+    const from = new Date(Date.now() - days * 86400000);
+    const entries = await getJournalRange(from.toISOString().split('T')[0], to.toISOString().split('T')[0]);
+    res.json(buildJournalBreakdown(entries, period));
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
