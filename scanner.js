@@ -801,8 +801,8 @@ async function runScan() {
 
   const authRegimeName    = rb.regimeName;
   const isChoppyRegime    = rb.gates.choppyDebitBlock;
-  const creditModeActive  = rb.gates.creditPutActive;
-  const creditCallModeActive = rb.gates.creditCallActive;
+  const creditModeActive  = false; // APEX is naked-only — credit mode removed (rb.gates.creditPutActive was never set → always falsy)
+  const creditCallModeActive = false; // APEX is naked-only — credit mode removed
   const choppyDebitBlock  = rb.gates.choppyDebitBlock;
   const crisisDebitBlock  = rb.gates.crisisDebitBlock;
   const inBullRegime      = rb.isBullRegime;
@@ -1064,7 +1064,7 @@ async function runScan() {
   }
 
   const _rb               = getRegimeRulebook(state);
-  const _creditPutActive  = _rb.gates.creditPutActive;
+  const _creditPutActive  = false; // APEX naked-only — credit mode removed (gate never set)
   const _choppyDebitBlock = _rb.gates.choppyDebitBlock;
   const _vixNow           = state.vix || 20;
   const _vixCreditMode    = _vixNow >= VIX_CREDIT_PRIMARY;
@@ -1887,8 +1887,7 @@ async function runScan() {
       if (cooldownMins < 30) { logEvent("filter", `${stock.ticker} defensive cooldown ${cooldownMins.toFixed(0)}/30min`); continue; }
     }
     const sameTickerSameDir = state.positions.filter(p => p.ticker === stock.ticker && p.optionType === optionType);
-    if (creditModeActive && sameTickerSameDir.length >= 1) { logEvent("filter", `${stock.ticker} already have ${sameTickerSameDir.length} position(s)`); continue; }
-    if (!creditModeActive && sameTickerSameDir.length >= 1) { logEvent("filter", `${stock.ticker} already have ${sameTickerSameDir.length} position(s)`); continue; }
+    if (sameTickerSameDir.length >= 1) { logEvent("filter", `${stock.ticker} already have ${sameTickerSameDir.length} position(s)`); continue; }
 
     const macdSignal    = liveStock.macd || "neutral";
     const macdBullish   = macdSignal.includes("bullish");
@@ -2035,7 +2034,7 @@ async function runScan() {
       const batch = scored.slice(i, i + BATCH_SIZE);
       await Promise.all(batch.map(async ({ stock, price, optionType, score }) => {
         try {
-          const isMR = optionType === "call" && (liveStock._isMeanReversion || false);
+          const isMR = optionType === "call" && (stock._isMeanReversion || false);
           const contract = await findContract(stock.ticker, optionType, isMR ? 0.42 : 0.35, isMR ? 14 : 38, state.vix, stock);
           if (contract) {
             stock._cachedContract = contract;
