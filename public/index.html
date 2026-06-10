@@ -88,6 +88,8 @@ canvas{display:block;width:100%!important}
 .journal-score{font-size:11px;padding:2px 8px;border-radius:10px;font-weight:700}
 .journal-reasoning{font-size:11px;color:var(--text);line-height:1.6;margin-top:6px}
 .journal-meta{font-size:10px;color:var(--muted);margin-top:6px;display:flex;gap:16px;flex-wrap:wrap}
+.jv-btn.active{background:rgba(0,196,255,.15);border-color:var(--blue);color:var(--blue)}
+.jb-period{display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;cursor:pointer}
 .report-box{background:#050e1a;border:1px solid var(--border);border-radius:8px;padding:16px;white-space:pre-wrap;font-size:11px;color:var(--text);line-height:1.8;max-height:500px;overflow-y:auto}
 .watchlist-row{display:flex;align-items:center;justify-content:space-between;padding:6px 0;border-bottom:1px solid rgba(13,48,80,.4)}
 .watchlist-row:last-child{border-bottom:none}
@@ -777,8 +779,14 @@ input[type=text]:focus{border-color:var(--blue)}
 
 <div id="tab-journal" class="content">
   <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;flex-wrap:wrap;gap:8px">
-    <div class="section-title" style="margin:0">Trade Journal — Entry Reasoning</div>
+    <div class="section-title" style="margin:0">Trade Journal — Logic, Entry &amp; Exit Reasoning</div>
     <button class="btn btn-green" onclick="copyJournal()" id="copy-journal-btn">📋 COPY JOURNAL</button>
+  </div>
+  <div style="display:flex;gap:6px;margin-bottom:12px;flex-wrap:wrap">
+    <button class="btn jv-btn active" data-jv="recent"  onclick="setJournalView('recent')">TODAY</button>
+    <button class="btn jv-btn"        data-jv="daily"   onclick="setJournalView('daily')">DAILY</button>
+    <button class="btn jv-btn"        data-jv="weekly"  onclick="setJournalView('weekly')">WEEKLY</button>
+    <button class="btn jv-btn"        data-jv="monthly" onclick="setJournalView('monthly')">MONTHLY</button>
   </div>
   <div id="journal-wrap">
     <div class="no-data">No journal entries yet. APEX logs detailed reasoning for every trade.</div>
@@ -2373,52 +2381,91 @@ function renderActivityLog() {
   }).join('');
 }
 
-async function renderJournal() {
-  const wrap = document.getElementById('journal-wrap');
-  let journal = state.tradeJournal || [];
-  try { const r = await fetch('/api/journal'); if (r.ok) journal = await r.json(); } catch(e) {}
-  journal = journal || [];
-  if (!journal.length) { wrap.innerHTML = '<div class="no-data">No journal entries yet.</div>'; return; }
-  wrap.innerHTML = journal.slice(0, 30).map(e => {
-    const isOpen  = e.action === 'OPEN';
-    const color   = isOpen ? 'var(--green)' : (e.pnl >= 0 ? 'var(--blue)' : 'var(--red)');
-    const score   = e.score;
-    const scoreColor = score >= 85 ? 'var(--green)' : score >= 70 ? 'var(--blue)' : 'var(--orange)';
-    return `
-    <div class="journal-entry">
-      <div class="journal-header">
-        <div style="display:flex;align-items:center;gap:10px">
-          <span class="journal-ticker">${e.ticker}</span>
-          <span style="font-size:10px;padding:2px 8px;border-radius:10px;background:${isOpen?'rgba(0,255,136,.1)':'rgba(0,196,255,.1)'};color:${color}">${e.action}</span>
-          ${isOpen ? `<span style="font-size:10px;color:var(--muted)">${
-            e.isSpread && e.buyStrike && e.sellStrike
-              ? '$'+e.buyStrike+'/'+'$'+e.sellStrike+((e.optionType==='call'?'C':'P')+'-SPRD')
-              : e.strike
-                ? '$'+e.strike+(e.optionType==='put'?'P':'C')+' · '+(e.expDate||'?')
-                : e.optionType
-                  ? e.optionType.toUpperCase()
-                  : '--'
-          }</span>` : ''}
-          ${e.isCreditSpread ? '<span style="font-size:9px;padding:2px 6px;border-radius:10px;background:rgba(0,255,136,.15);color:var(--green)">CREDIT</span>' : e.isSpread ? '<span style="font-size:9px;padding:2px 6px;border-radius:10px;background:rgba(0,150,255,.15);color:var(--blue)">DEBIT</span>' : ''}
-        </div>
-        <div style="display:flex;align-items:center;gap:8px">
-          ${score ? `<span class="journal-score" style="background:rgba(0,196,255,.1);color:${scoreColor}">${score}/100</span>` : ''}
-          ${!isOpen && e.pnl !== undefined ? `<span style="font-weight:700;color:${e.pnl>=0?'var(--green)':'var(--red)'}">${e.pnl>=0?'+':''}${(e.pnl||0).toFixed(2)}</span>` : ''}
-        </div>
-      </div>
-      <div class="journal-reasoning">${e.reasoning || '--'}</div>
-      ${(isOpen && e.scoreReasons && e.scoreReasons.length) ? ('<div style="margin-top:4px;padding:4px 0;border-top:1px solid #1a2a3a">' + e.scoreReasons.map(function(r) {
-        var isNeg = r.indexOf('(-') > -1 || r.indexOf('contradicts') > -1 || r.indexOf('bad for') > -1 || r.indexOf('capped') > -1 || r.indexOf('fighting') > -1 || r.indexOf('Neither') > -1;
-        var isPos = !isNeg && r.indexOf('(+') > -1 && r.indexOf('+0)') === -1;
-        var col = isNeg ? '#ff7766' : isPos ? '#88dd88' : '#666';
-        return '<span style="font-size:10px;color:' + col + ';display:block;line-height:1.5">' + r + '</span>';
-      }).join('') + '</div>') : ''}
-      <div class="journal-meta">
-        <span>${new Date(e.time).toLocaleString()}</span>
-        ${isOpen ? `<span>δ ${e.delta}</span><span>IV ${e.iv}%</span><span>VIX ${e.vix}</span>` : `<span>Reason: ${e.reason}</span><span style="font-size:9px;padding:1px 5px;border-radius:8px;background:${e.tradeType==='credit_spread'?'rgba(0,255,136,.12)':e.tradeType==='debit_spread'?'rgba(0,150,255,.12)':'rgba(100,100,100,.1)'};color:${e.tradeType==='credit_spread'?'var(--green)':e.tradeType==='debit_spread'?'var(--blue)':'var(--muted)'}">${(e.tradeType||'naked').replace('_',' ').toUpperCase()}</span>`}
-        ${e.catalyst ? `<span>Catalyst: ${e.catalyst}</span>` : ''}
-      </div>
-    </div>`;
+let _journalView = 'recent';
+
+function setJournalView(v){
+  _journalView = v;
+  document.querySelectorAll('.jv-btn').forEach(function(b){ b.classList.toggle('active', b.dataset.jv===v); });
+  renderJournal();
+}
+
+// Render one durable-journal entry (status / entryScore / entryReasons / exitReason / pnl_apex shape)
+function _journalEntryCard(e){
+  var open  = e.status === 'OPEN';
+  var pnl   = (e.pnl_alpaca != null) ? e.pnl_alpaca : (e.pnl_apex != null ? e.pnl_apex : (e.pnl != null ? e.pnl : null));
+  var score = e.entryScore;
+  var scoreColor = score>=85 ? 'var(--green)' : score>=70 ? 'var(--blue)' : 'var(--orange)';
+  var dirColor   = open ? 'var(--green)' : (pnl>=0 ? 'var(--blue)' : 'var(--red)');
+  var reasons = e.entryReasons || [];
+  var reasonsHtml = reasons.length ? ('<div class="journal-reasoning"><span style="color:var(--muted);font-size:9px;letter-spacing:.5px">ENTRY LOGIC</span>' + reasons.map(function(r){
+      var isNeg = r.indexOf('(-')>-1 || r.indexOf('contradicts')>-1 || r.indexOf('wrong')>-1 || r.indexOf('fighting')>-1 || r.indexOf('blocked')>-1;
+      var isPos = !isNeg && r.indexOf('(+')>-1 && r.indexOf('+0)')===-1;
+      var col = isNeg ? '#ff7766' : isPos ? '#88dd88' : '#888';
+      return '<span style="font-size:10px;color:'+col+';display:block;line-height:1.5">'+r+'</span>';
+    }).join('') + '</div>') : '';
+  var exitHtml = !open ? ('<div style="margin-top:6px;font-size:11px"><span style="color:var(--muted);font-size:9px;letter-spacing:.5px">EXIT</span> <span style="color:var(--text);font-weight:600">'+(e.exitReason||'?')+'</span>'
+      + (e.peakPct!=null ? ' · peak +'+e.peakPct+'%' : '')
+      + (e.hoursHeld!=null ? ' · held '+e.hoursHeld+'h' : '') + '</div>') : '';
+  var meta = '<div class="journal-meta">'
+      + '<span>'+(e.openDateET || e.openDate || '')+'</span>'
+      + (e.entryVIX!=null ? '<span>VIX '+e.entryVIX+'</span>' : '')
+      + (e.entryIVP!=null ? '<span>IVP '+e.entryIVP+'</span>' : '')
+      + (e.entryRSI!=null ? '<span>RSI '+e.entryRSI+'</span>' : '')
+      + (e.entryRegimeClass ? '<span>Regime '+e.entryRegimeClass+'</span>' : '')
+      + '</div>';
+  return '<div class="journal-entry">'
+      + '<div class="journal-header"><div style="display:flex;align-items:center;gap:10px">'
+      +   '<span class="journal-ticker">'+e.ticker+'</span>'
+      +   '<span style="font-size:10px;padding:2px 8px;border-radius:10px;background:'+(open?'rgba(0,255,136,.1)':'rgba(0,196,255,.1)')+';color:'+dirColor+'">'+(open?'OPEN':'CLOSED')+'</span>'
+      +   '<span style="font-size:10px;color:var(--muted)">$'+(e.strike||'?')+(e.optionType==='put'?'P':'C')+' · '+(e.expDate||'?')+'</span>'
+      + '</div><div style="display:flex;align-items:center;gap:8px">'
+      +   (score ? '<span class="journal-score" style="background:rgba(0,196,255,.1);color:'+scoreColor+'">'+score+'/100</span>' : '')
+      +   ((!open && pnl!=null) ? '<span style="font-weight:700;color:'+(pnl>=0?'var(--green)':'var(--red)')+'">'+(pnl>=0?'+':'')+'$'+Number(pnl).toFixed(2)+(e.pnl_pct!=null?' ('+e.pnl_pct+'%)':'')+'</span>' : '')
+      + '</div></div>'
+      + reasonsHtml + exitHtml + meta
+      + '</div>';
+}
+
+async function renderJournal(){
+  var wrap = document.getElementById('journal-wrap');
+  if (!wrap) return;
+  // Only fetch when the journal tab is visible (avoids per-refresh fetches on other tabs)
+  var tab = document.getElementById('tab-journal');
+  if (tab && !tab.classList.contains('active')) return;
+  if (_journalView === 'recent'){
+    var entries = [];
+    try { var r = await fetch('/api/journal'); if (r.ok) { var j = await r.json(); entries = (j && j.entries) ? j.entries : (Array.isArray(j) ? j : []); } } catch(e) {}
+    if (!entries.length) { wrap.innerHTML = '<div class="no-data">No trades logged today yet.</div>'; return; }
+    wrap.innerHTML = entries.slice(0,40).map(_journalEntryCard).join('');
+    return;
+  }
+  await renderJournalBreakdown(_journalView);
+}
+
+async function renderJournalBreakdown(period){
+  var wrap = document.getElementById('journal-wrap');
+  var data = null;
+  try { var r = await fetch('/api/journal/breakdown?period='+period); if (r.ok) data = await r.json(); } catch(e) {}
+  if (!data || !data.buckets || !data.buckets.length) { wrap.innerHTML = '<div class="no-data">No closed trades in this '+period+' window yet.</div>'; return; }
+  var head = '<div style="font-size:11px;color:var(--muted);margin-bottom:10px">'+data.closedTrades+' closed · '+data.openPositions+' open · net '+(data.netPnLAllPeriods>=0?'+':'')+'$'+data.netPnLAllPeriods+' across '+data.bucketCount+' '+period+' period(s)</div>';
+  wrap.innerHTML = head + data.buckets.map(function(b){
+    var netColor = b.netPnL>=0 ? 'var(--green)' : 'var(--red)';
+    var exitMix  = Object.keys(b.byExitReason).map(function(k){ return k+':'+b.byExitReason[k].count; }).join(' · ');
+    var trades   = b.entries.map(_journalEntryCard).join('');
+    return '<div class="card" style="margin-bottom:12px">'
+      + '<div class="jb-period" onclick="var t=this.parentElement.querySelector(\'.jb-trades\');t.style.display=(t.style.display===\'none\'?\'block\':\'none\')">'
+      +   '<div style="font-size:15px;font-weight:700;color:var(--blue)">'+b.period+' <span style="font-size:10px;color:var(--muted);font-weight:400">▸ tap to expand</span></div>'
+      +   '<div style="display:flex;gap:14px;align-items:center;flex-wrap:wrap;font-size:12px">'
+      +     '<span>'+b.trades+'T</span>'
+      +     '<span style="color:'+(b.winRate>=50?'var(--green)':'var(--orange)')+'">WR '+b.winRate+'%</span>'
+      +     '<span style="font-weight:700;color:'+netColor+'">'+(b.netPnL>=0?'+':'')+'$'+b.netPnL+'</span>'
+      +     '<span style="color:var(--muted)">PF '+(b.profitFactor==null?'∞':b.profitFactor)+'</span>'
+      +     '<span style="color:var(--muted)">P'+b.byDirection.put+'/C'+b.byDirection.call+'</span>'
+      +   '</div>'
+      + '</div>'
+      + '<div style="font-size:10px;color:var(--muted);margin-top:6px">avg win $'+b.avgWin+' · avg loss $'+b.avgLoss+(exitMix?(' · exits: '+exitMix):'')+'</div>'
+      + '<div class="jb-trades" style="display:none;margin-top:10px">'+trades+'</div>'
+      + '</div>';
   }).join('');
 }
 
@@ -3718,6 +3765,7 @@ function switchTab(name) {
   if (name==='theta')       loadTheta();
   if (name==='attribution') loadAttribution();
   if (name==='tax')         loadTaxLog();
+  if (name==='journal')     renderJournal();
 }
 
 // ── Init ──────────────────────────────────────────────────────────────────
