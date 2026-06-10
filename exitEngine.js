@@ -335,14 +335,50 @@ async function checkExits(positions, posSnapshots, posQuotes, posNewsCache, ctx)
       }
     }
 
-    // ── Fast stop ─────────────────────────────────────────────────────────────
+    // ── Intraday tiered stop (day-trade loss schedule) ────────────────────────
+    // Primary intraday loss control. Active from ENTRY (after a 2-min stale-
+    // snapshot guard), measured from entry, evaluated on the BID (realizable
+    // sell-side price). Tightens as the session runs; the hard -35% stop and the
+    // -50% premium floor below remain always-on backstops. This replaces the old
+    // hoursOpen>=2 fast-stop arming gap that left a day trade protected only by
+    // the -35% hard stop for its first ~2 hours.
+    {
+      const _entryMsTS      = new Date(pos.openDate || pos.entryTime || Date.now()).getTime();
+      const _minsSinceEntry = (Date.now() - _entryMsTS) / 60000;
+      const _etDecimalTS    = scanET.getHours() + scanET.getMinutes() / 60;
+      const _bidChg = (pos.bid > 0 && pos.premium > 0)
+        ? (pos.bid - pos.premium) / pos.premium : chg;       // realizable (sell-side), fall back to mid
+      let _tierStop;                                          // tightest applicable rung wins
+      if      (_etDecimalTS >= 14.75) _tierStop = 0.12;       // after 2:45pm ET — tighten into the 3:15 flatten
+      else if (_minsSinceEntry >= 90) _tierStop = 0.18;
+      else if (_minsSinceEntry >= 60) _tierStop = 0.22;
+      else if (_minsSinceEntry >= 30) _tierStop = 0.25;
+      else                            _tierStop = 0.30;       // 0–30 min: room for the dip-buy to breathe
+      if (_minsSinceEntry >= 2 && _bidChg <= -_tierStop) {
+        const _tierLabel = _etDecimalTS >= 14.75 ? "after-2:45pm" : `${_minsSinceEntry.toFixed(0)}min`;
+        logEvent("scan", `${pos.ticker} tiered-stop ${(_bidChg*100).toFixed(0)}% (bid) — tier ${_tierLabel} threshold -${(_tierStop*100).toFixed(0)}%`);
+        pos._tierStopContext = {                              // instrumentation for rung calibration
+          minsSinceEntry: Math.round(_minsSinceEntry),
+          etDecimal: parseFloat(_etDecimalTS.toFixed(2)),
+          tierStop: _tierStop,
+          bidChg: parseFloat(_bidChg.toFixed(3)),
+          peakChg: parseFloat((((pos.peakPremium || pos.premium) - pos.premium) / pos.premium).toFixed(3)),
+        };
+        if (!_closedThisCycle.has(pi)) {
+          _closedThisCycle.add(pi);
+          decisions.push({ pi, ticker: pos.ticker, action: 'close', reason: "tiered-stop", exitPremium: null, contractSym: pos.contractSymbol || null }); continue;
+        }
+      }
+    }
+
+    // ── Fast stop (weekly / legacy only — day trades use the tiered stop above) ─
     const isWeeklyPos    = pos.expiryType === "weekly" || (pos.expDays || 30) <= 21;
     const fastStopWindow = isWeeklyPos ? FAST_STOP_HOURS : 120;
     const _agentBearish  = (state._agentMacro?.signal || "").includes("bearish");
     const _macroFastStop = (!pos.isSpread && pos.optionType === "call" && _agentBearish && chg <= -0.10)
       ? 0.12 : (pos.fastStopPct || FAST_STOP_PCT);
     const activeFastStop   = isWeeklyPos ? _macroFastStop : Math.min(0.15, _macroFastStop);
-    const fastStopEligible = hoursOpen >= 2 && hoursOpen <= fastStopWindow;
+    const fastStopEligible = isWeeklyPos && hoursOpen >= 2 && hoursOpen <= fastStopWindow;
     if (fastStopEligible && chg <= -activeFastStop) {
       logEvent("scan", `${pos.ticker} fast-stop ${(chg*100).toFixed(0)}% in ${hoursOpen.toFixed(1)}hrs (threshold ${(activeFastStop*100).toFixed(0)}%)`);
       if (!_closedThisCycle.has(pi)) {
