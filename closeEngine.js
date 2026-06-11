@@ -472,7 +472,9 @@ async function _doClosePosition(ticker, reason, exitPremium = null, contractSym 
     status:             'CLOSED',
   };
   const _sym = pos.contractSymbol || pos.buySymbol;
-  updateJournalExit(_sym, _exitFields).then(found => {
+  updateJournalExit(_sym, _exitFields, {
+    ticker: pos.ticker || ticker, optionType: pos.optionType, strike: pos.strike, expDate: pos.expDate
+  }).then(found => {
     if (!found) {
       writeJournalEntry({
         id:             `${_sym}_exit_${Date.now()}`,
