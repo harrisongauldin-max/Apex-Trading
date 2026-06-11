@@ -472,12 +472,25 @@ async function writeJournalEntry(entry) {
   await saveJournalDay(dateStr, entries);
 }
 
-async function updateJournalExit(contractSymbol, exitFields) {
+async function updateJournalExit(contractSymbol, exitFields, descriptor) {
   const today = new Date().toISOString().split('T')[0];
   const yesterday = new Date(Date.now() - 86400000).toISOString().split('T')[0];
+  const d = descriptor || {};
+  const hasDesc = d.ticker || d.strike != null;
+  const matchesDesc = (e) =>
+    e.status === 'OPEN' &&
+    (!d.ticker     || e.ticker === d.ticker) &&
+    (!d.optionType || e.optionType === d.optionType) &&
+    (d.strike == null || Number(e.strike) === Number(d.strike)) &&
+    (!d.expDate    || e.expDate === d.expDate);
   for (const dateStr of [today, yesterday]) {
     const entries = await loadJournalDay(dateStr);
-    const idx = entries.findIndex(e => e.contractSymbol === contractSymbol && e.status === 'OPEN');
+    // 1) exact contract-symbol match (the normal path)
+    let idx = contractSymbol
+      ? entries.findIndex(e => e.contractSymbol === contractSymbol && e.status === 'OPEN')
+      : -1;
+    // 2) structural fallback when the symbol is missing/null/mismatched (prevents orphaned OPEN + duplicate)
+    if (idx < 0 && hasDesc) idx = entries.findIndex(matchesDesc);
     if (idx >= 0) {
       entries[idx] = { ...entries[idx], ...exitFields, status: 'CLOSED' };
       await saveJournalDay(dateStr, entries);
@@ -485,6 +498,35 @@ async function updateJournalExit(contractSymbol, exitFields) {
     }
   }
   return false;
+}
+
+// Backstop: close any journal entry still marked OPEN whose contract is not in the live
+// Alpaca position set. Enforces the invariant "no live position ⇒ no OPEN journal row".
+// liveSymbolSet must come from a SUCCESSFUL Alpaca positions fetch (empty = genuinely flat).
+async function closeOrphanJournalOpens(liveSymbolSet) {
+  const today = new Date().toISOString().split('T')[0];
+  const yesterday = new Date(Date.now() - 86400000).toISOString().split('T')[0];
+  let closed = 0;
+  for (const dateStr of [today, yesterday]) {
+    const entries = await loadJournalDay(dateStr);
+    let changed = false;
+    for (const e of entries) {
+      // Only sweep entries that carry a real contractSymbol and are absent from Alpaca.
+      // (Entries without a stored symbol are left alone — the structural fallback above
+      //  is what keeps them from orphaning in the first place.)
+      if (e.status === 'OPEN' && e.contractSymbol && !liveSymbolSet.has(e.contractSymbol)) {
+        e.status      = 'CLOSED';
+        e.exitReason  = e.exitReason || 'reconcile-orphan-closed';
+        e.closeDate   = new Date().toISOString();
+        e.closeDateET = new Date().toLocaleString('en-US', { timeZone: 'America/New_York' });
+        e._orphanClosed = true;
+        if (e.pnl_alpaca == null && e.pnl_apex == null && e.pnl == null) e.pnl = 0;
+        closed++; changed = true;
+      }
+    }
+    if (changed) await saveJournalDay(dateStr, entries);
+  }
+  return closed;
 }
 
 async function getJournalRange(fromDate, toDate) {
@@ -500,4 +542,5 @@ async function getJournalRange(fromDate, toDate) {
 
 module.exports = { state, markDirty, saveStateNow, flushStateIfDirty, logEvent,
                    redisSave, redisLoad, defaultState, saveDailyLogToRedis, getETDateStr,
-                   writeJournalEntry, updateJournalExit, loadJournalDay, getJournalRange };
+                   writeJournalEntry, updateJournalExit, loadJournalDay, getJournalRange,
+                   closeOrphanJournalOpens };
