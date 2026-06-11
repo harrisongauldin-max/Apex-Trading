@@ -77,7 +77,7 @@ function getRegimeRulebook(state) {
 
   // ── Gate flags ────────────────────────────────────────────
   const gates = {
-    choppyDebitBlock:    agentChoppy,    // choppy blocks ALL entries (no credit fallback in APEX)
+    choppyDebitBlock:    false,
     crisisDebitBlock:    isCrisis,       // crisis blocks ALL entries
     macroBullishBlock:   isMacroBullish,
     below200MACallBlock: !!(state._spyMA200 && state._liveSPY && state._liveSPY < state._spyMA200),
