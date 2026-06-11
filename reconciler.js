@@ -4,7 +4,7 @@
 'use strict';
 
 const { alpacaGet } = require('./broker');
-const { updateJournalExit, writeJournalEntry, loadJournalDay } = require('./state');
+const { updateJournalExit, writeJournalEntry, loadJournalDay, closeOrphanJournalOpens } = require('./state');
 const { WATCHLIST,
   ALPACA_KEY, INDIVIDUAL_STOCKS_ENABLED, MS_PER_DAY, STOP_LOSS_PCT, TAKE_PROFIT_PCT
 } = require('./constants');
@@ -239,7 +239,9 @@ async function runReconciliation() {
                 isWin:       _ghostPnl > 0,
                 status:      'CLOSED',
               };
-              updateJournalExit(sym, _ghostExitFields).then(found => {
+              updateJournalExit(sym, _ghostExitFields, {
+                ticker: pos.ticker, optionType: pos.optionType, strike: pos.strike, expDate: pos.expDate
+              }).then(found => {
                 if (!found) {
                   writeJournalEntry({
                     id: `${sym}_reconcile_${Date.now()}`,
@@ -565,6 +567,16 @@ async function runReconciliation() {
       _log("warn", `[RECONCILE] Re-paired ${pairsFound} spread(s) from individual legs`);
       await _redisSave(_state);
       _markDirty();
+    }
+
+    // ── Journal sweep — enforce "no live position ⇒ no OPEN journal row" ──────
+    // alpacaSymbols came from a successful /positions fetch (guarded at top), so an
+    // empty set genuinely means flat. Journal-only: never touches positions or orders.
+    try {
+      const swept = await closeOrphanJournalOpens(alpacaSymbols);
+      if (swept > 0) _log("warn", `[RECONCILE] Journal sweep: closed ${swept} orphan OPEN journal entr${swept === 1 ? 'y' : 'ies'} with no live position`);
+    } catch (e) {
+      _log("warn", `[RECONCILE] journal sweep failed: ${e.message}`);
     }
 
     _state.lastReconcile   = new Date().toISOString();
