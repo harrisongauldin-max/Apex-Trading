@@ -21,7 +21,7 @@ const {
 } = require('./signals');
 
 const {
-  getMacroNews, getFearAndGreed, getMarketBreadth, getSyntheticPCR,
+  getMacroNews, getFearAndGreed, getMarketBreadth, computeBreadthLab, getSyntheticPCR,
   getVolTermStructure, getCBOESKEW, getSentimentSignal, getDXY,
   getYieldCurve, getEarningsDate, getNewsForTicker, analyzeNews, scoreArticle,
   getAnalystActivity, getShortInterestSignal, getUpcomingMacroEvents,
@@ -354,6 +354,14 @@ async function runScan() {
         if (age > 2) state._zweigThrust = { detected: false };
       }
     }
+
+    // ── Parallel breadth lab (informational; freeze-window data gathering) ──
+    // Logs candidate metrics next to live breadth. NOT used by scoring/entries.
+    try {
+      const _lab = await computeBreadthLab(bPct);
+      state._breadthLab = _lab.data;
+      logEvent("scan", _lab.line);
+    } catch (_e) { logEvent("warn", `[BREADTH-LAB] failed: ${_e.message}`); }
 
     state.lastRebalance = now;
     const calMod = getMacroCalendarModifier();
