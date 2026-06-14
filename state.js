@@ -122,6 +122,7 @@ async function redisSave(data) {
     closedTrades: (data.closedTrades || []).slice(0, 200),
   };
   delete slim._marketContextCache;
+  delete slim._dailyLogBuffer;   // saved separately via saveDailyLogToRedis — keep it out of the state payload
 
   try { fs.writeFileSync(STATE_FILE, JSON.stringify(data, null, 2)); } catch(e) {}
 
@@ -263,14 +264,27 @@ async function flushStateIfDirty() {
   }
 }
 
+const _logDedup = {};
+const LOG_DEDUP_MS = 5 * 60 * 1000;  // collapse byte-identical non-event lines within 5 min
 function logEvent(type, message) {
+  const now = Date.now();
+  // Collapse identical, rapidly-repeating boilerplate. Never touches trade/error/warn,
+  // and the per-scan heartbeat survives because it carries live VIX/breadth (never identical).
+  if (type !== 'trade' && type !== 'error' && type !== 'warn') {
+    const last = _logDedup[message];
+    if (last && (now - last) < LOG_DEDUP_MS) { _logDedup[message] = now; return; }
+    _logDedup[message] = now;
+    if (Object.keys(_logDedup).length > 3000) {
+      for (const k in _logDedup) if (now - _logDedup[k] > LOG_DEDUP_MS) delete _logDedup[k];
+    }
+  }
   const entry = { time: new Date().toISOString(), type, message };
   state.tradeLog.unshift(entry);
   if (state.tradeLog.length > 1000) state.tradeLog = state.tradeLog.slice(0, 1000);
   if (!state._dailyLogBuffer) state._dailyLogBuffer = [];
   state._dailyLogBuffer.push(entry);
-  if (state._dailyLogBuffer.length > 5000)
-    state._dailyLogBuffer = state._dailyLogBuffer.slice(-5000);
+  if (state._dailyLogBuffer.length > 30000)
+    state._dailyLogBuffer = state._dailyLogBuffer.slice(-30000);
   console.log(`[${type.toUpperCase()}] ${message}`);
 }
 
