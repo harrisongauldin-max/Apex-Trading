@@ -446,11 +446,42 @@ async function _doClosePosition(ticker, reason, exitPremium = null, contractSym 
     ? parseFloat(((pos._peakTime - new Date(pos.openDate).getTime()) / 60000).toFixed(0))
     : null;
   const _pnlApex   = parseFloat(((ep - pos.premium) * 100 * (pos.contracts || contractsToSell)).toFixed(2));
+  // ADD (6/14): human-readable exit "why" from the context exitEngine stashed on pos
+  const _lastThesis = (pos.thesisHistory && pos.thesisHistory.length)
+    ? pos.thesisHistory[pos.thesisHistory.length - 1] : null;
+  const _exitPnlPct = pos.cost > 0 ? (_pnlApex / pos.cost * 100) : 0;
+  const _giveback   = (typeof _peakPct === 'number' && _peakPct > 0)
+    ? Math.round(_peakPct - _exitPnlPct) : null;
+  let _exitDetail;
+  switch (reason) {
+    case 'thesis-collapsed':  _exitDetail = _lastThesis ? `thesis ${_lastThesis.score}/100 — ${_lastThesis.notes}` : 'thesis integrity collapsed (<20)'; break;
+    case 'tiered-stop':       _exitDetail = pos._tierStopContext ? `tiered intraday stop @-${(pos._tierStopContext.tierStop*100).toFixed(0)}% after ${pos._tierStopContext.minsSinceEntry}min (peak was ${(pos._tierStopContext.peakChg*100).toFixed(0)}%)` : 'tiered intraday stop'; break;
+    case 'trail':             _exitDetail = `trail floor — peaked +${(_peakPct||0).toFixed(0)}%${_giveback!=null?`, gave back ~${_giveback}pts`:''}`; break;
+    case 'fast-stop':         _exitDetail = 'fast-stop (early loss control)'; break;
+    case 'time-stop':         _exitDetail = 'time-adjusted stop'; break;
+    case 'dte-urgency':       _exitDetail = 'DTE expiry urgency'; break;
+    case 'iv-collapse':       _exitDetail = 'IV collapse'; break;
+    case 'premium-floor':     _exitDetail = 'premium floor (-50%)'; break;
+    case 'delta-compression': _exitDetail = 'delta compression'; break;
+    case 'stop':              _exitDetail = 'hard stop (-35%)'; break;
+    case 'target':            _exitDetail = 'profit target hit'; break;
+    default:                  _exitDetail = reason;
+  }
+
   const _exitFields = {
     closeDate:          _now.toISOString(),
     closeDateET:        _etStr2(_now),
     exitPrice:          ep,
     exitReason:         reason,
+    exitDetail:         _exitDetail,
+    exitThesis:         _lastThesis ? { score: _lastThesis.score, notes: _lastThesis.notes } : null,
+    exitTierContext:    pos._tierStopContext || null,
+    exitBreadth:        state._breadth ?? null,
+    exitBreadthLab:     state._breadthLab
+                          ? { spSpread: state._breadthLab.spSpread, spLabel: state._breadthLab.spLabel,
+                              nqSpread: state._breadthLab.nqSpread, nqLabel: state._breadthLab.nqLabel,
+                              accel: state._breadthLab.accel, trend: state._breadthLab.trend }
+                          : null,
     exitRSI:            pos._prevRSI || null,
     exitVIX:            state.vix || null,
     exitScore:          pos._lastAgentScore || null,
@@ -472,6 +503,15 @@ async function _doClosePosition(ticker, reason, exitPremium = null, contractSym 
     status:             'CLOSED',
   };
   const _sym = pos.contractSymbol || pos.buySymbol;
+  // ADD (6/14): one grep-able structured line per exit — pairs with [ENTRY-FIRED]
+  {
+    const _labE = state._breadthLab;
+    const _labEStr = _labE
+      ? `RSP-SPY:${_labE.spSpread ?? '?'}(${_labE.spLabel || '?'}) QQQE-QQQ:${_labE.nqSpread ?? '?'}(${_labE.nqLabel || '?'})`
+      : 'lab:n/a';
+    logEvent('filter', `[EXIT-FIRED] ${pos.ticker} ${(pos.optionType||'?').toUpperCase()} reason:${reason} | ${_exitDetail} | P&L:${_exitFields.pnl_pct >= 0 ? '+' : ''}${_exitFields.pnl_pct}% (${_exitFields.isWin ? 'WIN' : 'LOSS'}) | held:${_exitFields.hoursHeld}h peak:+${(_peakPct||0).toFixed(0)}% | exitRSI:${pos._prevRSI ?? '?'} breadth:${state._breadth ?? '?'}% | ${_labEStr}`);
+  }
+
   updateJournalExit(_sym, _exitFields, {
     ticker: pos.ticker || ticker, optionType: pos.optionType, strike: pos.strike, expDate: pos.expDate
   }).then(found => {
