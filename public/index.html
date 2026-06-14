@@ -1055,6 +1055,7 @@ input[type=text]:focus{border-color:var(--blue)}
     <input type="date" id="redis-log-date" style="font-size:11px;background:#0a1628;color:#44aaff;border:1px solid rgba(0,196,255,.4);border-radius:4px;padding:3px 6px;cursor:pointer" title="Pick a date to copy from Redis" />
     <button class="btn" id="save-redis-btn" onclick="saveLogToRedis()" style="font-size:11px;border-color:rgba(255,200,50,.4);color:#ffc832" title="Force-save current log buffer to Redis before copying">&#128190; Save Now</button>
     <button class="btn" id="copy-redis-btn" onclick="copyFullDayFromRedis()" style="font-size:11px;border-color:rgba(100,200,100,.5);color:#6ec97a">&#9126; Copy Day from Redis</button>
+    <button class="btn" id="download-day-btn" onclick="downloadFullDay()" style="font-size:11px;border-color:rgba(0,196,255,.55);color:#44aaff;font-weight:600" title="Download the entire day's log as a .txt file to hand to Claude">&#11015; Download full day</button>
   </div>
   <!-- ── Log box ── -->
   <div class="log-box" id="server-log" style="height:560px;overflow-y:auto"></div>
@@ -4120,6 +4121,50 @@ async function copyFullDayFromRedis() {
     btn.textContent = '❌ ' + (err.message || 'Error');
     setTimeout(() => { btn.textContent = '💾 Copy Day from Redis'; btn.disabled = false; }, 3000);
   }
+}
+
+async function downloadFullDay() {
+  var btn = document.getElementById('download-day-btn');
+  var orig = btn.innerHTML;
+  btn.textContent = '\u23f3 Building...';
+  btn.disabled = true;
+  try {
+    var r = await fetch('/api/logs?since=1970-01-01T00:00:00Z&limit=30000');
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    var data = await r.json();
+    var entries = (data.logs || []).slice();
+    if (!entries.length) {
+      btn.textContent = '\u26a0 No entries';
+      setTimeout(function(){ btn.innerHTML = orig; btn.disabled = false; }, 2500);
+      return;
+    }
+    entries.sort(function(a, b){ return new Date(a.time) - new Date(b.time); });
+    var dateStr = new Date().toISOString().slice(0, 10);
+    var header = [
+      'APEX \u2014 Full Day Server Log \u2014 ' + dateStr,
+      'Cash: $' + parseFloat(state.cash || 0).toFixed(2) + ' | Positions: ' + (state.positions || []).length + ' | VIX: ' + (state.vix || '--') + ' | Regime: ' + (state._regimeClass || '--'),
+      'Entries: ' + entries.length + ' (source: ' + (data.source || 'daily') + ' \u00b7 identical boilerplate collapsed)',
+      '\u2500'.repeat(60),
+      ''
+    ];
+    var body = entries.map(function(e){
+      var t = new Date(e.time).toLocaleTimeString();
+      var type = (e.type || 'info').toUpperCase();
+      while (type.length < 8) type += ' ';
+      return '[' + t + '] ' + type + ' ' + (e.message || '');
+    });
+    var text = header.concat(body).join('\n');
+    var blob = new Blob([text], { type: 'text/plain' });
+    var url  = URL.createObjectURL(blob);
+    var a    = document.createElement('a');
+    a.href = url; a.download = 'APEX_log_' + dateStr + '.txt';
+    document.body.appendChild(a); a.click(); document.body.removeChild(a);
+    setTimeout(function(){ URL.revokeObjectURL(url); }, 1000);
+    btn.textContent = '\u2705 ' + entries.length + ' lines';
+  } catch(e) {
+    btn.textContent = '\u274c ' + (e.message || 'Error');
+  }
+  setTimeout(function(){ btn.innerHTML = orig; btn.disabled = false; }, 3000);
 }
 
 function copyLogsForClaude() {
