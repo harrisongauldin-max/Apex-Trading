@@ -816,6 +816,10 @@ function buildJournalBreakdown(entries, period = 'daily') {
       entryVIX: e.entryVIX, entryIVP: e.entryIVP, entryIVR: e.entryIVR,
       entryBreadth: e.entryBreadth, entryRegimeClass: e.entryRegimeClass,
       entryRegimeDuration: e.entryRegimeDuration, regimeAtEntry: e.regimeAtEntry,
+      // ADD (6/14): pass today's entry/exit breakdown fields through to the daily/weekly/monthly ledger
+      entryPutTier: e.entryPutTier, entryWeeklyTrend: e.entryWeeklyTrend, entryBreadthLab: e.entryBreadthLab,
+      exitDetail: e.exitDetail || null, exitThesis: e.exitThesis || null,
+      exitTierContext: e.exitTierContext || null, exitBreadth: e.exitBreadth, exitBreadthLab: e.exitBreadthLab,
     });
   }
 
