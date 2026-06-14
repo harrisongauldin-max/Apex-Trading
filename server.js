@@ -1098,7 +1098,7 @@ app.get("/api/score-debug", (req, res) => {
 });
 
 app.get("/api/logs", (req, res) => {
-  const limit  = Math.min(parseInt(req.query.limit || 200), 5000);
+  const limit  = Math.min(parseInt(req.query.limit || 200), 30000);
   const filter = req.query.filter || null;
   const since  = req.query.since  || null;
   const search = req.query.search || null;
@@ -1179,7 +1179,7 @@ app.get("/api/logs/history", async (req, res) => {
         source  = "redis";
       }
       const filter = req.query.filter;
-      const limit  = Math.min(parseInt(req.query.limit || 5000), 10000);
+      const limit  = Math.min(parseInt(req.query.limit || 5000), 30000);
       const types  = filter ? filter.split(",").map(t => t.trim().toLowerCase()) : null;
       if (types) entries = entries.filter(e => types.includes(e.type));
       res.json({ date, entries: entries.slice(0, limit), summary, source });
