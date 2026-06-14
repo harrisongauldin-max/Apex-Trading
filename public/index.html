@@ -800,6 +800,12 @@ input[type=text]:focus{border-color:var(--blue)}
     <button class="btn jv-btn"        data-jv="daily"   onclick="setJournalView('daily')">DAILY</button>
     <button class="btn jv-btn"        data-jv="weekly"  onclick="setJournalView('weekly')">WEEKLY</button>
     <button class="btn jv-btn"        data-jv="monthly" onclick="setJournalView('monthly')">MONTHLY</button>
+    <span style="display:inline-flex;align-items:center;gap:4px;margin-left:6px">
+      <input type="date" id="jv-from" class="jv-date" title="From" style="font-size:11px;padding:3px 5px;border:1px solid var(--border);border-radius:5px;background:var(--card);color:var(--text)">
+      <span style="color:var(--muted);font-size:11px">&rarr;</span>
+      <input type="date" id="jv-to" class="jv-date" title="To" style="font-size:11px;padding:3px 5px;border:1px solid var(--border);border-radius:5px;background:var(--card);color:var(--text)">
+      <button class="btn jv-btn" data-jv="range" onclick="applyJournalRange()">APPLY RANGE</button>
+    </span>
   </div>
   <div id="journal-wrap">
     <div class="no-data">No journal entries yet. APEX logs detailed reasoning for every trade.</div>
@@ -2398,6 +2404,18 @@ function renderActivityLog() {
 }
 
 let _journalView = 'recent';
+let _journalRange = { from: null, to: null };
+
+function applyJournalRange(){
+  var fromEl = document.getElementById('jv-from'), toEl = document.getElementById('jv-to');
+  var from = fromEl && fromEl.value, to = toEl && toEl.value;
+  if (!from || !to){ alert('Pick both a start and end date.'); return; }
+  if (from > to){ var t = from; from = to; to = t; if(fromEl)fromEl.value = from; if(toEl)toEl.value = to; }
+  _journalRange = { from: from, to: to };
+  _journalView = 'range';
+  document.querySelectorAll('.jv-btn').forEach(function(b){ b.classList.toggle('active', b.dataset.jv==='range'); });
+  renderJournal();
+}
 
 function setJournalView(v){
   _journalView = v;
@@ -2609,6 +2627,16 @@ async function renderJournal(){
     try { var r = await fetch('/api/journal'); if (r.ok) { var j = await r.json(); entries = (j && j.entries) ? j.entries : (Array.isArray(j) ? j : []); } } catch(e) {}
     var today = new Date().toLocaleDateString('en-US',{month:'2-digit',day:'2-digit',year:'numeric'});
     wrap.innerHTML = _ledgerBlock(entries.slice(0,60), _ledgerMeta(entries, today));
+    return;
+  }
+  if (_journalView === 'range' && _journalRange.from && _journalRange.to){
+    var rEntries = [];
+    try {
+      var rr = await fetch('/api/journal?from='+encodeURIComponent(_journalRange.from)+'&to='+encodeURIComponent(_journalRange.to));
+      if (rr.ok){ var jr = await rr.json(); rEntries = (jr && jr.entries) ? jr.entries : (Array.isArray(jr) ? jr : []); }
+    } catch(e) {}
+    var rLabel = _journalRange.from + '  \u2192  ' + _journalRange.to;
+    wrap.innerHTML = _ledgerBlock(rEntries, _ledgerMeta(rEntries, rLabel));
     return;
   }
   await renderJournalBreakdown(_journalView);
