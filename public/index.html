@@ -2512,7 +2512,10 @@ function _ledgerRow(e){
     return '<div style="color:'+(neg?'#c01f1f':pos?'#0a7d36':'#555')+'">'+r+'</div>';
   }).join('');
   var ctx=[]; if(e.entryVIX!=null)ctx.push('VIX '+e.entryVIX); if(e.entryIVP!=null)ctx.push('IVP '+e.entryIVP); if(e.entryRSI!=null)ctx.push('RSI '+e.entryRSI); if(e.entryRegimeClass)ctx.push('Regime '+e.entryRegimeClass);
-  var exitLine = !open ? ('<b>EXIT:</b> '+(e.exitReason||'?')+(e.peakPct!=null?' &middot; peak +'+e.peakPct+'%':'')+(e.hoursHeld!=null?' &middot; held '+e.hoursHeld+'h':'')) : '';
+  if(isPut && e.entryPutTier) ctx.push('tier '+e.entryPutTier);
+  if(e.entryWeeklyTrend && e.entryWeeklyTrend.trendContext) ctx.push('wk '+e.entryWeeklyTrend.trendContext);
+  if(e.entryBreadthLab){ var _bl=e.entryBreadthLab, _blp=[]; if(_bl.spLabel && _bl.spLabel!=='n/a') _blp.push('RSP-SPY '+_bl.spLabel); if(_bl.nqLabel && _bl.nqLabel!=='n/a') _blp.push('QQQE-QQQ '+_bl.nqLabel); if(_blp.length) ctx.push('breadth-lab: '+_blp.join(' / ')); }
+  var exitLine = !open ? ('<b>EXIT:</b> '+(e.exitDetail||e.exitReason||'?')+(e.peakPct!=null?' &middot; peak +'+e.peakPct+'%':'')+(e.hoursHeld!=null?' &middot; held '+e.hoursHeld+'h':'')) : '';
   var detail = '<tr class="ledger-detail" style="display:none"><td colspan="9" class="l" style="background:#f4f4f0;padding:9px 12px;font-size:10px;line-height:1.65">'
     + (ctx.length?('<div style="color:#777;margin-bottom:4px">'+ctx.join(' &middot; ')+'</div>'):'')
     + (exitLine?('<div style="color:#1a1a1a;margin-bottom:5px">'+exitLine+'</div>'):'')
