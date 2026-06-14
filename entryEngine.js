@@ -72,21 +72,21 @@ function getRegimeRulebook(state) {
 
   const minScorePut  = isBullRegime ? 85 : isB1 ? 75 : 70;
   const minScoreCall = isBullRegime ? 75 : 85;
-  const agentMinAdj  = isLowConf ? +10 : 0;
+  const agentMinAdj  = 0;                  // CUT (6/14): was isLowConf?+10:0. A stale/low-conf agent could silently raise the call floor 75→85. Agent no longer adjusts min score; isLowConf/agentStale still computed for logging.
   const macroReversalThreshold = isB1 ? 0.020 : 0.025;
 
   // ── Gate flags ────────────────────────────────────────────
   const gates = {
     choppyDebitBlock:    false,
     crisisDebitBlock:    isCrisis,       // crisis blocks ALL entries
-    macroBullishBlock:   isMacroBullish,
+    macroBullishBlock:   false,          // CUT (6/14): was isMacroBullish (agent mode==="aggressive"). Agent no longer blocks puts. Plumbing kept false.
     below200MACallBlock: !!(state._spyMA200 && state._liveSPY && state._liveSPY < state._spyMA200),
 
     spyGapUpBlockPuts:   !!(state._spyGapUp && isBullRegime),
     afternoonMinActive:  isBullRegime,
     macdContradictsGate: isBullRegime,
 
-    putsOnBounceMode:    isBearRegime && agentPutsOnBounce,
+    putsOnBounceMode:    false,          // CUT (6/14): was isBearRegime && agentPutsOnBounce. Agent no longer steers bear-regime put timing. Plumbing kept false.
     oversoldSizeReduce:  isBearRegime,
 
     avoidHoldActive:   !!(state._avoidUntil && Date.now() < state._avoidUntil),
