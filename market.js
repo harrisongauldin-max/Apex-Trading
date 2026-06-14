@@ -652,6 +652,81 @@ async function getMarketBreadth() {
   } catch(e) { return { advancing: 5, declining: 5, breadthPct: 50, breadthStrength: 0 }; }
 }
 
+// ── PARALLEL BREADTH LAB (informational only — NOT wired into scoring) ───────
+// Freeze-window data gathering. Logs candidate breadth metrics next to the live
+// equity breadth so distributions can be compared before any basket change.
+// Each [BREADTH-LAB] line is one timestamped sample. Touches nothing in scoring.
+let _internalsProbe = null;   // one-time feed probe, cached for process lifetime
+
+async function _labDayChangePct(ticker) {
+  const bars = await getIntradayBars(ticker).catch(() => []);
+  if (!bars || bars.length === 0) return null;
+  const first = bars[0], last = bars[bars.length - 1];
+  if (!(first && last && first.o > 0 && last.c > 0)) return null;
+  return ((last.c - first.o) / first.o) * 100;   // % move, session open → now
+}
+
+async function _probeInternals() {
+  if (_internalsProbe) return _internalsProbe;
+  // Exchange breadth-index symbols. Alpaca's /stocks path likely can't resolve
+  // these — the probe records, definitively, what THIS feed actually returns.
+  const candidates = ["$TICK", "TICK", "$TRIN", "TRIN", "$ADD", "ADD", "$ADSPD"];
+  const found = [];
+  for (const sym of candidates) {
+    const bars = await getIntradayBars(sym).catch(() => []);
+    if (bars && bars.length > 0) found.push(sym);
+  }
+  _internalsProbe = { available: found, checkedAt: new Date().toISOString() };
+  return _internalsProbe;
+}
+
+async function computeBreadthLab(currentBreadthPct) {
+  try {
+    const [rsp, spy, qqqe, qqq] = await Promise.all([
+      _labDayChangePct("RSP"),  _labDayChangePct("SPY"),
+      _labDayChangePct("QQQE"), _labDayChangePct("QQQ"),
+    ]);
+    // equal-weight minus cap-weight: + = broad participation, − = mega-cap-led (narrow)
+    const spSpread = (rsp != null && spy != null) ? parseFloat((rsp - spy).toFixed(3)) : null;
+    const nqSpread = (qqqe != null && qqq != null) ? parseFloat((qqqe - qqq).toFixed(3)) : null;
+    const label = (s) => s == null ? "n/a" : s > 0.05 ? "BROAD" : s < -0.05 ? "NARROW" : "flat";
+
+    // breadth acceleration: 1-step delta of live equity breadth + existing momentum
+    const hist = state._breadthHistory || [];
+    const accel = hist.length >= 2
+      ? parseFloat((hist[hist.length - 1].v - hist[hist.length - 2].v).toFixed(1)) : null;
+    const momentum = (state._breadthMomentum != null)
+      ? parseFloat(state._breadthMomentum.toFixed(1)) : null;
+    const trend = state._breadthTrend || "flat";
+
+    const probe = await _probeInternals();
+    const internalsStr = probe.available.length
+      ? `available:${probe.available.join(",")}`
+      : "none (ETF-proxy only)";
+
+    const eq = currentBreadthPct ?? state._breadth ?? null;
+    const sp = (v) => v == null ? "n/a" : (v >= 0 ? "+" : "") + v.toFixed(2) + "%";
+
+    const data = {
+      t: Date.now(), equityBreadth: eq,
+      rspChg: rsp, spyChg: spy, qqqeChg: qqqe, qqqChg: qqq,
+      spSpread, nqSpread, spLabel: label(spSpread), nqLabel: label(nqSpread),
+      accel, momentum, trend, internals: probe.available,
+    };
+    const line =
+      `[BREADTH-LAB] equity:${eq ?? "?"}% | ` +
+      `RSP-SPY:${sp(spSpread)} ${label(spSpread)} | ` +
+      `QQQE-QQQ:${sp(nqSpread)} ${label(nqSpread)} | ` +
+      `accel:${accel == null ? "n/a" : (accel >= 0 ? "+" : "") + accel} ` +
+      `mom:${momentum == null ? "n/a" : momentum} (${trend}) | ` +
+      `internals:${internalsStr}`;
+
+    return { data, line };
+  } catch (e) {
+    return { data: null, line: `[BREADTH-LAB] error: ${e.message}` };
+  }
+}
+
 async function getSyntheticPCR() {
   try {
     const cached = getCached("pcr:spy");
@@ -1166,7 +1241,7 @@ async function getVIX() {
 
 function setMarketContext(ctx) { marketContext = ctx; }
 module.exports = {
-  getCached, setCache, getMacroNews, getFearAndGreed, getMarketBreadth,
+  getCached, setCache, getMacroNews, getFearAndGreed, getMarketBreadth, computeBreadthLab,
   getSyntheticPCR, getVolTermStructure, getCBOESKEW, getSentimentSignal,
   getDXY, getYieldCurve, getEarningsDate, getNewsForTicker, analyzeNews,
   scoreArticle, getAnalystActivity, getShortInterestSignal,
