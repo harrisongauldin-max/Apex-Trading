@@ -371,7 +371,9 @@ function scoreMeanReversionCall(stock, relStrength, adx, bars, vix) {
   const vixFloorMR = inRecoveryRegime ? 20 : 25;
   if (vix < vixFloorMR) return { score: 0, reasons: [`VIX ${vix} too low for mean reversion${inRecoveryRegime ? " (recovery: floor 20)" : " (floor 25)"} (+0)`] };
 
-  if ((stock.beta || 1) < 1.0) return { score: 0, reasons: ["Low beta - not a mean reversion candidate (+0)"] };
+  // FIX (6/15): exempt indices. SPY's computed liveBeta can dip just under 1.0 and silently
+  // zero all SPY mean-reversion calls; the downstream liquidity check already gates on isIndex.
+  if (!stock.isIndex && (stock.beta || 1) < 1.0) return { score: 0, reasons: ["Low beta - not a mean reversion candidate (+0)"] };
 
   if (stock.rsi <= 35)                        { score += 20; reasons.push(`RSI ${stock.rsi} - deeply oversold (+20)`); }
   else if (stock.rsi <= 42)                   { score += 12; reasons.push(`RSI ${stock.rsi} - oversold (+12)`); }
@@ -393,7 +395,6 @@ function scoreMeanReversionCall(stock, relStrength, adx, bars, vix) {
   }
 
   if (stock.macd.includes("bullish crossover")) { score += 15; reasons.push("MACD bullish crossover - reversal signal (+15)"); }
-  else if (stock.macd.includes("forming"))      { score += 10; reasons.push("MACD forming base - bottom building (+10)"); }
   else if (stock.macd.includes("bullish"))      { score += 5;  reasons.push("MACD bullish (+5)"); }
   else                                          { reasons.push("MACD bearish - wait for base (+0)"); }
 
@@ -516,11 +517,19 @@ function scoreIndexSetup(stock, optionType, spyRSI, spyMACD, spyMomentum, breadt
     const _isOverboughtMRPut = ["trending_bull","recovery"].includes(regime)
       && spyRSI >= 65
       && _dailyRsiForPut >= 75;
+    // ADD (6/14): near-miss tier ramps the dailyRSI≥75 cliff. dailyRSI 70–75 gets partial
+    // overbought credit instead of falling all the way to the "wrong for puts -25" branch.
+    const _isOverboughtMRPutSoft = ["trending_bull","recovery"].includes(regime)
+      && spyRSI >= 65
+      && _dailyRsiForPut >= 70 && _dailyRsiForPut < 75;
 
     if (["trending_bear","breakdown"].includes(regime))                           { score += 20; reasons.push(`Regime: ${regime} (+20)`); }
     else if (regime === "choppy")                                                  { score -= 10; reasons.push("Choppy regime - puts risky (-10)"); }
     else if (_isOverboughtMRPut) {
       score -= 5; reasons.push(`Regime: ${regime} - overbought MR put, reduced penalty (-5)`);
+    }
+    else if (_isOverboughtMRPutSoft) {
+      score -= 15; reasons.push(`Regime: ${regime} - overbought MR put (soft, dailyRSI 70-75) (-15)`);
     }
     else if (["trending_bull","recovery"].includes(regime))                       { score -= 25; reasons.push(`Regime: ${regime} - wrong for puts (-25)`); }
 
@@ -548,6 +557,8 @@ function scoreIndexSetup(stock, optionType, spyRSI, spyMACD, spyMomentum, breadt
         score += 20; reasons.push(`${stock.ticker} RSI ${spyRSI} overbought in bear/choppy regime (+20)`);
       } else if (_isOverboughtMRPut) {
         score += 20; reasons.push(`${stock.ticker} RSI ${spyRSI} overbought MR put in bull regime - dailyRSI ${_dailyRsiForPut.toFixed(0)} confirms (+20)`);
+      } else if (_isOverboughtMRPutSoft) {
+        score += 12; reasons.push(`${stock.ticker} RSI ${spyRSI} overbought MR put (soft, dailyRSI ${_dailyRsiForPut.toFixed(0)}) (+12)`);
       } else {
         score += 5;  reasons.push(`${stock.ticker} RSI ${spyRSI} overbought in bull regime - trend may continue, reduced bonus (+5)`);
       }
@@ -679,9 +690,11 @@ function scoreIndexSetup(stock, optionType, spyRSI, spyMACD, spyMomentum, breadt
     if (stock.ticker === "QQQ") {
       const qqqGateApplies = !["trending_bear","breakdown"].includes(regime) || INDIVIDUAL_STOCKS_ENABLED;
       if (qqqGateApplies) {
-        const techBearish = (agentMacro || {}).bearishTickers && (agentMacro.bearishTickers.some(t => ["NVDA","MSFT","AAPL","META","GOOGL"].includes(t)));
-        if (!techBearish) { score -= 15; reasons.push("QQQ: no clear tech bearish thesis in bull regime (-15)"); }
-        else { reasons.push("QQQ: tech names in agent bearish list (+0)"); }
+        // CUT (6/14): was a -15 gated on agentMacro.bearishTickers (NVDA/MSFT/AAPL/...).
+        // The agent is cut, so bearishTickers is never populated → this had become a
+        // permanent unsatisfiable -15 on every QQQ put. The breadth -15 (broad-grind brake)
+        // and weekly-trend block already suppress QQQ puts in a healthy bull. No penalty here.
+        reasons.push("QQQ: tech-bearish agent gate retired — breadth/weekly carry the discrimination (+0)");
       } else {
         reasons.push(`QQQ: Regime ${regime} - macro bear thesis sufficient, no tech confirmation needed (+0)`);
       }
