@@ -48,25 +48,40 @@ function calcEMA(closes, period) {
   return ema;
 }
 
+// FIX (6/15): proper full-series EMA (SMA-seeded, converged) — replaces the prior
+// version that ran the EMA over only `period` bars (≈15% seed bias).
+function _emaSeries(values, period) {
+  const k = 2 / (period + 1);
+  const out = new Array(values.length).fill(null);
+  if (values.length < period) return out;
+  let ema = 0;
+  for (let i = 0; i < period; i++) ema += values[i];
+  ema /= period;                                   // SMA seed
+  out[period - 1] = ema;
+  for (let i = period; i < values.length; i++) { ema = values[i] * k + ema * (1 - k); out[i] = ema; }
+  return out;
+}
+
 function calcMACD(bars) {
-  if (bars.length < 26) return { signal: "neutral", value: 0 };
-  const closes  = bars.map(b => b.c);
-  const ema12   = calcEMA(closes.slice(-12), 12);
-  const ema26   = calcEMA(closes.slice(-26), 26);
-  const macdVal = ema12 - ema26;
-  const signal  = calcEMA(
-    bars.slice(-9).map((_, i) => {
-      const e12 = calcEMA(closes.slice(-(26 - 8 + i)), 12);
-      const e26 = calcEMA(closes.slice(-(26)), 26);
-      return e12 - e26;
-    }), 9
-  );
+  if (!bars || bars.length < 26) return { signal: "neutral", value: 0 };
+  const closes = bars.map(b => b.c);
+  const e12 = _emaSeries(closes, 12);
+  const e26 = _emaSeries(closes, 26);
+  const macdLine = [];                             // true MACD time series
+  for (let i = 0; i < closes.length; i++) {
+    if (e12[i] != null && e26[i] != null) macdLine.push(e12[i] - e26[i]);
+  }
+  if (!macdLine.length) return { signal: "neutral", value: 0 };
+  const macdVal = macdLine[macdLine.length - 1];
+  const sigArr  = _emaSeries(macdLine, 9);         // signal = 9-EMA of the MACD series
+  const signal  = sigArr[sigArr.length - 1];
+  if (signal == null) return { signal: "neutral", value: parseFloat(macdVal.toFixed(4)) };
   const histogram = macdVal - signal;
-  if (histogram > 0.5)       return { signal: "bullish crossover", value: macdVal };
-  if (histogram > 0)         return { signal: "bullish",           value: macdVal };
-  if (histogram < -0.5)      return { signal: "bearish crossover", value: macdVal };
-  if (histogram < 0)         return { signal: "bearish",           value: macdVal };
-  return { signal: "neutral", value: macdVal };
+  if (histogram > 0.5)  return { signal: "bullish crossover", value: parseFloat(macdVal.toFixed(4)) };
+  if (histogram > 0)    return { signal: "bullish",           value: parseFloat(macdVal.toFixed(4)) };
+  if (histogram < -0.5) return { signal: "bearish crossover", value: parseFloat(macdVal.toFixed(4)) };
+  if (histogram < 0)    return { signal: "bearish",           value: parseFloat(macdVal.toFixed(4)) };
+  return { signal: "neutral", value: parseFloat(macdVal.toFixed(4)) };
 }
 
 function calcMomentum(bars) {
@@ -91,21 +106,44 @@ function calcATR(bars, period = 14) {
   return parseFloat((atrSum / period).toFixed(4));
 }
 
+// FIX (6/15): proper Wilder ADX. Prior version accumulated BOTH +DM and -DM every bar
+// (skipping the dominant-direction rule) and returned the raw single-period DX as "ADX"
+// (never smoothing DX). This version applies the directional rule, Wilder-smooths
+// +DM/-DM/TR, then Wilder-smooths the DX series into ADX.
 function calcADX(bars, period = 14) {
-  if (bars.length < period + 1) return 20;
-  let dmPlus = 0, dmMinus = 0, atr = 0;
-  for (let i = bars.length-period; i < bars.length; i++) {
-    const high = bars[i].h, low = bars[i].l, prevClose = bars[i-1]?.c || bars[i].c;
-    const prevHigh = bars[i-1]?.h || high, prevLow = bars[i-1]?.l || low;
-    dmPlus  += Math.max(high - prevHigh, 0);
-    dmMinus += Math.max(prevLow - low, 0);
-    atr     += Math.max(high-low, Math.abs(high-prevClose), Math.abs(low-prevClose));
+  if (!bars || bars.length < period * 2) return 20;   // need ~2*period bars to seed ADX
+  const plusDM = [], minusDM = [], tr = [];
+  for (let i = 1; i < bars.length; i++) {
+    const high = bars[i].h, low = bars[i].l;
+    const prevHigh = bars[i-1].h, prevLow = bars[i-1].l, prevClose = bars[i-1].c;
+    const up = high - prevHigh, down = prevLow - low;
+    plusDM.push((up > down && up > 0) ? up : 0);       // only the dominant direction counts
+    minusDM.push((down > up && down > 0) ? down : 0);
+    tr.push(Math.max(high - low, Math.abs(high - prevClose), Math.abs(low - prevClose)));
   }
-  if (atr === 0) return 20;
-  const diPlus  = (dmPlus/atr)*100;
-  const diMinus = (dmMinus/atr)*100;
-  const dx      = Math.abs(diPlus-diMinus) / (diPlus+diMinus||1) * 100;
-  return parseFloat(dx.toFixed(1));
+  const wilder = (arr) => {
+    if (arr.length < period) return [];
+    let sum = 0; for (let i = 0; i < period; i++) sum += arr[i];
+    const out = [sum];
+    for (let i = period; i < arr.length; i++) { sum = sum - sum / period + arr[i]; out.push(sum); }
+    return out;
+  };
+  const sTR = wilder(tr), sP = wilder(plusDM), sM = wilder(minusDM);
+  if (!sTR.length) return 20;
+  const dx = [];
+  for (let i = 0; i < sTR.length; i++) {
+    if (sTR[i] === 0) { dx.push(0); continue; }
+    const diP = 100 * sP[i] / sTR[i], diM = 100 * sM[i] / sTR[i];
+    const denom = diP + diM;
+    dx.push(denom === 0 ? 0 : 100 * Math.abs(diP - diM) / denom);
+  }
+  if (dx.length < period) {
+    const m = dx.reduce((a, b) => a + b, 0) / (dx.length || 1);
+    return parseFloat(m.toFixed(1));
+  }
+  let adx = 0; for (let i = 0; i < period; i++) adx += dx[i]; adx /= period;
+  for (let i = period; i < dx.length; i++) adx = (adx * (period - 1) + dx[i]) / period;
+  return parseFloat(adx.toFixed(1));
 }
 
 function calcIVRank(currentIV, bars) {
