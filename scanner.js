@@ -1843,7 +1843,7 @@ async function runScan() {
       debitCallScore: _debitCallScore, debitCallActive: _debitCallActive,
       effectiveMin: _effectiveMin, rrEstimate: _rrEst,
       putReasons: putSetup.reasons, callReasons: callSetup.reasons,
-      signals: { rsi: signals.rsi, dailyRsi: signals.dailyRsi, macd: signals.macd, momentum: signals.momentum, ivPercentile: signals.ivPercentile, volPaceRatio: signals.volPaceRatio, intradayVWAP: signals.intradayVWAP },
+      signals: { rsi: signals.rsi, dailyRsi: signals.dailyRsi, macd: signals.macd, momentum: signals.momentum, adx: signals.adx, ivPercentile: signals.ivPercentile, volPaceRatio: signals.volPaceRatio, intradayVWAP: signals.intradayVWAP },
       blocked: [],
     };
 
