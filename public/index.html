@@ -4284,7 +4284,8 @@ function copyScoreDebug() {
       lines.push(r.ticker + ' | $' + (r.price||'--') + ' | PUT:' + r.putScore + ' CALL:' + r.callScore
         + ' | ' + (r.putScore >= (d.minScore||70) ? '▶ WOULD ENTER' : 'below min'));
       lines.push('rsi: ' + (r.signals&&r.signals.rsi||'--') + ' | dailyRsi: ' + (r.signals&&r.signals.dailyRsi||'--')
-        + ' | macd: ' + (r.signals&&r.signals.macd||'--') + ' | momentum: ' + (r.signals&&r.signals.momentum||'--'));
+        + ' | macd: ' + (r.signals&&r.signals.macd||'--') + ' | momentum: ' + (r.signals&&r.signals.momentum||'--')
+        + ' | adx: ' + (r.signals&&r.signals.adx||'--'));
       if (r.putReasons && r.putReasons.length) {
         r.putReasons.forEach(function(reason) { lines.push(reason); });
       }
