@@ -2110,6 +2110,11 @@ async function runScan() {
     );
     if (!eeResult.pass) {
       logEvent("filter", `${stock.ticker} entry blocked - ${eeResult.reason}`);
+      // INSTRUMENTATION (6/16): the real score-below-min / gate rejections short-circuit HERE at the
+      // eeResult gate, not at the entryBlocked flag upstream — so emit the winning side's full score
+      // trail at this point to surface modifier shaves (e.g. pre-corr 85 -> final 75). grep [NEAR-MISS].
+      const _nmTrail = (optionType === "put" ? putSetup.reasons : callSetup.reasons) || [];
+      logEvent("filter", `[NEAR-MISS] ${stock.ticker} ${optionType.toUpperCase()} final:${score} | ${eeResult.reason} | trail: ${_nmTrail.join(" \u00b7 ") || "none"}`);
       if (!dryRunMode) recordGateBlock(stock.ticker, eeResult.reason, rb.regimeName, score);
       continue;
     }
