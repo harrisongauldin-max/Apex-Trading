@@ -2003,7 +2003,7 @@ async function runScan() {
       // INSTRUMENTATION (6/16): near-miss attribution. Emit the winning side's full score trail so
       // post-core modifier reductions (e.g. pre-corr 84 -> final 72) and gate-zeroing are visible and
       // countable per scan, instead of only logging pre-corr and final. grep [NEAR-MISS] to tally.
-      const _nmTrail = (optionType === "put" ? putSetup.reasons : callSetup.reasons) || [];
+      const _nmTrail = bestReasons || [];
       logEvent("filter", `[NEAR-MISS] ${stock.ticker} ${optionType.toUpperCase()} final:${bestScore} | trail: ${_nmTrail.join(" \u00b7 ") || "none"}`);
       continue;
     }
@@ -2113,7 +2113,9 @@ async function runScan() {
       // INSTRUMENTATION (6/16): the real score-below-min / gate rejections short-circuit HERE at the
       // eeResult gate, not at the entryBlocked flag upstream — so emit the winning side's full score
       // trail at this point to surface modifier shaves (e.g. pre-corr 85 -> final 75). grep [NEAR-MISS].
-      const _nmTrail = (optionType === "put" ? putSetup.reasons : callSetup.reasons) || [];
+      // NOTE: putSetup/callSetup are out of scope at this block; bestReasons (set at ~1862) is the
+      // in-scope winning-side trail and is what must be used here.
+      const _nmTrail = bestReasons || [];
       logEvent("filter", `[NEAR-MISS] ${stock.ticker} ${optionType.toUpperCase()} final:${score} | ${eeResult.reason} | trail: ${_nmTrail.join(" \u00b7 ") || "none"}`);
       if (!dryRunMode) recordGateBlock(stock.ticker, eeResult.reason, rb.regimeName, score);
       continue;
