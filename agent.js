@@ -800,6 +800,21 @@ Respond with ONLY the JSON object. No words before or after.`;
       state._agentMacroHistory = state._agentMacroHistory.slice(-10);
     }
 
+    // ── Commit the live signal to state._agentMacro WITH a timestamp ──────────
+    // FIX (6/16): the staleness check in _shouldRunMacroAgent (line ~279) reads
+    // state._agentMacro.timestamp; nothing on the success path wrote it, so it was
+    // perpetually undefined → signalAge fell to Infinity ("Infinitymin") and the
+    // agent re-ran every scan. Persist the signal + timestamp here on every success.
+    state._agentMacro = {
+      ...(state._agentMacro || {}),
+      signal:     parsed.signal,
+      confidence: parsed.confidence,
+      modifier:   parsed.modifier,
+      reasoning:  parsed.reasoning,
+      timestamp:  Date.now(),
+      _stabilityHeld: !!parsed._stabilityHeld,
+    };
+
     _checkMacroShift(parsed.signal);
     return parsed;
   } catch(e) {
