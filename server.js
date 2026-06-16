@@ -1684,6 +1684,11 @@ initState().then(() => {
     console.log(`Positions:   ${state.positions.length} open`);
     console.log(`Trades:      ${(state.closedTrades||[]).length} closed trades in history`);
     // C1 Sunday 6/8 — feature flag boot log (added by deployment)
+    // BUILD BANNER (6/16): self-report the live resolved model string + build tag so deploys are
+    // verifiable from the first log line instead of waiting for a 404. Fresh require reads the
+    // constants.js value that is ACTUALLY in this build.
+    const _liveModel = require('./constants').ANTHROPIC_MODEL;
+    console.log(`[BUILD] model=${_liveModel} | near-miss=on | deployed=${new Date().toISOString()}`);
   });
 }).catch(e => {
   console.error("[BOOT] initState failed — Redis unreachable or corrupt:", e.message);
