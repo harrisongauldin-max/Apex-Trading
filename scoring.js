@@ -807,10 +807,10 @@ function scoreIndexSetup(stock, optionType, spyRSI, spyMACD, spyMomentum, breadt
     const macdRSIConflict = spyRSI <= 35 && spyMACD && spyMACD.includes("bearish");
     const macdMult = macdRSIConflict ? 0.4 : 1.0;
     if (macdRSIConflict) reasons.push(`MACD/RSI conflict - intraday RSI ${spyRSI} oversold, MACD dampened`);
-    if (spyMACD && spyMACD.includes("bullish crossover"))  { score += Math.round(15*macdMult); reasons.push(`SPY MACD bullish crossover (+${Math.round(15*macdMult)})`); }
-    else if (spyMACD && spyMACD.includes("bullish"))       { score += Math.round(8*macdMult);  reasons.push(`SPY MACD bullish (+${Math.round(8*macdMult)})`); }
-    else if (spyMACD && spyMACD.includes("bearish crossover")) { score -= Math.round(15*macdMult); reasons.push(`SPY MACD bearish crossover (-${Math.round(15*macdMult)})`); }
-    else if (spyMACD && spyMACD.includes("bearish"))       { score -= Math.round(5*macdMult);  reasons.push(`SPY MACD bearish (-${Math.round(5*macdMult)})`); }
+    if (spyMACD && spyMACD.includes("bullish crossover"))  { score += Math.round(5*macdMult); reasons.push(`SPY MACD bullish crossover (+${Math.round(5*macdMult)})`); }
+    else if (spyMACD && spyMACD.includes("bullish"))       { score += Math.round(3*macdMult);  reasons.push(`SPY MACD bullish (+${Math.round(3*macdMult)})`); }
+    else if (spyMACD && spyMACD.includes("bearish crossover")) { score -= Math.round(5*macdMult); reasons.push(`SPY MACD bearish crossover (-${Math.round(5*macdMult)})`); }
+    else if (spyMACD && spyMACD.includes("bearish"))       { score -= Math.round(3*macdMult);  reasons.push(`SPY MACD bearish (-${Math.round(3*macdMult)})`); }
 
     const bHist10 = (state._breadthHistory || []).map(b => b.v);
     const bMin = bHist10.length >= 3 ? Math.min(...bHist10) : 0;
