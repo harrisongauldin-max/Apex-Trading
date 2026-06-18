@@ -51,6 +51,20 @@ const MACRO_REVERSAL_PCT  = 0.025;
 const MIN_SCORE           = 70;
 const MIN_SCORE_CREDIT    = 65;  // credit/directional minimum
 const MIN_SCORE_MR        = 65;  // FIX 11: MR call minimum raised from 60→65 (theta drag requires higher conviction)
+
+// ─── MACD classification band (6/17) ─────────────────────────────
+// Histogram is normalized by daily ATR in signals.calcMACD, so the "crossover" (strong)
+// vs plain bearish/bullish (mild) split is volatility-relative, not an absolute $ band.
+// PROVISIONAL 0.5 (panel verdict 6/17); replace with the 75th-pct of real |hist/ATR|
+// measured on SPY/QQQ daily bars. Lower = strong label fires more (tighter on MR calls).
+const MACD_HIST_STRONG_ATR = 0.5;
+
+// ─── MR relative-bounce entry tier (6/17) ────────────────────────
+// scoring.scoreIndexSetup credits a price-confirmed bounce when intraday RSI has lifted
+// this many points off its OWN session low AND price has reclaimed VWAP. Replaces reliance
+// on the absolute RSI>=38 gate, which missed V-bottoms from deep lows. PROVISIONAL 6 (panel
+// verdict 6/17) — tune off paper trades. Lower = bounce credit fires earlier (more entries).
+const MR_BOUNCE_RSI_OFFLOW = 6;
 const IVR_MAX             = 70;
 const EARNINGS_SKIP_DAYS  = 5;
 const MIN_OPEN_INTEREST   = 100;
@@ -266,6 +280,7 @@ module.exports = {
   PARTIAL_CLOSE_PCT, TRAIL_ACTIVATE_PCT, TRAIL_STOP_PCT, BREAKEVEN_LOCK_PCT,
   RIDE_TARGET_PCT, TIME_STOP_DAYS, TIME_STOP_MOVE, IV_COLLAPSE_PCT,
   MA50_BUFFER, MACRO_REVERSAL_PCT, MIN_SCORE, MIN_SCORE_CREDIT, MIN_SCORE_MR, IVR_MAX,
+  MACD_HIST_STRONG_ATR, MR_BOUNCE_RSI_OFFLOW,
   EARNINGS_SKIP_DAYS, MIN_OPEN_INTEREST, MIN_STOCK_PRICE, MIN_OPTION_PREMIUM,
   MIN_OI, MAX_SPREAD_PCT, EARLY_SPREAD_PCT, MAX_GAP_PCT, TARGET_DELTA_MIN,
   VIX_CREDIT_PRIMARY, VIX_CALLS_BLOCKED,
