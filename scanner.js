@@ -2102,10 +2102,10 @@ async function runScan() {
     const _volDeclineExec = false;
 
     const eeResult = evaluateEntry(
-      { ticker: stock.ticker, optionType, tradeType: intentType, score, constraintPass: constraintPass !== false, constraintReason: constraintReason || null, tradeIntent: intent },
+      { ticker: stock.ticker, optionType, tradeType: intentType, score, constraintPass: constraintPass !== false, constraintReason: constraintReason || null, tradeIntent: intent, isMeanReversion, isIndex: stock.isIndex === true },
       rb, state,
       { etHour: etHourNow, isLateDay, isLastHour, volDecline: _volDeclineExec,
-        signals: { dailyRsi: stock.dailyRsi || stock.rsi || 50, macd: stock.macd || "neutral" },
+        signals: { rsi: stock.rsi, dailyRsi: stock.dailyRsi || stock.rsi || 50, macd: stock.macd || "neutral" },
         recentSameDir: recentSameDirMins, existingProfitPct, existingCreditProfitPct,
         drawdownMinScore: ddProtocol.minScore || MIN_SCORE, drawdownLevel: ddProtocol.level || "normal",
         agentSignal: (state._agentMacro || {}).signal || "neutral" }
