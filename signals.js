@@ -10,7 +10,9 @@ function getCached(key, ttl=60000) { const e=_localCache.get(key); return (e&&Da
 function setCache(key, data) { _localCache.set(key,{data,ts:Date.now()}); return data; }
 const { alpacaGet, getStockBars, getIntradayBars } = require('./broker');
 const { state } = require('./state');
-const { MAX_HEAT, CAPITAL_FLOOR, MONTHLY_BUDGET , ALPACA_DATA } = require('./constants');
+// V3.2 (6/17): MACD_HIST_STRONG_ATR — strong/mild MACD band in ATR units (see calcMACD).
+// Destructuring default 0.5 keeps signals.js functional even if constants.js lags on deploy.
+const { MAX_HEAT, CAPITAL_FLOOR, MONTHLY_BUDGET , ALPACA_DATA, MACD_HIST_STRONG_ATR = 0.5 } = require('./constants');
 let _log = (type, msg) => console.log(`[signals][${type}] ${msg}`);
 function setSignalsLogger(fn) { _log = fn; }
 
@@ -77,10 +79,18 @@ function calcMACD(bars) {
   const signal  = sigArr[sigArr.length - 1];
   if (signal == null) return { signal: "neutral", value: parseFloat(macdVal.toFixed(4)) };
   const histogram = macdVal - signal;
-  if (histogram > 0.5)  return { signal: "bullish crossover", value: parseFloat(macdVal.toFixed(4)) };
-  if (histogram > 0)    return { signal: "bullish",           value: parseFloat(macdVal.toFixed(4)) };
-  if (histogram < -0.5) return { signal: "bearish crossover", value: parseFloat(macdVal.toFixed(4)) };
-  if (histogram < 0)    return { signal: "bearish",           value: parseFloat(macdVal.toFixed(4)) };
+  // V3.2 (6/17): normalize the histogram by daily ATR instead of an absolute $0.5 band.
+  // A fixed ±0.5 is price-level- and volatility-blind: on $700+ indices the histogram
+  // naturally runs in the ±2-6 range, so almost any pause crossed ±0.5 and earned the
+  // strong "crossover" label. ATR makes "strong" mean "large relative to the instrument's
+  // own daily range" — a $2 histogram is strong in a calm tape, noise in a wild one.
+  // Provisional band = 0.5x ATR; replace with the 75th-pct of real |hist/ATR| once measured.
+  const atr   = calcATR(bars, 14) || (closes[closes.length - 1] * 0.01);
+  const histR = histogram / atr;                   // histogram in ATR units
+  if (histR >  MACD_HIST_STRONG_ATR) return { signal: "bullish crossover", value: parseFloat(macdVal.toFixed(4)) };
+  if (histR >  0)                    return { signal: "bullish",           value: parseFloat(macdVal.toFixed(4)) };
+  if (histR < -MACD_HIST_STRONG_ATR) return { signal: "bearish crossover", value: parseFloat(macdVal.toFixed(4)) };
+  if (histR <  0)                    return { signal: "bearish",           value: parseFloat(macdVal.toFixed(4)) };
   return { signal: "neutral", value: parseFloat(macdVal.toFixed(4)) };
 }
 
