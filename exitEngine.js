@@ -164,10 +164,30 @@ async function checkExits(positions, posSnapshots, posQuotes, posNewsCache, ctx)
       if (ask > 0) pos.ask = ask;
       const _staleSecs = pos._currentPriceUpdatedAt ? (Date.now() - pos._currentPriceUpdatedAt) / 1000 : 9999;
       const _freshCurrentPrice = _staleSecs < 30 ? pos.currentPrice : null;
-      curP = realPrice || _freshCurrentPrice || pos.premium;
-      if (realPrice) { pos.realData = true; pos._currentPriceUpdatedAt = Date.now(); }
-      if (!realPrice && !_freshCurrentPrice) {
-        logEvent("warn", `${pos.ticker} no live price available — using entry premium as floor`);
+      // FIX (6/17): when there's no live quote AND the cache is stale, carry forward the
+      // LAST KNOWN real price instead of pos.premium. Falling back to premium forces
+      // chg=0 → the position reads FLAT → every chg-based stop tier is silently skipped,
+      // so a position down 45% on a dropped quote rides untouched to the 3:15 flatten.
+      // _lastRealPrice preserves the true drawdown so the existing stops still fire.
+      // Only changes behavior when blinded, and only toward seeing the real loss (safe
+      // direction for long premium). _priceSource/_blindScans = provenance for Part B.
+      const _liveOrFresh = realPrice || _freshCurrentPrice;
+      curP = _liveOrFresh || pos._lastRealPrice || pos.premium;
+      if (realPrice) {
+        pos.realData = true; pos._currentPriceUpdatedAt = Date.now();
+        pos._lastRealPrice = realPrice; pos._lastRealAt = Date.now();
+        pos._priceSource = 'real'; pos._blindScans = 0;
+      } else if (_freshCurrentPrice) {
+        pos._lastRealPrice = _freshCurrentPrice; pos._lastRealAt = Date.now();
+        pos._priceSource = 'cache'; pos._blindScans = 0;
+      } else if (pos._lastRealPrice) {
+        pos._priceSource = 'lastKnown';
+        pos._blindScans = (pos._blindScans || 0) + 1;
+        logEvent("warn", `${pos.ticker} no live price — carrying last-known $${pos._lastRealPrice} (blind ${pos._blindScans} scan(s), age ${((Date.now() - (pos._lastRealAt || Date.now())) / 1000).toFixed(0)}s)`);
+      } else {
+        pos._priceSource = 'premium';
+        pos._blindScans = (pos._blindScans || 0) + 1;
+        logEvent("warn", `${pos.ticker} no live price and no last-known — using entry premium floor (blind ${pos._blindScans})`);
       }
       if (greeks.delta) {
         pos.greeks = {
