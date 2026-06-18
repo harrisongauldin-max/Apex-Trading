@@ -18,6 +18,12 @@
 const BASE_MIN_SCORE = 70;
 const SCORE_CAP      = 95;
 
+// ── Phase 1 (6/18): release the MR-call choke ────────────────
+// Two reversible knobs. The drawdown protocol still enforces ddMinScore (normally 70)
+// via Math.max below, so MR_CALL_MIN_SCORE cannot drop the effective floor under 70.
+const MR_CALL_MIN_SCORE      = 70;  // bull-regime mean-reversion (dip-buy) calls clear this instead of the 75 generic call floor. Set to 75 to revert to carve-out-only.
+const CALL_MACD_CARVEOUT_RSI = 35;  // an index MR call with intraday RSI <= this is exempt from the bearish-MACD floor lift (bearish daily MACD IS the dip). Set to 0 to disable the carve-out.
+
 // ── INSTRUMENT CONSTRAINTS ───────────────────────────────────
 // APEX trades SPY and QQQ naked options only.
 const INSTRUMENT_CONSTRAINTS = {
@@ -216,6 +222,7 @@ function evaluateEntry(candidate, rulebook, state, context = {}) {
   const isLateDay = etHour >= 14.5;
   const signals   = context.signals  || {};
   const dailyRsi  = signals.dailyRsi || signals.rsi || 50;
+  const intradayRsi = (signals.rsi != null) ? signals.rsi : dailyRsi;
   const macdSignal = signals.macd    || "neutral";
   const macdBullish = macdSignal.includes("bullish");
   const macdBearish = macdSignal.includes("bearish");
@@ -250,7 +257,16 @@ function evaluateEntry(candidate, rulebook, state, context = {}) {
   }
 
   // Minimum score
-  let minScore = optionType === "put" ? rb.minScorePut : rb.minScoreCall;
+  // Phase 1 (6/18): with-trend mean-reversion dip-buys clear MR_CALL_MIN_SCORE instead of the
+  // generic call floor. Against-trend puts keep rb.minScorePut (85 in bull) — Risk's wall, untouched.
+  let minScore;
+  if (optionType === "put") {
+    minScore = rb.minScorePut;
+  } else if (candidate.isMeanReversion === true && rb.isBullRegime) {
+    minScore = MR_CALL_MIN_SCORE;
+  } else {
+    minScore = rb.minScoreCall;
+  }
   minScore     = Math.max(0, minScore + rb.agentMinAdj);
 
   // Afternoon minimum [Regime A only]
@@ -261,8 +277,16 @@ function evaluateEntry(candidate, rulebook, state, context = {}) {
 
   // MACD contradiction [Regime A only]
   if (g.macdContradictsGate) {
+    // Phase 1 carve-out: an index mean-reversion call with deeply-oversold intraday RSI is NOT a
+    // MACD contradiction — bearish daily MACD IS the oversold dip it is buying. Exempting it stops
+    // the dip from raising its own floor 75->85. Everything else (bullish-MACD puts, and non-MR /
+    // non-index / not-oversold bearish-MACD calls) still gets lifted to 85.
+    const oversoldIndexMRCall = optionType === "call"
+      && candidate.isMeanReversion === true
+      && candidate.isIndex === true
+      && intradayRsi <= CALL_MACD_CARVEOUT_RSI;
     const genuineContradiction = (optionType === "put"  && macdBullish && dailyRsi < 65)
-                               || (optionType === "call" && macdBearish);
+                               || (optionType === "call" && macdBearish && !oversoldIndexMRCall);
     if (genuineContradiction) minScore = Math.max(minScore, 85);
   }
 
