@@ -85,6 +85,7 @@ const {
   MAX_GAP_PCT, MIN_STOCK_PRICE, GMAIL_USER, RESEND_API_KEY, VIX_PAUSE, VIX_REDUCE25, VIX_REDUCE50,
   VIX_CREDIT_PRIMARY, VIX_CALLS_BLOCKED,
   VIX_HIGH_CALL_SCORE, VIX_HIGH_CALL_RSI,
+  MR_LABEL_DECOUPLED = false,   // V3.2 (6/19) MR-label decoupling: default OFF; set true in constants.js to enable
 } = require('./constants');
 
 let scanRunning  = false;
@@ -1694,17 +1695,27 @@ async function runScan() {
       ? false  // index MR call in Regime A: oversold daily IS the entry signal, not a disqualifier (mirrors scoring.js C2 put-path)
       : (_mrDailyRsi < 45 || (_mrDailyRsi < 52 && (liveStock.macd || "").includes("bearish")));
     const mrDailyOverbought = _mrDailyRsi > 75;
-    if (mrSetup.score > callSetup.score && !mrBearishTrend && !mrDailyOverbought) {
-      const mrBeta   = stock.beta || 1.0;
-      const mrSector = stock.sector || "";
-      const mrLiquid = stock.isIndex || (mrBeta >= 1.2 && mrSector !== "Financial");
-      if (mrLiquid) {
-        callSetup.score   = mrSetup.score;
-        callSetup.reasons = mrSetup.reasons;
-        callSetup.isMeanReversion = true;
-        const _mrVixContext = state.vix >= 28 ? ` | VIX ${state.vix?.toFixed(1)} elevated` : "";
-        logEvent("filter", `${stock.ticker} MEAN REVERSION: score ${mrSetup.score}${_mrVixContext}`);
-      }
+    const _mrBeta   = stock.beta || 1.0;
+    const _mrSector = stock.sector || "";
+    const mrLiquid  = stock.isIndex || (_mrBeta >= 1.2 && _mrSector !== "Financial");
+    // V3.2 (6/19) MR-LABEL DECOUPLING (panel-decided; flag MR_LABEL_DECOUPLED, default OFF).
+    // _mrStrong = the original score-beat win — the STRICT tier. Gates the aggressive contract
+    // profile (0.42Δ/14DTE), sizing, and defensive-mode survival (unchanged semantics).
+    const _mrStrong = (mrSetup.score > callSetup.score) && !mrBearishTrend && !mrDailyOverbought && mrLiquid;
+    callSetup._mrStrong = _mrStrong;   // always carried (strict tier) — read by contract/defensive gates
+    // LIBERAL eligibility: when decoupled, the LABEL is granted on the SETUP (mrSetup recognized an
+    // oversold index MR dip) regardless of which scorer won — floor/carve-out eligibility only. The
+    // carve-out's own intraday-RSI<=35 gate stays the binding entry boundary. Flag OFF ⇒ _mrStrong
+    // (exact prior behavior, since isMeanReversion ⟺ _mrStrong then).
+    const _mrEligible = MR_LABEL_DECOUPLED
+      ? (mrSetup.isMeanReversion === true && !mrBearishTrend && !mrDailyOverbought && mrLiquid)
+      : _mrStrong;
+    if (_mrEligible) {
+      // SCORE: keep the higher of the two (never lose points); reasons follow the score used.
+      if (mrSetup.score >= callSetup.score) { callSetup.score = mrSetup.score; callSetup.reasons = mrSetup.reasons; }
+      callSetup.isMeanReversion = true;
+      const _mrVixContext = state.vix >= 28 ? ` | VIX ${state.vix?.toFixed(1)} elevated` : "";
+      logEvent("filter", `${stock.ticker} MEAN REVERSION${_mrStrong ? "" : " (label-only, std profile)"}: score ${Math.max(mrSetup.score, callSetup.score)}${_mrVixContext}`);
     }
 
     const ddProtocol  = marketContext.drawdownProtocol || { minScore: MIN_SCORE, sizeMultiplier: 1.0 };
@@ -1852,7 +1863,7 @@ async function runScan() {
       blocked: [],
     };
 
-    if (effectiveDefensive && !callSetup.isMeanReversion) callScore = 0;
+    if (effectiveDefensive && !callSetup._mrStrong) callScore = 0;   // D4: only strict/deep MR survives defensive
 
     const bestScore = Math.max(callScore, putScore);
     const optionType = putScore > callScore ? "put" : "call";
@@ -1873,11 +1884,11 @@ async function runScan() {
         (_clears ? "" : ` | headline: ${_killer}`));
     }
 
-    if (effectiveDefensive && optionType === "call" && !callSetup.isMeanReversion) {
+    if (effectiveDefensive && optionType === "call" && !callSetup._mrStrong) {
       logEvent("filter", `${stock.ticker} - macro defensive mode - skipping non-MR calls`);
       continue;
     }
-    if (effectiveDefensive && optionType === "call" && callSetup.isMeanReversion) {
+    if (effectiveDefensive && optionType === "call" && callSetup._mrStrong) {
       logEvent("filter", `${stock.ticker} - MR call proceeds despite defensive mode`);
     }
     const bestReasons = optionType === "put" ? putSetup.reasons : callSetup.reasons;
@@ -2032,6 +2043,7 @@ async function runScan() {
     }
     const isMR = optionType === "call" && callSetup.isMeanReversion;
     liveStock._isMeanReversion = isMR;
+    liveStock._mrStrong = (optionType === "call" && callSetup._mrStrong === true);   // strict tier → contract/size (two-tier)
 
     const eeCandidate = EE_scoreCandidate(
       { ...liveStock, isMeanReversion: isMR },
@@ -2073,7 +2085,7 @@ async function runScan() {
       const batch = scored.slice(i, i + BATCH_SIZE);
       await Promise.all(batch.map(async ({ stock, price, optionType, score }) => {
         try {
-          const isMR = optionType === "call" && (stock._isMeanReversion || false);
+          const isMR = optionType === "call" && (stock._mrStrong || false);   // D3: aggressive 0.42Δ/14DTE profile only on STRICT tier
           const contract = await findContract(stock.ticker, optionType, isMR ? 0.42 : 0.35, isMR ? 14 : 38, state.vix, stock);
           if (contract) {
             stock._cachedContract = contract;
