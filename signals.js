@@ -79,6 +79,13 @@ function calcMACD(bars) {
   const signal  = sigArr[sigArr.length - 1];
   if (signal == null) return { signal: "neutral", value: parseFloat(macdVal.toFixed(4)) };
   const histogram = macdVal - signal;
+  // V3.2 (6/19): expose the histogram SERIES (curl/divergence consumers need it). The series
+  // is already computed above (macdLine vs sigArr); we were discarding all but the last point.
+  // Additive only — the label classification below is byte-identical to before.
+  const _histSeries = [];
+  for (let i = 0; i < macdLine.length; i++) {
+    if (sigArr[i] != null) _histSeries.push(parseFloat((macdLine[i] - sigArr[i]).toFixed(4)));
+  }
   // V3.2 (6/17): normalize the histogram by daily ATR instead of an absolute $0.5 band.
   // A fixed ±0.5 is price-level- and volatility-blind: on $700+ indices the histogram
   // naturally runs in the ±2-6 range, so almost any pause crossed ±0.5 and earned the
@@ -87,11 +94,12 @@ function calcMACD(bars) {
   // Provisional band = 0.5x ATR; replace with the 75th-pct of real |hist/ATR| once measured.
   const atr   = calcATR(bars, 14) || (closes[closes.length - 1] * 0.01);
   const histR = histogram / atr;                   // histogram in ATR units
-  if (histR >  MACD_HIST_STRONG_ATR) return { signal: "bullish crossover", value: parseFloat(macdVal.toFixed(4)) };
-  if (histR >  0)                    return { signal: "bullish",           value: parseFloat(macdVal.toFixed(4)) };
-  if (histR < -MACD_HIST_STRONG_ATR) return { signal: "bearish crossover", value: parseFloat(macdVal.toFixed(4)) };
-  if (histR <  0)                    return { signal: "bearish",           value: parseFloat(macdVal.toFixed(4)) };
-  return { signal: "neutral", value: parseFloat(macdVal.toFixed(4)) };
+  const _h = parseFloat(histogram.toFixed(4));
+  if (histR >  MACD_HIST_STRONG_ATR) return { signal: "bullish crossover", value: parseFloat(macdVal.toFixed(4)), histogram: _h, histSeries: _histSeries };
+  if (histR >  0)                    return { signal: "bullish",           value: parseFloat(macdVal.toFixed(4)), histogram: _h, histSeries: _histSeries };
+  if (histR < -MACD_HIST_STRONG_ATR) return { signal: "bearish crossover", value: parseFloat(macdVal.toFixed(4)), histogram: _h, histSeries: _histSeries };
+  if (histR <  0)                    return { signal: "bearish",           value: parseFloat(macdVal.toFixed(4)), histogram: _h, histSeries: _histSeries };
+  return { signal: "neutral", value: parseFloat(macdVal.toFixed(4)), histogram: _h, histSeries: _histSeries };
 }
 
 function calcMomentum(bars) {
@@ -343,6 +351,18 @@ async function getDynamicSignals(ticker, bars, intradayBars = null, realOptionsI
   const rsi      = calcRSI(signalBars);                          // intraday RSI -- display/timing only
   const dailyRsi = bars.length >= 14 ? calcRSI(bars) : rsi;     // daily RSI -- all scoring thresholds
   const macd     = calcMACD(bars.length >= 26 ? bars : signalBars); // daily preferred
+  // V3.2 (6/19): MACD histogram-curl — momentum DECELERATING into a bottom. Histogram still
+  // negative (line below signal) but |hist| shrinking over the last 2 bars = an EARLIER read
+  // than a crossover, and aligned with the price-based bounce tier. OBSERVATIONAL ONLY here:
+  // scoring.js gates any points behind a flag + the existing bounce confirmation. This block
+  // only DERIVES + LOGS; it never changes a score on its own.
+  const _hs = Array.isArray(macd.histSeries) ? macd.histSeries : [];
+  let macdCurl = "none";
+  if (_hs.length >= 3) {
+    const a = _hs[_hs.length - 1], b = _hs[_hs.length - 2], c = _hs[_hs.length - 3];
+    if (a < 0 && a > b && b > c)      macdCurl = "bull_curl";   // negative but rising 2 bars = bottoming
+    else if (a > 0 && a < b && b < c) macdCurl = "bear_curl";   // positive but falling 2 bars = topping
+  }
   // TA-W2: ATR from daily bars - normalizes signal interpretation
   const atrRaw   = calcATR(bars.length >= 15 ? bars : signalBars, 14);
   const atrPct   = atrRaw && bars.length > 0 ? atrRaw / bars[bars.length-1].c : null; // ATR as % of price
@@ -407,6 +427,8 @@ async function getDynamicSignals(ticker, bars, intradayBars = null, realOptionsI
     rsi,           // intraday RSI -- display and timing only
     dailyRsi,      // daily RSI -- use this for all scoring thresholds (V2.81)
     macd:          macd.signal,
+    macdHist:      typeof macd.histogram === 'number' ? macd.histogram : null, // raw last histogram (number)
+    macdCurl,      // "bull_curl" | "bear_curl" | "none" — observational; scoring gated by flag in scoring.js
     momentum,
     adx,
     ivr,
