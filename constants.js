@@ -65,6 +65,9 @@ const MACD_HIST_STRONG_ATR = 0.5;
 // on the absolute RSI>=38 gate, which missed V-bottoms from deep lows. PROVISIONAL 6 (panel
 // verdict 6/17) — tune off paper trades. Lower = bounce credit fires earlier (more entries).
 const MR_BOUNCE_RSI_OFFLOW = 6;
+// Bounce also requires price to reclaim to within this fraction of VWAP (blocks rewarding RSI
+// noise on a still-falling tape). PROVISIONAL 0.004 (0.4%); tune off paper trades. Read by scoring.js.
+const MR_BOUNCE_VWAP_TOL   = 0.004;
 const IVR_MAX             = 70;
 const EARNINGS_SKIP_DAYS  = 5;
 const MIN_OPEN_INTEREST   = 100;
@@ -286,7 +289,7 @@ module.exports = {
   PARTIAL_CLOSE_PCT, TRAIL_ACTIVATE_PCT, TRAIL_STOP_PCT, BREAKEVEN_LOCK_PCT,
   RIDE_TARGET_PCT, TIME_STOP_DAYS, TIME_STOP_MOVE, IV_COLLAPSE_PCT,
   MA50_BUFFER, MACRO_REVERSAL_PCT, MIN_SCORE, MIN_SCORE_CREDIT, MIN_SCORE_MR, IVR_MAX,
-  MACD_HIST_STRONG_ATR, MR_BOUNCE_RSI_OFFLOW,
+  MACD_HIST_STRONG_ATR, MR_BOUNCE_RSI_OFFLOW, MR_BOUNCE_VWAP_TOL,
   EARNINGS_SKIP_DAYS, MIN_OPEN_INTEREST, MIN_STOCK_PRICE, MIN_OPTION_PREMIUM,
   MIN_OI, MAX_SPREAD_PCT, EARLY_SPREAD_PCT, MAX_GAP_PCT, TARGET_DELTA_MIN,
   VIX_CREDIT_PRIMARY, VIX_CALLS_BLOCKED,
