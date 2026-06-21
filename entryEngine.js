@@ -268,10 +268,13 @@ function evaluateEntry(candidate, rulebook, state, context = {}) {
     minScore = rb.minScoreCall;
   }
   minScore     = Math.max(0, minScore + rb.agentMinAdj);
+  const _trBase = minScore;                 // V3.2 (6/19) floor-composition trace (additive, no behavior change)
+  let _trAfternoon = false, _trMacdLift = false, _trCarveOut = false;
 
   // Afternoon minimum [Regime A only]
   if (g.afternoonMinActive && isLateDay) {
     const afternoonMin = rb.vix >= 30 ? 90 : rb.vix >= 25 ? 85 : minScore;
+    if (afternoonMin > minScore) _trAfternoon = true;
     minScore = Math.max(minScore, afternoonMin);
   }
 
@@ -285,19 +288,38 @@ function evaluateEntry(candidate, rulebook, state, context = {}) {
       && candidate.isMeanReversion === true
       && candidate.isIndex === true
       && intradayRsi <= CALL_MACD_CARVEOUT_RSI;
+    _trCarveOut = oversoldIndexMRCall;
     const genuineContradiction = (optionType === "put"  && macdBullish && dailyRsi < 65)
                                || (optionType === "call" && macdBearish && !oversoldIndexMRCall);
-    if (genuineContradiction) minScore = Math.max(minScore, 85);
+    if (genuineContradiction) { _trMacdLift = true; minScore = Math.max(minScore, 85); }
   }
 
   // Drawdown protocol
   const ddMinScore = context.drawdownMinScore ?? BASE_MIN_SCORE;
+  const _trBeforeDD = minScore;
   minScore = Math.max(minScore, ddMinScore);
+  const _trDD = minScore > _trBeforeDD ? ddMinScore : null;
+
+  // V3.2 (6/19) additive floor-composition trace — observability only, never alters pass/fail.
+  // carveOut shows at a glance whether the oversold-dip exemption fired; isMR/isIndex are the
+  // candidate fields it depends on (both were silently absent from the eeCandidate before 6/19,
+  // which forced every oversold index MR call to the 85 MACD-contradiction floor).
+  const minScoreTrace = {
+    base: _trBase,
+    afternoonLift: _trAfternoon ? minScore : null,
+    macdLift85: _trMacdLift,
+    ddLift: _trDD,
+    final: minScore,
+    isMR: candidate.isMeanReversion === true,
+    isIndex: candidate.isIndex === true,
+    carveOut: _trCarveOut,
+    intradayRsi,
+  };
 
   if (score < minScore)
-    return { pass: false, reason: `score ${score} below min ${minScore}`, minScore };
+    return { pass: false, reason: `score ${score} below min ${minScore}`, minScore, minScoreTrace };
 
-  return { pass: true, minScore, tradeType, optionType };
+  return { pass: true, minScore, tradeType, optionType, minScoreTrace };
 }
 
 // ── Exports ───────────────────────────────────────────────────
