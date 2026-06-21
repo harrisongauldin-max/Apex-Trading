@@ -15,7 +15,8 @@ const { MIN_SCORE, MIN_SCORE_CREDIT ,
 ,
   INDIVIDUAL_STOCKS_ENABLED
 ,
-  MR_BOUNCE_RSI_PTS = 6, MR_BOUNCE_VWAP_TOL = 0.004
+  MR_BOUNCE_RSI_PTS = 6, MR_BOUNCE_VWAP_TOL = 0.004,
+  MACD_CURL_SCORING = true   // V3.2 (6/19) Phase-1 curl: default ON; add MACD_CURL_SCORING:false to constants.js to disable
 }     = require('./constants');
 const { calcADX, getETTime } = require('./signals');
 const { setCache } = require('./market');
@@ -438,6 +439,7 @@ function scoreIndexSetup(stock, optionType, spyRSI, spyMACD, spyMomentum, breadt
     : "falling";
 
   let supplementScore = 0;
+  let _curlPts = 0;   // V3.2 (6/19) MACD bull-curl pts added to supplementScore (0 or 3) — for cap-aware net
   const SUPP_MAX_AGE_MS = 60 * 60 * 1000;
   const isDataFresh = (data) => data && data.updatedAt && (Date.now() - data.updatedAt) < SUPP_MAX_AGE_MS;
 
@@ -776,6 +778,19 @@ function scoreIndexSetup(stock, optionType, spyRSI, spyMACD, spyMomentum, breadt
       || (sessionLowRSI <= 30 && _rsiLiftOffLow >= MR_BOUNCE_RSI_PTS && _priceReclaim);
     const mrStabilized = sessionLowRSI <= 30 && _bounceConfirmed && intradayOversoldScans >= 3;
     const mrBouncing   = sessionLowRSI <= 30 && _bounceConfirmed && intradayOversoldScans >= 1;
+    // V3.2 (6/19) MACD histogram bull-curl — supplementary bounce CONFIRMATION (Phase 1).
+    // Capped under _suppCap; gated to ONLY agree with a price-bounce that already fired
+    // (mrStabilized/mrBouncing) so it can never originate or veto a setup. Flag MACD_CURL_SCORING
+    // (default ON; set false in constants.js → reverts to observational +0).
+    if (stock.macdCurl === "bull_curl" && (mrStabilized || mrBouncing)) {
+      if (MACD_CURL_SCORING) {
+        _curlPts = 3; supplementScore += _curlPts;
+        reasons.push(`MACD histogram bull-curl confirms ${mrStabilized ? "stabilized" : "bouncing"} bounce (+${_curlPts})`);
+      } else {
+        reasons.push(`MACD histogram bull-curl present — observational only (+0)`);
+      }
+      try { logEvent("filter", `${stock.ticker} CURL bull_curl tier:${mrStabilized?"stabilized":"bouncing"} rawPts:${_curlPts} flag:${MACD_CURL_SCORING?"ON":"OFF"}`); } catch(e) {}
+    }
     if (spyRSI <= 25) {
       if (mrStabilized) { score += 25; reasons.push(`${stock.ticker} RSI bounced from session low ${sessionLowRSI.toFixed(0)} to ${spyRSI} - mean reversion confirmed (+25)`); }
       else if (mrBouncing) { score += 12; reasons.push(`${stock.ticker} RSI bouncing from session low ${sessionLowRSI.toFixed(0)} - not yet confirmed (+12)`); }
@@ -936,8 +951,14 @@ function scoreIndexSetup(stock, optionType, spyRSI, spyMACD, spyMomentum, breadt
   score = Math.max(0, Math.min(100, score));
   const _mrCapitulationFlag = optionType === "call" && spyRSI <= 30 && !["trending_bull","recovery"].includes(regime);
   const _isMRPutExport = (typeof _isOverboughtMRPut !== 'undefined') && !!_isOverboughtMRPut;
+  // V3.2 (6/19) cap-aware curl contribution: how many of the +3 actually survived _suppCap
+  // (0 if the supplement cap was already saturated without curl). Lets the journal tell whether
+  // curl truly moved the final score — and, vs the entryEngine floor, whether it was decisive.
+  const _curlNet = _curlPts > 0
+    ? Math.min(_suppCap, supplementScore) - Math.min(_suppCap, supplementScore - _curlPts)
+    : 0;
   return { score, reasons, tradeType: "naked", mrCapitulation: _mrCapitulationFlag,
-           _isOverboughtMRPut: _isMRPutExport };
+           _isOverboughtMRPut: _isMRPutExport, macdCurl: stock.macdCurl || "none", curlPts: _curlPts, curlNet: _curlNet };
 }
 
 // estimateCreditRR removed — no credit spreads in APEX
