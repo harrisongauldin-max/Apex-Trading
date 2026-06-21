@@ -1394,6 +1394,8 @@ async function runScan() {
       rsi:           signals.rsi,
       dailyRsi:      (signals && signals.dailyRsi != null) ? parseFloat(signals.dailyRsi) : parseFloat(signals?.rsi || 50),
       macd:          signals.macd,
+      macdCurl:      signals.macdCurl || "none",   // V3.2 (6/19) histogram bull/bear-curl → scoreIndexSetup
+      macdHist:      typeof signals.macdHist === 'number' ? signals.macdHist : null,
       momentum:      signals.momentum,
       ivr:           signals.ivr,
       beta:          liveBeta,
@@ -1687,7 +1689,10 @@ async function runScan() {
 
     const mrSetup = scoreMeanReversionCall(liveStock, relStrength, signals.adx, bars, state.vix);
     const _mrDailyRsi       = liveStock.dailyRsi || 50;
-    const mrBearishTrend    = _mrDailyRsi < 45 || (_mrDailyRsi < 52 && (liveStock.macd || "").includes("bearish"));
+    const _idxBullExempt    = (liveStock.isIndex === true || stock.isIndex === true) && (state._regimeClass || "A") === "A";
+    const mrBearishTrend    = _idxBullExempt
+      ? false  // index MR call in Regime A: oversold daily IS the entry signal, not a disqualifier (mirrors scoring.js C2 put-path)
+      : (_mrDailyRsi < 45 || (_mrDailyRsi < 52 && (liveStock.macd || "").includes("bearish")));
     const mrDailyOverbought = _mrDailyRsi > 75;
     if (mrSetup.score > callSetup.score && !mrBearishTrend && !mrDailyOverbought) {
       const mrBeta   = stock.beta || 1.0;
@@ -1851,6 +1856,22 @@ async function runScan() {
 
     const bestScore = Math.max(callScore, putScore);
     const optionType = putScore > callScore ? "put" : "call";
+    // V3.2 (6/19) Consolidated SCAN VERDICT — one bottom-line per ticker per scan, so a no-entry
+    // stretch is diagnosable same-day instead of reconstructed from ~40 scattered gate logs. Reads
+    // only the scoring-layer result already computed; the FINAL floor + MACD-contradiction lift live
+    // in entryEngine, so this reports the scanner-floor disposition + isMR (entryEngine floor is lower
+    // when isMR=Y) and flags the handoff. Headline = the chosen path's likely blocker. Rides the
+    // existing "filter" channel so it surfaces wherever filter logs do.
+    {
+      const _vReasons = (optionType === "put" ? putSetup.reasons : callSetup.reasons) || [];
+      const _vFloor   = _effectiveMin;
+      const _clears   = bestScore >= _vFloor;
+      const _killer   = _vReasons.find(r => /\(-|too low|not oversold|wrong|bearish|no bounce|skip|block|\+0\)/i.test(r)) || _vReasons[_vReasons.length - 1] || "no reasons";
+      logEvent("filter",
+        `[VERDICT] ${stock.ticker} ${optionType.toUpperCase()} ${bestScore} vs scanner-floor ${_vFloor} → ${_clears ? "CLEARS→entryEngine" : "BELOW"}` +
+        ` | isMR:${callSetup.isMeanReversion ? "Y" : "N"} curl:${liveStock.macdCurl || "none"} dRSI:${(liveStock.dailyRsi || 0).toFixed(0)} c/p:${callScore}/${putScore}` +
+        (_clears ? "" : ` | headline: ${_killer}`));
+    }
 
     if (effectiveDefensive && optionType === "call" && !callSetup.isMeanReversion) {
       logEvent("filter", `${stock.ticker} - macro defensive mode - skipping non-MR calls`);
@@ -2102,10 +2123,10 @@ async function runScan() {
     const _volDeclineExec = false;
 
     const eeResult = evaluateEntry(
-      { ticker: stock.ticker, optionType, tradeType: intentType, score, constraintPass: constraintPass !== false, constraintReason: constraintReason || null, tradeIntent: intent, isMeanReversion, isIndex: stock.isIndex === true },
+      { ticker: stock.ticker, optionType, tradeType: intentType, score, constraintPass: constraintPass !== false, constraintReason: constraintReason || null, tradeIntent: intent },
       rb, state,
       { etHour: etHourNow, isLateDay, isLastHour, volDecline: _volDeclineExec,
-        signals: { rsi: stock.rsi, dailyRsi: stock.dailyRsi || stock.rsi || 50, macd: stock.macd || "neutral" },
+        signals: { dailyRsi: stock.dailyRsi || stock.rsi || 50, macd: stock.macd || "neutral" },
         recentSameDir: recentSameDirMins, existingProfitPct, existingCreditProfitPct,
         drawdownMinScore: ddProtocol.minScore || MIN_SCORE, drawdownLevel: ddProtocol.level || "normal",
         agentSignal: (state._agentMacro || {}).signal || "neutral" }
