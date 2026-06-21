@@ -15,7 +15,7 @@ const { MIN_SCORE, MIN_SCORE_CREDIT ,
 ,
   INDIVIDUAL_STOCKS_ENABLED
 ,
-  MR_BOUNCE_RSI_PTS = 6, MR_BOUNCE_VWAP_TOL = 0.004,
+  MR_BOUNCE_RSI_OFFLOW = 6, MR_BOUNCE_VWAP_TOL = 0.004,
   MACD_CURL_SCORING = true   // V3.2 (6/19) Phase-1 curl: default ON; add MACD_CURL_SCORING:false to constants.js to disable
 }     = require('./constants');
 const { calcADX, getETTime } = require('./signals');
@@ -768,14 +768,14 @@ function scoreIndexSetup(stock, optionType, spyRSI, spyMACD, spyMomentum, breadt
     // (6/17) Bounce confirmation is now relative + price-aware. The old absolute (spyRSI>=38)
     // missed violent V-bottoms (session low 18 → 30 is a 12pt rip but 30<38 → only +2).
     // Confirms on EITHER the original absolute RSI>=38, OR a real turn: RSI lifted
-    // MR_BOUNCE_RSI_PTS off its own session low AND price reclaimed to within
+    // MR_BOUNCE_RSI_OFFLOW off its own session low AND price reclaimed to within
     // MR_BOUNCE_VWAP_TOL of VWAP. Price gate blocks rewarding RSI noise on a falling tape.
     const _rsiLiftOffLow = (spyRSI || 50) - sessionLowRSI;
     const _bounceVWAP    = stock.intradayVWAP || stock.vwap || 0;
     const _bouncePrice   = stock.price || stock.lastPrice || 0;
     const _priceReclaim  = _bounceVWAP > 0 && _bouncePrice > 0 && _bouncePrice >= _bounceVWAP * (1 - MR_BOUNCE_VWAP_TOL);
     const _bounceConfirmed = (spyRSI || 50) >= 38
-      || (sessionLowRSI <= 30 && _rsiLiftOffLow >= MR_BOUNCE_RSI_PTS && _priceReclaim);
+      || (sessionLowRSI <= 30 && _rsiLiftOffLow >= MR_BOUNCE_RSI_OFFLOW && _priceReclaim);
     const mrStabilized = sessionLowRSI <= 30 && _bounceConfirmed && intradayOversoldScans >= 3;
     const mrBouncing   = sessionLowRSI <= 30 && _bounceConfirmed && intradayOversoldScans >= 1;
     // V3.2 (6/19) MACD histogram bull-curl — supplementary bounce CONFIRMATION (Phase 1).
