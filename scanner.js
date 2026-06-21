@@ -2123,7 +2123,8 @@ async function runScan() {
     const _volDeclineExec = false;
 
     const eeResult = evaluateEntry(
-      { ticker: stock.ticker, optionType, tradeType: intentType, score, constraintPass: constraintPass !== false, constraintReason: constraintReason || null, tradeIntent: intent },
+      { ticker: stock.ticker, optionType, tradeType: intentType, score, constraintPass: constraintPass !== false, constraintReason: constraintReason || null, tradeIntent: intent,
+        isMeanReversion: isMeanReversion === true, isIndex: stock.isIndex === true },  // V3.2 (6/19) FIX: evaluateEntry carve-outs depend on these — were absent, forcing oversold MR calls to the 85 floor
       rb, state,
       { etHour: etHourNow, isLateDay, isLastHour, volDecline: _volDeclineExec,
         signals: { dailyRsi: stock.dailyRsi || stock.rsi || 50, macd: stock.macd || "neutral" },
@@ -2139,7 +2140,11 @@ async function runScan() {
       // the top of this loop (it carries eeCandidate.reasons, the winning-side trail). grep [NEAR-MISS].
       try {
         const _nmTrail = reasons || [];
-        logEvent("filter", `[NEAR-MISS] ${stock.ticker} ${optionType.toUpperCase()} final:${score} | ${eeResult.reason} | trail: ${_nmTrail.join(" \u00b7 ") || "none"}`);
+        const _tr = eeResult.minScoreTrace;
+        const _trStr = _tr
+          ? ` | floor:${_tr.base}${_tr.afternoonLift ? `→aft${_tr.afternoonLift}` : ""}${_tr.macdLift85 ? "→macd85" : ""}${_tr.ddLift ? `→dd${_tr.ddLift}` : ""}=${_tr.final} carveOut:${_tr.carveOut ? "Y" : "N"} isMR:${_tr.isMR ? "Y" : "N"} isIdx:${_tr.isIndex ? "Y" : "N"}`
+          : "";
+        logEvent("filter", `[NEAR-MISS] ${stock.ticker} ${optionType.toUpperCase()} final:${score} | ${eeResult.reason} | trail: ${_nmTrail.join(" \u00b7 ") || "none"}${_trStr}`);
       } catch (_nmErr) { /* instrumentation must never halt the scan */ }
       if (!dryRunMode) recordGateBlock(stock.ticker, eeResult.reason, rb.regimeName, score);
       continue;
