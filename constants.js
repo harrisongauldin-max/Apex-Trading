@@ -106,6 +106,12 @@ const BARS_CACHE_TTL      = 60 * 60 * 1000;
 
 // ─── Feature flags ───────────────────────────────────────────────
 const INDIVIDUAL_STOCKS_ENABLED = false;
+// V3.2 (6/21) MR-LABEL DECOUPLING — panel-decided. When true, the mean-reversion LABEL
+// (entryEngine floor + 85-MACD-contradiction carve-out eligibility) is granted on the SETUP
+// rather than on the MR scorer out-scoring the general call path. Two-tier: the aggressive
+// contract profile (0.42Δ/14DTE) + defensive-mode survival stay gated on the strict score-beat
+// (_mrStrong) inside scanner.js. ENABLED for paper validation; set false to revert (no code deploy).
+const MR_LABEL_DECOUPLED = true;
 
 // ─── Infrastructure ──────────────────────────────────────────────
 const STATE_FILE = require('path').join(__dirname, 'state.json');
@@ -289,6 +295,7 @@ module.exports = {
   PDT_PROFIT_EXIT, PDT_STOP_LOSS, MS_PER_DAY, TRIGGER_COOLDOWN_MS,
   SAME_DAY_INTERVAL, OVERNIGHT_INTERVAL, SLOW_CACHE_TTL, BARS_CACHE_TTL,
   INDIVIDUAL_STOCKS_ENABLED, INDIVIDUAL_STOCK_WATCHLIST, STATE_FILE, WATCHLIST,
+  MR_LABEL_DECOUPLED,
   AGENT_MACRO_CACHE_MS, VIX_PAUSE, VIX_REDUCE25, VIX_REDUCE50, MAX_LOSS_PER_TRADE,
   WEEKLY_DD_LIMIT, PDT_DAYS, PREMARKET_NEGATIVE, PREMARKET_STRONG_MOVE,
   SUPPORT_BUFFER, RESISTANCE_BUFFER, FAST_PROFIT_PCT,
