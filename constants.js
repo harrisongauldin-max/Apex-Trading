@@ -115,6 +115,24 @@ const INDIVIDUAL_STOCKS_ENABLED = false;
 // contract profile (0.42Δ/14DTE) + defensive-mode survival stay gated on the strict score-beat
 // (_mrStrong) inside scanner.js. ENABLED for paper validation; set false to revert (no code deploy).
 const MR_LABEL_DECOUPLED = true;
+// V3.2 (6/22) PAPER-EXPERIMENT MODE — panel-decided "Aggressive" paper-validation experiment.
+// When true: caps the CALL entry floor at EXPERIMENT_CALL_FLOOR and bypasses the gap-up CALL blocks
+// (GAP-VWAP / GATE-C / GAP-REVERSAL / GAP-STRICT-RSI) so APEX takes marginal call setups on paper to
+// gather fills. CALLS ONLY — puts stay disciplined. Entries tagged [EXPERIMENT-ENTRY] for P&L
+// isolation. PAPER ONLY — set false to revert instantly (no code deploy). Review after ~15 fills.
+const APEX_PAPER_EXPERIMENT = true;
+const EXPERIMENT_CALL_FLOOR = 50;
+
+// --- Trade-robustness layer (panel D1/D5 + corroboration). Flags default OFF; toggle ON for paper validation. ---
+const IVP_CALL_PENALTY_STEEP            = true;  // D5: IVP threshold 75->70, calm-VIX call penalty 8->15
+const DIP_REQUIRES_MULTIDAY_ANCHOR      = true;  // D1: dip bonuses require underlying flat/red on the day
+const DIP_MAX_DAYCHANGE                 = 0.003;  // D1: max SPY day-change (+0.3%) to still count as a "dip"
+const OVERSOLD_CALL_NEEDS_CORROBORATION = false;  // PARKED OFF (6/22): superseded by the RSI daily-contract fix — the +20 now keys off daily RSI, so it no longer fires on intraday whipsaws (corroboration's main purpose). The below-VWAP clause also fights bounce-confirmation (D2 curl). Re-evaluate as a breadth-ONLY variant before ever enabling.
+const CORROBORATION_MAX_BREADTH         = 45;     // item4: breadth <= this corroborates an oversold-call dip
+const GIVEBACK_EXIT_ENABLED   = true;  // D3: exit a position that peaked then round-tripped to the floor
+const GIVEBACK_PEAK_MIN       = 0.01;   // D3: required peak gain (+1%) before give-back can arm (panel value; tune in paper)
+const GIVEBACK_FLOOR          = 0.0;    // D3: exit when current change falls back to <= this (breakeven)
+const GIVEBACK_MIN_HOLD_MIN   = 10;     // D3: minimum hold minutes before give-back can fire (anti early-noise)
 
 // ─── Infrastructure ──────────────────────────────────────────────
 const STATE_FILE = require('path').join(__dirname, 'state.json');
@@ -298,7 +316,10 @@ module.exports = {
   PDT_PROFIT_EXIT, PDT_STOP_LOSS, MS_PER_DAY, TRIGGER_COOLDOWN_MS,
   SAME_DAY_INTERVAL, OVERNIGHT_INTERVAL, SLOW_CACHE_TTL, BARS_CACHE_TTL,
   INDIVIDUAL_STOCKS_ENABLED, INDIVIDUAL_STOCK_WATCHLIST, STATE_FILE, WATCHLIST,
-  MR_LABEL_DECOUPLED,
+  MR_LABEL_DECOUPLED, APEX_PAPER_EXPERIMENT, EXPERIMENT_CALL_FLOOR,
+  IVP_CALL_PENALTY_STEEP, DIP_REQUIRES_MULTIDAY_ANCHOR, DIP_MAX_DAYCHANGE,
+  OVERSOLD_CALL_NEEDS_CORROBORATION, CORROBORATION_MAX_BREADTH,
+  GIVEBACK_EXIT_ENABLED, GIVEBACK_PEAK_MIN, GIVEBACK_FLOOR, GIVEBACK_MIN_HOLD_MIN,
   AGENT_MACRO_CACHE_MS, VIX_PAUSE, VIX_REDUCE25, VIX_REDUCE50, MAX_LOSS_PER_TRADE,
   WEEKLY_DD_LIMIT, PDT_DAYS, PREMARKET_NEGATIVE, PREMARKET_STRONG_MOVE,
   SUPPORT_BUFFER, RESISTANCE_BUFFER, FAST_PROFIT_PCT,
