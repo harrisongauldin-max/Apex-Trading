@@ -86,6 +86,7 @@ const {
   VIX_CREDIT_PRIMARY, VIX_CALLS_BLOCKED,
   VIX_HIGH_CALL_SCORE, VIX_HIGH_CALL_RSI,
   MR_LABEL_DECOUPLED = false,   // V3.2 (6/19) MR-label decoupling: default OFF; set true in constants.js to enable
+  APEX_PAPER_EXPERIMENT = false, EXPERIMENT_CALL_FLOOR = 50,   // V3.2 (6/22) paper-experiment mode: default OFF
 } = require('./constants');
 
 let scanRunning  = false;
@@ -738,6 +739,7 @@ async function runScan() {
       if (prevClose) state._spyPrevClose = prevClose;
       const curSPY     = spyBars[spyBars.length-1].c;
       const gapPct     = (curSPY - prevClose) / prevClose;
+      state._spyDayChangePct = gapPct;
       const etMinSince = (scanET.getHours() - 9) * 60 + scanET.getMinutes() - 30;
       if (!(gapPct > 0.015 && etMinSince >= 0)) return false;
       const spyVWAP = spyIntraday.length >= 5 ? calcVWAP(spyIntraday) : 0;
@@ -918,7 +920,7 @@ async function runScan() {
   }
 
   if (!dryRunMode) {
-    const breadthNow  = typeof marketContext?.breadth === "number" ? marketContext.breadth * 100 : parseFloat((marketContext?.breadth || "50").toString()) || 50;
+    const breadthNow  = parseFloat(marketContext?.breadth?.breadthPct ?? state._breadth ?? 50) || 50;
     const breadthPrev = state._prevBreadth || breadthNow;
     const breadthDrop = breadthPrev - breadthNow;
     if (breadthDrop >= 30 && breadthNow <= 35) {
@@ -1480,13 +1482,13 @@ async function runScan() {
     if (stock.isIndex) {
       const agentMacro  = state._agentMacro || {};
       const spyRSIPut   = liveStock.dailyRsi || liveStock.rsi || 50;
-      const spyRSICall  = liveStock.rsi || liveStock.dailyRsi || 50;
+      const spyRSICall  = liveStock.dailyRsi || liveStock.rsi || 50;
       const spyMACD     = liveStock.macd || "neutral";
       const spyMomentum = liveStock.momentum || "steady";
       const breadthVal  = typeof marketContext?.breadth === "number"
         ? marketContext.breadth * 100
         : marketContext?.breadth?.breadthPct ?? 50;
-      const scoringMacro  = { ...(agentMacro || {}), regime: authRegimeName, spyGapUp: !!spyGapUp };
+      const scoringMacro  = { ...(agentMacro || {}), regime: authRegimeName, spyGapUp: !!spyGapUp, spyDayChange: state._spyDayChangePct };
       const putResult  = scoreIndexSetup(liveStock, "put",  spyRSIPut,  spyMACD, spyMomentum, breadthVal, state.vix, scoringMacro);
       const callResult = scoreIndexSetup(liveStock, "call", spyRSICall, spyMACD, spyMomentum, breadthVal, state.vix, scoringMacro);
 
@@ -1762,7 +1764,7 @@ async function runScan() {
       callSetup.reasons.push(`High IV penalty: IVR ${_liveIVR.toFixed(0)} > 50 (-${_ivrPenalty})`);
     }
 
-    if (liveStock._gapDayCallBlocked) { callSetup.score = 0; callSetup.reasons.push('Gap-day VWAP block'); }
+    if (liveStock._gapDayCallBlocked && APEX_PAPER_EXPERIMENT !== true) { callSetup.score = 0; callSetup.reasons.push('Gap-day VWAP block'); }
 
     const _gateARecord = (state._dailyThesisComplete || {})[stock.ticker];
     if (_gateARecord && _gateARecord.optionType === 'call' && callSetup.score > 0) {
@@ -1774,15 +1776,15 @@ async function runScan() {
       }
     }
 
-    if (_gateCActive && callSetup.score > 0) {
-      const _gateCRSI = liveStock.rsi || signals.rsi || 50;
+    if (_gateCActive && callSetup.score > 0 && APEX_PAPER_EXPERIMENT !== true) {
+      const _gateCRSI = liveStock.dailyRsi || liveStock.rsi || signals.rsi || 50;
       if (_gateCRSI >= GATE_C_RSI_FLOOR) {
         callSetup.score = 0;
         logEvent("filter", `[GATE-C] ${stock.ticker} call blocked — PM gap-up day, RSI ${_gateCRSI.toFixed(0)}`);
       }
     }
 
-    if (state._gapReversalDay && callSetup.score > 0) {
+    if (state._gapReversalDay && callSetup.score > 0 && APEX_PAPER_EXPERIMENT !== true) {
       const _grRSI       = liveStock.rsi || signals.rsi || 50;
       const _grVWAP      = signals.intradayVWAP || 0;
       const _grAboveVWAP = _grVWAP > 0 && price > _grVWAP;
@@ -1798,15 +1800,15 @@ async function runScan() {
       putSetup.reasons.push(`Gap-up put fade boost (+${liveStock._gapPutBoost})`);
     }
     if (liveStock._gapCallBoost > 0 && callSetup.score > 0) {
-      const _breadthNow = marketContext?.breadth ?? 50;
+      const _breadthNow = parseFloat(marketContext?.breadth?.breadthPct ?? state._breadth ?? 50) || 50;
       const _broadWeakness = _breadthNow < 30;
       if (!_broadWeakness) {
         callSetup.score += liveStock._gapCallBoost;
         callSetup.reasons.push(`Gap-down call boost (+${liveStock._gapCallBoost})`);
       }
     }
-    if (liveStock._gapCallStrictRSI && callSetup.score > 0) {
-      const _strictRSI = liveStock.rsi || signals.rsi || 50;
+    if (liveStock._gapCallStrictRSI && callSetup.score > 0 && APEX_PAPER_EXPERIMENT !== true) {
+      const _strictRSI = liveStock.dailyRsi || liveStock.rsi || signals.rsi || 50;
       if (_strictRSI >= 37) { callSetup.score = 0; logEvent("filter", `[GAP-STRICT-RSI] ${stock.ticker} call blocked — RSI ${_strictRSI.toFixed(0)}`); }
     }
 
@@ -2139,11 +2141,15 @@ async function runScan() {
         isMeanReversion: isMeanReversion === true, isIndex: stock.isIndex === true },  // V3.2 (6/19) FIX: evaluateEntry carve-outs depend on these — were absent, forcing oversold MR calls to the 85 floor
       rb, state,
       { etHour: etHourNow, isLateDay, isLastHour, volDecline: _volDeclineExec,
-        signals: { dailyRsi: stock.dailyRsi || stock.rsi || 50, macd: stock.macd || "neutral" },
+        signals: { dailyRsi: stock.dailyRsi || stock.rsi || 50, macd: stock.macd || "neutral", macdCurl: signals.macdCurl || "none" },
         recentSameDir: recentSameDirMins, existingProfitPct, existingCreditProfitPct,
         drawdownMinScore: ddProtocol.minScore || MIN_SCORE, drawdownLevel: ddProtocol.level || "normal",
-        agentSignal: (state._agentMacro || {}).signal || "neutral" }
+        agentSignal: (state._agentMacro || {}).signal || "neutral",
+        experimentMode: APEX_PAPER_EXPERIMENT === true, experimentMinScore: EXPERIMENT_CALL_FLOOR }
     );
+    if (eeResult.pass && eeResult.minScoreTrace && eeResult.minScoreTrace.experiment) {
+      logEvent("filter", `[EXPERIMENT-ENTRY] ${stock.ticker} ${optionType.toUpperCase()} score ${score} @ exp-floor ${eeResult.minScore} (gap-bypass ${APEX_PAPER_EXPERIMENT === true ? "ON" : "OFF"}) — TAGGED for P&L isolation`);
+    }
     if (!eeResult.pass) {
       logEvent("filter", `${stock.ticker} entry blocked - ${eeResult.reason}`);
       // INSTRUMENTATION (6/16): the real score-below-min / gate rejections short-circuit HERE at the
