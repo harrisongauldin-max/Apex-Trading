@@ -19,6 +19,7 @@ const {
   MONTHLY_BUDGET, IV_COLLAPSE_PCT,
   ANTHROPIC_API_KEY,
   EARNINGS_SKIP_DAYS,
+  GIVEBACK_EXIT_ENABLED = false, GIVEBACK_PEAK_MIN = 0.01, GIVEBACK_FLOOR = 0, GIVEBACK_MIN_HOLD_MIN = 10,
 } = require('./constants');
 
 
@@ -352,6 +353,23 @@ async function checkExits(positions, posSnapshots, posQuotes, posNewsCache, ctx)
       if (!_closedThisCycle.has(pi)) {
         _closedThisCycle.add(pi);
         decisions.push({ pi, ticker: pos.ticker, action: 'close', reason: "dte-urgency", exitPremium: null, contractSym: pos.contractSymbol || null }); continue;
+      }
+    }
+
+    // ── Give-back exit (D3): worked, then round-tripped the whole move
+    // Flag-gated. If premium peaked >= GIVEBACK_PEAK_MIN above entry and has given it
+    // all back to <= GIVEBACK_FLOOR (curP basis, same as the peak), exit — independent
+    // of the tiered stop. Min-hold filters early-noise round-trips. Catches the
+    // "green then red" bleed the tiered stop only stops at -25%.
+    if (GIVEBACK_EXIT_ENABLED) {
+      const _gbHeldMin = (Date.now() - new Date(pos.openDate || pos.entryTime || Date.now()).getTime()) / 60000;
+      const _gbPeakChg = ((pos.peakPremium || pos.premium) - pos.premium) / pos.premium;
+      if (_gbHeldMin >= GIVEBACK_MIN_HOLD_MIN && _gbPeakChg >= GIVEBACK_PEAK_MIN && chg <= GIVEBACK_FLOOR) {
+        logEvent("scan", `${pos.ticker} give-back exit — peaked +${(_gbPeakChg*100).toFixed(0)}% now ${(chg*100).toFixed(0)}% after ${_gbHeldMin.toFixed(0)}min`);
+        if (!_closedThisCycle.has(pi)) {
+          _closedThisCycle.add(pi);
+          decisions.push({ pi, ticker: pos.ticker, action: 'close', reason: "give-back", exitPremium: null, contractSym: pos.contractSymbol || null }); continue;
+        }
       }
     }
 
