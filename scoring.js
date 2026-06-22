@@ -16,6 +16,8 @@ const { MIN_SCORE, MIN_SCORE_CREDIT ,
   INDIVIDUAL_STOCKS_ENABLED
 ,
   MR_BOUNCE_RSI_OFFLOW = 6, MR_BOUNCE_VWAP_TOL = 0.004,
+  IVP_CALL_PENALTY_STEEP = false, DIP_REQUIRES_MULTIDAY_ANCHOR = false, DIP_MAX_DAYCHANGE = 0.003,
+  OVERSOLD_CALL_NEEDS_CORROBORATION = false, CORROBORATION_MAX_BREADTH = 45,
   MACD_CURL_SCORING = true   // V3.2 (6/19) Phase-1 curl: default ON; add MACD_CURL_SCORING:false to constants.js to disable
 }     = require('./constants');
 const { calcADX, getETTime } = require('./signals');
@@ -378,10 +380,13 @@ function scoreMeanReversionCall(stock, relStrength, adx, bars, vix) {
   // zero all SPY mean-reversion calls; the downstream liquidity check already gates on isIndex.
   if (!stock.isIndex && (stock.beta || 1) < 1.0) return { score: 0, reasons: ["Low beta - not a mean reversion candidate (+0)"] };
 
-  if (stock.rsi <= 35)                        { score += 20; reasons.push(`RSI ${stock.rsi} - deeply oversold (+20)`); }
-  else if (stock.rsi <= 42)                   { score += 12; reasons.push(`RSI ${stock.rsi} - oversold (+12)`); }
-  else if (stock.rsi <= 48)                   { score += 5;  reasons.push(`RSI ${stock.rsi} - near oversold (+5)`); }
-  else return { score: 0, reasons: [`RSI ${stock.rsi} not oversold - skip mean reversion`] };
+  // RSI daily-contract enforcement (panel P0): mean-reversion oversold tiers key off DAILY RSI,
+  // not the display/timing intraday rsi (signals.js contract). Intraday whipsaw must never authorize entry.
+  const _mrDailyRSI = stock.dailyRsi || stock.rsi || 50;
+  if (_mrDailyRSI <= 35)      { score += 20; reasons.push(`dailyRSI ${_mrDailyRSI} - deeply oversold (+20)`); }
+  else if (_mrDailyRSI <= 42) { score += 12; reasons.push(`dailyRSI ${_mrDailyRSI} - oversold (+12)`); }
+  else if (_mrDailyRSI <= 48) { score += 5;  reasons.push(`dailyRSI ${_mrDailyRSI} - near oversold (+5)`); }
+  else return { score: 0, reasons: [`dailyRSI ${_mrDailyRSI} not oversold - skip mean reversion`] };
 
   const oversoldScans = state._oversoldCount ? (state._oversoldCount[stock.ticker] || 0) : 0;
   if (oversoldScans >= 3)      { score += 15; reasons.push(`Oversold ${oversoldScans} consecutive scans - capitulation (+15)`); }
@@ -722,7 +727,13 @@ function scoreIndexSetup(stock, optionType, spyRSI, spyMACD, spyMomentum, breadt
     if (["strongly bullish","bullish"].includes(signal) && confidence === "high") { score += 35; reasons.push(`Agent ${signal} high confidence (+35)`); }
     else if (["strongly bullish","bullish"].includes(signal))                     { score += 25; reasons.push(`Agent ${signal} (+25)`); }
     else if (signal === "mild bullish")                                            { score += 8;  reasons.push("Agent mild bullish (+8)"); }
-    else if (signal === "neutral" && spyRSI <= 35)                                { score += 20; reasons.push("Mean reversion call - SPY oversold on neutral macro (+20)"); }
+    else if (signal === "neutral" && spyRSI <= 35)                                {
+        const _px = stock.lastPrice || stock.price || 0;
+        const _belowVWAP = (stock.intradayVWAP || 0) > 0 && _px < stock.intradayVWAP;
+        const _mrCorrob = !OVERSOLD_CALL_NEEDS_CORROBORATION || (_belowVWAP && breadth <= CORROBORATION_MAX_BREADTH);
+        if (_mrCorrob) { score += 20; reasons.push("Mean reversion call - SPY oversold on neutral macro (+20)"); }
+        else { reasons.push(`Oversold but uncorroborated (breadth ${breadth}% ${_belowVWAP ? "below" : "above"} VWAP) - no MR credit (+0)`); }
+      }
     else if (signal === "neutral")                                                 { score += 0;  reasons.push("Agent neutral (+0)"); }
     else if (mrCapitulationActive) {
       score += 5; reasons.push(`Agent ${signal} bypassed — session panic RSI ${sessionLowRSIForBypass.toFixed(0)}, confirming MR capitulation entry (+5)`);
@@ -735,7 +746,7 @@ function scoreIndexSetup(stock, optionType, spyRSI, spyMACD, spyMomentum, breadt
 
     if (["trending_bull","recovery"].includes(regime)) {
       const _breadthNow  = state._breadth || 50;
-      const _aboveVWAP   = (stock.lastPrice || stock.price || 0) >= (stock.vwap || 0) * 0.995;
+      const _aboveVWAP   = (stock.intradayVWAP || 0) > 0 && (stock.lastPrice || stock.price || 0) >= stock.intradayVWAP * 0.995;
       if (_aboveVWAP && _breadthNow >= 40) {
         score += 20; reasons.push(`Regime: ${regime} (+20) — intraday aligned (above VWAP, breadth ${_breadthNow}%)`);
       } else if (_aboveVWAP || _breadthNow >= 30) {
@@ -834,7 +845,7 @@ function scoreIndexSetup(stock, optionType, spyRSI, spyMACD, spyMomentum, breadt
     const bNorm = bRange > 5 ? ((breadth - bMin) / bRange) * 100 : 50;
     if (bNorm >= 75 && breadth >= 60)      { score += 10; reasons.push(`Breadth ${breadth}% (${bNorm.toFixed(0)}th pctile) - strong relative to recent (+10)`); }
     else if (bNorm >= 60)                  { score += 6;  reasons.push(`Breadth ${breadth}% (${bNorm.toFixed(0)}th pctile) - recovering (+6)`); }
-    else if (bNorm <= 30 && ["trending_bull","recovery"].includes(regime)) {
+    else if (bNorm <= 30 && ["trending_bull","recovery"].includes(regime) && (!DIP_REQUIRES_MULTIDAY_ANCHOR || ((agentMacro||{}).spyDayChange ?? 0) <= DIP_MAX_DAYCHANGE)) {
       score += 12; reasons.push(`Breadth ${breadth}% (${bNorm.toFixed(0)}th pctile) - low relative to recent in bull regime - ideal dip entry (+12)`);
     }
     else if (bNorm <= 20 && !mrCapitulationActive) { score -= 8; reasons.push(`Breadth ${breadth}% (${bNorm.toFixed(0)}th pctile) - very weak relative to recent (-8)`); }
@@ -866,8 +877,8 @@ function scoreIndexSetup(stock, optionType, spyRSI, spyMACD, spyMomentum, breadt
     const highVIXNow = vix >= 30;
     if (ivpCall < 25)      { score += 10; reasons.push(`IVP ${ivpCall}% - cheap call spreads, favorable entry (+10)`); }
     else if (ivpCall < 45) { score += 5;  reasons.push(`IVP ${ivpCall}% - moderate IV, reasonable entry (+5)`); }
-    else if (ivpCall >= 75 && !highVIXNow) { score -= 8; reasons.push(`IVP ${ivpCall}% - expensive calls in calm VIX (-8)`); }
-    else if (ivpCall >= 75)  { score -= 3; reasons.push(`IVP ${ivpCall}% - expensive but VIX elevated, partial offset (-3)`); }
+    else if (ivpCall >= (IVP_CALL_PENALTY_STEEP ? 70 : 75) && !highVIXNow) { const _ivpPen = IVP_CALL_PENALTY_STEEP ? 15 : 8; score -= _ivpPen; reasons.push(`IVP ${ivpCall}% - expensive calls in calm VIX (-${_ivpPen})`); }
+    else if (ivpCall >= (IVP_CALL_PENALTY_STEEP ? 70 : 75))  { const _ivpPen2 = IVP_CALL_PENALTY_STEEP ? 5 : 3; score -= _ivpPen2; reasons.push(`IVP ${ivpCall}% - expensive but VIX elevated, partial offset (-${_ivpPen2})`); }
 
     const weeklyTrend    = stock._weeklyTrend || {};
     const trendCtx       = weeklyTrend.trendContext;
@@ -885,8 +896,8 @@ function scoreIndexSetup(stock, optionType, spyRSI, spyMACD, spyMomentum, breadt
 
     const agentAlreadyBullish = ["strongly bullish","bullish","mild bullish"].includes(signal);
     if (entryBias === "calls_on_dips") {
-      const _aboveVWAPNow = (stock.lastPrice || stock.price || 0) >= (stock.vwap || 0) * 0.995;
-      const _dipConfirmed = _aboveVWAPNow && (spyMomentum === "recovering" || spyRSI <= 45);
+      const _aboveVWAPNow = (stock.intradayVWAP || 0) > 0 && (stock.lastPrice || stock.price || 0) >= stock.intradayVWAP * 0.995;
+      const _dipConfirmed = _aboveVWAPNow && (spyMomentum === "recovering" || spyRSI <= 45) && (!DIP_REQUIRES_MULTIDAY_ANCHOR || ((agentMacro||{}).spyDayChange ?? 0) <= DIP_MAX_DAYCHANGE);
       if (_dipConfirmed) {
         const biasBonus = agentAlreadyBullish ? 6 : 12;
         score += biasBonus; reasons.push(`Entry bias: calls on dips - dip confirmed near VWAP (+${biasBonus})`);
