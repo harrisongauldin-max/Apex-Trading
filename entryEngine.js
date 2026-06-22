@@ -23,6 +23,7 @@ const SCORE_CAP      = 95;
 // via Math.max below, so MR_CALL_MIN_SCORE cannot drop the effective floor under 70.
 const MR_CALL_MIN_SCORE      = 70;  // bull-regime mean-reversion (dip-buy) calls clear this instead of the 75 generic call floor. Set to 75 to revert to carve-out-only.
 const CALL_MACD_CARVEOUT_RSI = 35;  // an index MR call with intraday RSI <= this is exempt from the bearish-MACD floor lift (bearish daily MACD IS the dip). Set to 0 to disable the carve-out.
+const MACD_BEARISH_CALL_VETO = true; // D2: true => re-key carve-out off DAILY RSI + require bull_curl, and HARD-VETO a bearish-MACD call that is not even daily-oversold (falling knife). false = prior 85-lift behavior.
 
 // ── INSTRUMENT CONSTRAINTS ───────────────────────────────────
 // APEX trades SPY and QQQ naked options only.
@@ -284,14 +285,36 @@ function evaluateEntry(candidate, rulebook, state, context = {}) {
     // MACD contradiction — bearish daily MACD IS the oversold dip it is buying. Exempting it stops
     // the dip from raising its own floor 75->85. Everything else (bullish-MACD puts, and non-MR /
     // non-index / not-oversold bearish-MACD calls) still gets lifted to 85.
-    const oversoldIndexMRCall = optionType === "call"
-      && candidate.isMeanReversion === true
-      && candidate.isIndex === true
-      && intradayRsi <= CALL_MACD_CARVEOUT_RSI;
-    _trCarveOut = oversoldIndexMRCall;
-    const genuineContradiction = (optionType === "put"  && macdBullish && dailyRsi < 65)
-                               || (optionType === "call" && macdBearish && !oversoldIndexMRCall);
-    if (genuineContradiction) { _trMacdLift = true; minScore = Math.max(minScore, 85); }
+    if (!MACD_BEARISH_CALL_VETO) {
+      // Flag OFF: prior behavior — carve-out (effectively daily; intradayRsi falls back to dailyRsi) + flat 85 lift.
+      const oversoldIndexMRCall = optionType === "call"
+        && candidate.isMeanReversion === true
+        && candidate.isIndex === true
+        && intradayRsi <= CALL_MACD_CARVEOUT_RSI;
+      _trCarveOut = oversoldIndexMRCall;
+      const genuineContradiction = (optionType === "put"  && macdBullish && dailyRsi < 65)
+                                 || (optionType === "call" && macdBearish && !oversoldIndexMRCall);
+      if (genuineContradiction) { _trMacdLift = true; minScore = Math.max(minScore, 85); }
+    } else {
+      // D2 (flag ON): carve-out re-keyed off DAILY RSI + bull_curl confirmation; tiered call-side response.
+      const _curl        = signals.macdCurl || "none";
+      const _oversoldDay = dailyRsi <= CALL_MACD_CARVEOUT_RSI;
+      const carvedOut    = optionType === "call"
+        && candidate.isMeanReversion === true
+        && candidate.isIndex === true
+        && _oversoldDay
+        && _curl === "bull_curl";                 // confirmed bottoming dip — not a contradiction
+      _trCarveOut = carvedOut;
+      if (optionType === "put" && macdBullish && dailyRsi < 65) {
+        _trMacdLift = true; minScore = Math.max(minScore, 85);             // puts: unchanged
+      } else if (optionType === "call" && macdBearish && !carvedOut) {
+        if (_oversoldDay) {
+          _trMacdLift = true; minScore = Math.max(minScore, 85);           // oversold, curl unconfirmed → high floor, not veto
+        } else {
+          return { pass: false, reason: `MACD bearish on long call & daily RSI ${dailyRsi.toFixed(0)} not oversold (D2 falling-knife veto)` };
+        }
+      }
+    }
   }
 
   // Drawdown protocol
@@ -299,6 +322,15 @@ function evaluateEntry(candidate, rulebook, state, context = {}) {
   const _trBeforeDD = minScore;
   minScore = Math.max(minScore, ddMinScore);
   const _trDD = minScore > _trBeforeDD ? ddMinScore : null;
+
+  // V3.2 (6/22) PAPER-EXPERIMENT floor override (panel-decided; flag-gated via context from constants.js).
+  // Caps the CALL floor at experimentMinScore so marginal paper setups can enter for data collection.
+  // CALLS ONLY — puts stay disciplined. Tagged in the trace so these fills are isolable. Reverts via flag.
+  let _expApplied = false;
+  if (context.experimentMode === true && optionType === "call") {
+    const _expFloor = context.experimentMinScore ?? 50;
+    if (_expFloor < minScore) { minScore = _expFloor; _expApplied = true; }
+  }
 
   // V3.2 (6/19) additive floor-composition trace — observability only, never alters pass/fail.
   // carveOut shows at a glance whether the oversold-dip exemption fired; isMR/isIndex are the
@@ -314,6 +346,7 @@ function evaluateEntry(candidate, rulebook, state, context = {}) {
     isIndex: candidate.isIndex === true,
     carveOut: _trCarveOut,
     intradayRsi,
+    experiment: _expApplied,
   };
 
   if (score < minScore)
