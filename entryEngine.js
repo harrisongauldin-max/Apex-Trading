@@ -296,22 +296,25 @@ function evaluateEntry(candidate, rulebook, state, context = {}) {
                                  || (optionType === "call" && macdBearish && !oversoldIndexMRCall);
       if (genuineContradiction) { _trMacdLift = true; minScore = Math.max(minScore, 85); }
     } else {
-      // D2 (flag ON): carve-out re-keyed off DAILY RSI + bull_curl confirmation; tiered call-side response.
+      // D2 (flag ON): carve-out keyed off INTRADAY RSI (panel B, 6/23 — the MR edge IS intraday; daily-RSI
+      // keying vetoed the very dip-buys the strategy exists to take) + bull_curl confirmation. The hard veto
+      // now fires ONLY when the call isn't even intraday-oversold (a genuine falling knife); an intraday-oversold
+      // dip with unconfirmed curl gets the 85 floor, not a veto. Puts unchanged (still daily-keyed).
       const _curl        = signals.macdCurl || "none";
-      const _oversoldDay = dailyRsi <= CALL_MACD_CARVEOUT_RSI;
+      const _oversoldNow = intradayRsi <= CALL_MACD_CARVEOUT_RSI;   // was dailyRsi — panel B re-key
       const carvedOut    = optionType === "call"
         && candidate.isMeanReversion === true
         && candidate.isIndex === true
-        && _oversoldDay
+        && _oversoldNow
         && _curl === "bull_curl";                 // confirmed bottoming dip — not a contradiction
       _trCarveOut = carvedOut;
       if (optionType === "put" && macdBullish && dailyRsi < 65) {
         _trMacdLift = true; minScore = Math.max(minScore, 85);             // puts: unchanged
       } else if (optionType === "call" && macdBearish && !carvedOut) {
-        if (_oversoldDay) {
-          _trMacdLift = true; minScore = Math.max(minScore, 85);           // oversold, curl unconfirmed → high floor, not veto
+        if (_oversoldNow) {
+          _trMacdLift = true; minScore = Math.max(minScore, 85);           // intraday-oversold, curl unconfirmed → high floor, not veto
         } else {
-          return { pass: false, reason: `MACD bearish on long call & daily RSI ${dailyRsi.toFixed(0)} not oversold (D2 falling-knife veto)` };
+          return { pass: false, reason: `MACD bearish on long call & intraday RSI ${intradayRsi.toFixed(0)} not oversold (D2 falling-knife veto)` };
         }
       }
     }
