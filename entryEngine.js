@@ -327,9 +327,12 @@ function evaluateEntry(candidate, rulebook, state, context = {}) {
   // Caps the CALL floor at experimentMinScore so marginal paper setups can enter for data collection.
   // CALLS ONLY — puts stay disciplined. Tagged in the trace so these fills are isolable. Reverts via flag.
   let _expApplied = false;
-  if (context.experimentMode === true && optionType === "call") {
-    const _expFloor = context.experimentMinScore ?? 50;
-    if (_expFloor < minScore) { minScore = _expFloor; _expApplied = true; }
+  let _expSide = null;
+  if (context.experimentMode === true) {
+    const _expFloor = optionType === "put"
+      ? (context.experimentMinScorePut ?? 60)   // PUT floor tunnels under Risk's 85 against-trend wall — tagged in scanner as PUT under-85-wall
+      : (context.experimentMinScore ?? 50);
+    if (_expFloor < minScore) { minScore = _expFloor; _expApplied = true; _expSide = optionType; }
   }
 
   // V3.2 (6/19) additive floor-composition trace — observability only, never alters pass/fail.
@@ -347,6 +350,7 @@ function evaluateEntry(candidate, rulebook, state, context = {}) {
     carveOut: _trCarveOut,
     intradayRsi,
     experiment: _expApplied,
+    expSide: _expSide,
   };
 
   if (score < minScore)
