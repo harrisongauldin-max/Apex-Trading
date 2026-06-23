@@ -8,7 +8,7 @@ const {
   getStockBars, getIntradayBars, getStockQuote, getCircuitState,
 } = require('./broker');
 
-const { state, logEvent, markDirty, saveStateNow, flushStateIfDirty } = require('./state');
+const { state, logEvent, markDirty, saveStateNow, flushStateIfDirty, paperDataActive } = require('./state');
 
 const {
   calcRSI, calcEMA, calcMACD, calcMomentum, calcATR, calcADX, calcIVRank,
@@ -86,7 +86,7 @@ const {
   VIX_CREDIT_PRIMARY, VIX_CALLS_BLOCKED,
   VIX_HIGH_CALL_SCORE, VIX_HIGH_CALL_RSI,
   MR_LABEL_DECOUPLED = false,   // V3.2 (6/19) MR-label decoupling: default OFF; set true in constants.js to enable
-  APEX_PAPER_EXPERIMENT = false, EXPERIMENT_CALL_FLOOR = 50,   // V3.2 (6/22) paper-experiment mode: default OFF
+  APEX_PAPER_EXPERIMENT = false, EXPERIMENT_CALL_FLOOR = 50, EXPERIMENT_PUT_FLOOR = 60,   // V3.2 (6/22) paper-experiment mode: default OFF
 } = require('./constants');
 
 let scanRunning  = false;
@@ -305,16 +305,16 @@ async function runScan() {
   logEvent("scan", `Scan | VIX:${state.vix} | cash:${fmt(state.cash)} | positions:${state.positions.length} | breadth:${marketContext.breadth.breadthPct}% (${marketContext.breadth.advancing ?? '?'}\u2191/${marketContext.breadth.declining ?? '?'}\u2193) | F&G:${marketContext.fearGreed.score}`);
 
   // C1-A: Daily loss lock check at scan top — halt entries if lock active
-  if (state._dailyLossLockActive && !dryRunMode) {
+  if (state._dailyLossLockActive && !dryRunMode && !paperDataActive(state)) {
     logEvent("circuit", `[C1-A] Daily loss lock ACTIVE — entries blocked. todayRealizedPnL: $${(state.todayRealizedPnL||0).toFixed(0)}`);
     // exits still run — fall through, don't return early
   }
 
   // C1-G: Weekly/monthly halt check
-  if (state._weeklyLossLockActive && !dryRunMode) {
+  if (state._weeklyLossLockActive && !dryRunMode && !paperDataActive(state)) {
     logEvent("circuit", `[C1-G] Weekly loss lock ACTIVE — entries blocked. weeklyRealizedPnL: $${(state._weeklyRealizedPnL||0).toFixed(0)}`);
   }
-  if (state._monthlyLossLockActive && !dryRunMode) {
+  if (state._monthlyLossLockActive && !dryRunMode && !paperDataActive(state)) {
     logEvent("circuit", `[C1-G] Monthly loss lock ACTIVE — entries blocked.`);
   }
 
@@ -558,7 +558,7 @@ async function runScan() {
       marketContext.skew = state._skew;
     }
     if (sentiment) { marketContext.aaii = sentiment; state._aaii = { ...sentiment, updatedAt: Date.now() }; }
-    marketContext.fearGreed   = fg;
+    marketContext.fearGreed   = fg; state._fearGreed = fg;
     marketContext.dxy         = dxy;
     marketContext.yieldCurve  = yc;
     if (dxy) state._dxy = { ...dxy, updatedAt: Date.now() };
@@ -724,7 +724,7 @@ async function runScan() {
     // C1-C: HIGH RISK day plan
     if (_dayPlanHighRisk) effectiveMin = Math.max(effectiveMin, 85);
     // C1-A: Daily loss lock active → raise to 85
-    if (state._dailyLossLockActive) effectiveMin = Math.max(effectiveMin, 85);
+    if (state._dailyLossLockActive && !paperDataActive(state)) effectiveMin = Math.max(effectiveMin, 85);
     // C1-B: Per-instrument loss count >= 2 → raise to 90
     return effectiveMin;
   }
@@ -885,9 +885,10 @@ async function runScan() {
   const _c1dHighRiskDay = _dayPlanHighRisk;
 
   // putsAllowed / callsAllowed incorporate C1-A and C1-G locks
-  const _c1aLockBlocking  = state._dailyLossLockActive && !dryRunMode;
-  const _c1gWeeklyBlocking = state._weeklyLossLockActive && !dryRunMode;
-  const _c1gMonthlyBlocking = state._monthlyLossLockActive && !dryRunMode;
+  const _paperData = paperDataActive(state);   // PAPER DATA MODE lifts the account-level P&L loss-locks (paper only)
+  const _c1aLockBlocking  = state._dailyLossLockActive && !dryRunMode && !_paperData;
+  const _c1gWeeklyBlocking = state._weeklyLossLockActive && !dryRunMode && !_paperData;
+  const _c1gMonthlyBlocking = state._monthlyLossLockActive && !dryRunMode && !_paperData;
   const _c1AnyLockActive   = _c1aLockBlocking || _c1gWeeklyBlocking || _c1gMonthlyBlocking;
 
   const putsAllowed       = (entryWindowOpen
@@ -1764,7 +1765,7 @@ async function runScan() {
       callSetup.reasons.push(`High IV penalty: IVR ${_liveIVR.toFixed(0)} > 50 (-${_ivrPenalty})`);
     }
 
-    if (liveStock._gapDayCallBlocked && APEX_PAPER_EXPERIMENT !== true) { callSetup.score = 0; callSetup.reasons.push('Gap-day VWAP block'); }
+    if (liveStock._gapDayCallBlocked && !paperDataActive(state)) { callSetup.score = 0; callSetup.reasons.push('Gap-day VWAP block'); }
 
     const _gateARecord = (state._dailyThesisComplete || {})[stock.ticker];
     if (_gateARecord && _gateARecord.optionType === 'call' && callSetup.score > 0) {
@@ -1776,7 +1777,7 @@ async function runScan() {
       }
     }
 
-    if (_gateCActive && callSetup.score > 0 && APEX_PAPER_EXPERIMENT !== true) {
+    if (_gateCActive && callSetup.score > 0 && !paperDataActive(state)) {
       const _gateCRSI = liveStock.dailyRsi || liveStock.rsi || signals.rsi || 50;
       if (_gateCRSI >= GATE_C_RSI_FLOOR) {
         callSetup.score = 0;
@@ -1784,7 +1785,7 @@ async function runScan() {
       }
     }
 
-    if (state._gapReversalDay && callSetup.score > 0 && APEX_PAPER_EXPERIMENT !== true) {
+    if (state._gapReversalDay && callSetup.score > 0 && !paperDataActive(state)) {
       const _grRSI       = liveStock.rsi || signals.rsi || 50;
       const _grVWAP      = signals.intradayVWAP || 0;
       const _grAboveVWAP = _grVWAP > 0 && price > _grVWAP;
@@ -1807,7 +1808,7 @@ async function runScan() {
         callSetup.reasons.push(`Gap-down call boost (+${liveStock._gapCallBoost})`);
       }
     }
-    if (liveStock._gapCallStrictRSI && callSetup.score > 0 && APEX_PAPER_EXPERIMENT !== true) {
+    if (liveStock._gapCallStrictRSI && callSetup.score > 0 && !paperDataActive(state)) {
       const _strictRSI = liveStock.dailyRsi || liveStock.rsi || signals.rsi || 50;
       if (_strictRSI >= 37) { callSetup.score = 0; logEvent("filter", `[GAP-STRICT-RSI] ${stock.ticker} call blocked — RSI ${_strictRSI.toFixed(0)}`); }
     }
@@ -2141,14 +2142,15 @@ async function runScan() {
         isMeanReversion: isMeanReversion === true, isIndex: stock.isIndex === true },  // V3.2 (6/19) FIX: evaluateEntry carve-outs depend on these — were absent, forcing oversold MR calls to the 85 floor
       rb, state,
       { etHour: etHourNow, isLateDay, isLastHour, volDecline: _volDeclineExec,
-        signals: { dailyRsi: stock.dailyRsi || stock.rsi || 50, macd: stock.macd || "neutral", macdCurl: signals.macdCurl || "none" },
+        signals: { dailyRsi: stock.dailyRsi || stock.rsi || 50, macd: stock.macd || "neutral", macdCurl: stock.macdCurl || "none" },
         recentSameDir: recentSameDirMins, existingProfitPct, existingCreditProfitPct,
         drawdownMinScore: ddProtocol.minScore || MIN_SCORE, drawdownLevel: ddProtocol.level || "normal",
         agentSignal: (state._agentMacro || {}).signal || "neutral",
-        experimentMode: APEX_PAPER_EXPERIMENT === true, experimentMinScore: EXPERIMENT_CALL_FLOOR }
+        experimentMode: paperDataActive(state), experimentMinScore: EXPERIMENT_CALL_FLOOR, experimentMinScorePut: EXPERIMENT_PUT_FLOOR }
     );
     if (eeResult.pass && eeResult.minScoreTrace && eeResult.minScoreTrace.experiment) {
-      logEvent("filter", `[EXPERIMENT-ENTRY] ${stock.ticker} ${optionType.toUpperCase()} score ${score} @ exp-floor ${eeResult.minScore} (gap-bypass ${APEX_PAPER_EXPERIMENT === true ? "ON" : "OFF"}) — TAGGED for P&L isolation`);
+      const _expSideTag = optionType === "put" ? "PUT under-85-wall" : "CALL";
+      logEvent("filter", `[EXPERIMENT-ENTRY ${_expSideTag}] ${stock.ticker} ${optionType.toUpperCase()} score ${score} @ exp-floor ${eeResult.minScore} (gap-bypass ${paperDataActive(state) ? "ON" : "OFF"}) — TAGGED for P&L isolation`);
     }
     if (!eeResult.pass) {
       logEvent("filter", `${stock.ticker} entry blocked - ${eeResult.reason}`);
@@ -2204,7 +2206,7 @@ async function runScan() {
     }
 
     // C1-A: daily loss lock gates entries (catches here in case c1AnyLock was bypassed above in dryRun)
-    if (state._dailyLossLockActive && !dryRunMode) {
+    if (state._dailyLossLockActive && !dryRunMode && !paperDataActive(state)) {
       const _effectiveMin = _computeEffectiveMinScore(MIN_SCORE);
       if (score < _effectiveMin) {
         logEvent("filter", `[C1-A] ${stock.ticker} blocked — daily loss lock active, need score ${_effectiveMin} (have ${score})`);
