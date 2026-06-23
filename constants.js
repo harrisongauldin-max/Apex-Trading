@@ -133,7 +133,7 @@ const EXPERIMENT_PUT_FLOOR  = 60;   // Decision B (6/23): put experiment floor �
 // against-trend put wall, above pure-noise 50. First dial to tune from paper PUT-entry data.
 
 // --- Trade-robustness layer (panel D1/D5 + corroboration). Flags default OFF; toggle ON for paper validation. ---
-const IVP_CALL_PENALTY_STEEP            = true;  // D5: IVP threshold 75->70, calm-VIX call penalty 8->15
+const IVP_CALL_PENALTY_STEEP            = false; // D5 (reverted 6/23, panel A): back to IVP threshold 75, calm-VIX call penalty 8 (was 70/15 — over-taxed normal call IV)
 const DIP_REQUIRES_MULTIDAY_ANCHOR      = true;  // D1: dip bonuses require underlying flat/red on the day
 const DIP_MAX_DAYCHANGE                 = 0.003;  // D1: max SPY day-change (+0.3%) to still count as a "dip"
 const OVERSOLD_CALL_NEEDS_CORROBORATION = false;  // PARKED OFF (6/22): superseded by the RSI daily-contract fix — the +20 now keys off daily RSI, so it no longer fires on intraday whipsaws (corroboration's main purpose). The below-VWAP clause also fights bounce-confirmation (D2 curl). Re-evaluate as a breadth-ONLY variant before ever enabling.
