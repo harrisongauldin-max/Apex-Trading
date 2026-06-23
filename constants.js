@@ -306,6 +306,37 @@ const MONTHLY_LOSS_LIMIT        = -1500; // monthlyRealizedPnL floor → hard ha
 
 // ─── State ───────────────────────────────────────────────────────────────────
 const BACKUP_FILE              = 'state_backup.json';
+// ── Real CBOE ^VIX daily closes (source: cdn.cboe.com VIX_History.csv) ──────────
+// Trailing 252 trading days 2025-06-30 → 2026-06-19. Used to SEED state._vixDaily so the
+// IV-Rank subsystem ranks the current REAL VIX close against a REAL one-year VIX
+// distribution. This is intentionally separate from getVIX() (which returns the
+// VIXY share price used by the risk gates) — IVR must rank real-vs-real to be
+// units-correct. state._vixDaily self-replaces this seed via the daily CBOE refresh.
+const VIX_DAILY_SEED = [
+  16.73, 16.83, 16.64, 16.38, 17.48, 17.79, 16.81, 15.94, 15.78, 16.40, 17.20, 17.38,
+  17.16, 16.52, 16.41, 16.65, 16.50, 15.37, 15.39, 14.93, 15.03, 15.98, 15.48, 16.72,
+  20.38, 17.52, 17.85, 16.77, 16.57, 15.15, 16.25, 14.73, 14.49, 14.83, 15.09, 14.99,
+  15.57, 15.69, 16.60, 14.22, 14.79, 14.62, 14.85, 14.43, 15.36, 16.12, 17.17, 16.35,
+  15.30, 15.18, 15.11, 15.04, 15.35, 14.71, 14.76, 15.69, 16.36, 15.72, 15.70, 15.45,
+  16.10, 16.64, 16.18, 16.74, 15.29, 16.12, 16.28, 16.29, 16.63, 16.65, 16.37, 17.24,
+  16.30, 16.43, 21.66, 19.03, 20.81, 20.64, 25.31, 20.78, 18.23, 17.87, 18.60, 17.30,
+  16.37, 15.79, 16.42, 16.92, 16.91, 17.44, 17.17, 19.00, 18.01, 19.50, 19.08, 17.60,
+  17.28, 17.51, 20.00, 19.83, 22.38, 24.69, 23.66, 26.42, 23.43, 20.52, 18.56, 17.19,
+  17.21, 16.35, 17.24, 16.59, 16.08, 15.78, 15.41, 16.66, 16.93, 15.77, 14.85, 15.74,
+  16.50, 16.48, 17.62, 16.87, 14.91, 14.08, 14.00, 13.47, 13.60, 14.20, 14.33, 14.95,
+  14.51, 14.90, 14.75, 15.38, 15.45, 14.49, 15.12, 15.98, 16.75, 15.84, 15.86, 18.84,
+  20.09, 16.90, 15.64, 16.09, 16.15, 16.35, 16.35, 16.88, 17.44, 16.34, 18.00, 18.64,
+  21.77, 17.76, 17.36, 17.79, 17.65, 20.82, 20.60, 21.20, 20.29, 19.62, 20.23, 19.09,
+  21.01, 19.55, 17.93, 18.63, 19.86, 21.44, 23.57, 21.15, 23.75, 29.49, 25.50, 24.93,
+  24.23, 27.29, 27.19, 23.51, 22.37, 25.09, 24.06, 26.78, 26.15, 26.95, 25.33, 27.44,
+  31.05, 30.61, 25.25, 24.54, 23.87, 24.17, 25.78, 21.04, 19.49, 19.23, 19.12, 18.36,
+  18.17, 17.94, 17.48, 18.87, 19.50, 18.92, 19.31, 18.71, 18.02, 17.83, 18.81, 16.89,
+  16.99, 18.29, 17.38, 17.39, 17.08, 17.19, 18.38, 17.99, 17.87, 17.26, 18.43, 17.82,
+  18.06, 17.44, 16.76, 16.70, 16.59, 17.01, 16.29, 15.74, 15.32, 16.05, 15.77, 16.06,
+  15.40, 21.51, 18.92, 19.87, 22.22, 19.44, 17.68, 16.20, 16.41, 18.44, 16.40, 16.78
+];
+const VIX_HISTORY_URL = "https://cdn.cboe.com/api/global/us_indices/daily_prices/VIX_History.csv";
+
 module.exports = {
   ALPACA_KEY, ALPACA_SECRET, ALPACA_BASE, ALPACA_DATA, ALPACA_OPTIONS,
   ALPACA_OPT_SNAP, ALPACA_NEWS, GMAIL_USER, RESEND_API_KEY,
@@ -326,6 +357,7 @@ module.exports = {
   SAME_DAY_INTERVAL, OVERNIGHT_INTERVAL, SLOW_CACHE_TTL, BARS_CACHE_TTL,
   INDIVIDUAL_STOCKS_ENABLED, INDIVIDUAL_STOCK_WATCHLIST, STATE_FILE, WATCHLIST,
   MR_LABEL_DECOUPLED, APEX_PAPER_EXPERIMENT, EXPERIMENT_CALL_FLOOR, EXPERIMENT_PUT_FLOOR, IS_PAPER_ACCOUNT,
+  VIX_DAILY_SEED, VIX_HISTORY_URL,
   IVP_CALL_PENALTY_STEEP, DIP_REQUIRES_MULTIDAY_ANCHOR, DIP_MAX_DAYCHANGE,
   OVERSOLD_CALL_NEEDS_CORROBORATION, CORROBORATION_MAX_BREADTH,
   GIVEBACK_EXIT_ENABLED, GIVEBACK_PEAK_MIN, GIVEBACK_FLOOR, GIVEBACK_MIN_HOLD_MIN,
