@@ -207,6 +207,10 @@ input[type=text]:focus{border-color:var(--blue)}
   <div id="spiral-warning" style="display:none;background:rgba(255,85,85,.1);border:1px solid rgba(255,85,85,.3);border-radius:8px;padding:10px 14px;margin-bottom:10px;font-size:11px;color:#ff5555">
     ⚠ <strong>SPIRAL DETECTED</strong> — <span id="spiral-warning-text"></span>
   </div>
+  <!-- PAPER DATA MODE banner — shown only when the mode is engaged (paper account only) -->
+  <div id="paper-data-banner" style="display:none;background:rgba(255,153,68,.12);border:1px solid rgba(255,153,68,.4);border-radius:8px;padding:10px 14px;margin-bottom:10px;font-size:11px;color:var(--orange)">
+    ⚠ <strong>PAPER DATA MODE</strong> — account-level P&amp;L loss-locks lifted, entries loosened (calls + puts). Per-position stops &amp; 3:15 flatten still active. Paper only · data gathering.
+  </div>
   <!-- Agent Intelligence Panel -->
   <div class="card" style="margin-bottom:12px;padding:12px 16px">
     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
@@ -521,6 +525,13 @@ input[type=text]:focus{border-color:var(--blue)}
 
   <div class="section-title">Quick Actions</div>
   <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:16px">
+    <div style="display:flex;align-items:center;gap:8px;padding:5px 10px;border:1px solid rgba(255,153,68,.3);border-radius:6px;background:rgba(255,153,68,.06)">
+      <span style="font-size:10px;color:var(--orange);letter-spacing:.5px">PAPER DATA MODE</span>
+      <div id="pdm-toggle" onclick="togglePaperDataMode()" style="width:36px;height:18px;border-radius:9px;background:var(--border);cursor:pointer;position:relative;transition:background .2s">
+        <div id="pdm-toggle-knob" style="position:absolute;top:2px;left:2px;width:14px;height:14px;border-radius:50%;background:#555;transition:left .2s"></div>
+      </div>
+      <span id="pdm-toggle-label" style="font-size:9px;color:var(--muted)">off</span>
+    </div>
     <button class="btn btn-green" onclick="triggerScan()">▶ MANUAL SCAN</button>
     <button class="btn" onclick="triggerDryRun()" style="background:#1a2a10;border-color:#4a7a20;color:#aadd44">⚡ DRY RUN</button>
     <button class="btn" onclick="triggerTestScan()" style="background:#1a1a2a;border-color:#6644aa;color:#aa88ff" title="Forces a dry run scan regardless of market hours — safe for after-hours testing">🧪 TEST SCAN</button>
@@ -1248,6 +1259,34 @@ function updateAgentToggleUI() {
   if (label) label.textContent = agentAutoExit ? 'ON — will auto-exit losing positions' : 'OFF — monitoring only';
 }
 
+// ── Paper data mode toggle ─────────────────────────────────────────────────
+// Single switch: lifts account-level P&L loss-locks + loosens entries (calls+puts) for data
+// gathering. Server enforces a hard interlock (refuses on a live account). secretHeaders() prompts
+// for the x-argo-secret like the other guarded actions.
+function togglePaperDataMode() {
+  const next = !(state.paperDataMode === true);
+  const h = secretHeaders(); if (!h) return;
+  fetch('/api/paper-data-mode', { method:'POST', headers:h, body: JSON.stringify({ enabled: next }) })
+    .then(r => r.json().then(d => ({ ok: r.ok, d })))
+    .then(({ ok, d }) => {
+      if (!ok) { alert(d.error || 'Failed — live account?'); return; }
+      state.paperDataMode = d.paperDataMode;
+      updatePaperDataModeUI();
+    })
+    .catch(e => alert('Error: ' + e.message));
+}
+function updatePaperDataModeUI() {
+  const on = state.paperDataMode === true;
+  const t = document.getElementById('pdm-toggle');
+  const knob = document.getElementById('pdm-toggle-knob');
+  const label = document.getElementById('pdm-toggle-label');
+  const banner = document.getElementById('paper-data-banner');
+  if (t) t.style.background = on ? 'var(--orange)' : 'var(--border)';
+  if (knob) { knob.style.left = on ? '20px' : '2px'; knob.style.background = on ? '#fff' : '#555'; }
+  if (label) { label.textContent = on ? 'ON' : 'off'; label.style.color = on ? 'var(--orange)' : 'var(--muted)'; }
+  if (banner) banner.style.display = on ? 'block' : 'none';
+}
+
 async function rescorePos(ticker) {
   // Show loading state
   const btn = document.querySelector(`button[onclick="rescorePos('${ticker}')"]`);
@@ -1352,6 +1391,7 @@ function renderAll() {
   renderJournal();
   renderPortfolioChart();
   renderAgentPanel();
+  updatePaperDataModeUI();
 }
 
 function renderMarketContext() { /* handled in renderMetrics */ }
