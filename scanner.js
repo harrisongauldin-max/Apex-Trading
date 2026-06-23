@@ -92,6 +92,7 @@ const {
 let scanRunning  = false;
 let _scanGen       = 0;
 let _lastScanStart = 0;
+let _lastScanTelemetryAt = 0;   // prev full-scan completion time for the inter-scan interval metric; decoupled from the state.lastScan heartbeat below
 
 const fmt = (n) => '$' + (n || 0).toFixed(2);
 let lastMedScan  = 0;
@@ -130,6 +131,10 @@ async function runScan() {
   try {
   if (!ALPACA_KEY) { logEvent("warn", "No ALPACA_KEY set - check Railway variables"); scanRunning = false; return; }
   if (!isMarketHours() && !dryRunMode) { logEvent("scan", "Outside market hours - skipping trade logic"); scanRunning = false; return; }
+  // Heartbeat — a real scan is now proceeding. Set lastScan BEFORE any entry-halt early-return
+  // (e.g. the `if (!callsAllowed && !putsAllowed) return` below when loss-locks block all entries),
+  // otherwise lastScan starves during halts and the market-hours health check false-alarms.
+  state.lastScan = new Date().toISOString();
   if (dryRunMode) logEvent("scan", "- DRY RUN MODE - no orders submitted, no state changes");
   if (dryRunMode) state.positions.forEach(p => { delete p._dryRunWouldClose; });
 
@@ -1006,7 +1011,7 @@ async function runScan() {
     }
   }
 
-  const _circuitEntryHalt = (state.circuitOpen === false) || (state._circuitHaltEntries === true);
+  const _circuitEntryHalt = !paperDataActive(state) && ((state.circuitOpen === false) || (state._circuitHaltEntries === true));
 
   const _macroSignal    = (state._agentMacro?.signal || "").toLowerCase();
   const _macroIsBearish = _macroSignal.includes("bearish");
@@ -2255,7 +2260,7 @@ async function runScan() {
   } // end else (no pending order)
 
   const scanNow = Date.now();
-  const lastScanMs = state.lastScan ? scanNow - new Date(state.lastScan).getTime() : 0;
+  const lastScanMs = _lastScanTelemetryAt ? scanNow - _lastScanTelemetryAt : 0;
   const isPlausibleInterval = lastScanMs >= 5000 && lastScanMs <= 120000;
   if (lastScanMs > 0 && isPlausibleInterval) {
     if (!state._scanIntervals) state._scanIntervals = [];
@@ -2267,6 +2272,7 @@ async function runScan() {
     logEvent("scan", `[PERF] Scan gap ${(lastScanMs/1000/60).toFixed(1)}min since last scan`);
   }
 
+  _lastScanTelemetryAt = scanNow;
   state.lastScan    = new Date().toISOString();
   state._scanFailures = 0;
   await Promise.race([
