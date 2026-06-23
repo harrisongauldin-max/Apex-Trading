@@ -32,7 +32,7 @@ function registerMacroCallbacks(cbs) {
   if (cbs.applyExitUrgency)           _applyExitUrgency           = cbs.applyExitUrgency;
 }
 const { SLOW_CACHE_TTL, BARS_CACHE_TTL, MARKETAUX_KEY,
-        MS_PER_DAY, ALPACA_NEWS }                = require('./constants');
+        MS_PER_DAY, ALPACA_NEWS, VIX_HISTORY_URL } = require('./constants');
 
 // ─── In-process cache ────────────────────────────────────────────
 const _slowCache     = new Map();
@@ -1237,14 +1237,38 @@ async function getVIX() {
   return _vixCache.value; // return last known on error
 }
 
-
+// Real CBOE ^VIX daily closes — the IV-Rank baseline (pairs with VIX_DAILY_SEED in constants).
+// Fetched once per trading day so IVR ranks the current REAL VIX close against a REAL one-year
+// VIX window. Deliberately separate from getVIX() (VIXY share price, used by the risk gates) so
+// the rank is real-vs-real and units-correct. Returns numeric closes oldest→newest, or null on
+// any failure/garbage — the caller then keeps the existing seeded _vixDaily (self-healing).
+async function getVIXDailyCloses(limit = 252) {
+  try {
+    const resp = await withTimeout(fetch(VIX_HISTORY_URL), 8000);
+    if (!resp || !resp.ok) return null;
+    const text = await resp.text();
+    if (!text || text.length < 100) return null;
+    const lines = text.trim().split(/\r?\n/);
+    if (lines.length < 60) return null;                       // need a genuine history, not an error page
+    const closes = [];
+    for (let i = 1; i < lines.length; i++) {                  // skip header row
+      const c = parseFloat((lines[i].split(',')[4]));
+      if (Number.isFinite(c) && c > 0 && c < 200) closes.push(parseFloat(c.toFixed(2)));
+    }
+    if (closes.length < 60) return null;
+    return closes.slice(-limit);
+  } catch (e) {
+    logEvent("scan", `[IVR] CBOE VIX history fetch failed: ${e.message} — keeping existing _vixDaily`);
+    return null;
+  }
+}
 
 function setMarketContext(ctx) { marketContext = ctx; }
 module.exports = {
   getCached, setCache, getMacroNews, getFearAndGreed, getMarketBreadth, computeBreadthLab,
   getSyntheticPCR, getVolTermStructure, getCBOESKEW, getSentimentSignal,
-  getDXY, getYieldCurve, getEarningsDate, getNewsForTicker, analyzeNews,
+  getDXY, getYieldCurve, getEarningsDate, getNewsForTicker, analyzeNews, getMarketauxNews,
   scoreArticle, getAnalystActivity, getShortInterestSignal,
   getUpcomingMacroEvents, getMacroCalendarModifier, getPreMarketData,
-  checkVIXVelocity, getVIXReversionDays, getVIX, setMarketContext, registerMacroCallbacks,
+  checkVIXVelocity, getVIXReversionDays, getVIX, getVIXDailyCloses, setMarketContext, registerMacroCallbacks,
 };
