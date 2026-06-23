@@ -442,6 +442,10 @@ async function _doClosePosition(ticker, reason, exitPremium = null, contractSym 
   const _peakPct   = pos.premium > 0
     ? parseFloat(((pos.peakPremium - pos.premium) / pos.premium * 100).toFixed(1))
     : 0;
+  // MFE = peak (above). MAE = max adverse excursion from troughPremium (reconciler-tracked).
+  const _maePct    = (pos.premium > 0 && pos.troughPremium != null)
+    ? parseFloat(((pos.troughPremium - pos.premium) / pos.premium * 100).toFixed(1))
+    : null;
   const _minsToPeak = pos.openDate && pos._peakTime
     ? parseFloat(((pos._peakTime - new Date(pos.openDate).getTime()) / 60000).toFixed(0))
     : null;
@@ -488,6 +492,8 @@ async function _doClosePosition(ticker, reason, exitPremium = null, contractSym 
     actualFillProceeds: null,
     peakPrice:          pos.peakPremium || ep,
     peakPct:            _peakPct,
+    mfe_pct:            _peakPct,
+    mae_pct:            _maePct,
     peakTime:           pos._peakTime ? new Date(pos._peakTime).toISOString() : null,
     minsToPeak:         _minsToPeak,
     _thesisFulfilled:   pos._thesisFulfilled || false,
