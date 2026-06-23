@@ -26,7 +26,7 @@ const {
   getYieldCurve, getEarningsDate, getNewsForTicker, analyzeNews, scoreArticle,
   getAnalystActivity, getShortInterestSignal, getUpcomingMacroEvents,
   getMacroCalendarModifier, getPreMarketData, checkVIXVelocity,
-  getVIXReversionDays, getVIX,
+  getVIXReversionDays, getVIX, getVIXDailyCloses,
   getCached, setCache } = require('./market');
 
 const {
@@ -87,6 +87,7 @@ const {
   VIX_HIGH_CALL_SCORE, VIX_HIGH_CALL_RSI,
   MR_LABEL_DECOUPLED = false,   // V3.2 (6/19) MR-label decoupling: default OFF; set true in constants.js to enable
   APEX_PAPER_EXPERIMENT = false, EXPERIMENT_CALL_FLOOR = 50, EXPERIMENT_PUT_FLOOR = 60,   // V3.2 (6/22) paper-experiment mode: default OFF
+  VIX_DAILY_SEED = [],   // V3.2 (6/23) real CBOE VIX year — seeds the IV-Rank baseline (_vixDaily)
 } = require('./constants');
 
 let scanRunning  = false;
@@ -144,6 +145,15 @@ async function runScan() {
   const todayScanDate = scanET.toLocaleDateString("en-US", { timeZone: "America/New_York" });
   if (todayScanDate !== (state._lastScanDate || "")) {
     state._lastScanDate     = todayScanDate;
+    // IVR baseline: refresh the real-VIX year from CBOE once per trading day. Self-healing —
+    // on any fetch failure getVIXDailyCloses returns null and we keep the existing seeded _vixDaily.
+    try {
+      const _freshVix = await getVIXDailyCloses(252);
+      if (Array.isArray(_freshVix) && _freshVix.length >= 60) {
+        state._vixDaily = _freshVix;
+        logEvent("scan", `[IVR] _vixDaily refreshed from CBOE — ${_freshVix.length} real closes, latest ${_freshVix[_freshVix.length - 1]}`);
+      }
+    } catch (_e) { /* getVIXDailyCloses logs + returns null on failure; keep existing _vixDaily */ }
     state._dailyCircuitOpen = true;
     state._dailyPnL         = 0;
     const _prevDayPnL = state.todayRealizedPnL || 0;
@@ -182,53 +192,30 @@ async function runScan() {
   const isBlackSwan = checkVIXVelocity(newVIX);
   state.vix     = newVIX;
 
-  if (!state._vixRolling) state._vixRolling = [];
-  state._vixRolling.push(newVIX);
-  if (state._vixRolling.length > 252) state._vixRolling.shift();
-  const _prevSortedVix = state._sortedVixCache;
-  const _prevSortedVixVal = state._sortedVixCacheVal || 0;
-  let sortedVix;
-  if (_prevSortedVix && Math.abs(newVIX - _prevSortedVixVal) < 0.5 && _prevSortedVix.length === state._vixRolling.length) {
-    sortedVix = _prevSortedVix;
-  } else {
-    sortedVix = [...state._vixRolling].sort((a, b) => a - b);
-    state._sortedVixCache    = sortedVix;
-    state._sortedVixCacheVal = newVIX;
+  // ── IV Rank (real-VIX subsystem, Path 1.5) ───────────────────────────────────
+  // Ranks the latest REAL CBOE VIX close against a REAL one-year VIX window (_vixDaily,
+  // seeded from VIX_DAILY_SEED, refreshed once/day from CBOE in the daily-reset block).
+  // Intentionally NOT keyed off newVIX/state.vix — that is the VIXY share price the risk
+  // gates use; IVR must rank real-vs-real to be units-correct (a VIXY value ranked against
+  // a real-VIX window reads ~3x too high). No "no-baseline" cap is needed: the baseline is
+  // real, so a genuine 1yr-low VIX correctly yields a low rank instead of a phantom floor.
+  if (!Array.isArray(state._vixDaily) || state._vixDaily.length < 60) {
+    state._vixDaily = VIX_DAILY_SEED.slice(-252);             // defensive seed (server boot also seeds)
   }
-  const vixMin = sortedVix[0]                    || 10;
-  const vixMax = sortedVix[sortedVix.length - 1] || 80;
-  const p5idx  = Math.floor(sortedVix.length * 0.05);
-  const p95idx = Math.floor(sortedVix.length * 0.95);
-  const vixP5  = sortedVix[p5idx]  || vixMin;
-  const vixP95 = sortedVix[p95idx] || vixMax;
-  const vixClamped = Math.min(Math.max(newVIX, vixP5), vixP95);
-  state._ivRank = vixP95 > vixP5
-    ? parseFloat(((vixClamped - vixP5) / (vixP95 - vixP5) * 100).toFixed(1))
+  const _vd         = state._vixDaily;
+  const _curRealVIX = _vd[_vd.length - 1];                    // most recent real CBOE close
+  const _sortedVD   = [..._vd].sort((a, b) => a - b);
+  const _vdP5  = _sortedVD[Math.floor(_sortedVD.length * 0.05)] || _sortedVD[0];
+  const _vdP95 = _sortedVD[Math.floor(_sortedVD.length * 0.95)] || _sortedVD[_sortedVD.length - 1];
+  const _vdClamped = Math.min(Math.max(_curRealVIX, _vdP5), _vdP95);
+  state._ivRank = _vdP95 > _vdP5
+    ? parseFloat(((_vdClamped - _vdP5) / (_vdP95 - _vdP5) * 100).toFixed(1))
     : 50;
-  if (vixMax - vixMin < 5) {
-    const formulaIVR = Math.min(95, Math.max(5, parseFloat(((newVIX - 12) / 33 * 100).toFixed(1))));
-    state._ivRank = formulaIVR;
-  }
-  const _windowTooNarrowForRank = vixP5 > 0 && (newVIX - vixP5) < 2.0 && newVIX >= 25;
-  if ((state._ivRank <= 20 || _windowTooNarrowForRank) && newVIX >= 20) {
-    const formulaIVR = Math.min(95, Math.max(5, parseFloat(((newVIX - 12) / 33 * 100).toFixed(1))));
-    const vixBelowRecentLow = newVIX < vixP5 && vixP5 > 25 && newVIX < 25;
-    if (vixBelowRecentLow) {
-      const cappedIVR = Math.min(40, formulaIVR);
-      logEvent("scan", `[IVR] Window has no low-VIX baseline - VIX ${newVIX} below recent P5 ${vixP5.toFixed(1)} - IVR capped at ${cappedIVR}`);
-      state._ivRank = cappedIVR;
-      state._ivEnv  = cappedIVR >= 50 ? "elevated" : cappedIVR >= 30 ? "normal" : "low";
-    } else {
-      logEvent("scan", `[IVR] Window has no low-VIX baseline - using formula fallback: VIX ${newVIX} = IVR ${formulaIVR}`);
-      state._ivRank = formulaIVR;
-      state._ivEnv  = formulaIVR >= 70 ? "high" : formulaIVR >= 50 ? "elevated" : formulaIVR >= 30 ? "normal" : "low";
-    }
-  }
   state._ivEnv = state._ivRank >= 70 ? "high"
                : state._ivRank >= 50 ? "elevated"
                : state._ivRank >= 30 ? "normal"
                : "low";
-  logEvent("scan", `[IV] Rank:${state._ivRank} (${state._ivEnv}) | VIX:${newVIX} | P5-P95:[${vixP5.toFixed(1)}-${vixP95.toFixed(1)}] | History:${state._vixRolling.length}d`);
+  logEvent("scan", `[IV] Rank:${state._ivRank} (${state._ivEnv}) | realVIX:${_curRealVIX} | P5-P95:[${_vdP5.toFixed(1)}-${_vdP95.toFixed(1)}] | History:${_vd.length}d (real CBOE)`);
 
   if (state._pendingOrder) {
     await confirmPendingOrder();
