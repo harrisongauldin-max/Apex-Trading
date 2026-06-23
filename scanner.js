@@ -11,7 +11,7 @@ const {
 const { state, logEvent, markDirty, saveStateNow, flushStateIfDirty, paperDataActive } = require('./state');
 
 const {
-  calcRSI, calcEMA, calcMACD, calcMomentum, calcATR, calcADX, calcIVRank,
+  calcRSI, calcEMA, calcMACD, calcMomentum, calcATR, calcADX,
   calcGreeks, calcVWAP, calcKellySize, calcBetaWeightedDelta, calcAggregateGreeks,
   calcCreditSpreadTP, getDynamicSignals, getLiveBeta, calcSharpeRatio, calcFactorScore,
   openRisk, openCostBasis, heatPct, realizedPnL, totalCap, stockValue,
@@ -202,20 +202,28 @@ async function runScan() {
   if (!Array.isArray(state._vixDaily) || state._vixDaily.length < 60) {
     state._vixDaily = VIX_DAILY_SEED.slice(-252);             // defensive seed (server boot also seeds)
   }
-  const _vd         = state._vixDaily;
-  const _curRealVIX = _vd[_vd.length - 1];                    // most recent real CBOE close
-  const _sortedVD   = [..._vd].sort((a, b) => a - b);
-  const _vdP5  = _sortedVD[Math.floor(_sortedVD.length * 0.05)] || _sortedVD[0];
-  const _vdP95 = _sortedVD[Math.floor(_sortedVD.length * 0.95)] || _sortedVD[_sortedVD.length - 1];
-  const _vdClamped = Math.min(Math.max(_curRealVIX, _vdP5), _vdP95);
-  state._ivRank = _vdP95 > _vdP5
-    ? parseFloat(((_vdClamped - _vdP5) / (_vdP95 - _vdP5) * 100).toFixed(1))
-    : 50;
-  state._ivEnv = state._ivRank >= 70 ? "high"
-               : state._ivRank >= 50 ? "elevated"
-               : state._ivRank >= 30 ? "normal"
-               : "low";
-  logEvent("scan", `[IV] Rank:${state._ivRank} (${state._ivEnv}) | realVIX:${_curRealVIX} | P5-P95:[${_vdP5.toFixed(1)}-${_vdP95.toFixed(1)}] | History:${_vd.length}d (real CBOE)`);
+  const _vd = state._vixDaily;
+  if (!Array.isArray(_vd) || _vd.length < 60) {
+    // Baseline missing/short even after the reseed above (only possible if VIX_DAILY_SEED itself were
+    // empty) — hold the last-known/neutral rank rather than crash the scan on undefined percentiles.
+    state._ivRank = (typeof state._ivRank === "number") ? state._ivRank : 50;
+    state._ivEnv  = state._ivEnv || "normal";
+    logEvent("scan", `[IV] baseline unavailable (_vixDaily ${Array.isArray(_vd) ? _vd.length : 0}d) — holding Rank:${state._ivRank} (${state._ivEnv}) until CBOE refresh`);
+  } else {
+    const _curRealVIX = _vd[_vd.length - 1];                    // most recent real CBOE close
+    const _sortedVD   = [..._vd].sort((a, b) => a - b);
+    const _vdP5  = _sortedVD[Math.floor(_sortedVD.length * 0.05)] || _sortedVD[0];
+    const _vdP95 = _sortedVD[Math.floor(_sortedVD.length * 0.95)] || _sortedVD[_sortedVD.length - 1];
+    const _vdClamped = Math.min(Math.max(_curRealVIX, _vdP5), _vdP95);
+    state._ivRank = _vdP95 > _vdP5
+      ? parseFloat(((_vdClamped - _vdP5) / (_vdP95 - _vdP5) * 100).toFixed(1))
+      : 50;
+    state._ivEnv = state._ivRank >= 70 ? "high"
+                 : state._ivRank >= 50 ? "elevated"
+                 : state._ivRank >= 30 ? "normal"
+                 : "low";
+    logEvent("scan", `[IV] Rank:${state._ivRank} (${state._ivEnv}) | realVIX:${_curRealVIX} | P5-P95:[${_vdP5.toFixed(1)}-${_vdP95.toFixed(1)}] | History:${_vd.length}d (real CBOE)`);
+  }
 
   if (state._pendingOrder) {
     await confirmPendingOrder();
