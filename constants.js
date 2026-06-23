@@ -11,6 +11,10 @@ const ALPACA_DATA       = 'https://data.alpaca.markets/v2';
 const ALPACA_OPTIONS    = 'https://paper-api.alpaca.markets/v2';
 const ALPACA_OPT_SNAP   = 'https://data.alpaca.markets/v1beta1';
 const ALPACA_NEWS       = 'https://data.alpaca.markets/v1beta1';
+// PAPER/LIVE detection — positive check. Alpaca paper URL contains 'paper'; the LIVE URL
+// (api.alpaca.markets) contains neither 'paper' nor 'live', so a .includes('live') test would
+// be dead. This is the hard interlock substrate for PAPER DATA MODE (see state.paperDataActive).
+const IS_PAPER_ACCOUNT  = String(ALPACA_BASE).includes('paper');
 
 // ─── External services ───────────────────────────────────────────
 const GMAIL_USER        = process.env.GMAIL_USER        || '';
@@ -120,8 +124,13 @@ const MR_LABEL_DECOUPLED = true;
 // (GAP-VWAP / GATE-C / GAP-REVERSAL / GAP-STRICT-RSI) so APEX takes marginal call setups on paper to
 // gather fills. CALLS ONLY — puts stay disciplined. Entries tagged [EXPERIMENT-ENTRY] for P&L
 // isolation. PAPER ONLY — set false to revert instantly (no code deploy). Review after ~15 fills.
-const APEX_PAPER_EXPERIMENT = true;
+const APEX_PAPER_EXPERIMENT = true;   // RETIRED as a live behavior flag (6/23). Now only the SEED
+// value for state.paperDataMode (state.js defaultState). The runtime on/off is the UI toggle →
+// state.paperDataMode, gated by IS_PAPER_ACCOUNT via state.paperDataActive(). Readers no longer
+// consult this constant directly. Kept exported so first-boot seeding stays continuous.
 const EXPERIMENT_CALL_FLOOR = 50;
+const EXPERIMENT_PUT_FLOOR  = 60;   // Decision B (6/23): put experiment floor — well under Risk's 85
+// against-trend put wall, above pure-noise 50. First dial to tune from paper PUT-entry data.
 
 // --- Trade-robustness layer (panel D1/D5 + corroboration). Flags default OFF; toggle ON for paper validation. ---
 const IVP_CALL_PENALTY_STEEP            = true;  // D5: IVP threshold 75->70, calm-VIX call penalty 8->15
@@ -316,7 +325,7 @@ module.exports = {
   PDT_PROFIT_EXIT, PDT_STOP_LOSS, MS_PER_DAY, TRIGGER_COOLDOWN_MS,
   SAME_DAY_INTERVAL, OVERNIGHT_INTERVAL, SLOW_CACHE_TTL, BARS_CACHE_TTL,
   INDIVIDUAL_STOCKS_ENABLED, INDIVIDUAL_STOCK_WATCHLIST, STATE_FILE, WATCHLIST,
-  MR_LABEL_DECOUPLED, APEX_PAPER_EXPERIMENT, EXPERIMENT_CALL_FLOOR,
+  MR_LABEL_DECOUPLED, APEX_PAPER_EXPERIMENT, EXPERIMENT_CALL_FLOOR, EXPERIMENT_PUT_FLOOR, IS_PAPER_ACCOUNT,
   IVP_CALL_PENALTY_STEEP, DIP_REQUIRES_MULTIDAY_ANCHOR, DIP_MAX_DAYCHANGE,
   OVERSOLD_CALL_NEEDS_CORROBORATION, CORROBORATION_MAX_BREADTH,
   GIVEBACK_EXIT_ENABLED, GIVEBACK_PEAK_MIN, GIVEBACK_FLOOR, GIVEBACK_MIN_HOLD_MIN,
