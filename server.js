@@ -115,6 +115,7 @@ const {
   TRIGGER_COOLDOWN_MS, SAME_DAY_INTERVAL, OVERNIGHT_INTERVAL,
   MACRO_REVERSAL_PCT, SCAN_WATCHDOG_MS: _SCAN_WATCHDOG_MS,
   INDIVIDUAL_STOCKS_ENABLED, INDIVIDUAL_STOCK_WATCHLIST, STATE_FILE,
+  VIX_DAILY_SEED,
 } = require('./constants');
 
 const app  = express();
@@ -290,56 +291,27 @@ async function initState() {
   }
   state._pendingOrder = null;
 
-  const _ivRollingRange = state._vixRolling && state._vixRolling.length >= 5
-    ? Math.max(...state._vixRolling) - Math.min(...state._vixRolling) : 0;
-  const _ivRollingMin = state._vixRolling && state._vixRolling.length > 0
-    ? Math.min(...state._vixRolling) : 99;
-  const _needsSeed = !state._vixRolling || state._vixRolling.length < 30
-    || _ivRollingRange < 15 || _ivRollingMin > 22;
-  if (_needsSeed) {
-    try {
-      const endDate   = new Date().toISOString().split("T")[0];
-      const startDate = new Date(Date.now() - 380 * 86400000).toISOString().split("T")[0];
-      let vixyBars = null;
-      for (const feed of ["sip", "iex"]) {
-        const resp = await alpacaGet(`/stocks/VIXY/bars?timeframe=1Day&start=${startDate}&end=${endDate}&limit=260&feed=${feed}`, ALPACA_DATA);
-        if (resp && resp.bars && resp.bars.length > 60) { vixyBars = resp.bars; break; }
-      }
-      let seeded = false;
-      if (vixyBars && vixyBars.length > 60) {
-        const seedReadings = vixyBars.map(b => parseFloat((b.c / 0.85).toFixed(2)));
-        const seedMin = Math.min(...seedReadings);
-        const seedMax = Math.max(...seedReadings);
-        if (seedMax - seedMin >= 10) {
-          state._vixRolling = seedReadings.slice(-252);
-          const sortedSeed  = [...state._vixRolling].sort((a, b) => a - b);
-          const seedP5  = sortedSeed[Math.floor(sortedSeed.length * 0.05)] || seedMin;
-          const seedP95 = sortedSeed[Math.floor(sortedSeed.length * 0.95)] || seedMax;
-          const currentVIX  = state.vix || seedReadings[seedReadings.length - 1];
-          const clampedVIX  = Math.min(Math.max(currentVIX, seedP5), seedP95);
-          state._ivRank = seedP95 > seedP5
-            ? parseFloat(((clampedVIX - seedP5) / (seedP95 - seedP5) * 100).toFixed(1))
-            : 50;
-          state._ivEnv  = state._ivRank >= 70 ? "high" : state._ivRank >= 50 ? "elevated" : state._ivRank >= 30 ? "normal" : "low";
-          console.log(`[IVR SEED] Seeded ${state._vixRolling.length} bars | P5-P95:[${seedP5.toFixed(1)}-${seedP95.toFixed(1)}] | IVR:${state._ivRank} (${state._ivEnv})`);
-          seeded = true;
-          markDirty();
-        }
-      }
-      if (!seeded) {
-        const currentVIX = state.vix || 20;
-        const formulaIVR = Math.min(95, Math.max(30, parseFloat(((currentVIX - 12) / 33 * 100).toFixed(1))));
-        state._ivRank = formulaIVR;
-        state._ivEnv  = formulaIVR >= 70 ? "high" : formulaIVR >= 50 ? "elevated" : formulaIVR >= 30 ? "normal" : "low";
-        console.log(`[IVR SEED] Formula fallback: VIX ${currentVIX} - IVR ${formulaIVR} (${state._ivEnv})`);
-        markDirty();
-      }
-    } catch(e) {
-      const currentVIX = state.vix || 20;
-      const formulaIVR = Math.min(95, Math.max(30, parseFloat(((currentVIX - 12) / 33 * 100).toFixed(1))));
-      state._ivRank = formulaIVR;
-      state._ivEnv  = formulaIVR >= 70 ? "high" : formulaIVR >= 50 ? "elevated" : formulaIVR >= 30 ? "normal" : "low";
-      console.log(`[IVR SEED] Error fallback: VIX ${currentVIX} - IVR ${formulaIVR} | ${e.message}`);
+  // ── IV-Rank baseline seed (real CBOE VIX) ────────────────────────────────────
+  // Seed _vixDaily from the embedded real one-year VIX window so IV Rank is correct from the
+  // first boot. The scanner refreshes it daily from CBOE (getVIXDailyCloses) and ranks the
+  // latest real close against it. This is REAL VIX, deliberately separate from getVIX() (the
+  // VIXY share price used by the risk gates) — IVR must rank real-vs-real to be units-correct.
+  // Replaces the old VIXY/0.85 seed + `range<15` re-seed loop, which manufactured a phantom
+  // high-VIX baseline (P5~28) and perpetually re-injected it on every restart.
+  if (!Array.isArray(state._vixDaily) || state._vixDaily.length < 60) {
+    state._vixDaily = (VIX_DAILY_SEED || []).slice(-252);
+    if (state._vixDaily.length >= 60) {
+      const _ss   = [...state._vixDaily].sort((a, b) => a - b);
+      const _sP5  = _ss[Math.floor(_ss.length * 0.05)] || _ss[0];
+      const _sP95 = _ss[Math.floor(_ss.length * 0.95)] || _ss[_ss.length - 1];
+      const _cur  = state._vixDaily[state._vixDaily.length - 1];
+      const _cl   = Math.min(Math.max(_cur, _sP5), _sP95);
+      state._ivRank = _sP95 > _sP5 ? parseFloat(((_cl - _sP5) / (_sP95 - _sP5) * 100).toFixed(1)) : 50;
+      state._ivEnv  = state._ivRank >= 70 ? "high" : state._ivRank >= 50 ? "elevated" : state._ivRank >= 30 ? "normal" : "low";
+      console.log(`[IVR SEED] Seeded _vixDaily with ${state._vixDaily.length} real CBOE closes | P5-P95:[${_sP5.toFixed(1)}-${_sP95.toFixed(1)}] | realVIX ${_cur} -> IVR ${state._ivRank} (${state._ivEnv})`);
+      markDirty();
+    } else {
+      console.log("[IVR SEED] VIX_DAILY_SEED missing/short — IVR will hold until the daily CBOE refresh populates _vixDaily");
     }
   }
 
