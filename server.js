@@ -11,7 +11,7 @@ const { state, markDirty, saveStateNow, flushStateIfDirty,
         logEvent, redisSave, redisLoad, defaultState,
         saveDailyLogToRedis, getETDateStr,
         writeJournalEntry, updateJournalExit,
-        loadJournalDay, getJournalRange }              = require('./state');
+        loadJournalDay, saveJournalDay, getJournalRange }              = require('./state');
 const { alpacaGet, alpacaPost, alpacaDelete,
         getCircuitState, setBrokerLogger,
         getStockQuote, getStockBars, getIntradayBars,
@@ -107,7 +107,7 @@ const { calcRSI }                                         = require('./signals')
 
 const {
   ALPACA_KEY, ALPACA_SECRET, ALPACA_BASE, ALPACA_DATA, ALPACA_OPTIONS,
-  ALPACA_OPT_SNAP, MONTHLY_BUDGET, CAPITAL_FLOOR,
+  ALPACA_OPT_SNAP, MONTHLY_BUDGET, CAPITAL_FLOOR, IS_PAPER_ACCOUNT,
   REDIS_URL, REDIS_TOKEN, REDIS_KEY, REDIS_SAVE_INTERVAL,
   ANTHROPIC_API_KEY, RESEND_API_KEY, GMAIL_USER, MARKETAUX_KEY,
   WATCHLIST, PDT_RULE_ACTIVE, PDT_LIMIT, MAX_HEAT, STOP_LOSS_PCT,
@@ -1396,6 +1396,19 @@ app.post("/api/reset-daily-pnl", requireSecret, async (req, res) => {
   res.json({ ok: true, before, after: { todayRealizedPnL: 0, _dailyPnL: 0, _dailyCircuitOpen: true } });
 });
 
+// PAPER DATA MODE — single UI toggle. Lifts account-level P&L loss-locks + loosens entries
+// (calls+puts) for data gathering. HARD INTERLOCK: refuses on a live account. Per-position stops,
+// give-back, the 3:15 flatten, and structural halts (crisis/Regime-C, VIX>=50, capital floor) are
+// untouched and stay ON. (Panel D1/D2/D3, 6/23.)
+app.post("/api/paper-data-mode", requireSecret, async (req, res) => {
+  if (!IS_PAPER_ACCOUNT) return res.status(403).json({ error: "PAPER DATA MODE is refused on a live account" });
+  const enabled = req.body?.enabled === true;
+  state.paperDataMode = enabled;
+  markDirty(); await saveStateNow();
+  logEvent("circuit", `[PAPER-DATA-MODE] ${enabled ? "ENABLED" : "disabled"} — P&L loss-locks ${enabled ? "LIFTED" : "restored"}, entries ${enabled ? "loosened (calls+puts)" : "disciplined"} · per-position stops + 3:15 flatten + structural halts unchanged (paper only)`);
+  res.json({ ok: true, paperDataMode: state.paperDataMode });
+});
+
 app.post("/api/clear-vix-cooldown", requireSecret, async (req, res) => {
   state._vixSpikeAt = null; markDirty(); await saveStateNow();
   logEvent("circuit", "VIX spike cooldown manually cleared");
@@ -1731,7 +1744,7 @@ app.post("/api/backtest/stress", async (req, res) => {
 });
 
 app.post('/api/force-entry', async (req, res) => {
-  if (ALPACA_BASE.includes('live')) return res.status(403).json({ error: 'force-entry disabled in live trading' });
+  if (!IS_PAPER_ACCOUNT) return res.status(403).json({ error: 'force-entry disabled in live trading' });
   const { ticker, optionType, confirm } = req.body || {};
   if (!confirm) return res.status(400).json({ error: 'must include confirm:true in body' });
   if (!ticker || !optionType) return res.status(400).json({ error: 'ticker and optionType required' });
