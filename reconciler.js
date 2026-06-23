@@ -618,6 +618,11 @@ async function syncPositionPnLFromAlpaca() {
       if (pos.currentPrice > (pos.peakPremium || 0)) {
         pos.peakPremium = pos.currentPrice;
       }
+      // MAE — max adverse excursion. Mirror of the peak (MFE) above. Always-on observability;
+      // written into the journal at close so PUT-entry quality can be read against how low it went.
+      if (pos.currentPrice > 0 && pos.currentPrice < (pos.troughPremium ?? Infinity)) {
+        pos.troughPremium = pos.currentPrice;
+      }
     }
   } catch(e) {
     _log('warn', `[SYNC] syncPositionPnLFromAlpaca error: ${e.message}`);
