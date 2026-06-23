@@ -10,6 +10,7 @@ const fs   = require('fs');
 const path = require('path');
 const fetch = require('node-fetch');
 const { REDIS_URL, REDIS_TOKEN, REDIS_KEY, REDIS_SAVE_INTERVAL, STATE_FILE, MONTHLY_BUDGET,
+  IS_PAPER_ACCOUNT, APEX_PAPER_EXPERIMENT,
 } = require('./constants');
 
 let lastRedisSave = 0;
@@ -43,6 +44,10 @@ function defaultState() {
     tickerBlacklist:  [],
     exitStats:        {},
     agentAutoExitEnabled: false,
+    // PAPER DATA MODE — runtime UI flag. Seeded from APEX_PAPER_EXPERIMENT so behavior is continuous
+    // at cutover; once the user toggles, the persisted value overrides this on load (Object.assign
+    // order in server boot). Only ACTIVE on a paper account — see paperDataActive().
+    paperDataMode:        APEX_PAPER_EXPERIMENT,
     _lastEntryAt:       null,
     _yesterdayGapPct:   null,
     _gapReversalDay:    false,
@@ -554,7 +559,15 @@ async function getJournalRange(fromDate, toDate) {
   return results.sort((a, b) => new Date(b.openDate) - new Date(a.openDate));
 }
 
+// PAPER DATA MODE gate — the single runtime check for the data-gathering posture.
+// HARD INTERLOCK: returns true ONLY on a paper account (IS_PAPER_ACCOUNT), regardless of the
+// toggle. So even if state.paperDataMode were somehow true on a live account, every read site
+// (loss-lock lifts, entry-floor loosening) still no-ops. Defense in depth with the endpoint's 403.
+function paperDataActive(st = state) {
+  return IS_PAPER_ACCOUNT === true && !!(st && st.paperDataMode === true);
+}
+
 module.exports = { state, markDirty, saveStateNow, flushStateIfDirty, logEvent,
                    redisSave, redisLoad, defaultState, saveDailyLogToRedis, getETDateStr,
-                   writeJournalEntry, updateJournalExit, loadJournalDay, getJournalRange,
-                   closeOrphanJournalOpens };
+                   writeJournalEntry, updateJournalExit, loadJournalDay, saveJournalDay, getJournalRange,
+                   closeOrphanJournalOpens, paperDataActive };
