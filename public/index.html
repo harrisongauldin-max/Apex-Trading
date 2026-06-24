@@ -1073,6 +1073,7 @@ input[type=text]:focus{border-color:var(--blue)}
     <button class="btn" id="save-redis-btn" onclick="saveLogToRedis()" style="font-size:11px;border-color:rgba(255,200,50,.4);color:#ffc832" title="Force-save current log buffer to Redis before copying">&#128190; Save Now</button>
     <button class="btn" id="copy-redis-btn" onclick="copyFullDayFromRedis()" style="font-size:11px;border-color:rgba(100,200,100,.5);color:#6ec97a">&#9126; Copy Day from Redis</button>
     <button class="btn" id="download-day-btn" onclick="downloadFullDay()" style="font-size:11px;border-color:rgba(0,196,255,.55);color:#44aaff;font-weight:600" title="Download the entire day's log as a .txt file to hand to Claude">&#11015; Download full day</button>
+    <button class="btn" id="download-telemetry-btn" onclick="downloadTelemetry()" style="font-size:11px;border-color:rgba(255,153,68,.55);color:#ff9944;font-weight:600" title="Download today's compact score telemetry (CSV) — one row per material change, light enough to hand to Claude whole">&#11015; Telemetry CSV</button>
   </div>
   <!-- ── Log box ── -->
   <div class="log-box" id="server-log" style="height:560px;overflow-y:auto"></div>
@@ -4192,6 +4193,37 @@ async function copyFullDayFromRedis() {
     btn.textContent = '❌ ' + (err.message || 'Error');
     setTimeout(() => { btn.textContent = '💾 Copy Day from Redis'; btn.disabled = false; }, 3000);
   }
+}
+
+async function downloadTelemetry() {
+  var btn = document.getElementById('download-telemetry-btn');
+  var orig = btn.innerHTML;
+  btn.textContent = '\u23f3 Fetching...';
+  btn.disabled = true;
+  try {
+    // today's date in ET (en-CA → YYYY-MM-DD), matching the server's argo:telemetry:<date> key
+    var date = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+    var r = await fetch('/api/telemetry?date=' + date);
+    if (r.status === 404) {
+      btn.textContent = '\u26a0 No telemetry yet';
+      setTimeout(function(){ btn.innerHTML = orig; btn.disabled = false; }, 2500);
+      return;
+    }
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    var csv = await r.text();
+    var rows = Math.max(0, csv.split('\n').length - 1);
+    var src = r.headers.get('X-Telemetry-Source') || '';
+    var blob = new Blob([csv], { type: 'text/csv' });
+    var url  = URL.createObjectURL(blob);
+    var a    = document.createElement('a');
+    a.href = url; a.download = 'argo-telemetry-' + date + '.csv';
+    document.body.appendChild(a); a.click(); document.body.removeChild(a);
+    setTimeout(function(){ URL.revokeObjectURL(url); }, 1000);
+    btn.textContent = '\u2705 ' + rows + ' rows' + (src === 'live_buffer' ? ' (live)' : '');
+  } catch(e) {
+    btn.textContent = '\u274c ' + (e.message || 'Error');
+  }
+  setTimeout(function(){ btn.innerHTML = orig; btn.disabled = false; }, 3000);
 }
 
 async function downloadFullDay() {
