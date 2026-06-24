@@ -4098,12 +4098,9 @@ function copyOpenPositions() {
 (function() {
   var el = document.getElementById('redis-log-date');
   if (el) {
-    var d = new Date();
-    // Adjust to ET (UTC-4 or UTC-5)
-    var etOffset = -4 * 60; // approximate EDT
-    var etNow = new Date(d.getTime() + (d.getTimezoneOffset() + etOffset * -1) * 60000);
-    // Actually just use local date — close enough
-    el.value = d.toISOString().slice(0, 10);
+    // ET trading day (en-CA → YYYY-MM-DD). The previous code used UTC, which after ~8pm ET
+    // rolls to tomorrow and makes "Copy Day from Redis" query an empty future key.
+    el.value = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
   }
 })();
 
