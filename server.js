@@ -298,7 +298,14 @@ async function initState() {
   // VIXY share price used by the risk gates) — IVR must rank real-vs-real to be units-correct.
   // Replaces the old VIXY/0.85 seed + `range<15` re-seed loop, which manufactured a phantom
   // high-VIX baseline (P5~28) and perpetually re-injected it on every restart.
-  if (!Array.isArray(state._vixDaily) || state._vixDaily.length < 60) {
+  // Reseed if missing/short OR holding legacy VIXY-price data (median > 40 ⇒ VIXY units, not real
+  // VIX). A length-only check let the persisted 261-elem VIXY array survive and mask the ranking.
+  let _bootVixStale = !Array.isArray(state._vixDaily) || state._vixDaily.length < 60;
+  if (!_bootVixStale) {
+    const _m = [...state._vixDaily].sort((a, b) => a - b)[Math.floor(state._vixDaily.length / 2)];
+    _bootVixStale = !(_m > 0) || _m > 40;
+  }
+  if (_bootVixStale) {
     state._vixDaily = (VIX_DAILY_SEED || []).slice(-252);
     if (state._vixDaily.length >= 60) {
       const _ss   = [...state._vixDaily].sort((a, b) => a - b);
@@ -1172,6 +1179,41 @@ app.post("/api/logs/save-now", async (req, res) => {
     const dateStr = getETDateStr();
     logEvent("scan", `[MANUAL SAVE] Daily log force-saved to Redis: argo:logs:${dateStr} | ${before} entries (buffer retained)`);
     res.json({ ok: true, date: dateStr, entries: before, note: "Buffer saved to Redis. Buffer retained in memory — logs continue accumulating." });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// Compact score telemetry — CSV download for a day, or ?date=dates for the list.
+// Falls back to the live in-memory buffer for today before the first checkpoint save.
+app.get("/api/telemetry", async (req, res) => {
+  if (!REDIS_URL || !REDIS_TOKEN) return res.status(503).json({ error: "Redis not configured" });
+  try {
+    const date = req.query.date;
+    if (!date || date === "dates") {
+      const resp = await fetch(`${REDIS_URL}/keys/argo:telemetry:*`, { headers: { Authorization: `Bearer ${REDIS_TOKEN}` } });
+      const data  = await resp.json();
+      const dates = (data.result || []).map(k => k.replace("argo:telemetry:", "")).sort().reverse();
+      return res.json({ available: dates, count: dates.length });
+    }
+    let header = "time,tkr,px,iRSI,dRSI,call,put,isMR,curl,vwap%,blocker,drivers";
+    let rows = [], source = "redis";
+    const resp = await fetch(`${REDIS_URL}/get/argo:telemetry:${date}`, { headers: { Authorization: `Bearer ${REDIS_TOKEN}` } });
+    const data = await resp.json();
+    if (!data.result) {
+      const todayStr = getETDateStr();
+      if (date === todayStr && state._telemetryBuffer && state._telemetryBuffer.length) {
+        rows = state._telemetryBuffer; source = "live_buffer";
+      } else {
+        return res.status(404).json({ error: `No telemetry for ${date}` });
+      }
+    } else {
+      const parsed = JSON.parse(data.result);
+      header = parsed.header || header;
+      rows   = parsed.rows || [];
+    }
+    res.setHeader("Content-Type", "text/csv");
+    res.setHeader("Content-Disposition", `attachment; filename="argo-telemetry-${date}.csv"`);
+    res.setHeader("X-Telemetry-Source", source);
+    res.send(header + "\n" + rows.join("\n"));
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
