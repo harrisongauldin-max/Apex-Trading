@@ -9,6 +9,7 @@ const {
 } = require('./broker');
 
 const { state, logEvent, markDirty, saveStateNow, flushStateIfDirty, paperDataActive } = require('./state');
+const { recordTelemetry } = require('./telemetry');
 
 const {
   calcRSI, calcEMA, calcMACD, calcMomentum, calcATR, calcADX,
@@ -1898,6 +1899,23 @@ async function runScan() {
         `[VERDICT] ${stock.ticker} ${optionType.toUpperCase()} ${bestScore} vs scanner-floor ${_vFloor} → ${_clears ? "CLEARS→entryEngine" : "BELOW"}` +
         ` | isMR:${callSetup.isMeanReversion ? "Y" : "N"} curl:${liveStock.macdCurl || "none"} dRSI:${(liveStock.dailyRsi || 0).toFixed(0)} c/p:${callScore}/${putScore}` +
         (_clears ? "" : ` | headline: ${_killer}`));
+
+      // Compact score telemetry (V3.2 6/23) — projects the just-computed verdict into one
+      // material-change/heartbeat CSV row. try/catch: instrumentation must never halt a scan.
+      try {
+        const _vwapPx = signals.intradayVWAP || 0;
+        recordTelemetry(state, {
+          tkr: stock.ticker, px: price,
+          iRSI: signals.rsi, dRSI: signals.dailyRsi,
+          call: callScore, put: putScore,
+          isMR: callSetup.isMeanReversion === true,
+          curl: liveStock.macdCurl || "none",
+          vwapPct: _vwapPx ? ((price - _vwapPx) / _vwapPx) * 100 : null,
+          blocker: _clears ? "" : _killer,
+          callReasons: callSetup.reasons, putReasons: putSetup.reasons,
+          direction: optionType,
+        });
+      } catch (_telErr) { /* telemetry must never break the scan */ }
     }
 
     if (effectiveDefensive && optionType === "call" && !callSetup._mrStrong) {
