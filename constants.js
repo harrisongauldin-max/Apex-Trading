@@ -136,6 +136,12 @@ const EXPERIMENT_PUT_FLOOR  = 60;   // Decision B (6/23): put experiment floor �
 const IVP_CALL_PENALTY_STEEP            = false; // D5 (reverted 6/23, panel A): back to IVP threshold 75, calm-VIX call penalty 8 (was 70/15 — over-taxed normal call IV)
 const DIP_REQUIRES_MULTIDAY_ANCHOR      = true;  // D1: dip bonuses require underlying flat/red on the day
 const DIP_MAX_DAYCHANGE                 = 0.003;  // D1: max SPY day-change (+0.3%) to still count as a "dip"
+// F+G (6/23, panel): MR oversold tiers historically keyed off DAILY RSI (P0 anti-whipsaw) — which made
+// QQQ (daily 51) ineligible despite intraday 26, and flattened the score (daily RSI barely moves
+// intraday). When true, a bull_curl-CONFIRMED intraday dip is scored at its intraday depth, so depth
+// finally scales and intraday-oversold index names qualify. The curl requirement IS the anti-whipsaw
+// guard P0 wanted. Default OFF; paper-armed. Set false to revert (no code deploy).
+const MR_INTRADAY_OVERSOLD              = false;
 const OVERSOLD_CALL_NEEDS_CORROBORATION = false;  // PARKED OFF (6/22): superseded by the RSI daily-contract fix — the +20 now keys off daily RSI, so it no longer fires on intraday whipsaws (corroboration's main purpose). The below-VWAP clause also fights bounce-confirmation (D2 curl). Re-evaluate as a breadth-ONLY variant before ever enabling.
 const CORROBORATION_MAX_BREADTH         = 45;     // item4: breadth <= this corroborates an oversold-call dip
 const GIVEBACK_EXIT_ENABLED   = true;  // D3: exit a position that peaked then round-tripped to the floor
@@ -356,7 +362,7 @@ module.exports = {
   PDT_PROFIT_EXIT, PDT_STOP_LOSS, MS_PER_DAY, TRIGGER_COOLDOWN_MS,
   SAME_DAY_INTERVAL, OVERNIGHT_INTERVAL, SLOW_CACHE_TTL, BARS_CACHE_TTL,
   INDIVIDUAL_STOCKS_ENABLED, INDIVIDUAL_STOCK_WATCHLIST, STATE_FILE, WATCHLIST,
-  MR_LABEL_DECOUPLED, APEX_PAPER_EXPERIMENT, EXPERIMENT_CALL_FLOOR, EXPERIMENT_PUT_FLOOR, IS_PAPER_ACCOUNT,
+  MR_LABEL_DECOUPLED, MR_INTRADAY_OVERSOLD, APEX_PAPER_EXPERIMENT, EXPERIMENT_CALL_FLOOR, EXPERIMENT_PUT_FLOOR, IS_PAPER_ACCOUNT,
   VIX_DAILY_SEED, VIX_HISTORY_URL,
   IVP_CALL_PENALTY_STEEP, DIP_REQUIRES_MULTIDAY_ANCHOR, DIP_MAX_DAYCHANGE,
   OVERSOLD_CALL_NEEDS_CORROBORATION, CORROBORATION_MAX_BREADTH,
