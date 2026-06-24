@@ -17,6 +17,7 @@ const { MIN_SCORE, MIN_SCORE_CREDIT ,
 ,
   MR_BOUNCE_RSI_OFFLOW = 6, MR_BOUNCE_VWAP_TOL = 0.004,
   IVP_CALL_PENALTY_STEEP = false, DIP_REQUIRES_MULTIDAY_ANCHOR = false, DIP_MAX_DAYCHANGE = 0.003,
+  MR_INTRADAY_OVERSOLD = false,
   OVERSOLD_CALL_NEEDS_CORROBORATION = false, CORROBORATION_MAX_BREADTH = 45,
   MACD_CURL_SCORING = true   // V3.2 (6/19) Phase-1 curl: default ON; add MACD_CURL_SCORING:false to constants.js to disable
 }     = require('./constants');
@@ -382,11 +383,21 @@ function scoreMeanReversionCall(stock, relStrength, adx, bars, vix) {
 
   // RSI daily-contract enforcement (panel P0): mean-reversion oversold tiers key off DAILY RSI,
   // not the display/timing intraday rsi (signals.js contract). Intraday whipsaw must never authorize entry.
+  // RSI oversold tiers. Historically keyed off DAILY RSI only (panel P0 anti-whipsaw). F+G (6/23):
+  // when MR_INTRADAY_OVERSOLD is on, a bull_curl-CONFIRMED intraday dip is scored at its intraday
+  // depth — so the score scales with how oversold the dip actually is (fixing the flat ~+5 that
+  // disqualified QQQ and never rewarded depth). The bull_curl gate is the anti-whipsaw guard the
+  // daily contract provided: an unconfirmed intraday spike down still falls back to daily RSI.
   const _mrDailyRSI = stock.dailyRsi || stock.rsi || 50;
-  if (_mrDailyRSI <= 35)      { score += 20; reasons.push(`dailyRSI ${_mrDailyRSI} - deeply oversold (+20)`); }
-  else if (_mrDailyRSI <= 42) { score += 12; reasons.push(`dailyRSI ${_mrDailyRSI} - oversold (+12)`); }
-  else if (_mrDailyRSI <= 48) { score += 5;  reasons.push(`dailyRSI ${_mrDailyRSI} - near oversold (+5)`); }
-  else return { score: 0, reasons: [`dailyRSI ${_mrDailyRSI} not oversold - skip mean reversion`] };
+  const _mrIntraRSI = (stock.rsi != null) ? stock.rsi : _mrDailyRSI;
+  const _mrCurlOK   = (stock.macdCurl || "none") === "bull_curl";
+  const _useIntra   = MR_INTRADAY_OVERSOLD && _mrCurlOK && _mrIntraRSI < _mrDailyRSI;
+  const _mrRSI      = _useIntra ? _mrIntraRSI : _mrDailyRSI;
+  const _mrSrc      = _useIntra ? "intraday(curl)" : "dailyRSI";
+  if (_mrRSI <= 35)      { score += 20; reasons.push(`${_mrSrc} ${_mrRSI} - deeply oversold (+20)`); }
+  else if (_mrRSI <= 42) { score += 12; reasons.push(`${_mrSrc} ${_mrRSI} - oversold (+12)`); }
+  else if (_mrRSI <= 48) { score += 5;  reasons.push(`${_mrSrc} ${_mrRSI} - near oversold (+5)`); }
+  else return { score: 0, reasons: [`${_mrSrc} ${_mrRSI} not oversold - skip mean reversion`] };
 
   const oversoldScans = state._oversoldCount ? (state._oversoldCount[stock.ticker] || 0) : 0;
   if (oversoldScans >= 3)      { score += 15; reasons.push(`Oversold ${oversoldScans} consecutive scans - capitulation (+15)`); }
