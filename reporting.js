@@ -7,6 +7,7 @@ const { withTimeout ,
   alpacaGet, getStockBars
 } = require('./broker');
 const { state, logEvent, saveStateNow, markDirty } = require('./state');
+const { telemetryCSV } = require('./telemetry');
 const { realizedPnL, openRisk, openCostBasis,
         getETTime, isMarketHours ,
   heatPct, stockValue, calcRSI, calcGreeks
@@ -18,7 +19,7 @@ const { RESEND_API_KEY, GMAIL_USER, MONTHLY_BUDGET,
   MS_PER_DAY
 }                            = require('./constants');
 const { countRecentDayTrades } = require('./risk');
-const { getNewsForTicker, getUpcomingMacroEvents } = require('./market');
+const { getNewsForTicker, getUpcomingMacroEvents, getMarketauxNews } = require('./market');
 
 let _getAgentBriefing = async () => '';
 let _getMacroNews     = async () => ({});
@@ -39,7 +40,7 @@ function initReporting({ getAgentMorningBriefing, getMacroNews,
 let _marketContext = {};
 function setReportingContext(ctx) { _marketContext = ctx; }
 
-async function sendResendEmail(subject, html) {
+async function sendResendEmail(subject, html, attachments = []) {
   if (!RESEND_API_KEY || !GMAIL_USER) {
     console.log("[EMAIL] Resend not configured - set RESEND_API_KEY and GMAIL_USER in Railway");
     return false;
@@ -56,6 +57,7 @@ async function sendResendEmail(subject, html) {
         to:      [GMAIL_USER],
         subject,
         html,
+        ...(attachments && attachments.length ? { attachments } : {}),
       }),
     }), 10000);
     const data = await res.json();
@@ -78,8 +80,19 @@ async function sendEmail(type) {
     ? `APEX Morning Briefing - ${new Date().toLocaleDateString()}`
     : `APEX EOD Report - P&L ${(state.cash-state.dayStartCash)>=0?"+":""}$${(state.cash-state.dayStartCash).toFixed(2)}`;
   try {
-    await sendResendEmail(subject, buildEmailHTML(type));
-    logEvent("email", `${type} email sent to ${GMAIL_USER}`);
+    let attachments = [];
+    if (type !== "morning") {
+      try {
+        const rows = state._telemetryBuffer || [];
+        if (rows.length) {
+          const csv = telemetryCSV(rows);
+          const dateStr = new Date().toLocaleDateString("en-CA", { timeZone: "America/New_York" });
+          attachments = [{ filename: `argo-telemetry-${dateStr}.csv`, content: Buffer.from(csv, "utf8").toString("base64") }];
+        }
+      } catch (_telErr) { /* telemetry attachment is best-effort — never block the email */ }
+    }
+    await sendResendEmail(subject, buildEmailHTML(type), attachments);
+    logEvent("email", `${type} email sent to ${GMAIL_USER}${attachments.length ? " (+telemetry.csv)" : ""}`);
   } catch(e) { logEvent("error", `Email failed: ${e.message}`); }
 }
 
