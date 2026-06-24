@@ -9,7 +9,7 @@ const fs      = require('fs');
 
 const { state, markDirty, saveStateNow, flushStateIfDirty,
         logEvent, redisSave, redisLoad, defaultState,
-        saveDailyLogToRedis, getETDateStr,
+        saveDailyLogToRedis, getETDateStr, restoreBuffersFromRedis,
         writeJournalEntry, updateJournalExit,
         loadJournalDay, saveJournalDay, getJournalRange }              = require('./state');
 const { alpacaGet, alpacaPost, alpacaDelete,
@@ -1680,7 +1680,8 @@ process.on("unhandledRejection", (reason, promise) => {
   console.error("[ERROR] Unhandled rejection:", reason?.message || reason);
 });
 
-initState().then(() => {
+initState().then(async () => {
+  await restoreBuffersFromRedis();   // repopulate today's log + telemetry buffers after a restart
   initAgent({
     logFn:               logEvent,
     markDirty:           markDirty,
