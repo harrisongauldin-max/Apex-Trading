@@ -424,6 +424,7 @@ function scoreIndexSetup(stock, optionType, spyRSI, spyMACD, spyMomentum, breadt
   let score = 0;
   const reasons = [];
 
+  let _isOverboughtMRPut = false;  // hoisted from the put branch (read at supplement-cap ~L953); optionType-guarded below
   const _agentAcc30  = state._agentAccuracy?.acc30  ?? 50;
   const _agentAccN   = state._agentAccuracy?.calls   ?? 0;
   const _agentDegraded = _agentAccN >= 30 && _agentAcc30 < 25;
@@ -523,7 +524,7 @@ function scoreIndexSetup(stock, optionType, spyRSI, spyMACD, spyMomentum, breadt
     if (signal) reasons.push(`Agent signal: ${signal} (${confidence}) — scoring impact removed, threshold-only`);
 
     const _dailyRsiForPut   = stock.dailyRsi || spyRSI || 50;
-    const _isOverboughtMRPut = ["trending_bull","recovery"].includes(regime)
+    _isOverboughtMRPut = optionType === "put" && ["trending_bull","recovery"].includes(regime)
       && spyRSI >= 65
       && _dailyRsiForPut >= 75;
     // ADD (6/14): near-miss tier ramps the dailyRSI≥75 cliff. dailyRSI 70–75 gets partial
@@ -951,7 +952,7 @@ function scoreIndexSetup(stock, optionType, spyRSI, spyMACD, spyMomentum, breadt
   }
 
   const _isOverboughtMRPutForCap = typeof _isOverboughtMRPut !== 'undefined' && _isOverboughtMRPut;
-  const _suppCap = _isOverboughtMRPutForCap ? 25 : 15;
+  const _suppCap = _isOverboughtMRPutForCap ? 25 : 20;   // panel A (6/23): general cap 15->20 — was clipping the best-confluence days (raw 19 -> 15)
   if (supplementScore > 0) {
     const cappedSupp = Math.min(_suppCap, supplementScore);
     score += cappedSupp;
