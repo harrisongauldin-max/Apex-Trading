@@ -199,8 +199,21 @@ async function runScan() {
   // gates use; IVR must rank real-vs-real to be units-correct (a VIXY value ranked against
   // a real-VIX window reads ~3x too high). No "no-baseline" cap is needed: the baseline is
   // real, so a genuine 1yr-low VIX correctly yields a low rank instead of a phantom floor.
-  if (!Array.isArray(state._vixDaily) || state._vixDaily.length < 60) {
-    state._vixDaily = VIX_DAILY_SEED.slice(-252);             // defensive seed (server boot also seeds)
+  // Reseed if missing/short OR holding legacy VIXY-PRICE data. A length-only check let the old
+  // persisted VIXY array (261 elems, prices ~30-74) sail past and mask the real-VIX ranking. Real
+  // VIX never year-medians above ~40 (this window medians ~17); VIXY prices median ~50.
+  {
+    const _vdChk = state._vixDaily;
+    let _vdStale = !Array.isArray(_vdChk) || _vdChk.length < 60;
+    if (!_vdStale) {
+      const _med = [..._vdChk].sort((a, b) => a - b)[Math.floor(_vdChk.length / 2)];
+      _vdStale = !(_med > 0) || _med > 40;                    // >40 ⇒ VIXY units, not real VIX
+    }
+    if (_vdStale) {
+      const _wasLen = Array.isArray(_vdChk) ? _vdChk.length : 0;
+      state._vixDaily = VIX_DAILY_SEED.slice(-252);
+      if (_wasLen >= 60) logEvent("scan", `[IVR] reseeded — discarded legacy/units-wrong _vixDaily (${_wasLen}d) for real-VIX seed`);
+    }
   }
   const _vd = state._vixDaily;
   if (!Array.isArray(_vd) || _vd.length < 60) {
@@ -2142,7 +2155,7 @@ async function runScan() {
         isMeanReversion: isMeanReversion === true, isIndex: stock.isIndex === true },  // V3.2 (6/19) FIX: evaluateEntry carve-outs depend on these — were absent, forcing oversold MR calls to the 85 floor
       rb, state,
       { etHour: etHourNow, isLateDay, isLastHour, volDecline: _volDeclineExec,
-        signals: { dailyRsi: stock.dailyRsi || stock.rsi || 50, macd: stock.macd || "neutral", macdCurl: stock.macdCurl || "none" },
+        signals: { rsi: signals.rsi, dailyRsi: signals.dailyRsi || stock.dailyRsi || 50, macd: stock.macd || "neutral", macdCurl: stock.macdCurl || "none" },  // FIX (6/23): intraday rsi was never plumbed → entryEngine intradayRsi silently fell back to dailyRsi, making the D2 carve-out/veto key off DAILY RSI. Now passes the true intraday signal.
         recentSameDir: recentSameDirMins, existingProfitPct, existingCreditProfitPct,
         drawdownMinScore: ddProtocol.minScore || MIN_SCORE, drawdownLevel: ddProtocol.level || "normal",
         agentSignal: (state._agentMacro || {}).signal || "neutral",
