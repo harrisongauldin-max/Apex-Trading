@@ -308,14 +308,37 @@ async function saveDailyLogToRedis(isEOD = false) {
   try {
     const dateStr  = getETDateStr();
     const logKey   = `argo:logs:${dateStr}`;
+    const buffer   = state._dailyLogBuffer || [];
+
+    // Merge-on-save: never overwrite a populated Redis day-log with a thinner buffer.
+    // The in-memory buffer is wiped on every restart/redeploy and cleared at EOD, so a
+    // blind SET (esp. from save-now after the buffer empties) would clobber the real day.
+    // Read the existing key, union with the buffer, dedup by time|type|message, write the superset.
+    let existing = [];
+    try {
+      const gr = await fetch(`${REDIS_URL}/get/${logKey}`, { headers: { Authorization: `Bearer ${REDIS_TOKEN}` } });
+      const gd = await gr.json();
+      if (gd && gd.result) { const p = JSON.parse(gd.result); if (Array.isArray(p.entries)) existing = p.entries; }
+    } catch(_) { /* if the read fails, fall through and write the buffer rather than lose this save */ }
+
+    const seen = new Set();
+    let merged = [];
+    for (const e of existing.concat(buffer)) {
+      const k = `${e.time}|${e.type}|${e.message}`;
+      if (seen.has(k)) continue;
+      seen.add(k); merged.push(e);
+    }
+    merged.sort((a, b) => new Date(a.time) - new Date(b.time));
+    if (merged.length > 30000) merged = merged.slice(-30000);
+
     const logData  = JSON.stringify({
       date:     dateStr,
-      entries:  state._dailyLogBuffer || [],
+      entries:  merged,
       summary: {
-        totalEntries: (state._dailyLogBuffer || []).length,
-        trades:       (state._dailyLogBuffer || []).filter(e => e.type === "trade").length,
-        errors:       (state._dailyLogBuffer || []).filter(e => e.type === "error").length,
-        warns:        (state._dailyLogBuffer || []).filter(e => e.type === "warn").length,
+        totalEntries: merged.length,
+        trades:       merged.filter(e => e.type === "trade").length,
+        errors:       merged.filter(e => e.type === "error").length,
+        warns:        merged.filter(e => e.type === "warn").length,
         closedToday:  (state.closedTrades || []).filter(t => t.closeTime && new Date(t.closeTime).toISOString().slice(0,10) === dateStr).length,
         cashEOD:      state.cash,
         positionsEOD: state.positions.length,
@@ -327,7 +350,7 @@ async function saveDailyLogToRedis(isEOD = false) {
       body:    JSON.stringify({ value: logData, ex: 7776000 }),
     });
     if (res.ok) {
-      logEvent("scan", `[EOD LOG] Daily log saved to Redis: ${logKey} | ${(state._dailyLogBuffer||[]).length} entries`);
+      logEvent("scan", `[EOD LOG] Daily log saved to Redis: ${logKey} | ${merged.length} entries (buffer ${buffer.length} + existing ${existing.length})`);
       if (isEOD) {
         state._dailyLogBuffer = [];
         markDirty();
@@ -450,14 +473,28 @@ async function saveTelemetryToRedis(isEOD = false) {
   try {
     const dateStr = getETDateStr();
     const key     = `argo:telemetry:${dateStr}`;
-    const payload = JSON.stringify({ date: dateStr, header: TELEMETRY_HEADER, rows });
+    // Merge-on-save: union existing Redis rows with the buffer, dedup exact rows.
+    // A restart wipes the buffer; without merging, the next checkpoint would overwrite
+    // the key with only post-restart rows and lose the morning. existing+buffer preserves
+    // chronological order (existing = earlier saves, buffer = since).
+    let existing = [];
+    try {
+      const gr = await fetch(`${REDIS_URL}/get/${key}`, { headers: { Authorization: `Bearer ${REDIS_TOKEN}` } });
+      const gd = await gr.json();
+      if (gd && gd.result) { const p = JSON.parse(gd.result); if (Array.isArray(p.rows)) existing = p.rows; }
+    } catch(_) { /* read failure: fall through and write the buffer rather than lose this save */ }
+    const seen = new Set();
+    let merged = [];
+    for (const r of existing.concat(rows)) { if (seen.has(r)) continue; seen.add(r); merged.push(r); }
+    if (merged.length > 6000) merged = merged.slice(-6000);
+    const payload = JSON.stringify({ date: dateStr, header: TELEMETRY_HEADER, rows: merged });
     const res = await fetch(`${REDIS_URL}/set/${key}`, {
       method:  "POST",
       headers: { Authorization: `Bearer ${REDIS_TOKEN}`, "Content-Type": "application/json" },
       body:    JSON.stringify({ value: payload, ex: 7776000 }),
     });
     if (res.ok) {
-      logEvent("scan", `[TELEMETRY] Saved ${rows.length} rows → ${key}`);
+      logEvent("scan", `[TELEMETRY] Saved ${merged.length} rows → ${key} (buffer ${rows.length} + existing ${existing.length})`);
       if (isEOD) { state._telemetryBuffer = []; state._telemetryLast = {}; markDirty(); }
     } else {
       console.error("[TELEMETRY] Redis save failed:", res.status);
@@ -598,7 +635,42 @@ function paperDataActive(st = state) {
   return IS_PAPER_ACCOUNT === true && !!(st && st.paperDataMode === true);
 }
 
+// Boot-restore: repopulate today's in-memory buffers from Redis so a redeploy/restart
+// doesn't leave "Download full day" / telemetry empty (and so merge-on-save has the
+// morning to merge against). Only fills a buffer that's currently empty.
+async function restoreBuffersFromRedis() {
+  if (!REDIS_URL || !REDIS_TOKEN) return;
+  const dateStr = getETDateStr();
+  try {
+    if (!state._dailyLogBuffer || state._dailyLogBuffer.length === 0) {
+      const gr = await fetch(`${REDIS_URL}/get/argo:logs:${dateStr}`, { headers: { Authorization: `Bearer ${REDIS_TOKEN}` } });
+      const gd = await gr.json();
+      if (gd && gd.result) {
+        const p = JSON.parse(gd.result);
+        if (Array.isArray(p.entries) && p.entries.length) {
+          state._dailyLogBuffer = p.entries.slice(-30000);
+          console.log(`[BOOT] Restored ${state._dailyLogBuffer.length} daily-log entries from Redis (${dateStr})`);
+        }
+      }
+    }
+  } catch(e) { console.error("[BOOT] daily-log restore failed:", e.message); }
+  try {
+    if (!state._telemetryBuffer || state._telemetryBuffer.length === 0) {
+      const gr = await fetch(`${REDIS_URL}/get/argo:telemetry:${dateStr}`, { headers: { Authorization: `Bearer ${REDIS_TOKEN}` } });
+      const gd = await gr.json();
+      if (gd && gd.result) {
+        const p = JSON.parse(gd.result);
+        if (Array.isArray(p.rows) && p.rows.length) {
+          state._telemetryBuffer = p.rows.slice(-6000);
+          console.log(`[BOOT] Restored ${state._telemetryBuffer.length} telemetry rows from Redis (${dateStr})`);
+        }
+      }
+    }
+  } catch(e) { console.error("[BOOT] telemetry restore failed:", e.message); }
+}
+
 module.exports = { state, markDirty, saveStateNow, flushStateIfDirty, logEvent,
                    redisSave, redisLoad, defaultState, saveDailyLogToRedis, saveTelemetryToRedis, getETDateStr,
+                   restoreBuffersFromRedis,
                    writeJournalEntry, updateJournalExit, loadJournalDay, saveJournalDay, getJournalRange,
                    closeOrphanJournalOpens, paperDataActive };
