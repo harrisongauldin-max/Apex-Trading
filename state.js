@@ -9,6 +9,7 @@ const BACKUP_FILE = require('path').join(__dirname, 'state-backup.json');
 const fs   = require('fs');
 const path = require('path');
 const fetch = require('node-fetch');
+const { TELEMETRY_HEADER } = require('./telemetry');
 const { REDIS_URL, REDIS_TOKEN, REDIS_KEY, REDIS_SAVE_INTERVAL, STATE_FILE, MONTHLY_BUDGET,
   IS_PAPER_ACCOUNT, APEX_PAPER_EXPERIMENT,
 } = require('./constants');
@@ -128,6 +129,8 @@ async function redisSave(data) {
   };
   delete slim._marketContextCache;
   delete slim._dailyLogBuffer;   // saved separately via saveDailyLogToRedis — keep it out of the state payload
+  delete slim._telemetryBuffer;  // saved separately via saveTelemetryToRedis
+  delete slim._telemetryLast;    // transient material-change tracker
 
   try { fs.writeFileSync(STATE_FILE, JSON.stringify(data, null, 2)); } catch(e) {}
 
@@ -434,6 +437,34 @@ async function saveDailyLogToRedis(isEOD = false) {
   } catch(e) {
     console.error("[ANALYTICS] Snapshot error:", e.message);
   }
+
+  await saveTelemetryToRedis(isEOD);
+}
+
+// Compact score-telemetry persistence — mirrors saveDailyLogToRedis. Rides its cadence
+// (hourly checkpoint + EOD), so no new timers. Buffer flushed only at EOD.
+async function saveTelemetryToRedis(isEOD = false) {
+  if (!REDIS_URL || !REDIS_TOKEN) return;
+  const rows = state._telemetryBuffer || [];
+  if (rows.length === 0) return;
+  try {
+    const dateStr = getETDateStr();
+    const key     = `argo:telemetry:${dateStr}`;
+    const payload = JSON.stringify({ date: dateStr, header: TELEMETRY_HEADER, rows });
+    const res = await fetch(`${REDIS_URL}/set/${key}`, {
+      method:  "POST",
+      headers: { Authorization: `Bearer ${REDIS_TOKEN}`, "Content-Type": "application/json" },
+      body:    JSON.stringify({ value: payload, ex: 7776000 }),
+    });
+    if (res.ok) {
+      logEvent("scan", `[TELEMETRY] Saved ${rows.length} rows → ${key}`);
+      if (isEOD) { state._telemetryBuffer = []; state._telemetryLast = {}; markDirty(); }
+    } else {
+      console.error("[TELEMETRY] Redis save failed:", res.status);
+    }
+  } catch(e) {
+    console.error("[TELEMETRY] save error:", e.message);
+  }
 }
 
 
@@ -568,6 +599,6 @@ function paperDataActive(st = state) {
 }
 
 module.exports = { state, markDirty, saveStateNow, flushStateIfDirty, logEvent,
-                   redisSave, redisLoad, defaultState, saveDailyLogToRedis, getETDateStr,
+                   redisSave, redisLoad, defaultState, saveDailyLogToRedis, saveTelemetryToRedis, getETDateStr,
                    writeJournalEntry, updateJournalExit, loadJournalDay, saveJournalDay, getJournalRange,
                    closeOrphanJournalOpens, paperDataActive };
