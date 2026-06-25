@@ -11,6 +11,7 @@ const ALPACA_DATA       = 'https://data.alpaca.markets/v2';
 const ALPACA_OPTIONS    = 'https://paper-api.alpaca.markets/v2';
 const ALPACA_OPT_SNAP   = 'https://data.alpaca.markets/v1beta1';
 const ALPACA_NEWS       = 'https://data.alpaca.markets/v1beta1';
+const OPTION_FEED       = process.env.OPTION_FEED || 'opra';   // D3 (6/25) real-time OPRA (Algo Trader Plus). Set OPTION_FEED=indicative to revert to the free 15-min-delayed feed without a redeploy.
 // PAPER/LIVE detection — positive check. Alpaca paper URL contains 'paper'; the LIVE URL
 // (api.alpaca.markets) contains neither 'paper' nor 'live', so a .includes('live') test would
 // be dead. This is the hard interlock substrate for PAPER DATA MODE (see state.paperDataActive).
@@ -352,7 +353,7 @@ const VIX_HISTORY_URL = "https://cdn.cboe.com/api/global/us_indices/daily_prices
 
 module.exports = {
   ALPACA_KEY, ALPACA_SECRET, ALPACA_BASE, ALPACA_DATA, ALPACA_OPTIONS,
-  ALPACA_OPT_SNAP, ALPACA_NEWS, GMAIL_USER, RESEND_API_KEY,
+  ALPACA_OPT_SNAP, ALPACA_NEWS, OPTION_FEED, GMAIL_USER, RESEND_API_KEY,
   ANTHROPIC_API_KEY, ANTHROPIC_MODEL, REDIS_URL, REDIS_TOKEN, REDIS_KEY,
   REDIS_SAVE_INTERVAL, MARKETAUX_KEY, MONTHLY_BUDGET, CAPITAL_FLOOR,
   REVENUE_THRESHOLD, BONUS_AMOUNT, MAX_HEAT, MAX_SECTOR_PCT,
