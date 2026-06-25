@@ -1134,28 +1134,29 @@ app.get("/api/logs/history", async (req, res) => {
       const resp   = await fetch(`${REDIS_URL}/get/${logKey}`, { headers: { Authorization: `Bearer ${REDIS_TOKEN}` } });
       const data = await resp.json();
       let entries, summary, source;
-      if (!data.result) {
-        const todayStr = getETTime().toISOString().slice(0, 10);
-        if (date === todayStr && state._dailyLogBuffer && state._dailyLogBuffer.length) {
-          entries = state._dailyLogBuffer;
-          summary = {
-            totalEntries: entries.length,
-            trades:  entries.filter(e => e.type === "trade").length,
-            errors:  entries.filter(e => e.type === "error").length,
-            warns:   entries.filter(e => e.type === "warn").length,
-            cashEOD: state.cash,
-            positionsEOD: state.positions.length,
-            note: "live buffer — EOD save not yet triggered"
-          };
-          source = "live_buffer";
-        } else {
-          return res.status(404).json({ error: `No log found for ${date}` });
-        }
-      } else {
-        const parsed = JSON.parse(data.result);
-        entries = parsed.entries || [];
+      const parsed       = data.result ? JSON.parse(data.result) : null;
+      const redisEntries = parsed && Array.isArray(parsed.entries) ? parsed.entries : [];
+      const todayStr     = getETDateStr();
+      if (redisEntries.length) {
+        entries = redisEntries;
         summary = parsed.summary;
         source  = "redis";
+      } else if (date === todayStr && state._dailyLogBuffer && state._dailyLogBuffer.length) {
+        // Redis key absent OR present-but-empty → serve today's live buffer so an
+        // empty/clobbered key doesn't mask in-memory data before a save runs.
+        entries = state._dailyLogBuffer;
+        summary = {
+          totalEntries: entries.length,
+          trades:  entries.filter(e => e.type === "trade").length,
+          errors:  entries.filter(e => e.type === "error").length,
+          warns:   entries.filter(e => e.type === "warn").length,
+          cashEOD: state.cash,
+          positionsEOD: state.positions.length,
+          note: "live buffer — Redis copy empty or not yet saved"
+        };
+        source = "live_buffer";
+      } else {
+        return res.status(404).json({ error: `No log found for ${date}` });
       }
       const filter = req.query.filter;
       const limit  = Math.min(parseInt(req.query.limit || 5000), 30000);
@@ -1561,6 +1562,17 @@ app.get("/api/spy", async (req, res) => {
     const dayChangeDollar = quote && prevClose ? parseFloat((quote - prevClose).toFixed(2)) : 0;
     const chartBars  = (intradayBars || []).slice(-60).map(b => ({ t: b.t, c: b.c, o: b.o }));
     res.json({ price: quote ? parseFloat(quote.toFixed(2)) : null, prevClose: prevClose ? parseFloat(prevClose.toFixed(2)) : null, dayChange, dayChangeDollar, vix: state.vix || null, chartBars, updatedAt: new Date().toISOString() });
+  } catch(e) { res.json({ error: e.message }); }
+});
+
+app.get("/api/qqq", async (req, res) => {
+  try {
+    const [quote, bars, intradayBars] = await Promise.all([getStockQuote("QQQ"), getStockBars("QQQ", 2), getIntradayBars("QQQ")]);
+    const prevClose  = bars.length >= 2 ? bars[bars.length-2].c : null;
+    const dayChange  = quote && prevClose ? parseFloat(((quote - prevClose) / prevClose * 100).toFixed(2)) : 0;
+    const dayChangeDollar = quote && prevClose ? parseFloat((quote - prevClose).toFixed(2)) : 0;
+    const chartBars  = (intradayBars || []).slice(-60).map(b => ({ t: b.t, c: b.c, o: b.o }));
+    res.json({ price: quote ? parseFloat(quote.toFixed(2)) : null, prevClose: prevClose ? parseFloat(prevClose.toFixed(2)) : null, dayChange, dayChangeDollar, chartBars, updatedAt: new Date().toISOString() });
   } catch(e) { res.json({ error: e.message }); }
 });
 
