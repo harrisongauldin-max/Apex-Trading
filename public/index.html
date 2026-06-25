@@ -202,6 +202,29 @@ input[type=text]:focus{border-color:var(--blue)}
     </div>
   </div>
 
+  <!-- QQQ Live Tracker -->
+  <div class="card" style="margin-bottom:12px;padding:12px 16px">
+    <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px">
+      <div style="display:flex;align-items:center;gap:20px">
+        <div>
+          <div style="font-size:10px;color:var(--muted);letter-spacing:1px;margin-bottom:2px">NASDAQ-100 · QQQ</div>
+          <div style="display:flex;align-items:baseline;gap:8px">
+            <span id="qqq-price" style="font-size:26px;font-weight:700;font-family:var(--font)">$--</span>
+            <span id="qqq-change" style="font-size:14px;font-weight:700">--</span>
+            <span id="qqq-change-dollar" style="font-size:11px;color:var(--muted)">--</span>
+          </div>
+        </div>
+        <div style="border-left:1px solid var(--border);padding-left:20px">
+          <div style="font-size:10px;color:var(--muted);letter-spacing:1px;margin-bottom:2px">LAST UPDATE</div>
+          <div id="qqq-updated" style="font-size:11px;color:var(--muted)">--</div>
+        </div>
+      </div>
+      <div style="flex:1;min-width:200px;max-width:400px">
+        <canvas id="qqq-chart" height="50" style="width:100%"></canvas>
+      </div>
+    </div>
+  </div>
+
   <!-- Spiral Warning -->
 
   <div id="spiral-warning" style="display:none;background:rgba(255,85,85,.1);border:1px solid rgba(255,85,85,.3);border-radius:8px;padding:10px 14px;margin-bottom:10px;font-size:11px;color:#ff5555">
@@ -1147,6 +1170,62 @@ function renderSPY() {
 // Fetch SPY immediately and then every 60 seconds
 fetchSPY();
 
+// ── QQQ Live Tracker ───────────────────────────────────────────────────────
+let qqqData = null;
+let qqqChartInstance = null;
+
+async function fetchQQQ() {
+  try {
+    const res = await fetch('/api/qqq');
+    qqqData   = await res.json();
+    renderQQQ();
+  } catch(e) { console.error('QQQ fetch error:', e); }
+}
+
+function renderQQQ() {
+  if (!qqqData || qqqData.error) return;
+  const priceEl  = document.getElementById('qqq-price');
+  const changeEl = document.getElementById('qqq-change');
+  const dollarEl = document.getElementById('qqq-change-dollar');
+  if (!priceEl) return;
+  const chg = qqqData.dayChange || 0;
+  const col = chg >= 0 ? 'var(--green)' : 'var(--red)';
+  priceEl.textContent  = qqqData.price ? '$' + qqqData.price.toFixed(2) : '$--';
+  priceEl.style.color  = col;
+  changeEl.textContent = (chg >= 0 ? '+' : '') + chg.toFixed(2) + '%';
+  changeEl.style.color = col;
+  dollarEl.textContent = qqqData.dayChangeDollar ? ((qqqData.dayChangeDollar >= 0 ? '+$' : '-$') + Math.abs(qqqData.dayChangeDollar).toFixed(2)) : '';
+
+  const bars = qqqData.chartBars || [];
+  if (bars.length > 1) {
+    const ctx = document.getElementById('qqq-chart');
+    if (!ctx) return;
+    const prices = bars.map(b => b.c);
+    const labels = bars.map((b,i) => i % 15 === 0 ? new Date(b.t).toLocaleTimeString('en-US',{hour:'2-digit',minute:'2-digit'}) : '');
+    const c2     = chg >= 0 ? '#00ff88' : '#ff5555';
+    if (qqqChartInstance) qqqChartInstance.destroy();
+    ctx.height = 50;
+    qqqChartInstance = new SimpleChart(ctx.getContext('2d'), { labels, data: prices, color: c2, fill: true, label: 'QQQ' });
+  }
+}
+
+// Freshness ticker — shows seconds-since-update for both trackers, ambers/reds when stale
+function tickFreshness() {
+  const now = Date.now();
+  [['spy-updated', spyData], ['qqq-updated', qqqData]].forEach(([id, d]) => {
+    const el = document.getElementById(id);
+    if (!el || !d || !d.updatedAt) return;
+    const ageS = Math.round((now - new Date(d.updatedAt).getTime()) / 1000);
+    el.textContent = new Date(d.updatedAt).toLocaleTimeString() + ' · ' + ageS + 's ago';
+    el.style.color = ageS > 90 ? 'var(--red)' : ageS > 40 ? 'var(--gold)' : 'var(--muted)';
+  });
+}
+
+function refreshTrackers() { fetchSPY(); fetchQQQ(); }
+
+// Fetch QQQ immediately alongside SPY
+fetchQQQ();
+
 // ── Live rescore function ──────────────────────────────────────────────────
 // ── Agent panel renderer ──────────────────────────────────────────────────
 function renderAgentPanel() {
@@ -1310,7 +1389,8 @@ async function rescorePos(ticker) {
     if (btn) { btn.textContent = '↻ RESCORE'; btn.disabled = false; }
   }
 }
-setInterval(fetchSPY, 60000);
+setInterval(refreshTrackers, 20000);
+setInterval(tickFreshness, 1000);
 
 // ── Portfolio Value Chart ──────────────────────────────────────────────────
 let portWindow = '1D';
