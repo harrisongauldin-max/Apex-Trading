@@ -101,9 +101,9 @@ async function fetchPositionData(positions) {
     return p.contractSymbol ? [p.contractSymbol] : [];
   }))].join(",");
 
-  const { ALPACA_OPT_SNAP } = require('./constants');
+  const { ALPACA_OPT_SNAP, OPTION_FEED } = require('./constants');
   const [posSnapData, ...posQuotes] = await Promise.all([
-    posSymbols ? alpacaGet(`/options/snapshots?symbols=${posSymbols}&feed=indicative`, ALPACA_OPT_SNAP) : Promise.resolve({}),
+    posSymbols ? alpacaGet(`/options/snapshots?symbols=${posSymbols}&feed=${OPTION_FEED}`, ALPACA_OPT_SNAP) : Promise.resolve({}),
     ...positions.map(p => getStockQuote(p.ticker)),
   ]);
   const posSnapshots = posSnapData?.snapshots || {};
