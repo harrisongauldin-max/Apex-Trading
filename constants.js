@@ -87,6 +87,12 @@ const MR_INTRA_SESSLOW_MAX = 35;    // session must have reached <= this RSI (ge
 const MR_FLUSH_DD1 = 0.005;         // >= 0.5% off session high → +6  (shallow flush)
 const MR_FLUSH_DD2 = 0.009;         // >= 0.9% off session high → +10 (solid flush)
 const MR_FLUSH_DD3 = 0.015;         // >= 1.5% off session high → +15 (deep flush)
+// Session-low recency (6/25 fix). The _mrEarlyTurn gate keyed off the all-session sticky
+// MIN RSI, so once 1-min RSI printed any deep value early (6/25: a stuck 2.2 on a 1.28%
+// range day), the gate stayed permanently open and the flush credit fired on every MR call.
+// Require the session low to have occurred within this many minutes — a stale low no longer
+// counts as an "early turn." Tunable: shorter = stricter (only very recent flushes qualify).
+const MR_SESSLOW_RECENCY_MIN = 60;
 const IVR_MAX             = 70;
 const EARNINGS_SKIP_DAYS  = 5;
 const MIN_OPEN_INTEREST   = 100;
@@ -372,6 +378,7 @@ module.exports = {
   MACD_HIST_STRONG_ATR, MR_BOUNCE_RSI_OFFLOW, MR_BOUNCE_VWAP_TOL,
   MR_INTRA_LIFTOFF_PTS, MR_INTRA_SESSLOW_MAX,
   MR_FLUSH_DD1, MR_FLUSH_DD2, MR_FLUSH_DD3,
+  MR_SESSLOW_RECENCY_MIN,
   EARNINGS_SKIP_DAYS, MIN_OPEN_INTEREST, MIN_STOCK_PRICE, MIN_OPTION_PREMIUM,
   MIN_OI, MAX_SPREAD_PCT, EARLY_SPREAD_PCT, MAX_GAP_PCT, TARGET_DELTA_MIN,
   VIX_CREDIT_PRIMARY, VIX_CALLS_BLOCKED,
