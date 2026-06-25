@@ -32,7 +32,7 @@ function registerMacroCallbacks(cbs) {
   if (cbs.applyExitUrgency)           _applyExitUrgency           = cbs.applyExitUrgency;
 }
 const { SLOW_CACHE_TTL, BARS_CACHE_TTL, MARKETAUX_KEY,
-        MS_PER_DAY, ALPACA_NEWS, VIX_HISTORY_URL } = require('./constants');
+        MS_PER_DAY, ALPACA_NEWS, VIX_HISTORY_URL, OPTION_FEED } = require('./constants');
 
 // ─── In-process cache ────────────────────────────────────────────
 const _slowCache     = new Map();
@@ -735,7 +735,7 @@ async function getSyntheticPCR() {
     // Fetch SPY options chain - already have this infrastructure
     const today  = new Date().toISOString().split("T")[0];
     const expiry = new Date(Date.now() + 45 * MS_PER_DAY).toISOString().split("T")[0]; // 0-45 DTE full range
-    const url    = `/options/snapshots/SPY?feed=indicative&limit=1000&expiration_date_gte=${today}&expiration_date_lte=${expiry}`;
+    const url    = `/options/snapshots/SPY?feed=${OPTION_FEED}&limit=1000&expiration_date_gte=${today}&expiration_date_lte=${expiry}`;
     const data   = await alpacaGet(url, ALPACA_OPT_SNAP);
 
     if (!data || !data.snapshots) return null;
@@ -795,8 +795,8 @@ async function getVolTermStructure() {
     const nearStrike = Math.round(spyPrice / 5) * 5; // nearest $5 strike
 
     const [nearData, farData] = await Promise.all([
-      alpacaGet(`/options/snapshots/SPY?feed=indicative&limit=50&expiration_date_gte=${nearExp}&strike_price_gte=${nearStrike - 10}&strike_price_lte=${nearStrike + 10}&type=put`, ALPACA_OPT_SNAP),
-      alpacaGet(`/options/snapshots/SPY?feed=indicative&limit=50&expiration_date_gte=${farExp}&strike_price_gte=${nearStrike - 10}&strike_price_lte=${nearStrike + 10}&type=put`, ALPACA_OPT_SNAP),
+      alpacaGet(`/options/snapshots/SPY?feed=${OPTION_FEED}&limit=50&expiration_date_gte=${nearExp}&strike_price_gte=${nearStrike - 10}&strike_price_lte=${nearStrike + 10}&type=put`, ALPACA_OPT_SNAP),
+      alpacaGet(`/options/snapshots/SPY?feed=${OPTION_FEED}&limit=50&expiration_date_gte=${farExp}&strike_price_gte=${nearStrike - 10}&strike_price_lte=${nearStrike + 10}&type=put`, ALPACA_OPT_SNAP),
     ]);
 
     const getAvgIV = (data) => {
@@ -844,7 +844,7 @@ async function getCBOESKEW() {
     const expMax = new Date(getETTime().getTime() + 35 * 86400000).toISOString().split("T")[0];
     // Fetch SPY puts in 14-35 DTE window — liquid strikes, IV well-defined
     const data = await alpacaGet(
-      `/options/snapshots/SPY?feed=indicative&limit=200&type=put&expiration_date_gte=${today}&expiration_date_lte=${expMax}`,
+      `/options/snapshots/SPY?feed=${OPTION_FEED}&limit=200&type=put&expiration_date_gte=${today}&expiration_date_lte=${expMax}`,
       ALPACA_OPT_SNAP
     );
     if (!data?.snapshots) return null;
