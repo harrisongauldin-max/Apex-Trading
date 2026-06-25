@@ -18,6 +18,7 @@ const { MIN_SCORE, MIN_SCORE_CREDIT ,
   MR_BOUNCE_RSI_OFFLOW = 6, MR_BOUNCE_VWAP_TOL = 0.004,
   MR_INTRA_LIFTOFF_PTS = 4, MR_INTRA_SESSLOW_MAX = 35,
   MR_FLUSH_DD1 = 0.005, MR_FLUSH_DD2 = 0.009, MR_FLUSH_DD3 = 0.015,
+  MR_SESSLOW_RECENCY_MIN = 60,
   IVP_CALL_PENALTY_STEEP = false, DIP_REQUIRES_MULTIDAY_ANCHOR = false, DIP_MAX_DAYCHANGE = 0.003,
   MR_INTRADAY_OVERSOLD = false,
   OVERSOLD_CALL_NEEDS_CORROBORATION = false, CORROBORATION_MAX_BREADTH = 45,
@@ -405,7 +406,23 @@ function scoreMeanReversionCall(stock, relStrength, adx, bars, vix, intradayBars
   const _mrCurlOK     = (stock.macdCurl || "none") === "bull_curl";
   const _mrSessLowRSI = state._sessionLowRSI?.[stock.ticker] ?? _mrIntraRSI;
   const _mrLiftOff    = _mrIntraRSI - _mrSessLowRSI;
-  const _mrEarlyTurn  = _mrSessLowRSI <= MR_INTRA_SESSLOW_MAX && _mrLiftOff >= MR_INTRA_LIFTOFF_PTS;
+  // 6/25 fix: the session low must be RECENT, else a deep early print (e.g. a stuck 2.2)
+  // keeps this gate permanently open all day. _sessionLowRSIAt is the ms timestamp of the low.
+  const _mrSessLowAt     = state._sessionLowRSIAt?.[stock.ticker] ?? 0;
+  const _mrSessLowAgeMin = _mrSessLowAt ? (Date.now() - _mrSessLowAt) / 60000 : Infinity;
+  const _mrLowRecent     = _mrSessLowAgeMin <= MR_SESSLOW_RECENCY_MIN;
+  const _mrEarlyTurn  = _mrSessLowRSI <= MR_INTRA_SESSLOW_MAX
+                        && _mrLiftOff >= MR_INTRA_LIFTOFF_PTS
+                        && _mrLowRecent;
+  // Gate visibility (6/25): log whenever the session reached oversold, so a stale low shows
+  // up as recent:N earlyTurn:N instead of silently producing no flush line. Fires even when
+  // the gate is CLOSED — this is how we verify the recency fix is doing its job.
+  if (_mrSessLowRSI <= MR_INTRA_SESSLOW_MAX) {
+    reasons.push(
+      `[MR-GATE] sessLowRSI ${Number(_mrSessLowRSI).toFixed(1)} liftOff ${Number(_mrLiftOff).toFixed(1)} ` +
+      `lowAge ${Number(_mrSessLowAgeMin).toFixed(0)}m recent:${_mrLowRecent ? 'Y' : 'N'} earlyTurn:${_mrEarlyTurn ? 'Y' : 'N'}`
+    );
+  }
   const _mrConfirmed  = _mrCurlOK || _mrEarlyTurn;
   const _useIntra     = MR_INTRADAY_OVERSOLD && _mrConfirmed && _mrIntraRSI < _mrDailyRSI;
   const _mrRSI      = _useIntra ? _mrIntraRSI : _mrDailyRSI;
