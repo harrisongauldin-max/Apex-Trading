@@ -72,6 +72,12 @@ const MR_BOUNCE_RSI_OFFLOW = 6;
 // Bounce also requires price to reclaim to within this fraction of VWAP (blocks rewarding RSI
 // noise on a still-falling tape). PROVISIONAL 0.004 (0.4%); tune off paper trades. Read by scoring.js.
 const MR_BOUNCE_VWAP_TOL   = 0.004;
+// D2 (6/24) intraday-MR early-turn confirmation. The intraday-MR path (MR_INTRADAY_OVERSOLD)
+// previously gated on a MACD bull_curl, which only sets AFTER the bounce begins — so deep
+// intraday dips (RSI 14-30) never authorized an entry while the daily RSI was neutral, and the
+// system entered late or not at all. These gate a turn signal that fires DURING the dip:
+const MR_INTRA_LIFTOFF_PTS = 4;     // intraday RSI must lift >= this many pts off its session low (the early turn). Lower = earlier/more entries, more dead-cat risk.
+const MR_INTRA_SESSLOW_MAX = 35;    // session must have reached <= this RSI (genuinely oversold) before the intraday path engages.
 const IVR_MAX             = 70;
 const EARNINGS_SKIP_DAYS  = 5;
 const MIN_OPEN_INTEREST   = 100;
@@ -141,10 +147,11 @@ const DIP_MAX_DAYCHANGE                 = 0.003;  // D1: max SPY day-change (+0.
 // intraday). When true, a bull_curl-CONFIRMED intraday dip is scored at its intraday depth, so depth
 // finally scales and intraday-oversold index names qualify. The curl requirement IS the anti-whipsaw
 // guard P0 wanted. Default OFF; paper-armed. Set false to revert (no code deploy).
-const MR_INTRADAY_OVERSOLD              = false;
+const MR_INTRADAY_OVERSOLD              = true;   // ARMED (6/24, paper): bull_curl-confirmed intraday dips now score at intraday depth (+20 deeply-oversold reachable) AND set isMeanReversion:true, which is what makes the D2 carve-out reachable. Watch give-back losses — entries up, exit unfixed. Set false to revert (no code deploy).
 const OVERSOLD_CALL_NEEDS_CORROBORATION = false;  // PARKED OFF (6/22): superseded by the RSI daily-contract fix — the +20 now keys off daily RSI, so it no longer fires on intraday whipsaws (corroboration's main purpose). The below-VWAP clause also fights bounce-confirmation (D2 curl). Re-evaluate as a breadth-ONLY variant before ever enabling.
 const CORROBORATION_MAX_BREADTH         = 45;     // item4: breadth <= this corroborates an oversold-call dip
-const GIVEBACK_EXIT_ENABLED   = true;  // D3: exit a position that peaked then round-tripped to the floor
+const GIVEBACK_EXIT_ENABLED   = false;  // D3 DISABLED (6/24): redundant with the trail-floor (exitEngine.js:479), and worse — armed at +1% RAW peak vs trail's +5% CONFIRMED, and a 10-min min-hold delayed the exit past breakeven into deep red (stopped MR dips out at the bottom). Trail-floor is the sole profit-lock, as its own design comment states.
+const SPIRAL_COOLDOWN_MIN     = 45;     // D3 (6/24) spiral-block cooldown: after a 5-loss streak locks a side, auto-clear the block this many minutes later so entries resume for data-gathering. Fixes the deadlock where the block could only clear on a winning trade of a side that was itself blocked (→ permanent lock until daily reset). Tunable.
 const GIVEBACK_PEAK_MIN       = 0.01;   // D3: required peak gain (+1%) before give-back can arm (panel value; tune in paper)
 const GIVEBACK_FLOOR          = 0.0;    // D3: exit when current change falls back to <= this (breakeven)
 const GIVEBACK_MIN_HOLD_MIN   = 10;     // D3: minimum hold minutes before give-back can fire (anti early-noise)
@@ -354,6 +361,7 @@ module.exports = {
   RIDE_TARGET_PCT, TIME_STOP_DAYS, TIME_STOP_MOVE, IV_COLLAPSE_PCT,
   MA50_BUFFER, MACRO_REVERSAL_PCT, MIN_SCORE, MIN_SCORE_CREDIT, MIN_SCORE_MR, IVR_MAX,
   MACD_HIST_STRONG_ATR, MR_BOUNCE_RSI_OFFLOW, MR_BOUNCE_VWAP_TOL,
+  MR_INTRA_LIFTOFF_PTS, MR_INTRA_SESSLOW_MAX,
   EARNINGS_SKIP_DAYS, MIN_OPEN_INTEREST, MIN_STOCK_PRICE, MIN_OPTION_PREMIUM,
   MIN_OI, MAX_SPREAD_PCT, EARLY_SPREAD_PCT, MAX_GAP_PCT, TARGET_DELTA_MIN,
   VIX_CREDIT_PRIMARY, VIX_CALLS_BLOCKED,
@@ -367,6 +375,7 @@ module.exports = {
   IVP_CALL_PENALTY_STEEP, DIP_REQUIRES_MULTIDAY_ANCHOR, DIP_MAX_DAYCHANGE,
   OVERSOLD_CALL_NEEDS_CORROBORATION, CORROBORATION_MAX_BREADTH,
   GIVEBACK_EXIT_ENABLED, GIVEBACK_PEAK_MIN, GIVEBACK_FLOOR, GIVEBACK_MIN_HOLD_MIN,
+  SPIRAL_COOLDOWN_MIN,
   AGENT_MACRO_CACHE_MS, VIX_PAUSE, VIX_REDUCE25, VIX_REDUCE50, MAX_LOSS_PER_TRADE,
   WEEKLY_DD_LIMIT, PDT_DAYS, PREMARKET_NEGATIVE, PREMARKET_STRONG_MOVE,
   SUPPORT_BUFFER, RESISTANCE_BUFFER, FAST_PROFIT_PCT,
