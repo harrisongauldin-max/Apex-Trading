@@ -1734,7 +1734,7 @@ async function runScan() {
 
     const regimeMod = getRegimeModifier(marketContext.regime?.regime || "neutral", "call");
 
-    const mrSetup = scoreMeanReversionCall(liveStock, relStrength, signals.adx, bars, state.vix);
+    const mrSetup = scoreMeanReversionCall(liveStock, relStrength, signals.adx, bars, state.vix, intradayBars);
     const _mrDailyRsi       = liveStock.dailyRsi || 50;
     const _idxBullExempt    = (liveStock.isIndex === true || stock.isIndex === true) && (state._regimeClass || "A") === "A";
     const mrBearishTrend    = _idxBullExempt
