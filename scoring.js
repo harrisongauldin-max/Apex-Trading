@@ -16,6 +16,7 @@ const { MIN_SCORE, MIN_SCORE_CREDIT ,
   INDIVIDUAL_STOCKS_ENABLED
 ,
   MR_BOUNCE_RSI_OFFLOW = 6, MR_BOUNCE_VWAP_TOL = 0.004,
+  MR_INTRA_LIFTOFF_PTS = 4, MR_INTRA_SESSLOW_MAX = 35,
   IVP_CALL_PENALTY_STEEP = false, DIP_REQUIRES_MULTIDAY_ANCHOR = false, DIP_MAX_DAYCHANGE = 0.003,
   MR_INTRADAY_OVERSOLD = false,
   OVERSOLD_CALL_NEEDS_CORROBORATION = false, CORROBORATION_MAX_BREADTH = 45,
@@ -390,10 +391,24 @@ function scoreMeanReversionCall(stock, relStrength, adx, bars, vix) {
   // daily contract provided: an unconfirmed intraday spike down still falls back to daily RSI.
   const _mrDailyRSI = stock.dailyRsi || stock.rsi || 50;
   const _mrIntraRSI = (stock.rsi != null) ? stock.rsi : _mrDailyRSI;
-  const _mrCurlOK   = (stock.macdCurl || "none") === "bull_curl";
-  const _useIntra   = MR_INTRADAY_OVERSOLD && _mrCurlOK && _mrIntraRSI < _mrDailyRSI;
+  // D2 (6/24) early-turn confirmation. The old gate required a MACD bull_curl, which only sets
+  // AFTER the histogram turns up — i.e. after the bounce has begun. On deep intraday dips
+  // (RSI 14-30) with neutral daily RSI, that meant the intraday path never engaged, the dip
+  // scored on daily RSI (~53 → "not oversold" → score 0, isMeanReversion never set), and the
+  // system sat out the exact moment price was most stretched. Replaced with a turn signal that
+  // fires DURING the dip: the session reached oversold (low <= MR_INTRA_SESSLOW_MAX) AND intraday
+  // RSI has lifted MR_INTRA_LIFTOFF_PTS off its own session low. bull_curl still qualifies (sharp
+  // V-bottoms where the curl leads). A knife still making new lows (liftOff ~0, no curl) stays
+  // unconfirmed and falls back to daily RSI — preserving the anti-whipsaw guard, without waiting
+  // on the lagging curl. Depth tiers below still scale the reward by how oversold it actually is.
+  const _mrCurlOK     = (stock.macdCurl || "none") === "bull_curl";
+  const _mrSessLowRSI = state._sessionLowRSI?.[stock.ticker] ?? _mrIntraRSI;
+  const _mrLiftOff    = _mrIntraRSI - _mrSessLowRSI;
+  const _mrEarlyTurn  = _mrSessLowRSI <= MR_INTRA_SESSLOW_MAX && _mrLiftOff >= MR_INTRA_LIFTOFF_PTS;
+  const _mrConfirmed  = _mrCurlOK || _mrEarlyTurn;
+  const _useIntra     = MR_INTRADAY_OVERSOLD && _mrConfirmed && _mrIntraRSI < _mrDailyRSI;
   const _mrRSI      = _useIntra ? _mrIntraRSI : _mrDailyRSI;
-  const _mrSrc      = _useIntra ? "intraday(curl)" : "dailyRSI";
+  const _mrSrc      = _useIntra ? (_mrCurlOK ? "intraday(curl)" : "intraday(liftoff)") : "dailyRSI";
   if (_mrRSI <= 35)      { score += 20; reasons.push(`${_mrSrc} ${_mrRSI} - deeply oversold (+20)`); }
   else if (_mrRSI <= 42) { score += 12; reasons.push(`${_mrSrc} ${_mrRSI} - oversold (+12)`); }
   else if (_mrRSI <= 48) { score += 5;  reasons.push(`${_mrSrc} ${_mrRSI} - near oversold (+5)`); }
@@ -850,11 +865,13 @@ function scoreIndexSetup(stock, optionType, spyRSI, spyMACD, spyMomentum, breadt
     else if (spyMACD && spyMACD.includes("bearish crossover")) { score -= Math.round(5*macdMult); reasons.push(`SPY MACD bearish crossover (-${Math.round(5*macdMult)})`); }
     else if (spyMACD && spyMACD.includes("bearish"))       { score -= Math.round(3*macdMult);  reasons.push(`SPY MACD bearish (-${Math.round(3*macdMult)})`); }
 
-    const bHist10 = (state._breadthHistory || []).map(b => b.v);
-    const bMin = bHist10.length >= 3 ? Math.min(...bHist10) : 0;
-    const bMax = bHist10.length >= 3 ? Math.max(...bHist10) : 100;
-    const bRange = bMax - bMin;
-    const bNorm = bRange > 5 ? ((breadth - bMin) / bRange) * 100 : 50;
+    // BUG-2 fix: rank today's breadth against the DAILY buffer (recent sessions) as a TRUE
+    // percentile, instead of a min-max over the last ~10 intraday scans (noise, and mislabeled
+    // "pctile"). Neutral (50) until >=5 sessions accumulate. Daily buffer built in scanner.js.
+    const bDaily = (state._breadthDaily || []).map(b => b.v);
+    const bNorm  = bDaily.length >= 5
+      ? (bDaily.filter(v => v < breadth).length / bDaily.length) * 100
+      : 50;
     if (bNorm >= 75 && breadth >= 60)      { score += 10; reasons.push(`Breadth ${breadth}% (${bNorm.toFixed(0)}th pctile) - strong relative to recent (+10)`); }
     else if (bNorm >= 60)                  { score += 6;  reasons.push(`Breadth ${breadth}% (${bNorm.toFixed(0)}th pctile) - recovering (+6)`); }
     else if (bNorm <= 30 && ["trending_bull","recovery"].includes(regime) && (!DIP_REQUIRES_MULTIDAY_ANCHOR || ((agentMacro||{}).spyDayChange ?? 0) <= DIP_MAX_DAYCHANGE)) {
