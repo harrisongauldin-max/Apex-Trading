@@ -89,6 +89,8 @@ const {
   MR_LABEL_DECOUPLED = false,   // V3.2 (6/19) MR-label decoupling: default OFF; set true in constants.js to enable
   APEX_PAPER_EXPERIMENT = false, EXPERIMENT_CALL_FLOOR = 50, EXPERIMENT_PUT_FLOOR = 60,   // V3.2 (6/22) paper-experiment mode: default OFF
   VIX_DAILY_SEED = [],   // V3.2 (6/23) real CBOE VIX year — seeds the IV-Rank baseline (_vixDaily)
+  SPIRAL_COOLDOWN_MIN = 45,   // D3 (6/24) spiral-block auto-clear cooldown (min) — fallback 45 if not in constants
+  MR_INTRA_LIFTOFF_PTS = 4,   // D3 (6/24) intraday RSI lift-off pts off session low — shared early-turn threshold (scoring + VWAP gate)
 } = require('./constants');
 
 let scanRunning  = false;
@@ -171,6 +173,10 @@ async function runScan() {
     state._dailyLossLockTriggeredAt = null;
     state._instrumentLossCount    = {};
     logEvent("scan", `[DAILY RESET] New trading day ${todayScanDate} — circuit reset, P&L zeroed (was $${_prevDayPnL.toFixed(0)}), gap + thesis state cleared`);
+    // #4: effective-config audit — surface the behavior flags that change what the system does,
+    // so the active configuration is legible each session (the flag combinatorics were hard to
+    // reason about). Add new safety-affecting flags here as they're introduced.
+    logEvent("scan", `[CONFIG] paperDataMode:${state.paperDataMode === true ? 'ON — loss-locks + circuit-breaker + gap blocks DISABLED' : 'off'} | paperExperiment:${APEX_PAPER_EXPERIMENT ? 'ON' : 'off'} | callFloor:${EXPERIMENT_CALL_FLOOR} putFloor:${EXPERIMENT_PUT_FLOOR} | MIN_SCORE:${MIN_SCORE}`);
     markDirty();
   }
 
@@ -344,6 +350,18 @@ async function runScan() {
     state._breadth        = bPct;   // BUGFIX: was never assigned → scorer read a phantom 50
     state._breadthHistory.push({ t: now, v: bPct });
     if (state._breadthHistory.length > 10) state._breadthHistory = state._breadthHistory.slice(-10);
+
+    // BUG-2 fix: DAILY breadth buffer (one entry/session) so scoring's breadth "percentile"
+    // ranks today vs recent SESSIONS, not the last ~10 intraday scans (noise). Persists
+    // wholesale via redisSave(state). Window (20 sessions) is panel-tunable.
+    if (!state._breadthDaily) state._breadthDaily = [];
+    {
+      const _etDate = new Date(now).toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+      const _lastD  = state._breadthDaily[state._breadthDaily.length - 1];
+      if (_lastD && _lastD.d === _etDate) _lastD.v = bPct;           // update today's live value
+      else state._breadthDaily.push({ d: _etDate, v: bPct });        // new session
+      if (state._breadthDaily.length > 20) state._breadthDaily = state._breadthDaily.slice(-20);
+    }
 
     const bHist = state._breadthHistory;
     if (bHist.length >= 2) {
@@ -1330,8 +1348,19 @@ async function runScan() {
       const _vwapReliable = _sessionMinutes >= 30;
       const _callLikelyPath = signals.rsi !== null && signals.rsi < 40;
       if (_vwapReliable && _callLikelyPath && price < vwap * 0.99) {
-        logEvent("filter", `[VWAP] ${stock.ticker} MR call path blocked — price ${((price/vwap-1)*100).toFixed(1)}% below VWAP`);
-        continue;
+        // D3 (6/24, panel Option 3): block a below-VWAP call ONLY while it's still making new
+        // session lows (a true falling knife). Once intraday RSI lifts MR_INTRA_LIFTOFF_PTS off
+        // its own session low the dip is turning — let it through. Same early-turn model as the MR
+        // scorer (scoring.js), so scoring and this gate now share one confirmation rule instead of
+        // contradicting each other. Both outcomes are logged for measurement.
+        const _vwSessLowRSI = state._sessionLowRSI?.[stock.ticker] ?? signals.rsi;
+        const _vwLiftOff    = signals.rsi - _vwSessLowRSI;
+        const _vwPctBelow   = ((price/vwap-1)*100).toFixed(1);
+        if (_vwLiftOff < MR_INTRA_LIFTOFF_PTS) {
+          logEvent("filter", `[VWAP] ${stock.ticker} MR call path blocked — ${_vwPctBelow}% below VWAP, still falling (RSI ${signals.rsi.toFixed(0)} vs sessLow ${_vwSessLowRSI.toFixed(0)}, liftoff ${_vwLiftOff.toFixed(0)}<${MR_INTRA_LIFTOFF_PTS})`);
+          continue;
+        }
+        logEvent("filter", `[VWAP] ${stock.ticker} below-VWAP call ALLOWED (early turn) — ${_vwPctBelow}% below VWAP but RSI lifting off (sessLow ${_vwSessLowRSI.toFixed(0)}→${signals.rsi.toFixed(0)}, +${_vwLiftOff.toFixed(0)})`);
       }
       const _putsOnBounceActive = rb.gates.putsOnBounceMode && rb.isBearRegime;
       if (_putsOnBounceActive && price > vwap * 1.02) {
@@ -1741,9 +1770,21 @@ async function runScan() {
     if (_circuit.open) { logEvent("filter", `[CIRCUIT] Entries paused - Alpaca API degraded`); continue; }
 
     if (state._spiralActive) {
-      const spiralType = state._spiralActive;
-      if (spiralType === "call") { callSetup = { score: 0, reasons: ["Spiral block"] }; }
-      if (spiralType === "put")  { putSetup  = { score: 0, reasons: ["Spiral block"] }; }
+      // D3 (6/24) time-decay auto-clear: the spiral block could previously only clear on a WINNING
+      // trade of the blocked side — but that side was blocked, so it could never win → permanent
+      // deadlock until the daily reset. Now it auto-clears after SPIRAL_COOLDOWN_MIN so entries
+      // resume for data-gathering. Reset the tracker too, else the next single loss re-triggers at 5→6.
+      const _spiralAgeMin = state._spiralActiveSince ? (Date.now() - state._spiralActiveSince) / 60000 : Infinity;
+      if (_spiralAgeMin >= SPIRAL_COOLDOWN_MIN) {
+        logEvent("scan", `[SPIRAL] ${state._spiralActive} block auto-cleared after ${Math.round(_spiralAgeMin)}min (cooldown ${SPIRAL_COOLDOWN_MIN}min) — resuming entries`);
+        if (state._spiralTracker) state._spiralTracker[state._spiralActive] = 0;
+        state._spiralActive = null;
+        state._spiralActiveSince = null;
+      } else {
+        const spiralType = state._spiralActive;
+        if (spiralType === "call") { callSetup = { score: 0, reasons: ["Spiral block"] }; }
+        if (spiralType === "put")  { putSetup  = { score: 0, reasons: ["Spiral block"] }; }
+      }
     }
 
     const macro = marketContext.macro || { scoreModifier: 0, sectorBearish: [], sectorBullish: [] };
@@ -1779,7 +1820,10 @@ async function runScan() {
       callSetup.reasons.push(`High IV penalty: IVR ${_liveIVR.toFixed(0)} > 50 (-${_ivrPenalty})`);
     }
 
-    if (liveStock._gapDayCallBlocked && !paperDataActive(state)) { callSetup.score = 0; callSetup.reasons.push('Gap-day VWAP block'); }
+    if (liveStock._gapDayCallBlocked) {
+      callSetup.reasons.push('[SHADOW-BLOCK:gap-vwap]');   // shadow-mode: record would-block (gate stays OFF in paper for data-gathering; enforced in live)
+      if (!paperDataActive(state)) { callSetup.score = 0; callSetup.reasons.push('Gap-day VWAP block'); }
+    }
 
     const _gateARecord = (state._dailyThesisComplete || {})[stock.ticker];
     if (_gateARecord && _gateARecord.optionType === 'call' && callSetup.score > 0) {
@@ -1791,22 +1835,28 @@ async function runScan() {
       }
     }
 
-    if (_gateCActive && callSetup.score > 0 && !paperDataActive(state)) {
+    if (_gateCActive && callSetup.score > 0) {
       const _gateCRSI = liveStock.dailyRsi || liveStock.rsi || signals.rsi || 50;
       if (_gateCRSI >= GATE_C_RSI_FLOOR) {
-        callSetup.score = 0;
-        logEvent("filter", `[GATE-C] ${stock.ticker} call blocked — PM gap-up day, RSI ${_gateCRSI.toFixed(0)}`);
+        callSetup.reasons.push('[SHADOW-BLOCK:gate-c]');   // shadow-mode: record would-block
+        if (!paperDataActive(state)) {
+          callSetup.score = 0;
+          logEvent("filter", `[GATE-C] ${stock.ticker} call blocked — PM gap-up day, RSI ${_gateCRSI.toFixed(0)}`);
+        }
       }
     }
 
-    if (state._gapReversalDay && callSetup.score > 0 && !paperDataActive(state)) {
+    if (state._gapReversalDay && callSetup.score > 0) {
       const _grRSI       = liveStock.rsi || signals.rsi || 50;
       const _grVWAP      = signals.intradayVWAP || 0;
       const _grAboveVWAP = _grVWAP > 0 && price > _grVWAP;
       const _grRSITooHigh = _grRSI >= 35;
       if (_grRSITooHigh || _grAboveVWAP) {
-        callSetup.score = 0;
-        logEvent("filter", `[GAP-REVERSAL] ${stock.ticker} call blocked`);
+        callSetup.reasons.push('[SHADOW-BLOCK:gap-reversal]');   // shadow-mode: record would-block
+        if (!paperDataActive(state)) {
+          callSetup.score = 0;
+          logEvent("filter", `[GAP-REVERSAL] ${stock.ticker} call blocked`);
+        }
       }
     }
 
@@ -1822,9 +1872,12 @@ async function runScan() {
         callSetup.reasons.push(`Gap-down call boost (+${liveStock._gapCallBoost})`);
       }
     }
-    if (liveStock._gapCallStrictRSI && callSetup.score > 0 && !paperDataActive(state)) {
+    if (liveStock._gapCallStrictRSI && callSetup.score > 0) {
       const _strictRSI = liveStock.dailyRsi || liveStock.rsi || signals.rsi || 50;
-      if (_strictRSI >= 37) { callSetup.score = 0; logEvent("filter", `[GAP-STRICT-RSI] ${stock.ticker} call blocked — RSI ${_strictRSI.toFixed(0)}`); }
+      if (_strictRSI >= 37) {
+        callSetup.reasons.push('[SHADOW-BLOCK:strict-rsi]');   // shadow-mode: record would-block
+        if (!paperDataActive(state)) { callSetup.score = 0; logEvent("filter", `[GAP-STRICT-RSI] ${stock.ticker} call blocked — RSI ${_strictRSI.toFixed(0)}`); }
+      }
     }
 
     const _liveRSIForMom  = liveStock.rsi || signals.rsi || 50;
