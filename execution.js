@@ -21,7 +21,7 @@ const { calcGreeks, getETTime,
 const { CAPITAL_FLOOR, MIN_OPTION_PREMIUM, MIN_OI,
         MAX_SPREAD_PCT, EARLY_SPREAD_PCT, TARGET_DELTA_MIN,
         TARGET_DELTA_MAX, MONTHLY_BUDGET, INDIVIDUAL_STOCKS_ENABLED,
-        WATCHLIST, ALPACA_OPT_SNAP, ALPACA_OPTIONS,
+        WATCHLIST, ALPACA_OPT_SNAP, ALPACA_OPTIONS, OPTION_FEED,
         MAX_HEAT, STOP_LOSS_PCT, TAKE_PROFIT_PCT,
 }                                          = require('./constants');
 const { confirmPendingOrder } = require('./closeEngine');
@@ -59,7 +59,7 @@ function bsStrikeForDelta(price, targetDelta, T, sigma, optionType = "put", r = 
 
 async function getOptionsPrice(symbol) {
   try {
-    const data = await alpacaGet(`/options/snapshots?symbols=${symbol}&feed=indicative`, ALPACA_OPT_SNAP);
+    const data = await alpacaGet(`/options/snapshots?symbols=${symbol}&feed=${OPTION_FEED}`, ALPACA_OPT_SNAP);
     if (!data || !data.snapshots || !data.snapshots[symbol]) return null;
     const snap  = data.snapshots[symbol];
     const quote = snap.latestQuote || snap.latest_quote || snap.quote || {};
@@ -117,13 +117,15 @@ async function findContract(ticker, optionType, targetDelta, targetDTE, vix, sto
     const batches = [];
     for (let i = 0; i < symbols.length; i += 25) batches.push(symbols.slice(i, i+25).join(","));
     const snapResults = await Promise.all(
-      batches.map(b => alpacaGet(`/options/snapshots?symbols=${b}&feed=indicative`, ALPACA_OPT_SNAP).catch(() => null))
+      batches.map(b => alpacaGet(`/options/snapshots?symbols=${b}&feed=${OPTION_FEED}`, ALPACA_OPT_SNAP).catch(() => null))
     );
     const snaps = snapResults.reduce((acc, r) => ({ ...acc, ...(r?.snapshots || {}) }), {});
 
     const deltaMin = Math.max(0.05, targetDelta - 0.12);
     const deltaMax = Math.min(0.65, targetDelta + 0.12);
 
+    let _best = null, _bestDist = Infinity, _bestRawIV = 0;   // BUG-1 fix: closest-to-target delta
+    let _ivWin = { withIV: 0, total: 0 };   // Q3.1: measure indicative-feed IV coverage across the evaluated window
     for (const c of allC.slice(0, 50)) {
       const snap = snaps[c.symbol];
       if (!snap) continue;
@@ -142,22 +144,38 @@ async function findContract(ticker, optionType, targetDelta, targetDTE, vix, sto
         logEvent("filter", `${ticker} findContract: skipping $${strike} ${expDTE}DTE — exceeds ${DTE_ENTRY_CAP}DTE entry cap (Tier 3 framework not yet implemented)`);
         continue;
       }
-      logEvent("filter", `${ticker} findContract: ${optionType} $${strike} | ${expDTE}DTE | delta${delta.toFixed(3)} | $${mid.toFixed(2)} | target delta${targetDelta} strike $${targetStrike}`);
-      return {
-        symbol:  c.symbol,
-        strike,
-        expDate: c.expiration_date,
-        expDays: expDTE,
-        premium: parseFloat(mid.toFixed(2)),
-        bid, ask,
-        spread:  ask > 0 ? (ask - bid) / ask : 1,
-        greeks:  { delta: parseFloat(g.delta || 0).toFixed(3),
-                   theta: parseFloat(g.theta || 0).toFixed(3),
-                   gamma: parseFloat(g.gamma || 0).toFixed(4),
-                   vega:  parseFloat(g.vega  || 0).toFixed(3) },
-        oi:      parseInt(snap.openInterest || 0),
-        iv:      parseFloat(snap.impliedVolatility || sigma),
-      };
+      const _rawIV = parseFloat(snap.impliedVolatility || 0);   // Q3.1: raw feed IV (pre sigma-fallback)
+      _ivWin.total++; if (_rawIV > 0) _ivWin.withIV++;
+      const _dist = Math.abs(delta - targetDelta);
+      if (_dist < _bestDist) {
+        _bestDist = _dist;
+        _bestRawIV = _rawIV;
+        _best = {
+          symbol:  c.symbol,
+          strike,
+          expDate: c.expiration_date,
+          expDays: expDTE,
+          premium: parseFloat(mid.toFixed(2)),
+          bid, ask,
+          spread:  ask > 0 ? (ask - bid) / ask : 1,
+          greeks:  { delta: parseFloat(g.delta || 0).toFixed(3),
+                     theta: parseFloat(g.theta || 0).toFixed(3),
+                     gamma: parseFloat(g.gamma || 0).toFixed(4),
+                     vega:  parseFloat(g.vega  || 0).toFixed(3) },
+          oi:      parseInt(snap.openInterest || 0),
+          iv:      parseFloat(snap.impliedVolatility || sigma),
+        };
+      }
+    }
+
+    if (_best) {
+      // Q3.1: track whether the indicative feed returned real IV for the contract we would actually use.
+      if (!state._ivCoverage) state._ivCoverage = { withIV: 0, total: 0 };
+      state._ivCoverage.total++; if (_bestRawIV > 0) state._ivCoverage.withIV++;
+      const _covPct = (100 * state._ivCoverage.withIV / state._ivCoverage.total).toFixed(0);
+      logEvent("filter", `[IV-COVERAGE] ${ticker} chosen ${_bestRawIV > 0 ? `feed IV ${_bestRawIV.toFixed(3)}` : "feed IV MISSING (realized-vol proxy)"} | window ${_ivWin.withIV}/${_ivWin.total} | session ${_covPct}% (${state._ivCoverage.withIV}/${state._ivCoverage.total})`);
+      logEvent("filter", `${ticker} findContract: ${optionType} $${_best.strike} | ${_best.expDays}DTE | delta${Math.abs(parseFloat(_best.greeks.delta)).toFixed(3)} | $${_best.premium} | target delta${targetDelta} strike $${targetStrike} (closest in-window)`);
+      return _best;
     }
 
     logEvent("filter", `${ticker} findContract: no valid ${optionType} found (target delta${targetDelta} strike $${targetStrike} window ${fetchMin}->${fetchMax})`);
@@ -169,7 +187,7 @@ async function findContract(ticker, optionType, targetDelta, targetDTE, vix, sto
 }
 
 function calcPositionSize(premium, score, vix) {
-  const recentTrades = (state.closedTrades || []).slice(0, 30);
+  const recentTrades = (state.closedTrades || []).slice(-30);   // BUG-3 fix: closedTrades is push-ordered (oldest-first); slice(-30) = newest 30. Was slice(0,30) = OLDEST 30, so Kelly never saw recent performance.
   let kellyBase;
 
   const totalFills = (state.dataQuality || {}).realTrades || 0;
@@ -328,7 +346,8 @@ async function executeTrade(stock, price, score, scoreReasons, vix, optionType =
     try {
       const askPrice = parseFloat(contract.ask.toFixed(2));
       const midPrice = contract.bid > 0 ? parseFloat(((contract.bid + contract.ask) / 2).toFixed(2)) : askPrice;
-      const concessionPrices = [askPrice, midPrice];
+      const _payUp = parseFloat(Math.min(askPrice * 1.02, askPrice + 0.15).toFixed(2));
+      const concessionPrices = [askPrice, _payUp];   // BUG-5 fix: escalate for a BUY — cross at ask, then pay up (<=2% / 15c) to catch a quote that moved between findContract and submit. Was [ask, mid], which RETREATED and guaranteed the 2nd attempt missed in a fast tape.
       let limitPrice = askPrice;
       let fillConfirmed = false;
       let fillPrice = null;
@@ -337,7 +356,7 @@ async function executeTrade(stock, price, score, scoreReasons, vix, optionType =
       for (let attempt = 0; attempt < concessionPrices.length && !fillConfirmed; attempt++) {
         limitPrice = concessionPrices[attempt];
         if (attempt > 0) {
-          logEvent("trade", `Order concession attempt ${attempt+1}: widening limit to $${limitPrice} (mid price)`);
+          logEvent("trade", `Order concession attempt ${attempt+1}: paying up to $${limitPrice} to ensure fill`);
         }
         const orderBody = {
           symbol:          contract.symbol,
@@ -473,7 +492,6 @@ async function executeTrade(stock, price, score, scoreReasons, vix, optionType =
     greeks:         contract.greeks,
     beta:           stock.beta || 1,
     peakPremium:    contract.premium,
-    trailStop:      null,
     breakevenLocked: false,
     score,
     halfPosition:   false,
@@ -554,6 +572,20 @@ async function executeTrade(stock, price, score, scoreReasons, vix, optionType =
 
   await saveStateNow();
 
+  // ADD (6/14): one grep-able structured line per entry — slices put fires by tier/breadth/lab
+  {
+    const _lab = state._breadthLab;
+    const _labStr = _lab
+      ? `RSP-SPY:${_lab.spSpread ?? '?'}(${_lab.spLabel || '?'}) QQQE-QQQ:${_lab.nqSpread ?? '?'}(${_lab.nqLabel || '?'}) accel:${_lab.accel ?? '?'}`
+      : 'lab:n/a';
+    const _wt = stock._weeklyTrend;
+    const _wkStr = _wt ? `${_wt.trendContext || '?'}/above10wk:${_wt.above10wk}` : 'weekly:n/a';
+    const _tierStr = optionType === 'put'
+      ? (((stock.dailyRsi || 0) >= 75) ? 'full' : ((stock.dailyRsi || 0) >= 70) ? 'soft' : 'standard')
+      : 'call';
+    logEvent('filter', `[ENTRY-FIRED] ${stock.ticker} ${optionType.toUpperCase()} score:${score} tier:${_tierStr} | RSI:${stock.rsi ?? '?'} dailyRSI:${stock.dailyRsi ?? '?'} | breadth:${state._breadth ?? '?'}% | ${_labStr} | wk:${_wkStr} | regime:${state._regimeClass || '?'} | reasons:${(scoreReasons||[]).slice(0,4).join(' · ')}`);
+  }
+
   writeJournalEntry({
     id:             `${contract.symbol}_${Date.now()}`,
     contractSymbol: contract.symbol,
@@ -582,6 +614,18 @@ async function executeTrade(stock, price, score, scoreReasons, vix, optionType =
     entryBreadth:        state._breadth ?? null,
     entryRegimeClass:    state._regimeClass || null,
     entryRegimeDuration: state._regimeDuration || 0,
+    // ADD (6/14): put-validation slicing context for [ENTRY-FIRED] / journal breakdown
+    entryPutTier:    optionType === 'put'
+                       ? (((stock.dailyRsi || 0) >= 75) ? 'full' : ((stock.dailyRsi || 0) >= 70) ? 'soft' : 'standard')
+                       : null,
+    entryWeeklyTrend: stock._weeklyTrend
+                       ? { above10wk: stock._weeklyTrend.above10wk, trendContext: stock._weeklyTrend.trendContext }
+                       : null,
+    entryBreadthLab: state._breadthLab
+                       ? { spSpread: state._breadthLab.spSpread, spLabel: state._breadthLab.spLabel,
+                           nqSpread: state._breadthLab.nqSpread, nqLabel: state._breadthLab.nqLabel,
+                           accel: state._breadthLab.accel, trend: state._breadthLab.trend }
+                       : null,
     entryMACD:      stock.macd || null,
     entryMomentum:  stock.momentum || null,
     macroSignal:    (state._agentMacro || {}).signal || 'neutral',
