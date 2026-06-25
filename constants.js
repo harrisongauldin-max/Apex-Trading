@@ -79,6 +79,14 @@ const MR_BOUNCE_VWAP_TOL   = 0.004;
 // system entered late or not at all. These gate a turn signal that fires DURING the dip:
 const MR_INTRA_LIFTOFF_PTS = 4;     // intraday RSI must lift >= this many pts off its session low (the early turn). Lower = earlier/more entries, more dead-cat risk.
 const MR_INTRA_SESSLOW_MAX = 35;    // session must have reached <= this RSI (genuinely oversold) before the intraday path engages.
+// Intraday flush discount (6/25, LIVE paper). Fills the hole where the daily 20-day-drawdown
+// tier returns +0 on intraday flushes. Credit scales with intraday drawdown off the SESSION HIGH
+// (the newly-bridged intraday series), gated on _mrEarlyTurn so only a confirmed oversold turn
+// earns it (RSI gate = quality, price drawdown = magnitude), taken as MAX vs the daily discount
+// (never summed). Starting thresholds — tune from the logged [MR-FLUSH] data.
+const MR_FLUSH_DD1 = 0.005;         // >= 0.5% off session high → +6  (shallow flush)
+const MR_FLUSH_DD2 = 0.009;         // >= 0.9% off session high → +10 (solid flush)
+const MR_FLUSH_DD3 = 0.015;         // >= 1.5% off session high → +15 (deep flush)
 const IVR_MAX             = 70;
 const EARNINGS_SKIP_DAYS  = 5;
 const MIN_OPEN_INTEREST   = 100;
@@ -363,6 +371,7 @@ module.exports = {
   MA50_BUFFER, MACRO_REVERSAL_PCT, MIN_SCORE, MIN_SCORE_CREDIT, MIN_SCORE_MR, IVR_MAX,
   MACD_HIST_STRONG_ATR, MR_BOUNCE_RSI_OFFLOW, MR_BOUNCE_VWAP_TOL,
   MR_INTRA_LIFTOFF_PTS, MR_INTRA_SESSLOW_MAX,
+  MR_FLUSH_DD1, MR_FLUSH_DD2, MR_FLUSH_DD3,
   EARNINGS_SKIP_DAYS, MIN_OPEN_INTEREST, MIN_STOCK_PRICE, MIN_OPTION_PREMIUM,
   MIN_OI, MAX_SPREAD_PCT, EARLY_SPREAD_PCT, MAX_GAP_PCT, TARGET_DELTA_MIN,
   VIX_CREDIT_PRIMARY, VIX_CALLS_BLOCKED,
