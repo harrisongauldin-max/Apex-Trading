@@ -17,6 +17,7 @@ const { MIN_SCORE, MIN_SCORE_CREDIT ,
 ,
   MR_BOUNCE_RSI_OFFLOW = 6, MR_BOUNCE_VWAP_TOL = 0.004,
   MR_INTRA_LIFTOFF_PTS = 4, MR_INTRA_SESSLOW_MAX = 35,
+  MR_FLUSH_DD1 = 0.005, MR_FLUSH_DD2 = 0.009, MR_FLUSH_DD3 = 0.015,
   IVP_CALL_PENALTY_STEEP = false, DIP_REQUIRES_MULTIDAY_ANCHOR = false, DIP_MAX_DAYCHANGE = 0.003,
   MR_INTRADAY_OVERSOLD = false,
   OVERSOLD_CALL_NEEDS_CORROBORATION = false, CORROBORATION_MAX_BREADTH = 45,
@@ -370,7 +371,7 @@ function scorePutSetup(stock, relStrength, adx, volume, avgVolume, vix = 20) {
   return _sigResult;
 }
 
-function scoreMeanReversionCall(stock, relStrength, adx, bars, vix) {
+function scoreMeanReversionCall(stock, relStrength, adx, bars, vix, intradayBars) {
   let score = 0;
   const reasons = [];
 
@@ -418,14 +419,47 @@ function scoreMeanReversionCall(stock, relStrength, adx, bars, vix) {
   if (oversoldScans >= 3)      { score += 15; reasons.push(`Oversold ${oversoldScans} consecutive scans - capitulation (+15)`); }
   else if (oversoldScans >= 2) { score += 8;  reasons.push(`Oversold ${oversoldScans} consecutive scans (+8)`); }
 
+  let _dailyDiscount = 0;
   if (bars && bars.length >= 20) {
     const recentHigh = Math.max(...bars.slice(-20).map(b => b.h));
     const currentPrice = bars[bars.length - 1].c;
     const drawdown = (recentHigh - currentPrice) / recentHigh;
-    if (drawdown >= 0.20)      { score += 25; reasons.push(`Down ${(drawdown*100).toFixed(0)}% from 20d high - deep discount (+25)`); }
-    else if (drawdown >= 0.12) { score += 15; reasons.push(`Down ${(drawdown*100).toFixed(0)}% from 20d high - discount (+15)`); }
-    else if (drawdown >= 0.07) { score += 8;  reasons.push(`Down ${(drawdown*100).toFixed(0)}% from 20d high (+8)`); }
-    else                       { score += 0;  reasons.push(`Only down ${(drawdown*100).toFixed(0)}% - not enough discount (+0)`); }
+    if (drawdown >= 0.20)      { _dailyDiscount = 25; reasons.push(`Down ${(drawdown*100).toFixed(0)}% from 20d high - deep discount (+25)`); }
+    else if (drawdown >= 0.12) { _dailyDiscount = 15; reasons.push(`Down ${(drawdown*100).toFixed(0)}% from 20d high - discount (+15)`); }
+    else if (drawdown >= 0.07) { _dailyDiscount = 8;  reasons.push(`Down ${(drawdown*100).toFixed(0)}% from 20d high (+8)`); }
+    else                       { _dailyDiscount = 0;  reasons.push(`Only down ${(drawdown*100).toFixed(0)}% - not enough discount (+0)`); }
+    score += _dailyDiscount;
+  }
+
+  // ── Intraday flush discount (6/25) — LIVE (paper). Scores off the newly-bridged
+  // intraday series. The daily tier above is blind to intraday flushes (a ~1% session
+  // drop never clears its 7% floor → +0 on the deep intraday dips this strategy targets,
+  // e.g. the RSI-19.9 SPY setup that died at 48<50 on 6/25). Credit scales with intraday
+  // drawdown off the SESSION HIGH; gated on _mrEarlyTurn so a knife still making new lows
+  // earns nothing — the RSI gate confirms the session got oversold AND has lifted off
+  // (quality), the price drawdown supplies magnitude. Taken as MAX vs the daily discount
+  // (same concept, two timeframes, never summed). The D2 falling-knife veto downstream is
+  // UNCHANGED and remains the final gate. Thresholds are starting values; tune from the
+  // logged [MR-FLUSH] data.
+  if (Array.isArray(intradayBars) && intradayBars.length >= 2 && _mrEarlyTurn) {
+    const _ibHigh = Math.max(...intradayBars.map(b => b.h));
+    const _ibLow  = Math.min(...intradayBars.map(b => b.l));
+    const _ibCur  = intradayBars[intradayBars.length - 1].c;
+    const _prevClose = (bars && bars.length >= 2) ? bars[bars.length - 2].c : 0;
+    const _intraDD = _ibHigh > 0 ? (_ibHigh - _ibCur) / _ibHigh : 0;   // off session high (new-data signal)
+    const _sessRng = _ibHigh > 0 ? (_ibHigh - _ibLow) / _ibHigh : 0;
+    const _ddPrev  = _prevClose > 0 ? (_prevClose - _ibCur) / _prevClose : 0;
+    let _flush = 0;
+    if      (_intraDD >= MR_FLUSH_DD3) _flush = 15;
+    else if (_intraDD >= MR_FLUSH_DD2) _flush = 10;
+    else if (_intraDD >= MR_FLUSH_DD1) _flush = 6;
+    const _applied = Math.max(0, _flush - _dailyDiscount);   // max vs daily, no double-count
+    if (_applied > 0) score += _applied;
+    reasons.push(
+      `[MR-FLUSH] intraDD ${(_intraDD*100).toFixed(2)}% offHigh → flush +${_flush} ` +
+      `(applied +${_applied} max-vs-daily +${_dailyDiscount}) | sessLowRSI ${Number(_mrSessLowRSI).toFixed(1)} ` +
+      `liftOff ${Number(_mrLiftOff).toFixed(1)} | diag ${(_ddPrev*100).toFixed(2)}% vsPrevClose, sessRange ${(_sessRng*100).toFixed(2)}%`
+    );
   }
 
   if (stock.macd.includes("bullish crossover")) { score += 15; reasons.push("MACD bullish crossover - reversal signal (+15)"); }
