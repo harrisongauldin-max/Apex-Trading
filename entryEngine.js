@@ -29,6 +29,7 @@ const MACD_BEARISH_CALL_VETO = true; // D2: true => re-key carve-out off DAILY R
 //    Put : STRICTER (fights bull regime) — gap-down-holding + deeper VWAP break + stronger breadth drop.
 //    Neither awards points; score still clears its floor downstream.
 const CARVE_BREADTH_MOM_MIN = 5;      // call: breadthMom >= +5
+const CARVE_CALL_VWAP_MAX    = 0.01;  // call: price within +1% above VWAP — early reclaim, not extended (6/26 rising-tape carve)
 const CARVE_PUT_BREADTH_MOM  = -10;   // put : breadthMom <= -10 (stricter than call's mirror -5)
 const CARVE_PUT_VWAP_BREAK   = 0.005; // put : price <= vwap*(1-0.005), a real break not a touch
 const CARVE_MIN_SESSION_MIN  = 30;    // both: VWAP unreliable before 30 session-minutes
@@ -316,9 +317,14 @@ function evaluateEntry(candidate, rulebook, state, context = {}) {
       const _breadthMom   = context.breadthMom ?? 0;
       const _sessionMin   = (context.etHour && context.etHour >= 9.5) ? (context.etHour - 9.5) * 60 : 0;
       const _vwapReliable = _sessionMin >= CARVE_MIN_SESSION_MIN;
-      // Call stand-down: confirmed rebound — gap-up holding above VWAP + breadth rising.
+      // Call stand-down: RISING-TAPE rebound (6/26 reframe — not gap-based). Price reclaimed VWAP
+      // and is still EARLY (within CARVE_CALL_VWAP_MAX of it, not extended), breadth rising, bull-curl
+      // confirming. Catches "SPY/QQQ is rising, call opportunity" that D2 vetoes for stale MACD.
+      // Deliberately within-1%-of-VWAP so it fires on early reclaims, not stretched gaps the fade gate owns.
+      const _aboveVwapEarly = _gapVwapRatio >= 1 && _gapVwapRatio <= (1 + CARVE_CALL_VWAP_MAX);
       const _callCarveReversal = optionType === "call" && candidate.isIndex === true
-        && _gapState === "gap-up-holding" && _breadthMom >= CARVE_BREADTH_MOM_MIN && _vwapReliable;
+        && _aboveVwapEarly && _breadthMom >= CARVE_BREADTH_MOM_MIN
+        && _curl === "bull_curl" && _vwapReliable;
       // Put stand-down (STRICTER): confirmed breakdown — gap-down holding, REAL vwap break, breadth falling hard.
       const _putCarveBreakdown = optionType === "put" && candidate.isIndex === true
         && _gapState === "gap-down-holding" && _gapVwapRatio <= (1 - CARVE_PUT_VWAP_BREAK)
