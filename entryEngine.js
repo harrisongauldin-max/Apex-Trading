@@ -24,6 +24,14 @@ const SCORE_CAP      = 95;
 const MR_CALL_MIN_SCORE      = 70;  // bull-regime mean-reversion (dip-buy) calls clear this instead of the 75 generic call floor. Set to 75 to revert to carve-out-only.
 const CALL_MACD_CARVEOUT_RSI = 35;  // an index MR call with intraday RSI <= this is exempt from the bearish-MACD floor lift (bearish daily MACD IS the dip). Set to 0 to disable the carve-out.
 const MACD_BEARISH_CALL_VETO = true; // D2: true => re-key carve-out off DAILY RSI + require bull_curl, and HARD-VETO a bearish-MACD call that is not even daily-oversold (falling knife). false = prior 85-lift behavior.
+// ── #3 D2 CARVE-OUT (6/26, LIVE) — present-tense reversal exemptions. Mirrors constants.js.
+//    Call: stand D2 down on gap-up-holding + breadth rising (leans WITH bull regime).
+//    Put : STRICTER (fights bull regime) — gap-down-holding + deeper VWAP break + stronger breadth drop.
+//    Neither awards points; score still clears its floor downstream.
+const CARVE_BREADTH_MOM_MIN = 5;      // call: breadthMom >= +5
+const CARVE_PUT_BREADTH_MOM  = -10;   // put : breadthMom <= -10 (stricter than call's mirror -5)
+const CARVE_PUT_VWAP_BREAK   = 0.005; // put : price <= vwap*(1-0.005), a real break not a touch
+const CARVE_MIN_SESSION_MIN  = 30;    // both: VWAP unreliable before 30 session-minutes
 
 // ── INSTRUMENT CONSTRAINTS ───────────────────────────────────
 // APEX trades SPY and QQQ naked options only.
@@ -270,7 +278,7 @@ function evaluateEntry(candidate, rulebook, state, context = {}) {
   }
   minScore     = Math.max(0, minScore + rb.agentMinAdj);
   const _trBase = minScore;                 // V3.2 (6/19) floor-composition trace (additive, no behavior change)
-  let _trAfternoon = false, _trMacdLift = false, _trCarveOut = false;
+  let _trAfternoon = false, _trMacdLift = false, _trCarveOut = false, _trCarveKind = "oversold-dip";
 
   // Afternoon minimum [Regime A only]
   if (g.afternoonMinActive && isLateDay) {
@@ -302,6 +310,19 @@ function evaluateEntry(candidate, rulebook, state, context = {}) {
       // dip with unconfirmed curl gets the 85 floor, not a veto. Puts unchanged (still daily-keyed).
       const _curl        = signals.macdCurl || "none";
       const _oversoldNow = intradayRsi <= CALL_MACD_CARVEOUT_RSI;   // was dailyRsi — panel B re-key
+      // ── #3 carve-out: present-tense tape exemptions (LIVE). Read tape state passed from scanner.
+      const _gapState     = context.gapState   || "flat";
+      const _gapVwapRatio = context.gapVwapRatio ?? 1;
+      const _breadthMom   = context.breadthMom ?? 0;
+      const _sessionMin   = (context.etHour && context.etHour >= 9.5) ? (context.etHour - 9.5) * 60 : 0;
+      const _vwapReliable = _sessionMin >= CARVE_MIN_SESSION_MIN;
+      // Call stand-down: confirmed rebound — gap-up holding above VWAP + breadth rising.
+      const _callCarveReversal = optionType === "call" && candidate.isIndex === true
+        && _gapState === "gap-up-holding" && _breadthMom >= CARVE_BREADTH_MOM_MIN && _vwapReliable;
+      // Put stand-down (STRICTER): confirmed breakdown — gap-down holding, REAL vwap break, breadth falling hard.
+      const _putCarveBreakdown = optionType === "put" && candidate.isIndex === true
+        && _gapState === "gap-down-holding" && _gapVwapRatio <= (1 - CARVE_PUT_VWAP_BREAK)
+        && _breadthMom <= CARVE_PUT_BREADTH_MOM && _vwapReliable;
       const carvedOut    = optionType === "call"
         && candidate.isMeanReversion === true
         && candidate.isIndex === true
@@ -309,9 +330,15 @@ function evaluateEntry(candidate, rulebook, state, context = {}) {
         && _curl === "bull_curl";                 // confirmed bottoming dip — not a contradiction
       _trCarveOut = carvedOut;
       if (optionType === "put" && macdBullish && dailyRsi < 65) {
-        _trMacdLift = true; minScore = Math.max(minScore, 85);             // puts: unchanged
+        if (_putCarveBreakdown) {
+          _trCarveOut = true; _trCarveKind = "breakdown";   // #3: confirmed breakdown — let the put stand against the bull-regime penalty
+        } else {
+          _trMacdLift = true; minScore = Math.max(minScore, 85);             // puts: unchanged
+        }
       } else if (optionType === "call" && macdBearish && !carvedOut) {
-        if (_oversoldNow) {
+        if (_callCarveReversal) {
+          _trCarveOut = true; _trCarveKind = "reversal";   // #3: confirmed rebound — stand D2 down (no veto, no 85 lift); score still clears floor
+        } else if (_oversoldNow) {
           _trMacdLift = true; minScore = Math.max(minScore, 85);           // intraday-oversold, curl unconfirmed → high floor, not veto
         } else {
           return { pass: false, reason: `MACD bearish on long call & intraday RSI ${intradayRsi.toFixed(0)} not oversold (D2 falling-knife veto)` };
@@ -351,6 +378,7 @@ function evaluateEntry(candidate, rulebook, state, context = {}) {
     isMR: candidate.isMeanReversion === true,
     isIndex: candidate.isIndex === true,
     carveOut: _trCarveOut,
+    carveKind: _trCarveOut ? _trCarveKind : null,
     intradayRsi,
     experiment: _expApplied,
     expSide: _expSide,
