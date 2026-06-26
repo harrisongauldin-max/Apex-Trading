@@ -83,7 +83,7 @@ const {
   INDIVIDUAL_STOCKS_ENABLED, INDIVIDUAL_STOCK_WATCHLIST, MONTHLY_BUDGET, MACRO_REVERSAL_PCT,
   TARGET_DELTA_MIN, TARGET_DELTA_MAX,
   ALPACA_KEY, ALPACA_SECRET, ALPACA_DATA, ALPACA_OPT_SNAP, ALPACA_OPTIONS,
-  MAX_GAP_PCT, MIN_STOCK_PRICE, GMAIL_USER, RESEND_API_KEY, VIX_PAUSE, VIX_REDUCE25, VIX_REDUCE50,
+  MAX_GAP_PCT, GAP_MIN_PCT, MIN_STOCK_PRICE, GMAIL_USER, RESEND_API_KEY, VIX_PAUSE, VIX_REDUCE25, VIX_REDUCE50,
   VIX_CREDIT_PRIMARY, VIX_CALLS_BLOCKED,
   VIX_HIGH_CALL_SCORE, VIX_HIGH_CALL_RSI,
   MR_LABEL_DECOUPLED = false,   // V3.2 (6/19) MR-label decoupling: default OFF; set true in constants.js to enable
@@ -1338,11 +1338,38 @@ async function runScan() {
     const signals = await getDynamicSignals(stock.ticker, bars, intradayBars, stock._realIV || null);
 
     const vwap = signals.intradayVWAP > 0 ? signals.intradayVWAP : calcVWAP(bars.slice(-5));
+    let _carveGapState = "flat";   // #3: present-tense gap state, set by classifier below if vwap valid
+    let _carveVwapRatio = 1;       // #3: price/vwap, <1 below >1 above
     if (vwap > 0) {
       const vwapBias = price < vwap ? "below_vwap" : "above_vwap";
       const vwapPct  = ((price - vwap) / vwap * 100).toFixed(1);
       if (Math.abs(price - vwap) / vwap > 0.005) {
         logEvent("scan", `[VWAP] ${stock.ticker} $${price.toFixed(2)} vs VWAP $${vwap.toFixed(2)} (${vwapPct}%) - ${vwapBias}`);
+      }
+      // [GAP] classifier (6/26, LOGGED-ONLY — no scoring effect). gapPct off today's regular
+      // open vs prior regular close; gapState combines gapType with the live VWAP relationship.
+      // Faded = gapped one way but price now on the other side of VWAP (the trap to watch).
+      if (Array.isArray(bars) && bars.length >= 2) {
+        const _gapOpen  = bars[bars.length - 1].o;
+        const _gapPrevC = bars[bars.length - 2].c;
+        if (_gapOpen > 0 && _gapPrevC > 0) {
+          const _gapPct  = (_gapOpen - _gapPrevC) / _gapPrevC;
+          const _gapType = _gapPct >=  GAP_MIN_PCT ? "up"
+                         : _gapPct <= -GAP_MIN_PCT ? "down" : "flat";
+          const _aboveVwap = price >= vwap;
+          let _gapState = "flat";
+          if (_gapType === "up")   _gapState = _aboveVwap ? "gap-up-holding"   : "gap-up-faded";
+          if (_gapType === "down") _gapState = _aboveVwap ? "gap-down-reclaimed" : "gap-down-holding";
+          // #3 carve-out inputs: capture present-tense tape state; assigned onto liveStock below
+          // (liveStock is constructed later in this loop, ~1462, so stash in loop-scoped vars now).
+          _carveGapState = _gapState;
+          _carveVwapRatio = vwap > 0 ? price / vwap : 1;   // <1 below, >1 above
+          logEvent("scan",
+            `[GAP] ${stock.ticker} gapPct ${(_gapPct*100).toFixed(2)}% (${_gapType}) | ` +
+            `open ${_gapOpen.toFixed(2)} prevC ${_gapPrevC.toFixed(2)} | px ${price.toFixed(2)} ` +
+            `${_aboveVwap ? "≥" : "<"} vwap ${vwap.toFixed(2)} → ${_gapState}`
+          );
+        }
       }
       const _sessionMinutes = etHourNow >= 9.5 ? (etHourNow - 9.5) * 60 : 0;
       const _vwapReliable = _sessionMinutes >= 30;
@@ -1442,6 +1469,8 @@ async function runScan() {
       dailyRsi:      (signals && signals.dailyRsi != null) ? parseFloat(signals.dailyRsi) : parseFloat(signals?.rsi || 50),
       macd:          signals.macd,
       macdCurl:      signals.macdCurl || "none",   // V3.2 (6/19) histogram bull/bear-curl → scoreIndexSetup
+      _gapState:     _carveGapState,                // #3 carve-out: present-tense gap/VWAP state
+      _gapVwapRatio: _carveVwapRatio,               // #3 carve-out: price/vwap ratio
       macdHist:      typeof signals.macdHist === 'number' ? signals.macdHist : null,
       momentum:      signals.momentum,
       ivr:           signals.ivr,
@@ -2227,6 +2256,7 @@ async function runScan() {
       rb, state,
       { etHour: etHourNow, isLateDay, isLastHour, volDecline: _volDeclineExec,
         signals: { rsi: stock.rsi, dailyRsi: stock.dailyRsi || 50, macd: stock.macd || "neutral", macdCurl: stock.macdCurl || "none" },  // FIX (6/23, scope-corrected): plumb intraday rsi from the scored candidate. `stock` here is liveStock (see scored.push ~2093), and liveStock.rsi IS the intraday RSI. The prior version referenced `signals`, which lives in the SCORING loop (closes ~2104), not this execution loop — so it threw "signals is not defined" and crashed every scan at the evaluateEntry call.
+        gapState: stock._gapState || "flat", gapVwapRatio: stock._gapVwapRatio ?? 1, breadthMom: state._breadthMomentum ?? 0,  // #3 D2 carve-out inputs (present-tense tape)
         recentSameDir: recentSameDirMins, existingProfitPct, existingCreditProfitPct,
         drawdownMinScore: ddProtocol.minScore || MIN_SCORE, drawdownLevel: ddProtocol.level || "normal",
         agentSignal: (state._agentMacro || {}).signal || "neutral",
