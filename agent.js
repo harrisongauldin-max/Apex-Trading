@@ -5,6 +5,7 @@ const fetch = require('node-fetch');
 const { ANTHROPIC_API_KEY, ANTHROPIC_MODEL, PDT_RULE_ACTIVE, PDT_LIMIT,
         MS_PER_DAY, OVERNIGHT_INTERVAL, SAME_DAY_INTERVAL, TRIGGER_COOLDOWN_MS,
   AGENT_MACRO_CACHE_MS,
+  BEAR_DD_PCT, BEAR_DD_LOOKBACK, BEAR_VIX_SUSTAINED, BEAR_EXIT_DD_PCT, BEAR_EXIT_VIX, BEAR_EXIT_SESSIONS,
 } = require('./constants');
 const { state } = require('./state');
 const { alpacaGet, getStockQuote, getStockBars, getIntradayBars } = require('./broker');
@@ -285,7 +286,10 @@ function _shouldRunMacroAgent(headlines) {
   if (!lastSignal) return { shouldRun: true, reason: 'no_prior_signal', isEmergency: false };
 
   // Always run if signal is stale beyond 90 minutes
-  if (signalAgeMs > MAX_STALE_MS) return { shouldRun: true, reason: `stale_${signalAgeMins.toFixed(0)}min`, isEmergency: false };
+  if (signalAgeMs > MAX_STALE_MS) {
+    const _ageLabel = isFinite(signalAgeMs) ? `${signalAgeMins.toFixed(0)}min` : 'no_ts';   // #5 fix: a cached signal missing its timestamp made signalAgeMs=Infinity → "stale_Infinitymin". Still force a re-run, but label it legibly.
+    return { shouldRun: true, reason: `stale_${_ageLabel}`, isEmergency: false };
+  }
 
   // Compute headline delta
   const delta = _computeHeadlineDelta(headlines);
@@ -535,6 +539,43 @@ SCORING CONTEXT:
   } else if (!spyBelowNow) {
     state._regimeDuration = 0; // reset when SPY recovers above 200MA
     state._regimeDurationDate = "";
+  }
+
+  // ── #2 DRAWDOWN BEAR TRIGGER — SHADOW-LOG ONLY (6/26). Computes whether a drawdown-based
+  //    regime-B would fire, with hysteresis, and logs it. Does NOT write state._regimeClass —
+  //    the live regime stays on the 200MA gate above. This generates calibration data so the
+  //    threshold can be proven before it ever controls the book. (panel: Data's shadow-first vote)
+  {
+    const _swHigh = spyBarsForAgent.length >= BEAR_DD_LOOKBACK
+      ? Math.max(...spyBarsForAgent.slice(-BEAR_DD_LOOKBACK).map(b => b.h))
+      : (spyBarsForAgent.length ? Math.max(...spyBarsForAgent.map(b => b.h)) : spyPrice);
+    const _ddFromSwing = _swHigh > 0 ? (spyPrice - _swHigh) / _swHigh : 0;
+    const _vixSust     = state._vixSustained || state.vix || 20;
+    const _prevLatched = !!state._bearShadowLatched;
+    // Entry: deep enough drawdown off the recent swing high AND sustained fear.
+    const _wouldEnter = _ddFromSwing <= BEAR_DD_PCT && _vixSust >= BEAR_VIX_SUSTAINED;
+    // Exit/hysteresis: reclaim to within BEAR_EXIT_DD_PCT of swing high, OR N sessions of calm VIX.
+    if (_prevLatched && _vixSust < BEAR_EXIT_VIX) {
+      state._bearShadowCalmSessions = (state._bearShadowCalmSessions || 0) + (state._bearShadowCalmDate !== todayDateStr ? 1 : 0);
+      state._bearShadowCalmDate = todayDateStr;
+    } else if (_vixSust >= BEAR_EXIT_VIX) {
+      state._bearShadowCalmSessions = 0;
+    }
+    const _wouldExit = _prevLatched && (
+      _ddFromSwing >= BEAR_EXIT_DD_PCT ||
+      (state._bearShadowCalmSessions || 0) >= BEAR_EXIT_SESSIONS
+    );
+    let _latched = _prevLatched;
+    if (!_prevLatched && _wouldEnter) { _latched = true;  state._bearShadowCalmSessions = 0; }
+    else if (_prevLatched && _wouldExit) { _latched = false; }
+    state._bearShadowLatched = _latched;
+    const _shadowClass = _latched ? "B(shadow)" : "A";
+    const _agree = (_latched ? (state._regimeClass !== "A") : (state._regimeClass === "A")) ? "agree" : "DIVERGE";
+    _log("scan",
+      `[REGIME-SHADOW] would:${_shadowClass} | ddFromSwing ${(_ddFromSwing*100).toFixed(1)}% (sw${BEAR_DD_LOOKBACK}d ${_swHigh.toFixed(2)}) | ` +
+      `VIX5d ${_vixSust} | latched:${_latched ? "Y" : "N"} calmSess:${state._bearShadowCalmSessions || 0} | ` +
+      `live:${state._regimeClass} → ${_agree}`
+    );
   }
 
   _log("scan", `[REGIME] Class:${state._regimeClass} | Below200MA:${state._regimeDuration}d | VIX5d:${state._vixSustained} | SPYdd:${state._spyDrawdown}%`);
@@ -903,7 +944,7 @@ async function agentTool_getMarketStatus() {
       spy: { price: spyQuote, dayChangePct: dayChg },
       vix: state.vix,
       breadth: state._breadth || null,
-      fearGreed: marketContext.fearGreed?.score || null,
+      fearGreed: state._fearGreed?.score ?? null,
       pdtRemaining: Math.max(0, PDT_LIMIT - _countDT()),
       cash: parseFloat((state.cash||0).toFixed(2)),
       openPositions: (state.positions||[]).length,
