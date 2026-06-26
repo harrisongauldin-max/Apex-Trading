@@ -121,6 +121,7 @@ const GAP_MIN_PCT         = 0.004;   // 0.4% — starting boundary, tune per tic
 //    Put side: STRICTER (fights bull regime) — needs deeper VWAP break + stronger breadth drop.
 //    Neither hands out points; score must still clear its floor.
 const CARVEOUT_BREADTH_MOM_MIN   = 5;      // call side: _breadthMomentum >= +5 (the "rising" bar)
+const CARVEOUT_CALL_VWAP_MAX     = 0.01;   // call side: price within +1% above VWAP — early reclaim, not extended (6/26 rising-tape)
 const CARVEOUT_PUT_BREADTH_MOM   = -10;    // put side STRICTER: _breadthMomentum <= -10 (vs -5)
 const CARVEOUT_PUT_VWAP_BREAK    = 0.005;  // put side STRICTER: price <= vwap*(1-0.005), real break not a touch
 const CARVEOUT_MIN_SESSION_MIN   = 30;     // both sides: VWAP unreliable before 30 session-min
@@ -399,7 +400,7 @@ module.exports = {
   MR_SESSLOW_RECENCY_MIN,
   EARNINGS_SKIP_DAYS, MIN_OPEN_INTEREST, MIN_STOCK_PRICE, MIN_OPTION_PREMIUM,
   MIN_OI, MAX_SPREAD_PCT, EARLY_SPREAD_PCT, MAX_GAP_PCT, GAP_MIN_PCT,
-  CARVEOUT_BREADTH_MOM_MIN, CARVEOUT_PUT_BREADTH_MOM, CARVEOUT_PUT_VWAP_BREAK, CARVEOUT_MIN_SESSION_MIN,
+  CARVEOUT_BREADTH_MOM_MIN, CARVEOUT_CALL_VWAP_MAX, CARVEOUT_PUT_BREADTH_MOM, CARVEOUT_PUT_VWAP_BREAK, CARVEOUT_MIN_SESSION_MIN,
   BEAR_DD_PCT, BEAR_DD_LOOKBACK, BEAR_VIX_SUSTAINED, BEAR_EXIT_DD_PCT, BEAR_EXIT_VIX, BEAR_EXIT_SESSIONS,
   TARGET_DELTA_MIN,
   VIX_CREDIT_PRIMARY, VIX_CALLS_BLOCKED,
