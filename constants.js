@@ -113,6 +113,24 @@ const VIX_HIGH_CALL_RSI   = 38;    // RSI must be < 38 when VIX >= 25
 // ── END VIX CALL QUALITY GATE ────────────────────────────────────────────
 const EARLY_SPREAD_PCT    = 0.10;
 const MAX_GAP_PCT         = 0.03;
+// Gap classifier (6/26, logged-only). gapType boundary: |gapPct| >= this → up/down, else flat.
+// Distinct from MAX_GAP_PCT (a 3% extreme-gap SAFETY cutoff). This is a label threshold only.
+const GAP_MIN_PCT         = 0.004;   // 0.4% — starting boundary, tune per ticker overnight behavior
+// ── #3 D2 carve-out (6/26, LIVE). Lets a confirmed present-tense reversal past the regime veto.
+//    Call side: stand D2 down on gap-up-holding + breadth expanding (leans WITH bull regime).
+//    Put side: STRICTER (fights bull regime) — needs deeper VWAP break + stronger breadth drop.
+//    Neither hands out points; score must still clear its floor.
+const CARVEOUT_BREADTH_MOM_MIN   = 5;      // call side: _breadthMomentum >= +5 (the "rising" bar)
+const CARVEOUT_PUT_BREADTH_MOM   = -10;    // put side STRICTER: _breadthMomentum <= -10 (vs -5)
+const CARVEOUT_PUT_VWAP_BREAK    = 0.005;  // put side STRICTER: price <= vwap*(1-0.005), real break not a touch
+const CARVEOUT_MIN_SESSION_MIN   = 30;     // both sides: VWAP unreliable before 30 session-min
+// ── #2 drawdown bear trigger (6/26, SHADOW-LOG ONLY — does NOT write _regimeClass).
+const BEAR_DD_PCT          = -0.04;  // SPY <= -4% off recent swing high
+const BEAR_DD_LOOKBACK     = 5;      // ...measured over a 5-day swing high
+const BEAR_VIX_SUSTAINED   = 24;     // ...AND VIX 5d-sustained >= 24
+const BEAR_EXIT_DD_PCT     = -0.015; // hysteresis: un-latch when back within -1.5% of swing high
+const BEAR_EXIT_VIX        = 22;     // ...OR after BEAR_EXIT_SESSIONS with VIX sustained < 22
+const BEAR_EXIT_SESSIONS   = 3;
 const TARGET_DELTA_MIN    = 0.22; // Lowered from 0.28 — expanded DTE window finds 48d contracts at delta 0.23-0.26
 const TARGET_DELTA_MAX    = 0.42;
 const MAX_BETA_POSITIONS  = 2;
@@ -380,7 +398,10 @@ module.exports = {
   MR_FLUSH_DD1, MR_FLUSH_DD2, MR_FLUSH_DD3,
   MR_SESSLOW_RECENCY_MIN,
   EARNINGS_SKIP_DAYS, MIN_OPEN_INTEREST, MIN_STOCK_PRICE, MIN_OPTION_PREMIUM,
-  MIN_OI, MAX_SPREAD_PCT, EARLY_SPREAD_PCT, MAX_GAP_PCT, TARGET_DELTA_MIN,
+  MIN_OI, MAX_SPREAD_PCT, EARLY_SPREAD_PCT, MAX_GAP_PCT, GAP_MIN_PCT,
+  CARVEOUT_BREADTH_MOM_MIN, CARVEOUT_PUT_BREADTH_MOM, CARVEOUT_PUT_VWAP_BREAK, CARVEOUT_MIN_SESSION_MIN,
+  BEAR_DD_PCT, BEAR_DD_LOOKBACK, BEAR_VIX_SUSTAINED, BEAR_EXIT_DD_PCT, BEAR_EXIT_VIX, BEAR_EXIT_SESSIONS,
+  TARGET_DELTA_MIN,
   VIX_CREDIT_PRIMARY, VIX_CALLS_BLOCKED,
   VIX_HIGH_CALL_SCORE, VIX_HIGH_CALL_RSI,
   TARGET_DELTA_MAX, MAX_BETA_POSITIONS, MAX_HIGH_BETA, PDT_RULE_ACTIVE, PDT_LIMIT,
