@@ -303,6 +303,21 @@ function getETDateStr() {
   return `${y}-${m.padStart(2,'0')}-${d.padStart(2,'0')}`;
 }
 
+// Tolerant parse for day-log / telemetry / analytics blobs stored in Redis.
+// Correct format stores the payload object's JSON directly. A prior bug wrote the
+// /set body as {"value":"<json>","ex":N}, which Upstash stored literally — so reads
+// found no .entries/.rows. Detect that exact wrapper shape and unwrap the real payload
+// so keys written during the buggy window remain readable.
+function parseRedisBlob(rawResult) {
+  if (!rawResult) return null;
+  let p;
+  try { p = JSON.parse(rawResult); } catch (_) { return null; }
+  if (p && typeof p.value === 'string' && p.ex !== undefined && Object.keys(p).length <= 2) {
+    try { const inner = JSON.parse(p.value); if (inner && typeof inner === 'object') return inner; } catch (_) {}
+  }
+  return p;
+}
+
 async function saveDailyLogToRedis(isEOD = false) {
   if (!REDIS_URL || !REDIS_TOKEN) return;
   try {
@@ -318,7 +333,7 @@ async function saveDailyLogToRedis(isEOD = false) {
     try {
       const gr = await fetch(`${REDIS_URL}/get/${logKey}`, { headers: { Authorization: `Bearer ${REDIS_TOKEN}` } });
       const gd = await gr.json();
-      if (gd && gd.result) { const p = JSON.parse(gd.result); if (Array.isArray(p.entries)) existing = p.entries; }
+      if (gd && gd.result) { const p = parseRedisBlob(gd.result); if (p && Array.isArray(p.entries)) existing = p.entries; }
     } catch(_) { /* if the read fails, fall through and write the buffer rather than lose this save */ }
 
     const seen = new Set();
@@ -344,10 +359,10 @@ async function saveDailyLogToRedis(isEOD = false) {
         positionsEOD: state.positions.length,
       }
     });
-    const res = await fetch(`${REDIS_URL}/set/${logKey}`, {
+    const res = await fetch(`${REDIS_URL}/pipeline`, {
       method:  "POST",
       headers: { Authorization: `Bearer ${REDIS_TOKEN}`, "Content-Type": "application/json" },
-      body:    JSON.stringify({ value: logData, ex: 7776000 }),
+      body:    JSON.stringify([["set", logKey, logData, "EX", 7776000]]),
     });
     if (res.ok) {
       logEvent("scan", `[EOD LOG] Daily log saved to Redis: ${logKey} | ${merged.length} entries (buffer ${buffer.length} + existing ${existing.length})`);
@@ -446,10 +461,10 @@ async function saveDailyLogToRedis(isEOD = false) {
       })),
     });
 
-    const aRes = await fetch(`${REDIS_URL}/set/${analyticsKey}`, {
+    const aRes = await fetch(`${REDIS_URL}/pipeline`, {
       method:  "POST",
       headers: { Authorization: `Bearer ${REDIS_TOKEN}`, "Content-Type": "application/json" },
-      body:    JSON.stringify({ value: analyticsData, ex: 15552000 }),
+      body:    JSON.stringify([["set", analyticsKey, analyticsData, "EX", 15552000]]),
     });
     if (aRes.ok) {
       const _logPnL = state._alpacaTruth ? state._alpacaTruth.totalPnL : (grossW - grossL);
@@ -481,17 +496,17 @@ async function saveTelemetryToRedis(isEOD = false) {
     try {
       const gr = await fetch(`${REDIS_URL}/get/${key}`, { headers: { Authorization: `Bearer ${REDIS_TOKEN}` } });
       const gd = await gr.json();
-      if (gd && gd.result) { const p = JSON.parse(gd.result); if (Array.isArray(p.rows)) existing = p.rows; }
+      if (gd && gd.result) { const p = parseRedisBlob(gd.result); if (p && Array.isArray(p.rows)) existing = p.rows; }
     } catch(_) { /* read failure: fall through and write the buffer rather than lose this save */ }
     const seen = new Set();
     let merged = [];
     for (const r of existing.concat(rows)) { if (seen.has(r)) continue; seen.add(r); merged.push(r); }
     if (merged.length > 6000) merged = merged.slice(-6000);
     const payload = JSON.stringify({ date: dateStr, header: TELEMETRY_HEADER, rows: merged });
-    const res = await fetch(`${REDIS_URL}/set/${key}`, {
+    const res = await fetch(`${REDIS_URL}/pipeline`, {
       method:  "POST",
       headers: { Authorization: `Bearer ${REDIS_TOKEN}`, "Content-Type": "application/json" },
-      body:    JSON.stringify({ value: payload, ex: 7776000 }),
+      body:    JSON.stringify([["set", key, payload, "EX", 7776000]]),
     });
     if (res.ok) {
       logEvent("scan", `[TELEMETRY] Saved ${merged.length} rows → ${key} (buffer ${rows.length} + existing ${existing.length})`);
@@ -646,8 +661,8 @@ async function restoreBuffersFromRedis() {
       const gr = await fetch(`${REDIS_URL}/get/argo:logs:${dateStr}`, { headers: { Authorization: `Bearer ${REDIS_TOKEN}` } });
       const gd = await gr.json();
       if (gd && gd.result) {
-        const p = JSON.parse(gd.result);
-        if (Array.isArray(p.entries) && p.entries.length) {
+        const p = parseRedisBlob(gd.result);
+        if (p && Array.isArray(p.entries) && p.entries.length) {
           state._dailyLogBuffer = p.entries.slice(-30000);
           console.log(`[BOOT] Restored ${state._dailyLogBuffer.length} daily-log entries from Redis (${dateStr})`);
         }
@@ -659,8 +674,8 @@ async function restoreBuffersFromRedis() {
       const gr = await fetch(`${REDIS_URL}/get/argo:telemetry:${dateStr}`, { headers: { Authorization: `Bearer ${REDIS_TOKEN}` } });
       const gd = await gr.json();
       if (gd && gd.result) {
-        const p = JSON.parse(gd.result);
-        if (Array.isArray(p.rows) && p.rows.length) {
+        const p = parseRedisBlob(gd.result);
+        if (p && Array.isArray(p.rows) && p.rows.length) {
           state._telemetryBuffer = p.rows.slice(-6000);
           console.log(`[BOOT] Restored ${state._telemetryBuffer.length} telemetry rows from Redis (${dateStr})`);
         }
@@ -671,6 +686,6 @@ async function restoreBuffersFromRedis() {
 
 module.exports = { state, markDirty, saveStateNow, flushStateIfDirty, logEvent,
                    redisSave, redisLoad, defaultState, saveDailyLogToRedis, saveTelemetryToRedis, getETDateStr,
-                   restoreBuffersFromRedis,
+                   restoreBuffersFromRedis, parseRedisBlob,
                    writeJournalEntry, updateJournalExit, loadJournalDay, saveJournalDay, getJournalRange,
                    closeOrphanJournalOpens, paperDataActive };
