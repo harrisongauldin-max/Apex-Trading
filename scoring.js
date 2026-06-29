@@ -17,7 +17,7 @@ const { MIN_SCORE, MIN_SCORE_CREDIT ,
 ,
   MR_BOUNCE_RSI_OFFLOW = 6, MR_BOUNCE_VWAP_TOL = 0.004,
   MR_INTRA_LIFTOFF_PTS = 4, MR_INTRA_SESSLOW_MAX = 35,
-  MR_FLUSH_DD1 = 0.005, MR_FLUSH_DD2 = 0.009, MR_FLUSH_DD3 = 0.015,
+  MR_FLUSH_DD1 = 0.004, MR_FLUSH_DD2 = 0.007, MR_FLUSH_DD3 = 0.010,
   MR_SESSLOW_RECENCY_MIN = 60,
   IVP_CALL_PENALTY_STEEP = false, DIP_REQUIRES_MULTIDAY_ANCHOR = false, DIP_MAX_DAYCHANGE = 0.003,
   MR_INTRADAY_OVERSOLD = false,
@@ -448,17 +448,21 @@ function scoreMeanReversionCall(stock, relStrength, adx, bars, vix, intradayBars
     score += _dailyDiscount;
   }
 
-  // ── Intraday flush discount (6/25) — LIVE (paper). Scores off the newly-bridged
+  // ── Intraday flush discount (6/25, re-tiered 6/29) — LIVE (paper). Scores off the
   // intraday series. The daily tier above is blind to intraday flushes (a ~1% session
-  // drop never clears its 7% floor → +0 on the deep intraday dips this strategy targets,
-  // e.g. the RSI-19.9 SPY setup that died at 48<50 on 6/25). Credit scales with intraday
-  // drawdown off the SESSION HIGH; gated on _mrEarlyTurn so a knife still making new lows
-  // earns nothing — the RSI gate confirms the session got oversold AND has lifted off
-  // (quality), the price drawdown supplies magnitude. Taken as MAX vs the daily discount
-  // (same concept, two timeframes, never summed). The D2 falling-knife veto downstream is
-  // UNCHANGED and remains the final gate. Thresholds are starting values; tune from the
-  // logged [MR-FLUSH] data.
-  if (Array.isArray(intradayBars) && intradayBars.length >= 2 && _mrEarlyTurn) {
+  // drop never clears its 7% floor → +0 on the deep intraday dips this strategy targets).
+  // Credit scales with intraday drawdown off the SESSION HIGH. Taken as MAX vs the daily
+  // discount (same concept, two timeframes, never summed). D2 falling-knife veto downstream
+  // is UNCHANGED and remains the final gate.
+  // 6/29 re-tier: gate on session having REACHED oversold (sessLowRSI<=35), NOT on earlyTurn
+  // liftoff. The old _mrEarlyTurn gate meant a continuous flush making new lows never ran this
+  // block at all, so the deepest oversold rows got zero flush credit (confirmed in 6/29
+  // telemetry: 0 flush fires on the RSI-14 QQQ cluster). Now the credit applies DURING the
+  // flush; the price-drawdown tiers off session high supply the quality filter instead of
+  // liftoff. KNOWN RISK: this also pays credit into a knife still making new lows on a
+  // down-tape day — intentional, to gather grind-day fill data. Tiers: DD1 0.4%/+8,
+  // DD2 0.7%/+12, DD3 1.0%/+16.
+  if (Array.isArray(intradayBars) && intradayBars.length >= 2 && _mrSessLowRSI <= MR_INTRA_SESSLOW_MAX) {
     const _ibHigh = Math.max(...intradayBars.map(b => b.h));
     const _ibLow  = Math.min(...intradayBars.map(b => b.l));
     const _ibCur  = intradayBars[intradayBars.length - 1].c;
@@ -467,9 +471,9 @@ function scoreMeanReversionCall(stock, relStrength, adx, bars, vix, intradayBars
     const _sessRng = _ibHigh > 0 ? (_ibHigh - _ibLow) / _ibHigh : 0;
     const _ddPrev  = _prevClose > 0 ? (_prevClose - _ibCur) / _prevClose : 0;
     let _flush = 0;
-    if      (_intraDD >= MR_FLUSH_DD3) _flush = 15;
-    else if (_intraDD >= MR_FLUSH_DD2) _flush = 10;
-    else if (_intraDD >= MR_FLUSH_DD1) _flush = 6;
+    if      (_intraDD >= MR_FLUSH_DD3) _flush = 16;
+    else if (_intraDD >= MR_FLUSH_DD2) _flush = 12;
+    else if (_intraDD >= MR_FLUSH_DD1) _flush = 8;
     const _applied = Math.max(0, _flush - _dailyDiscount);   // max vs daily, no double-count
     if (_applied > 0) score += _applied;
     reasons.push(
