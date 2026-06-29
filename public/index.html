@@ -4199,6 +4199,65 @@ async function saveLogToRedis() {
   setTimeout(() => { btn.textContent = '💾 Save Now'; btn.disabled = false; }, 3000);
 }
 
+// iOS-hardened copy. On iOS Safari, navigator.clipboard.writeText() called AFTER an
+// await (e.g. fetch) loses transient activation and rejects; execCommand on a hidden
+// textarea is also unreliable. Returns 'clipboard' | 'execCommand' | 'manual'. On
+// 'manual' a visible, pre-selected overlay is shown so the data is ALWAYS retrievable.
+async function apexRobustCopy(text) {
+  // 1) Modern async clipboard — works on desktop/Android; usually blocked on iOS post-await.
+  try {
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      await navigator.clipboard.writeText(text);
+      return 'clipboard';
+    }
+  } catch (e) { /* fall through */ }
+
+  // 2) execCommand on an iOS-selectable textarea (range + setSelectionRange, not bare .select()).
+  try {
+    var ta = document.createElement('textarea');
+    ta.value = text;
+    ta.readOnly = false;
+    ta.contentEditable = 'true';
+    ta.style.cssText = 'position:fixed;left:0;top:0;width:1px;height:1px;opacity:0.01;';
+    document.body.appendChild(ta);
+    var range = document.createRange();
+    range.selectNodeContents(ta);
+    var sel = window.getSelection();
+    sel.removeAllRanges();
+    sel.addRange(range);
+    ta.setSelectionRange(0, text.length);
+    var ok = document.execCommand('copy');
+    document.body.removeChild(ta);
+    if (ok) return 'execCommand';
+  } catch (e) { /* fall through */ }
+
+  // 3) Guaranteed manual fallback — visible overlay with text pre-selected for long-press → Copy.
+  apexShowCopyOverlay(text);
+  return 'manual';
+}
+
+function apexShowCopyOverlay(text) {
+  var prev = document.getElementById('apex-copy-overlay');
+  if (prev) prev.remove();
+  var ov = document.createElement('div');
+  ov.id = 'apex-copy-overlay';
+  ov.style.cssText = 'position:fixed;inset:0;z-index:99999;background:rgba(2,8,16,.93);display:flex;flex-direction:column;padding:14px;gap:10px';
+  var hint = document.createElement('div');
+  hint.style.cssText = 'color:#8fc7ff;font-size:13px;line-height:1.5';
+  hint.textContent = 'Auto-copy is blocked on this device. Tap inside the box, Select All, then Copy:';
+  var ta = document.createElement('textarea');
+  ta.value = text;
+  ta.readOnly = true;
+  ta.style.cssText = 'flex:1;width:100%;background:#04101e;color:#cfe6ff;border:1px solid #28527a;border-radius:8px;font:12px/1.4 monospace;padding:10px;-webkit-user-select:text;user-select:text';
+  var close = document.createElement('button');
+  close.textContent = 'Close';
+  close.style.cssText = 'align-self:flex-end;background:#0a2236;border:1px solid #2a6fae;color:#7fc0ff;border-radius:6px;padding:9px 20px;font-size:13px;cursor:pointer';
+  close.onclick = function(){ ov.remove(); };
+  ov.appendChild(hint); ov.appendChild(ta); ov.appendChild(close);
+  document.body.appendChild(ov);
+  setTimeout(function(){ try { ta.focus(); ta.setSelectionRange(0, text.length); } catch(e){} }, 60);
+}
+
 async function copyFullDayFromRedis() {
   var btn = document.getElementById('copy-redis-btn');
   var dateEl = document.getElementById('redis-log-date');
@@ -4248,22 +4307,12 @@ async function copyFullDayFromRedis() {
 
     var text = lines.join(NL);
 
-    // Copy with fallback
-    var copied = false;
-    try {
-      await navigator.clipboard.writeText(text);
-      copied = true;
-    } catch(e) {
-      var ta = document.createElement('textarea');
-      ta.value = text;
-      ta.style.cssText = 'position:fixed;top:0;left:0;opacity:0;pointer-events:none';
-      document.body.appendChild(ta);
-      ta.focus(); ta.select();
-      copied = document.execCommand('copy');
-      document.body.removeChild(ta);
-    }
-
-    btn.textContent = copied ? '✅ Copied ' + entries.length + ' entries' : '❌ Copy failed — select manually';
+    // Copy with iOS-hardened fallback (apexRobustCopy guarantees a manual path).
+    var how = await apexRobustCopy(text);
+    var copied = (how === 'clipboard' || how === 'execCommand');
+    btn.textContent = copied
+      ? ('✅ Copied ' + entries.length + ' entries')
+      : ('📋 ' + entries.length + ' entries — copy from box');
     setTimeout(() => { btn.textContent = '💾 Copy Day from Redis'; btn.disabled = false; }, 3000);
 
   } catch(err) {
