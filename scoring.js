@@ -292,26 +292,26 @@ function scorePutSetup(stock, relStrength, adx, volume, avgVolume, vix = 20) {
   let score = 0;
   const reasons = [];
 
-  if (stock.momentum === "recovering")       { score += 20; reasons.push("Weak momentum - bearish (+20)"); }
+  if (stock.momentum === "recovering")       { score += 21; reasons.push("Weak momentum - bearish (+21)"); }
   else if (stock.momentum === "steady")      { score += 0;  reasons.push("Momentum steady - neutral for put (+0)"); }
   else                                       { score += 0;  reasons.push("Strong momentum - bad for put (+0)"); }
 
-  if (stock.rsi >= 72)                       { score += 20; reasons.push(`RSI ${stock.rsi} - overbought (+20)`); }
-  else if (stock.rsi >= 65 && stock.rsi < 72){ score += 12; reasons.push(`RSI ${stock.rsi} - elevated (+12)`); }
+  if (stock.rsi >= 72)                       { score += 21; reasons.push(`RSI ${stock.rsi} - overbought (+21)`); }
+  else if (stock.rsi >= 65 && stock.rsi < 72){ score += 13; reasons.push(`RSI ${stock.rsi} - elevated (+13)`); }
   else if (stock.rsi <= 35)                  { score -= 30; reasons.push(`RSI ${stock.rsi} - stock already crashed, put thesis gone (-30)`); }
   else if (stock.rsi <= 45)                  { score -= 10; reasons.push(`RSI ${stock.rsi} - oversold, put thesis weak (-10)`); }
   else                                       { reasons.push(`RSI ${stock.rsi} neutral for put (+0)`); }
 
-  if (stock.macd.includes("bearish crossover")) { score += 10; reasons.push("MACD bearish crossover (+10)"); }
-  else if (stock.macd.includes("bearish"))      { score += 7;  reasons.push("MACD bearish (+7)"); }
-  else if (stock.macd.includes("neutral"))      { score += 3;  reasons.push("MACD neutral (+3)"); }
+  if (stock.macd.includes("bearish crossover")) { score += 11; reasons.push("MACD bearish crossover (+11)"); }
+  else if (stock.macd.includes("bearish"))      { score += 8;  reasons.push("MACD bearish (+8)"); }
+  else if (stock.macd.includes("neutral"))      { score += 4;  reasons.push("MACD neutral (+4)"); }
   else if (stock.macd.includes("bullish crossover")) { score -= 12; reasons.push("MACD bullish crossover - contradicts put (-12)"); }
   else                                          { score -= 8;  reasons.push("MACD bullish - contradicts put (-8)"); }
 
   const ivpP = stock.ivPercentile || 50;
   const highVIX = vix > 30;
-  if (ivpP < 30)       { score += 15; reasons.push(`IVP ${ivpP}% - cheap options (+15)`); }
-  else if (ivpP < 50)  { score += 10; reasons.push(`IVP ${ivpP}% - moderate (+10)`); }
+  if (ivpP < 30)       { score += 16; reasons.push(`IVP ${ivpP}% - cheap options (+16)`); }
+  else if (ivpP < 50)  { score += 11; reasons.push(`IVP ${ivpP}% - moderate (+11)`); }
   else if (ivpP < 70)  { score += highVIX ? 8 : 5; reasons.push(`IVP ${ivpP}% - elevated (${highVIX ? "+8 high VIX" : "+5"})`); }
   else                 { score += highVIX ? 5 : 0; reasons.push(`IVP ${ivpP}% - expensive (${highVIX ? "+5 high VIX justified" : "+0"})`); }
 
@@ -321,7 +321,7 @@ function scorePutSetup(stock, relStrength, adx, volume, avgVolume, vix = 20) {
                 : 0;
   if (newsMod > 0) reasons.push(`News ${stock.newsSentiment} (+${newsMod})`);
   else if (stock.momentum === "recovering" && stock.hasIntraday) {
-    score += 8; reasons.push("Intraday confirmed bearish move (+8)");
+    score += 9; reasons.push("Intraday confirmed bearish move (+9)");
   }
   score += newsMod;
 
@@ -330,7 +330,7 @@ function scorePutSetup(stock, relStrength, adx, volume, avgVolume, vix = 20) {
     const volPts = belowVWAP ? 12 : 8;
     score += volPts; reasons.push(`Above-avg volume ${belowVWAP ? "+ below VWAP" : ""} (+${volPts})`);
   } else if (volume && avgVolume && volume > avgVolume) {
-    score += 5; reasons.push("Average volume (+5)");
+    score += 6; reasons.push("Average volume (+6)");
   } else { reasons.push("Low volume (+0)"); }
 
   let spyWeakPts = 0;
@@ -340,9 +340,9 @@ function scorePutSetup(stock, relStrength, adx, volume, avgVolume, vix = 20) {
   else                         { reasons.push(`Outperforming SPY - bad for put (+0)`); }
   score += spyWeakPts;
 
-  if (adx && adx > 35)      { score += 15; reasons.push(`ADX ${adx} - very strong downtrend (+15)`); }
-  else if (adx && adx > 25) { score += 10; reasons.push(`ADX ${adx} - strong trend (+10)`); }
-  else if (adx && adx > 18) { score += 5;  reasons.push(`ADX ${adx} - emerging trend (+5)`); }
+  if (adx && adx > 35)      { score += 16; reasons.push(`ADX ${adx} - very strong downtrend (+16)`); }
+  else if (adx && adx > 25) { score += 11; reasons.push(`ADX ${adx} - strong trend (+11)`); }
+  else if (adx && adx > 18) { score += 6;  reasons.push(`ADX ${adx} - emerging trend (+6)`); }
 
   if (stock.rsi <= 35) {
     return { score: 0, reasons };
@@ -427,14 +427,14 @@ function scoreMeanReversionCall(stock, relStrength, adx, bars, vix, intradayBars
   const _useIntra     = MR_INTRADAY_OVERSOLD && _mrConfirmed && _mrIntraRSI < _mrDailyRSI;
   const _mrRSI      = _useIntra ? _mrIntraRSI : _mrDailyRSI;
   const _mrSrc      = _useIntra ? (_mrCurlOK ? "intraday(curl)" : "intraday(liftoff)") : "dailyRSI";
-  if (_mrRSI <= 35)      { score += 20; reasons.push(`${_mrSrc} ${_mrRSI} - deeply oversold (+20)`); }
-  else if (_mrRSI <= 42) { score += 12; reasons.push(`${_mrSrc} ${_mrRSI} - oversold (+12)`); }
-  else if (_mrRSI <= 48) { score += 5;  reasons.push(`${_mrSrc} ${_mrRSI} - near oversold (+5)`); }
+  if (_mrRSI <= 35)      { score += 21; reasons.push(`${_mrSrc} ${_mrRSI} - deeply oversold (+21)`); }
+  else if (_mrRSI <= 42) { score += 13; reasons.push(`${_mrSrc} ${_mrRSI} - oversold (+13)`); }
+  else if (_mrRSI <= 48) { score += 6;  reasons.push(`${_mrSrc} ${_mrRSI} - near oversold (+6)`); }
   else return { score: 0, reasons: [`${_mrSrc} ${_mrRSI} not oversold - skip mean reversion`] };
 
   const oversoldScans = state._oversoldCount ? (state._oversoldCount[stock.ticker] || 0) : 0;
-  if (oversoldScans >= 3)      { score += 15; reasons.push(`Oversold ${oversoldScans} consecutive scans - capitulation (+15)`); }
-  else if (oversoldScans >= 2) { score += 8;  reasons.push(`Oversold ${oversoldScans} consecutive scans (+8)`); }
+  if (oversoldScans >= 3)      { score += 16; reasons.push(`Oversold ${oversoldScans} consecutive scans - capitulation (+16)`); }
+  else if (oversoldScans >= 2) { score += 9;  reasons.push(`Oversold ${oversoldScans} consecutive scans (+9)`); }
 
   let _dailyDiscount = 0;
   if (bars && bars.length >= 20) {
@@ -479,20 +479,20 @@ function scoreMeanReversionCall(stock, relStrength, adx, bars, vix, intradayBars
     );
   }
 
-  if (stock.macd.includes("bullish crossover")) { score += 15; reasons.push("MACD bullish crossover - reversal signal (+15)"); }
-  else if (stock.macd.includes("bullish"))      { score += 5;  reasons.push("MACD bullish (+5)"); }
+  if (stock.macd.includes("bullish crossover")) { score += 16; reasons.push("MACD bullish crossover - reversal signal (+16)"); }
+  else if (stock.macd.includes("bullish"))      { score += 6;  reasons.push("MACD bullish (+6)"); }
   else                                          { reasons.push("MACD bearish - wait for base (+0)"); }
 
-  if (vix >= 35)      { score += 15; reasons.push(`VIX ${vix} - extreme fear, calls historically cheap (+15)`); }
-  else if (vix >= 30) { score += 10; reasons.push(`VIX ${vix} - elevated fear (+10)`); }
-  else if (vix >= 25) { score += 5;  reasons.push(`VIX ${vix} - moderate fear (+5)`); }
+  if (vix >= 35)      { score += 16; reasons.push(`VIX ${vix} - extreme fear, calls historically cheap (+16)`); }
+  else if (vix >= 30) { score += 11; reasons.push(`VIX ${vix} - elevated fear (+11)`); }
+  else if (vix >= 25) { score += 6;  reasons.push(`VIX ${vix} - moderate fear (+6)`); }
 
-  if (stock.catalyst)  { score += 10; reasons.push(`Recovery catalyst: ${stock.catalyst} (+10)`); }
+  if (stock.catalyst)  { score += 11; reasons.push(`Recovery catalyst: ${stock.catalyst} (+11)`); }
 
-  if (adx && adx < 20) { score += 10; reasons.push(`ADX ${adx} - weak trend, reversal likely (+10)`); }
-  else if (adx && adx < 30) { score += 5; reasons.push(`ADX ${adx} - trend weakening (+5)`); }
+  if (adx && adx < 20) { score += 11; reasons.push(`ADX ${adx} - weak trend, reversal likely (+11)`); }
+  else if (adx && adx < 30) { score += 6; reasons.push(`ADX ${adx} - trend weakening (+6)`); }
 
-  return { score: Math.min(score + 2, 100), reasons, isMeanReversion: true };   // 6/29: global +2 data-gather bump (Harrison)
+  return { score: Math.min(score, 100), reasons, isMeanReversion: true };
 }
 
 // scoreCreditSpread removed — APEX uses naked options, not credit spreads
@@ -610,7 +610,7 @@ function scoreIndexSetup(stock, optionType, spyRSI, spyMACD, spyMomentum, breadt
       && spyRSI >= 65
       && _dailyRsiForPut >= 70 && _dailyRsiForPut < 75;
 
-    if (["trending_bear","breakdown"].includes(regime))                           { score += 20; reasons.push(`Regime: ${regime} (+20)`); }
+    if (["trending_bear","breakdown"].includes(regime))                           { score += 21; reasons.push(`Regime: ${regime} (+21)`); }
     else if (regime === "choppy")                                                  { score -= 10; reasons.push("Choppy regime - puts risky (-10)"); }
     else if (_isOverboughtMRPut) {
       score -= 5; reasons.push(`Regime: ${regime} - overbought MR put, reduced penalty (-5)`);
@@ -625,11 +625,11 @@ function scoreIndexSetup(stock, optionType, spyRSI, spyMACD, spyMomentum, breadt
     const vixSustainedBonus = vixSustainedAvg >= 28 ? 5 : vixSustainedAvg >= 25 ? 3 : 0;
     const effectiveDuration = regimeDuration;
     if (["trending_bear","breakdown"].includes(regime) && effectiveDuration >= 5) {
-      score += 15; reasons.push(`Bear trend ${effectiveDuration}d below 200MA - high confidence (+15)`);
+      score += 16; reasons.push(`Bear trend ${effectiveDuration}d below 200MA - high confidence (+16)`);
     } else if (["trending_bear","breakdown"].includes(regime) && effectiveDuration >= 3) {
-      score += 10; reasons.push(`Bear trend ${effectiveDuration}d below 200MA - regime confirmed (+10)`);
+      score += 11; reasons.push(`Bear trend ${effectiveDuration}d below 200MA - regime confirmed (+11)`);
     } else if (["trending_bear","breakdown"].includes(regime) && effectiveDuration >= 1) {
-      score += 5; reasons.push(`Bear trend ${effectiveDuration}d below 200MA - regime establishing (+5)`);
+      score += 6; reasons.push(`Bear trend ${effectiveDuration}d below 200MA - regime establishing (+6)`);
     }
     if (["trending_bear","breakdown"].includes(regime) && vixSustainedBonus > 0) {
       score += vixSustainedBonus; reasons.push(`VIX 5d avg ${vixSustainedAvg.toFixed(1)} sustained elevated (+${vixSustainedBonus})`);
@@ -639,20 +639,20 @@ function scoreIndexSetup(stock, optionType, spyRSI, spyMACD, spyMomentum, breadt
     if (spyRSI >= 70) {
       const ivpNow = stock.ivPercentile || 50;
       if (ivpNow <= 30 && inBearOrChoppy) {
-        score += 25; reasons.push(`${stock.ticker} RSI ${spyRSI} overbought + IVP ${ivpNow}% cheap puts - ideal debit put entry (+25)`);
+        score += 26; reasons.push(`${stock.ticker} RSI ${spyRSI} overbought + IVP ${ivpNow}% cheap puts - ideal debit put entry (+26)`);
       } else if (inBearOrChoppy) {
-        score += 20; reasons.push(`${stock.ticker} RSI ${spyRSI} overbought in bear/choppy regime (+20)`);
+        score += 21; reasons.push(`${stock.ticker} RSI ${spyRSI} overbought in bear/choppy regime (+21)`);
       } else if (_isOverboughtMRPut) {
-        score += 20; reasons.push(`${stock.ticker} RSI ${spyRSI} overbought MR put in bull regime - dailyRSI ${_dailyRsiForPut.toFixed(0)} confirms (+20)`);
+        score += 21; reasons.push(`${stock.ticker} RSI ${spyRSI} overbought MR put in bull regime - dailyRSI ${_dailyRsiForPut.toFixed(0)} confirms (+21)`);
       } else if (_isOverboughtMRPutSoft) {
-        score += 12; reasons.push(`${stock.ticker} RSI ${spyRSI} overbought MR put (soft, dailyRSI ${_dailyRsiForPut.toFixed(0)}) (+12)`);
+        score += 13; reasons.push(`${stock.ticker} RSI ${spyRSI} overbought MR put (soft, dailyRSI ${_dailyRsiForPut.toFixed(0)}) (+13)`);
       } else {
-        score += 5;  reasons.push(`${stock.ticker} RSI ${spyRSI} overbought in bull regime - trend may continue, reduced bonus (+5)`);
+        score += 6;  reasons.push(`${stock.ticker} RSI ${spyRSI} overbought in bull regime - trend may continue, reduced bonus (+6)`);
       }
     }
-    else if (spyRSI >= 60)                                                        { score += 10; reasons.push(`${stock.ticker} RSI ${spyRSI} elevated (+10)`); }
+    else if (spyRSI >= 60)                                                        { score += 11; reasons.push(`${stock.ticker} RSI ${spyRSI} elevated (+11)`); }
     else if (spyRSI >= 45 && spyRSI < 60 && inBearOrChoppy && entryBias === "puts_on_bounces") {
-      score += 8; reasons.push(`${stock.ticker} RSI ${spyRSI} in bounce zone - puts_on_bounces Regime B (+8)`);
+      score += 9; reasons.push(`${stock.ticker} RSI ${spyRSI} in bounce zone - puts_on_bounces Regime B (+9)`);
     }
     else if (spyRSI <= 35) {
       // ── C2 FIX: Index instrument path — RSI <= 35 in bull regime ──────────────
@@ -670,7 +670,7 @@ function scoreIndexSetup(stock, optionType, spyRSI, spyMACD, spyMomentum, breadt
       // other signals (bearish MACD, low breadth, VIX elevated, credit stress) pile on.
       const inBearRegimeForPuts = ["trending_bear","breakdown"].includes(regime);
       if (inBearRegimeForPuts) {
-        score += 5; reasons.push(`${stock.ticker} RSI ${spyRSI} oversold in bear trend — brief bounce, put thesis intact (+5)`);
+        score += 6; reasons.push(`${stock.ticker} RSI ${spyRSI} oversold in bear trend — brief bounce, put thesis intact (+6)`);
       } else if (stock.isIndex) {
         // C2 FIX: Index macro catalyst path — no hard zero
         score -= 10;
@@ -720,9 +720,9 @@ function scoreIndexSetup(stock, optionType, spyRSI, spyMACD, spyMomentum, breadt
     else if (spyMACD && spyMACD.includes("bullish crossover")) { score -= Math.round(15*macdMultPut); reasons.push(`SPY MACD bullish crossover (-${Math.round(15*macdMultPut)})`); }
     else if (spyMACD && spyMACD.includes("bullish"))           { score -= Math.round(8*macdMultPut);  reasons.push(`SPY MACD bullish (-${Math.round(8*macdMultPut)})`); }
 
-    if (breadth <= 30)       { score += 15; reasons.push(`Breadth ${breadth}% - severe weakness (+15)`); }
-    else if (breadth <= 45)  { score += 8;  reasons.push(`Breadth ${breadth}% - weak (+8)`); }
-    else if (breadth <= 65 && inBearOrChoppy) { score += 4; reasons.push(`Breadth ${breadth}% - below neutral in bear regime (+4)`); }
+    if (breadth <= 30)       { score += 16; reasons.push(`Breadth ${breadth}% - severe weakness (+16)`); }
+    else if (breadth <= 45)  { score += 9;  reasons.push(`Breadth ${breadth}% - weak (+9)`); }
+    else if (breadth <= 65 && inBearOrChoppy) { score += 5; reasons.push(`Breadth ${breadth}% - below neutral in bear regime (+5)`); }
     else if (breadth >= 70)  {
       const isGapDayBreadth = !!(agentMacro && agentMacro.spyGapUp);
       if (isGapDayBreadth) {
@@ -732,10 +732,10 @@ function scoreIndexSetup(stock, optionType, spyRSI, spyMACD, spyMomentum, breadt
       }
     }
 
-    if (vixOutlook === "spiking")          { score += 10; reasons.push("VIX spiking - put premium expanding (+10)"); }
-    else if (vixOutlook === "elevated_stable") { score += 5; reasons.push("VIX elevated stable (+5)"); }
+    if (vixOutlook === "spiking")          { score += 11; reasons.push("VIX spiking - put premium expanding (+11)"); }
+    else if (vixOutlook === "elevated_stable") { score += 6; reasons.push("VIX elevated stable (+6)"); }
     else if (vixOutlook === "falling")     { score -= 10; reasons.push("VIX falling - puts losing value (-10)"); }
-    if (vix >= 25)                         { score += 5;  reasons.push(`VIX ${vix.toFixed(1)} elevated (+5)`); }
+    if (vix >= 25)                         { score += 6;  reasons.push(`VIX ${vix.toFixed(1)} elevated (+6)`); }
 
     if (entryBias === "puts_on_bounces") {
       const volPace         = stock.volPaceRatio || 1.0;
@@ -765,12 +765,12 @@ function scoreIndexSetup(stock, optionType, spyRSI, spyMACD, spyMomentum, breadt
     const putPrice = stock.price || 0;
     if (putVWAP > 0 && putPrice > 0) {
       const vwapDiffPut = (putPrice - putVWAP) / putVWAP;
-      if (vwapDiffPut < -0.01)     { score += 8; reasons.push(`Below VWAP ${(vwapDiffPut*100).toFixed(1)}% - weakness confirmed (+8)`); }
+      if (vwapDiffPut < -0.01)     { score += 9; reasons.push(`Below VWAP ${(vwapDiffPut*100).toFixed(1)}% - weakness confirmed (+9)`); }
       else if (vwapDiffPut > 0.02) { score -= 6; reasons.push(`Extended above VWAP ${(vwapDiffPut*100).toFixed(1)}% - overbought vs today (+6 short)`); }
     }
 
     const ivpPut = stock.ivPercentile || 50;
-    if (ivpPut < 25)        { score += 8;  reasons.push(`IVP ${ivpPut}% - cheap puts, favorable entry (+8)`); }
+    if (ivpPut < 25)        { score += 9;  reasons.push(`IVP ${ivpPut}% - cheap puts, favorable entry (+9)`); }
     else if (ivpPut >= 90)  { score -= 3; reasons.push(`IVP ${ivpPut}% - buying expensive premium, cost drag (-3)`); }
     else if (ivpPut >= 70)  { supplementScore += 3; reasons.push(`IVP ${ivpPut}% - elevated IV, active market (+3)`); }
 
@@ -790,10 +790,10 @@ function scoreIndexSetup(stock, optionType, spyRSI, spyMACD, spyMomentum, breadt
     {
       const weeklyTrend = stock._weeklyTrend || {};
       const trendCtx    = weeklyTrend.trendContext;
-      if (trendCtx === 'confirmed_bear') { score += 12; reasons.push(`10-wk MA confirmed bear (${weeklyTrend.maSlopeDir}) - puts aligned with weekly trend (+12)`); }
-      else if (trendCtx === 'pullback_bull' && weeklyTrend.above10wk === false) { score += 6; reasons.push(`10-wk MA rising but price below - tentative bear (+6)`); }
+      if (trendCtx === 'confirmed_bear') { score += 13; reasons.push(`10-wk MA confirmed bear (${weeklyTrend.maSlopeDir}) - puts aligned with weekly trend (+13)`); }
+      else if (trendCtx === 'pullback_bull' && weeklyTrend.above10wk === false) { score += 7; reasons.push(`10-wk MA rising but price below - tentative bear (+7)`); }
       else if (trendCtx === 'aligned_bull') { score -= 10; reasons.push(`10-wk MA aligned bull - puts fighting weekly trend (-10)`); }
-      else if (weeklyTrend.above10wk === false) { score += 5;  reasons.push("Below 10-wk MA - weekly downtrend (+5)"); }
+      else if (weeklyTrend.above10wk === false) { score += 6;  reasons.push("Below 10-wk MA - weekly downtrend (+6)"); }
       else if (weeklyTrend.above10wk === true)  { score -= 5;  reasons.push("Above 10-wk MA - weekly uptrend, puts against grain (-5)"); }
     }
 
@@ -802,14 +802,14 @@ function scoreIndexSetup(stock, optionType, spyRSI, spyMACD, spyMomentum, breadt
     const mrCapitulationActive = sessionLowRSIForBypass <= 22 && spyRSI <= 28;
     const mrMildCapitulation   = sessionLowRSIForBypass <= 30 && spyRSI <= 35 && !mrCapitulationActive;
 
-    if (["strongly bullish","bullish"].includes(signal) && confidence === "high") { score += 35; reasons.push(`Agent ${signal} high confidence (+35)`); }
-    else if (["strongly bullish","bullish"].includes(signal))                     { score += 25; reasons.push(`Agent ${signal} (+25)`); }
-    else if (signal === "mild bullish")                                            { score += 8;  reasons.push("Agent mild bullish (+8)"); }
+    if (["strongly bullish","bullish"].includes(signal) && confidence === "high") { score += 36; reasons.push(`Agent ${signal} high confidence (+36)`); }
+    else if (["strongly bullish","bullish"].includes(signal))                     { score += 26; reasons.push(`Agent ${signal} (+26)`); }
+    else if (signal === "mild bullish")                                            { score += 9;  reasons.push("Agent mild bullish (+9)"); }
     else if (signal === "neutral" && spyRSI <= 35)                                {
         const _px = stock.lastPrice || stock.price || 0;
         const _belowVWAP = (stock.intradayVWAP || 0) > 0 && _px < stock.intradayVWAP;
         const _mrCorrob = !OVERSOLD_CALL_NEEDS_CORROBORATION || (_belowVWAP && breadth <= CORROBORATION_MAX_BREADTH);
-        if (_mrCorrob) { score += 20; reasons.push("Mean reversion call - SPY oversold on neutral macro (+20)"); }
+        if (_mrCorrob) { score += 21; reasons.push("Mean reversion call - SPY oversold on neutral macro (+21)"); }
         else { reasons.push(`Oversold but uncorroborated (breadth ${breadth}% ${_belowVWAP ? "below" : "above"} VWAP) - no MR credit (+0)`); }
       }
     // 6/29 (Harrison): restore the +20 on a genuine INTRADAY flush even when daily RSI > 35.
@@ -830,14 +830,14 @@ function scoreIndexSetup(stock, optionType, spyRSI, spyMACD, spyMomentum, breadt
                                  && _intraLift   >= MR_INTRA_LIFTOFF_PTS
                                  && _intraLowAgeMin <= MR_SESSLOW_RECENCY_MIN;
         if (_intraEarlyTurn) {
-          score += 20;
-          reasons.push(`Mean reversion call - intraday flush oversold on neutral macro (+20) [iRSI ${_intraRSInow.toFixed(0)} sessLow ${_intraSessLow.toFixed(0)} lift ${_intraLift.toFixed(0)} age ${_intraLowAgeMin.toFixed(0)}m]`);
+          score += 21;
+          reasons.push(`Mean reversion call - intraday flush oversold on neutral macro (+21) [iRSI ${_intraRSInow.toFixed(0)} sessLow ${_intraSessLow.toFixed(0)} lift ${_intraLift.toFixed(0)} age ${_intraLowAgeMin.toFixed(0)}m]`);
         } else {
           score += 0;  reasons.push("Agent neutral (+0)");
         }
       }
     else if (mrCapitulationActive) {
-      score += 5; reasons.push(`Agent ${signal} bypassed — session panic RSI ${sessionLowRSIForBypass.toFixed(0)}, confirming MR capitulation entry (+5)`);
+      score += 6; reasons.push(`Agent ${signal} bypassed — session panic RSI ${sessionLowRSIForBypass.toFixed(0)}, confirming MR capitulation entry (+6)`);
     } else if (mrMildCapitulation) {
       score += 0; reasons.push(`Agent ${signal} — mild oversold (session low ${sessionLowRSIForBypass.toFixed(0)}), impact softened (+0)`);
     }
@@ -849,18 +849,18 @@ function scoreIndexSetup(stock, optionType, spyRSI, spyMACD, spyMomentum, breadt
       const _breadthNow  = state._breadth || 50;
       const _aboveVWAP   = (stock.intradayVWAP || 0) > 0 && (stock.lastPrice || stock.price || 0) >= stock.intradayVWAP * 0.995;
       if (_aboveVWAP && _breadthNow >= 40) {
-        score += 20; reasons.push(`Regime: ${regime} (+20) — intraday aligned (above VWAP, breadth ${_breadthNow}%)`);
+        score += 21; reasons.push(`Regime: ${regime} (+21) — intraday aligned (above VWAP, breadth ${_breadthNow}%)`);
       } else if (_aboveVWAP || _breadthNow >= 30) {
-        score += 10; reasons.push(`Regime: ${regime} (+10) — partial intraday alignment`);
+        score += 11; reasons.push(`Regime: ${regime} (+11) — partial intraday alignment`);
       } else {
-        score += 3;  reasons.push(`Regime: ${regime} (+3) — weekly bull but intraday bearish context`);
+        score += 4;  reasons.push(`Regime: ${regime} (+4) — weekly bull but intraday bearish context`);
       }
     }
     else if (regime === "choppy")                                                  { score -= 10; reasons.push("Choppy regime - calls risky (-10)"); }
     else if (["trending_bear","breakdown"].includes(regime)) {
       if (mrCapitulationActive) {
         const oversoldDays = state._oversoldCount?.[stock.ticker] || 0;
-        score += 10; reasons.push(`Regime: ${regime} - MR call capitulation bypass (RSI ${spyRSI}, ${oversoldDays}d oversold) - regime is the entry signal (+10 vs normal -25)`);
+        score += 11; reasons.push(`Regime: ${regime} - MR call capitulation bypass (RSI ${spyRSI}, ${oversoldDays}d oversold) - regime is the entry signal (+11 vs normal -25)`);
       } else if (spyRSI <= 35) {
         const oversoldDays = state._oversoldCount?.[stock.ticker] || 0;
         const vixNotSpiking = (state._agentMacro?.vixOutlook || "") !== "spiking";
@@ -904,16 +904,16 @@ function scoreIndexSetup(stock, optionType, spyRSI, spyMACD, spyMomentum, breadt
       try { logEvent("filter", `${stock.ticker} CURL bull_curl tier:${mrStabilized?"stabilized":"bouncing"} rawPts:${_curlPts} flag:${MACD_CURL_SCORING?"ON":"OFF"}`); } catch(e) {}
     }
     if (spyRSI <= 25) {
-      if (mrStabilized) { score += 25; reasons.push(`${stock.ticker} RSI bounced from session low ${sessionLowRSI.toFixed(0)} to ${spyRSI} - mean reversion confirmed (+25)`); }
-      else if (mrBouncing) { score += 12; reasons.push(`${stock.ticker} RSI bouncing from session low ${sessionLowRSI.toFixed(0)} - not yet confirmed (+12)`); }
-      else { score += 2; reasons.push(`${stock.ticker} RSI ${spyRSI} extreme oversold - no bounce yet, waiting for recovery (+2)`); }
+      if (mrStabilized) { score += 26; reasons.push(`${stock.ticker} RSI bounced from session low ${sessionLowRSI.toFixed(0)} to ${spyRSI} - mean reversion confirmed (+26)`); }
+      else if (mrBouncing) { score += 13; reasons.push(`${stock.ticker} RSI bouncing from session low ${sessionLowRSI.toFixed(0)} - not yet confirmed (+13)`); }
+      else { score += 3; reasons.push(`${stock.ticker} RSI ${spyRSI} extreme oversold - no bounce yet, waiting for recovery (+3)`); }
     }
     else if (spyRSI <= 35) {
-      if (mrStabilized) { score += 18; reasons.push(`${stock.ticker} RSI bounced from session low ${sessionLowRSI.toFixed(0)} to ${spyRSI} - mean reversion (+18)`); }
-      else if (mrBouncing) { score += 8; reasons.push(`${stock.ticker} RSI bouncing from session low ${sessionLowRSI.toFixed(0)} - partial credit (+8)`); }
-      else { score += 2; reasons.push(`${stock.ticker} RSI ${spyRSI} deeply oversold - no bounce yet (+2)`); }
+      if (mrStabilized) { score += 19; reasons.push(`${stock.ticker} RSI bounced from session low ${sessionLowRSI.toFixed(0)} to ${spyRSI} - mean reversion (+19)`); }
+      else if (mrBouncing) { score += 9; reasons.push(`${stock.ticker} RSI bouncing from session low ${sessionLowRSI.toFixed(0)} - partial credit (+9)`); }
+      else { score += 3; reasons.push(`${stock.ticker} RSI ${spyRSI} deeply oversold - no bounce yet (+3)`); }
     }
-    else if (spyRSI <= 42)                                                        { score += 10; reasons.push(`${stock.ticker} RSI ${spyRSI} oversold (+10)`); }
+    else if (spyRSI <= 42)                                                        { score += 11; reasons.push(`${stock.ticker} RSI ${spyRSI} oversold (+11)`); }
     else if (spyRSI >= 45 && spyRSI <= 58 && ["trending_bull","recovery"].includes(regime)) {
       // V3.00: "healthy dip" bonus removed — MR system requires RSI < 45
     }
@@ -946,25 +946,25 @@ function scoreIndexSetup(stock, optionType, spyRSI, spyMACD, spyMomentum, breadt
     const bNorm  = bDaily.length >= 5
       ? (bDaily.filter(v => v < breadth).length / bDaily.length) * 100
       : 50;
-    if (bNorm >= 75 && breadth >= 60)      { score += 10; reasons.push(`Breadth ${breadth}% (${bNorm.toFixed(0)}th pctile) - strong relative to recent (+10)`); }
-    else if (bNorm >= 60)                  { score += 6;  reasons.push(`Breadth ${breadth}% (${bNorm.toFixed(0)}th pctile) - recovering (+6)`); }
+    if (bNorm >= 75 && breadth >= 60)      { score += 11; reasons.push(`Breadth ${breadth}% (${bNorm.toFixed(0)}th pctile) - strong relative to recent (+11)`); }
+    else if (bNorm >= 60)                  { score += 7;  reasons.push(`Breadth ${breadth}% (${bNorm.toFixed(0)}th pctile) - recovering (+7)`); }
     else if (bNorm <= 30 && ["trending_bull","recovery"].includes(regime) && (!DIP_REQUIRES_MULTIDAY_ANCHOR || ((agentMacro||{}).spyDayChange ?? 0) <= DIP_MAX_DAYCHANGE)) {
-      score += 12; reasons.push(`Breadth ${breadth}% (${bNorm.toFixed(0)}th pctile) - low relative to recent in bull regime - ideal dip entry (+12)`);
+      score += 13; reasons.push(`Breadth ${breadth}% (${bNorm.toFixed(0)}th pctile) - low relative to recent in bull regime - ideal dip entry (+13)`);
     }
     else if (bNorm <= 20 && !mrCapitulationActive) { score -= 8; reasons.push(`Breadth ${breadth}% (${bNorm.toFixed(0)}th pctile) - very weak relative to recent (-8)`); }
-    else if (bNorm <= 20 && mrCapitulationActive)  { score += 5;  reasons.push(`Breadth ${breadth}% (${bNorm.toFixed(0)}th pctile) - capitulation breadth, MR setup confirmed (+5)`); }
+    else if (bNorm <= 20 && mrCapitulationActive)  { score += 6;  reasons.push(`Breadth ${breadth}% (${bNorm.toFixed(0)}th pctile) - capitulation breadth, MR setup confirmed (+6)`); }
 
     if (mrCapitulationActive) {
-      if (vix >= 35)      { score += 15; reasons.push(`VIX ${vix} - extreme fear, MR calls historically cheap at capitulation (+15)`); }
-      else if (vix >= 25) { score += 8;  reasons.push(`VIX ${vix} - elevated fear, MR call entry (+8)`); }
-      if (vixOutlook === "spiking")       { score += 8;  reasons.push("VIX spiking - fear at peak, MR call entry signal (+8)"); }
-      else if (vixOutlook === "mean_reverting") { score += 5; reasons.push("VIX mean reverting - MR improving (+5)"); }
+      if (vix >= 35)      { score += 16; reasons.push(`VIX ${vix} - extreme fear, MR calls historically cheap at capitulation (+16)`); }
+      else if (vix >= 25) { score += 9;  reasons.push(`VIX ${vix} - elevated fear, MR call entry (+9)`); }
+      if (vixOutlook === "spiking")       { score += 9;  reasons.push("VIX spiking - fear at peak, MR call entry signal (+9)"); }
+      else if (vixOutlook === "mean_reverting") { score += 6; reasons.push("VIX mean reverting - MR improving (+6)"); }
     } else {
-      if (vix <= 18)            { score += 12; reasons.push(`VIX ${vix} - calls historically cheap, low premium (+12)`); }
-      else if (vix <= 22)       { score += 8;  reasons.push(`VIX ${vix} - moderate, calls reasonably priced (+8)`); }
+      if (vix <= 18)            { score += 13; reasons.push(`VIX ${vix} - calls historically cheap, low premium (+13)`); }
+      else if (vix <= 22)       { score += 9;  reasons.push(`VIX ${vix} - moderate, calls reasonably priced (+9)`); }
       else if (vix >= 35)       { score -= 10; reasons.push(`VIX ${vix} - calls expensive in fear environment (-10)`); }
-      if (vixOutlook === "falling")      { score += 12; reasons.push("VIX compressing - call premium expanding (+12)"); }
-      else if (vixOutlook === "mean_reverting") { score += 6; reasons.push("VIX mean reverting - calls improving (+6)"); }
+      if (vixOutlook === "falling")      { score += 13; reasons.push("VIX compressing - call premium expanding (+13)"); }
+      else if (vixOutlook === "mean_reverting") { score += 7; reasons.push("VIX mean reverting - calls improving (+7)"); }
       else if (vixOutlook === "spiking") { score -= 12; reasons.push("VIX spiking - calls losing value fast (-12)"); }
     }
 
@@ -972,29 +972,29 @@ function scoreIndexSetup(stock, optionType, spyRSI, spyMACD, spyMomentum, breadt
     const callPrice = stock.price || 0;
     if (callVWAP > 0 && callPrice > 0) {
       const vwapDiff = (callPrice - callVWAP) / callVWAP;
-      if (vwapDiff < -0.005)      { score += 8; reasons.push(`Below VWAP ${(vwapDiff*100).toFixed(1)}% - dip entry (+8)`); }
+      if (vwapDiff < -0.005)      { score += 9; reasons.push(`Below VWAP ${(vwapDiff*100).toFixed(1)}% - dip entry (+9)`); }
       else if (vwapDiff > 0.015)  { score -= 5; reasons.push(`Extended above VWAP ${(vwapDiff*100).toFixed(1)}% - chasing (+-5)`); }
     }
 
     const ivpCall = stock.ivPercentile || 50;
     const highVIXNow = vix >= 30;
-    if (ivpCall < 25)      { score += 10; reasons.push(`IVP ${ivpCall}% - cheap call spreads, favorable entry (+10)`); }
-    else if (ivpCall < 45) { score += 5;  reasons.push(`IVP ${ivpCall}% - moderate IV, reasonable entry (+5)`); }
+    if (ivpCall < 25)      { score += 11; reasons.push(`IVP ${ivpCall}% - cheap call spreads, favorable entry (+11)`); }
+    else if (ivpCall < 45) { score += 6;  reasons.push(`IVP ${ivpCall}% - moderate IV, reasonable entry (+6)`); }
     else if (ivpCall >= (IVP_CALL_PENALTY_STEEP ? 70 : 75) && !highVIXNow) { const _ivpPen = IVP_CALL_PENALTY_STEEP ? 15 : 8; score -= _ivpPen; reasons.push(`IVP ${ivpCall}% - expensive calls in calm VIX (-${_ivpPen})`); }
     else if (ivpCall >= (IVP_CALL_PENALTY_STEEP ? 70 : 75))  { const _ivpPen2 = IVP_CALL_PENALTY_STEEP ? 5 : 3; score -= _ivpPen2; reasons.push(`IVP ${ivpCall}% - expensive but VIX elevated, partial offset (-${_ivpPen2})`); }
 
     const weeklyTrend    = stock._weeklyTrend || {};
     const trendCtx       = weeklyTrend.trendContext;
-    if (trendCtx === 'aligned_bull')   { score += 10; reasons.push(`10-wk MA aligned bull (${weeklyTrend.maSlopeDir}) (+10)`); }
-    else if (trendCtx === 'pullback_bull') { score += 6; reasons.push(`10-wk MA rising - pullback buy (+6)`); }
+    if (trendCtx === 'aligned_bull')   { score += 11; reasons.push(`10-wk MA aligned bull (${weeklyTrend.maSlopeDir}) (+11)`); }
+    else if (trendCtx === 'pullback_bull') { score += 7; reasons.push(`10-wk MA rising - pullback buy (+7)`); }
     else if (trendCtx === 'confirmed_bear') { score -= 12; reasons.push(`10-wk MA falling + price below - confirmed bear (-12)`); }
-    else if (weeklyTrend.above10wk === true)  { score += 5; reasons.push("Above 10-wk MA (+5)"); }
+    else if (weeklyTrend.above10wk === true)  { score += 6; reasons.push("Above 10-wk MA (+6)"); }
     else if (weeklyTrend.above10wk === false) { score -= 5; reasons.push("Below 10-wk MA (-5)"); }
 
     if (spyMomentum === "recovering" && ["trending_bull","recovery"].includes(regime)) {
-      score += 10; reasons.push("Momentum recovering in bull regime - resuming uptrend (+10)");
+      score += 11; reasons.push("Momentum recovering in bull regime - resuming uptrend (+11)");
     } else if (spyMomentum === "steady") {
-      score += 3; reasons.push("Momentum steady (+3)");
+      score += 4; reasons.push("Momentum steady (+4)");
     }
 
     const agentAlreadyBullish = ["strongly bullish","bullish","mild bullish"].includes(signal);
@@ -1019,12 +1019,12 @@ function scoreIndexSetup(stock, optionType, spyRSI, spyMACD, spyMomentum, breadt
       if (!techBullish && !["trending_bull","recovery"].includes(regime)) {
         score -= 10; reasons.push("QQQ: no tech bullish thesis in non-bull regime (-10)");
       } else if (techBullish) {
-        score += 5; reasons.push("QQQ: tech names bullish (+5)");
+        score += 6; reasons.push("QQQ: tech names bullish (+6)");
       }
     }
 
     if (stock.ticker === "IWM" && ["trending_bull","recovery"].includes(regime)) {
-      score += 8; reasons.push("IWM in bull/recovery regime - small cap confirmation (+8)");
+      score += 9; reasons.push("IWM in bull/recovery regime - small cap confirmation (+9)");
     }
   }
 
@@ -1033,23 +1033,23 @@ function scoreIndexSetup(stock, optionType, spyRSI, spyMACD, spyMomentum, breadt
     const xlfRelStr = sectorData.XLF?.relStr || 0;
     const smhRelStr = sectorData.SMH?.relStr || 0;
     const iwmRelStr = sectorData.IWM?.relStr || 0;
-    if (xlfRelStr < -2.0) { score += 8; reasons.push(`XLF underperforming SPY by ${Math.abs(xlfRelStr).toFixed(1)}% - financial stress (+8)`); }
-    else if (xlfRelStr < -1.0) { score += 4; reasons.push(`XLF lagging SPY by ${Math.abs(xlfRelStr).toFixed(1)}% (+4)`); }
+    if (xlfRelStr < -2.0) { score += 9; reasons.push(`XLF underperforming SPY by ${Math.abs(xlfRelStr).toFixed(1)}% - financial stress (+9)`); }
+    else if (xlfRelStr < -1.0) { score += 5; reasons.push(`XLF lagging SPY by ${Math.abs(xlfRelStr).toFixed(1)}% (+5)`); }
     else if (xlfRelStr > 2.0)  { score -= 5; reasons.push(`XLF outperforming SPY by ${xlfRelStr.toFixed(1)}% - financials strong (-5)`); }
     if (stock.ticker === "QQQ" || stock.ticker === "SPY") {
-      if (smhRelStr < -3.0) { score += 10; reasons.push(`SMH underperforming by ${Math.abs(smhRelStr).toFixed(1)}% - semi weakness leading QQQ down (+10)`); }
-      else if (smhRelStr < -1.5) { score += 5; reasons.push(`SMH lagging ${Math.abs(smhRelStr).toFixed(1)}% - tech breadth narrowing (+5)`); }
+      if (smhRelStr < -3.0) { score += 11; reasons.push(`SMH underperforming by ${Math.abs(smhRelStr).toFixed(1)}% - semi weakness leading QQQ down (+11)`); }
+      else if (smhRelStr < -1.5) { score += 6; reasons.push(`SMH lagging ${Math.abs(smhRelStr).toFixed(1)}% - tech breadth narrowing (+6)`); }
       else if (smhRelStr > 3.0)  { score -= 5; reasons.push(`SMH outperforming - semis strong, QQQ puts less valid (-5)`); }
     }
-    if (iwmRelStr < -2.0)  { score += 5; reasons.push(`IWM lagging SPY ${Math.abs(iwmRelStr).toFixed(1)}% - narrow rally, puts valid (+5)`); }
+    if (iwmRelStr < -2.0)  { score += 6; reasons.push(`IWM lagging SPY ${Math.abs(iwmRelStr).toFixed(1)}% - narrow rally, puts valid (+6)`); }
     else if (iwmRelStr > 2.0) { score -= 5; reasons.push(`IWM outperforming - broad participation, puts less valid (-5)`); }
-    if (state._creditStress) { score += 8; reasons.push("Credit stress: HYG+TLT both falling - forced liquidation, bear regime confirmed (+8)"); }
+    if (state._creditStress) { score += 9; reasons.push("Credit stress: HYG+TLT both falling - forced liquidation, bear regime confirmed (+9)"); }
   }
   if (optionType === "call") {
     const xlfRelStr = sectorData.XLF?.relStr || 0;
     const iwmRelStr = sectorData.IWM?.relStr || 0;
-    if (xlfRelStr > 2.0)   { score += 5; reasons.push(`XLF outperforming SPY - financial strength, calls favorable (+5)`); }
-    if (iwmRelStr > 2.0)   { score += 5; reasons.push(`IWM outperforming - broad participation, calls favorable (+5)`); }
+    if (xlfRelStr > 2.0)   { score += 6; reasons.push(`XLF outperforming SPY - financial strength, calls favorable (+6)`); }
+    if (iwmRelStr > 2.0)   { score += 6; reasons.push(`IWM outperforming - broad participation, calls favorable (+6)`); }
     if (state._creditStress) { score -= 8; reasons.push("Credit stress: HYG+TLT falling - calls risky in liquidation (-8)"); }
   }
 
@@ -1071,7 +1071,7 @@ function scoreIndexSetup(stock, optionType, spyRSI, spyMACD, spyMomentum, breadt
   const _curlNet = _curlPts > 0
     ? Math.min(_suppCap, supplementScore) - Math.min(_suppCap, supplementScore - _curlPts)
     : 0;
-  return { score: Math.min(score + 2, 100), reasons, tradeType: "naked", mrCapitulation: _mrCapitulationFlag,   // 6/29: global +2 data-gather bump (Harrison)
+  return { score: Math.min(score, 100), reasons, tradeType: "naked", mrCapitulation: _mrCapitulationFlag,
            _isOverboughtMRPut: _isMRPutExport, macdCurl: stock.macdCurl || "none", curlPts: _curlPts, curlNet: _curlNet };
 }
 
