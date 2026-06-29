@@ -84,9 +84,9 @@ const MR_INTRA_SESSLOW_MAX = 35;    // session must have reached <= this RSI (ge
 // (the newly-bridged intraday series), gated on _mrEarlyTurn so only a confirmed oversold turn
 // earns it (RSI gate = quality, price drawdown = magnitude), taken as MAX vs the daily discount
 // (never summed). Starting thresholds — tune from the logged [MR-FLUSH] data.
-const MR_FLUSH_DD1 = 0.005;         // >= 0.5% off session high → +6  (shallow flush)
-const MR_FLUSH_DD2 = 0.009;         // >= 0.9% off session high → +10 (solid flush)
-const MR_FLUSH_DD3 = 0.015;         // >= 1.5% off session high → +15 (deep flush)
+const MR_FLUSH_DD1 = 0.004;         // 6/29 re-tier: >= 0.4% off session high → +8  (shallow flush)
+const MR_FLUSH_DD2 = 0.007;         // 6/29 re-tier: >= 0.7% off session high → +12 (solid flush)
+const MR_FLUSH_DD3 = 0.010;         // 6/29 re-tier: >= 1.0% off session high → +16 (deep flush). Old 0.015 never fired on SPY/QQQ intraday in calm VIX.
 // Session-low recency (6/25 fix). The _mrEarlyTurn gate keyed off the all-session sticky
 // MIN RSI, so once 1-min RSI printed any deep value early (6/25: a stuck 2.2 on a 1.28%
 // range day), the gate stayed permanently open and the flush credit fired on every MR call.
