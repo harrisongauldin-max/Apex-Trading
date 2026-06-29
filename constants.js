@@ -37,7 +37,7 @@ const MAX_HEAT            = 0.60;
 const MAX_SECTOR_PCT      = 0.50;
 
 // ─── Exit parameters ─────────────────────────────────────────────
-const STOP_LOSS_PCT       = 0.35;
+const STOP_LOSS_PCT       = 0.15;   // 6/29: tightened 0.35→0.15 for data-gather phase (Harrison). NOTE: ~0.3-0.4% adverse underlying move trips this on a 0.4-delta call — expect more stop-outs incl. on dips that later recover.
 const FAST_STOP_PCT       = 0.20;
 const FAST_STOP_HOURS     = 48;
 const TAKE_PROFIT_PCT     = 0.50;
