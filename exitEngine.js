@@ -68,7 +68,7 @@ function getTimeAdjustedStop(pos) {
 function getDTEExitParams(dte, daysOpen = 0) {
   const label = dte <= 21 ? "SHORT-DTE" : dte <= 45 ? "MONTHLY" : "MONTHLY+";
   return {
-    stopLossPct:   0.35,
+    stopLossPct:   0.15,   // aligned to STOP_LOSS_PCT 6/29 (note: this fn is currently unused; live stop is _activeHardStop=STOP_LOSS_PCT)
     fastStopPct:   dte <= 21 ? 0.15 : 0.20,
     trailActivate: dte <= 21 ? 0.12 : 0.22,
     trailStop:     dte <= 21 ? 0.07 : 0.12,
