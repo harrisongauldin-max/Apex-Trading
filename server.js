@@ -9,7 +9,7 @@ const fs      = require('fs');
 
 const { state, markDirty, saveStateNow, flushStateIfDirty,
         logEvent, redisSave, redisLoad, defaultState,
-        saveDailyLogToRedis, getETDateStr, restoreBuffersFromRedis,
+        saveDailyLogToRedis, getETDateStr, restoreBuffersFromRedis, parseRedisBlob,
         writeJournalEntry, updateJournalExit,
         loadJournalDay, saveJournalDay, getJournalRange }              = require('./state');
 const { alpacaGet, alpacaPost, alpacaDelete,
@@ -640,6 +640,19 @@ cron.schedule("30 13-21 * * 1-5", async () => {
   await saveDailyLogToRedis(false);
 });
 
+// 3:55pm ET insurance checkpoint (2:55 CT) — an independent save ~10 min before the
+// 4:05 ET EOD save, so the full day is durably in Redis even if the EOD save misfires.
+// Non-EOD (isEOD=false): does NOT wipe the buffer — EOD still does the final save+wipe.
+// Merge-on-save makes it safe even if the buffer is thin. 19:55/20:55 UTC covers EDT/EST;
+// the ET-guard fires it exactly once at 15:55 ET.
+cron.schedule("55 19,20 * * 1-5", async () => {
+  const et = getETTime();
+  if (et.getHours() !== 15 || et.getMinutes() !== 55) return;
+  const bufLen = (state._dailyLogBuffer || []).length;
+  logEvent("scan", `[AUTO-SAVE] 3:55 PM insurance checkpoint: saving ${bufLen} entries to Redis...`);
+  await saveDailyLogToRedis(false);
+});
+
 // 3:15pm ET hard close — pure intraday
 cron.schedule("15 19,20 * * 1-5", async () => {
   const et = getETTime();
@@ -1115,7 +1128,7 @@ app.get("/api/analytics/history", async (req, res) => {
       const resp = await fetch(`${REDIS_URL}/get/${key}`, { headers: { Authorization: `Bearer ${REDIS_TOKEN}` } });
       const data = await resp.json();
       if (!data.result) return res.status(404).json({ error: `No analytics snapshot for ${date}` });
-      return res.json(JSON.parse(data.result));
+      return res.json(parseRedisBlob(data.result));
     } else {
       const resp  = await fetch(`${REDIS_URL}/keys/argo:analytics:*`, { headers: { Authorization: `Bearer ${REDIS_TOKEN}` } });
       const data  = await resp.json();
@@ -1134,7 +1147,7 @@ app.get("/api/logs/history", async (req, res) => {
       const resp   = await fetch(`${REDIS_URL}/get/${logKey}`, { headers: { Authorization: `Bearer ${REDIS_TOKEN}` } });
       const data = await resp.json();
       let entries, summary, source;
-      const parsed       = data.result ? JSON.parse(data.result) : null;
+      const parsed       = parseRedisBlob(data.result);
       const redisEntries = parsed && Array.isArray(parsed.entries) ? parsed.entries : [];
       const todayStr     = getETDateStr();
       if (redisEntries.length) {
@@ -1207,9 +1220,9 @@ app.get("/api/telemetry", async (req, res) => {
         return res.status(404).json({ error: `No telemetry for ${date}` });
       }
     } else {
-      const parsed = JSON.parse(data.result);
-      header = parsed.header || header;
-      rows   = parsed.rows || [];
+      const parsed = parseRedisBlob(data.result);
+      header = (parsed && parsed.header) || header;
+      rows   = (parsed && parsed.rows) || [];
     }
     res.setHeader("Content-Type", "text/csv");
     res.setHeader("Content-Disposition", `attachment; filename="argo-telemetry-${date}.csv"`);
