@@ -492,12 +492,12 @@ function scoreMeanReversionCall(stock, relStrength, adx, bars, vix, intradayBars
   if (adx && adx < 20) { score += 10; reasons.push(`ADX ${adx} - weak trend, reversal likely (+10)`); }
   else if (adx && adx < 30) { score += 5; reasons.push(`ADX ${adx} - trend weakening (+5)`); }
 
-  return { score: Math.min(score, 100), reasons, isMeanReversion: true };
+  return { score: Math.min(score + 2, 100), reasons, isMeanReversion: true };   // 6/29: global +2 data-gather bump (Harrison)
 }
 
 // scoreCreditSpread removed — APEX uses naked options, not credit spreads
 
-function scoreIndexSetup(stock, optionType, spyRSI, spyMACD, spyMomentum, breadth, vix, agentMacro) {
+function scoreIndexSetup(stock, optionType, spyRSI, spyMACD, spyMomentum, breadth, vix, agentMacro, intradayRsi) {
   let score = 0;
   const reasons = [];
 
@@ -812,7 +812,30 @@ function scoreIndexSetup(stock, optionType, spyRSI, spyMACD, spyMomentum, breadt
         if (_mrCorrob) { score += 20; reasons.push("Mean reversion call - SPY oversold on neutral macro (+20)"); }
         else { reasons.push(`Oversold but uncorroborated (breadth ${breadth}% ${_belowVWAP ? "below" : "above"} VWAP) - no MR credit (+0)`); }
       }
-    else if (signal === "neutral")                                                 { score += 0;  reasons.push("Agent neutral (+0)"); }
+    // 6/29 (Harrison): restore the +20 on a genuine INTRADAY flush even when daily RSI > 35.
+    // Root cause of the 70→40s score drop: the +20 above was rekeyed (6/22) from intraday to
+    // DAILY spyRSI, so an intraday flush (iRSI 15, dRSI ~50) never qualified. Gate it on the same
+    // earlyTurn signal the MR-gate uses — session reached oversold AND RSI lifted MR_INTRA_LIFTOFF_PTS
+    // off its recent session low — so it fires on confirmed intraday turns, not on daily-neutral chop.
+    // NOTE: 3-day sim of this entry showed ~33% 15m-forward win rate on a down tape; shipped for
+    // data-gather, NOT as a proven edge. D2 falling-knife veto and stop downstream unchanged.
+    else if (signal === "neutral") {
+        const _intraRSInow    = (typeof intradayRsi === "number" ? intradayRsi : spyRSI) || 50;
+        const _intraSessLow   = state._sessionLowRSI?.[stock.ticker] ?? 100;
+        const _intraSessLowAt  = state._sessionLowRSIAt?.[stock.ticker] ?? 0;
+        const _intraLowAgeMin  = _intraSessLowAt ? (Date.now() - _intraSessLowAt) / 60000 : Infinity;
+        const _intraLift       = _intraRSInow - _intraSessLow;   // REAL intraday lift off session low (not daily RSI)
+        const _intraEarlyTurn  = _intraSessLow   <= MR_INTRA_SESSLOW_MAX
+                                 && _intraRSInow <= 40                       // still oversold-ish now (not a recovered spike)
+                                 && _intraLift   >= MR_INTRA_LIFTOFF_PTS
+                                 && _intraLowAgeMin <= MR_SESSLOW_RECENCY_MIN;
+        if (_intraEarlyTurn) {
+          score += 20;
+          reasons.push(`Mean reversion call - intraday flush oversold on neutral macro (+20) [iRSI ${_intraRSInow.toFixed(0)} sessLow ${_intraSessLow.toFixed(0)} lift ${_intraLift.toFixed(0)} age ${_intraLowAgeMin.toFixed(0)}m]`);
+        } else {
+          score += 0;  reasons.push("Agent neutral (+0)");
+        }
+      }
     else if (mrCapitulationActive) {
       score += 5; reasons.push(`Agent ${signal} bypassed — session panic RSI ${sessionLowRSIForBypass.toFixed(0)}, confirming MR capitulation entry (+5)`);
     } else if (mrMildCapitulation) {
@@ -1048,7 +1071,7 @@ function scoreIndexSetup(stock, optionType, spyRSI, spyMACD, spyMomentum, breadt
   const _curlNet = _curlPts > 0
     ? Math.min(_suppCap, supplementScore) - Math.min(_suppCap, supplementScore - _curlPts)
     : 0;
-  return { score, reasons, tradeType: "naked", mrCapitulation: _mrCapitulationFlag,
+  return { score: Math.min(score + 2, 100), reasons, tradeType: "naked", mrCapitulation: _mrCapitulationFlag,   // 6/29: global +2 data-gather bump (Harrison)
            _isOverboughtMRPut: _isMRPutExport, macdCurl: stock.macdCurl || "none", curlPts: _curlPts, curlNet: _curlNet };
 }
 
