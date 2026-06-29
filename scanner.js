@@ -1562,8 +1562,8 @@ async function runScan() {
         ? marketContext.breadth * 100
         : marketContext?.breadth?.breadthPct ?? 50;
       const scoringMacro  = { ...(agentMacro || {}), regime: authRegimeName, spyGapUp: !!spyGapUp, spyDayChange: state._spyDayChangePct };
-      const putResult  = scoreIndexSetup(liveStock, "put",  spyRSIPut,  spyMACD, spyMomentum, breadthVal, state.vix, scoringMacro);
-      const callResult = scoreIndexSetup(liveStock, "call", spyRSICall, spyMACD, spyMomentum, breadthVal, state.vix, scoringMacro);
+      const putResult  = scoreIndexSetup(liveStock, "put",  spyRSIPut,  spyMACD, spyMomentum, breadthVal, state.vix, scoringMacro, liveStock.rsi);
+      const callResult = scoreIndexSetup(liveStock, "call", spyRSICall, spyMACD, spyMomentum, breadthVal, state.vix, scoringMacro, liveStock.rsi);
 
       putSetup  = { score: putResult.score,  reasons: putResult.reasons,  tradeType: "put",  isMeanReversion: false, _isOverboughtMRPut: !!putResult._isOverboughtMRPut };
       callSetup = { score: callResult.score, reasons: callResult.reasons, tradeType: "call", isMeanReversion: false };
@@ -2110,7 +2110,7 @@ async function runScan() {
     if (recentCloseSameDir) {
       const minsSinceClose = (Date.now() - recentClose.closedAt) / 60000;
       const _closePnl = parseFloat(recentClose.pnl) || 0;
-      const CLOSE_COOLDOWN_MINS = _closePnl > 0 ? 10 : 20;
+      const CLOSE_COOLDOWN_MINS = _closePnl > 0 ? 5 : 10;   // 6/29: shortened win 10→5, loss 20→10 (Harrison, data-gather)
       if (minsSinceClose < CLOSE_COOLDOWN_MINS) {
         const wasWin = _closePnl > 0 ? `win (+$${_closePnl.toFixed(0)})` : _closePnl < 0 ? `loss (-$${Math.abs(_closePnl).toFixed(0)})` : 'cooldown';
         logEvent("filter", `${stock.ticker} re-entry cooldown — ${wasWin} closed ${minsSinceClose.toFixed(0)}min ago`);
