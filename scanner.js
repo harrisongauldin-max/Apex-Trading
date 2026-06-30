@@ -2118,8 +2118,18 @@ async function runScan() {
       }
     }
 
+    // 6/30 (Harrison): the post-loss lockout should punish a BLOWN THESIS, not a managed exit.
+    // A hard stop (thesis wrong, adverse move) keeps the 4h/score-75 penalty. A protective tier
+    // exit that minimized the loss (trail-floor giving back to ~breakeven, time/give-back/dte
+    // tighten) is not a thesis failure and should NOT bench the instrument for hours. Gated on the
+    // stored exit reason. Default-deny (unknown reason → treat as stop) keeps it conservative.
+    const _STOP_REASONS = new Set(["stop","fast-stop","tiered-stop","thesis-collapsed","thesis-no-follow","50ma-break"]);
+    const _wasHardStop = !recentLoss || !recentLoss.reason || _STOP_REASONS.has(recentLoss.reason);
     const recentLossSameDir = recentLoss && (!recentLoss.optionType || recentLoss.optionType === optionType);
-    if (recentLossSameDir && (Date.now() - recentLoss.closedAt) < 4 * 3600 * 1000) {
+    // 6/30 (Harrison): window shortened 4h→2h. The score-75 floor is the real filter — a stopped
+    // name re-entering must print a high-conviction setup regardless of clock — so the duration is
+    // backup, not the gate. 2h lets a name re-base after a stop without benching it most of a session.
+    if (recentLossSameDir && _wasHardStop && (Date.now() - recentLoss.closedAt) < 2 * 3600 * 1000) {
       const hoursSinceLoss = ((Date.now() - recentLoss.closedAt) / 3600000).toFixed(1);
       const lossRSI    = recentLoss.exitRSI || recentLoss.entryRSI || 50;
       const currentRSI = liveStock.rsi || signals.rsi || 50;
