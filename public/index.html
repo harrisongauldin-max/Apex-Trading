@@ -4191,15 +4191,11 @@ function copyOpenPositions() {
   lines.push('\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500');
   lines.push(groups.length+' position'+(groups.length!==1?'s':'')+' | Total P&L: '+(totalPnL>=0?'+':'-')+'$'+Math.abs(totalPnL).toFixed(2));
   var text = lines.join(NL);
-  var doCopy = function(t) {
-    if (navigator.clipboard && navigator.clipboard.writeText) return navigator.clipboard.writeText(t);
-    var ta = document.createElement('textarea');
-    ta.value = t; ta.style.cssText = 'position:fixed;opacity:0';
-    document.body.appendChild(ta); ta.select(); document.execCommand('copy'); ta.remove();
-    return Promise.resolve();
-  };
-  doCopy(text)
-    .then(function(){ btn.textContent='\u2714 Copied!'; setTimeout(function(){ btn.textContent='\u2398 Copy positions'; },2500); })
+  apexRobustCopy(text)
+    .then(function(how){
+      if (how === 'manual') { btn.textContent='\u2398 Copy positions'; return; }
+      btn.textContent='\u2714 Copied!'; setTimeout(function(){ btn.textContent='\u2398 Copy positions'; },2500);
+    })
     .catch(function(){ btn.textContent='! Failed'; setTimeout(function(){ btn.textContent='\u2398 Copy positions'; },2000); });
 }
 
@@ -4452,15 +4448,11 @@ function copyLogsForClaude() {
     lines.push('['+t+'] '+type+' '+(e.message||''));
   });
   var text = lines.join(NL);
-  var doCopy = function(t) {
-    if (navigator.clipboard && navigator.clipboard.writeText) return navigator.clipboard.writeText(t);
-    var ta = document.createElement('textarea');
-    ta.value = t; ta.style.cssText = 'position:fixed;opacity:0';
-    document.body.appendChild(ta); ta.select(); document.execCommand('copy'); ta.remove();
-    return Promise.resolve();
-  };
-  doCopy(text)
-    .then(function(){ btn.textContent='\u2714 Copied!'; setTimeout(function(){ btn.textContent='\u2398 Copy for Claude'; },2500); })
+  apexRobustCopy(text)
+    .then(function(how){
+      if (how === 'manual') { btn.textContent='\u2398 Copy for Claude'; return; }   // overlay handles it
+      btn.textContent='\u2714 Copied!'; setTimeout(function(){ btn.textContent='\u2398 Copy for Claude'; },2500);
+    })
     .catch(function(){ btn.textContent='! Failed'; setTimeout(function(){ btn.textContent='\u2398 Copy for Claude'; },2000); });
 }
 
