@@ -166,6 +166,10 @@ async function getStockBars(ticker, limit = 60) {
   const cacheKey = 'bars:' + ticker + ':' + limit;
   const cached = getCached(cacheKey, BARS_CACHE_TTL);
   if (cached) return cached;
+  // 6/30 (Harrison): don't fetch bars after hours. Daily bars don't change overnight, nothing that runs
+  // after the close needs fresh bars, and Alpaca drops these connections at night (Premature close spam
+  // + circuit trips). Serve cache if present (above), otherwise return empty without calling Alpaca.
+  if (!isMarketHours()) return cached || [];
   try {
     // Always use date range - more reliable than limit param across all Alpaca tiers
     const end   = new Date().toISOString().split("T")[0];
@@ -207,6 +211,9 @@ async function getIntradayBars(ticker, minutes = 390) {
       return _sliced; // OPT8: serve sub-window from full cached bars
     }
   }
+  // 6/30 (Harrison): no intraday fetch after hours — there's no live session, the last session's bars
+  // are already cached, and Alpaca drops these 1-Min connections at night. Serve cache or return empty.
+  if (!isMarketHours()) return [];   // 6/30: cache already served above; nothing to fetch after hours
   try {
     // Calculate market open in ET (Railway runs UTC - must use ET explicitly)
     const nowET       = getETTime();
