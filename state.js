@@ -8,7 +8,17 @@ function getETTime() {
 const BACKUP_FILE = require('path').join(__dirname, 'state-backup.json');
 const fs   = require('fs');
 const path = require('path');
-const fetch = require('node-fetch');
+const _nodeFetch = require('node-fetch');
+const http  = require('http');
+const https = require('https');
+// 7/1 fix (Premature-close storm): Node 19+ made the global http/https agent keepAlive:true by default.
+// node-fetch v2 reuses those pooled sockets; when Alpaca/Railway's edge closes an idle keep-alive socket,
+// the next reuse fails mid-response with "Premature close" — the storm hitting every endpoint AND every host
+// (data.alpaca, paper-api, anthropic, marketaux) at once. Forcing a fresh connection per request kills reuse.
+const _noKeepAliveHttp  = new http.Agent({ keepAlive: false });
+const _noKeepAliveHttps = new https.Agent({ keepAlive: false });
+const _agentFor = (parsedURL) => parsedURL.protocol === 'http:' ? _noKeepAliveHttp : _noKeepAliveHttps;
+const fetch = (url, opts = {}) => _nodeFetch(url, { agent: _agentFor, ...opts });
 const { TELEMETRY_HEADER } = require('./telemetry');
 const { REDIS_URL, REDIS_TOKEN, REDIS_KEY, REDIS_SAVE_INTERVAL, STATE_FILE, MONTHLY_BUDGET,
   IS_PAPER_ACCOUNT, APEX_PAPER_EXPERIMENT,
