@@ -159,7 +159,7 @@ async function alpacaDelete(endpoint) {
 
 async function getStockQuote(ticker) {
   const data = await alpacaGet(`/stocks/${ticker}/quotes/latest`, ALPACA_DATA);
-  if (data && data.quote) {
+  if (data && data !== ALPACA_CONN_DROP && data.quote) {
     // Stale data check - reject quotes older than 5 minutes during market hours
     const quoteTime = data.quote.t ? new Date(data.quote.t).getTime() : Date.now();
     const ageMs     = Date.now() - quoteTime;
@@ -168,11 +168,16 @@ async function getStockQuote(ticker) {
       _log("warn", `${ticker} quote is ${(ageMs/60000).toFixed(1)}min old - stale data, skipping`);
       return null; // return null so calling code skips this stock
     }
-    return parseFloat(data.quote.ap || data.quote.bp || 0);
+    // 7/1 fix: price off the bid/ask MIDPOINT, not the raw ask. The raw ask (q.ap) can sit off-NBBO on a
+    // thin/one-sided quote and was skewing the mark. Two-sided → midpoint; one-sided → whichever we have.
+    const bid = parseFloat(data.quote.bp || 0);
+    const ask = parseFloat(data.quote.ap || 0);
+    const mid = (bid > 0 && ask > 0) ? (bid + ask) / 2 : (ask > 0 ? ask : bid);
+    if (mid > 0) return parseFloat(mid.toFixed(2));
   }
-  // Fallback to snapshot
+  // Fallback to snapshot's last executed trade (the actual print — reliable single value)
   const snap = await alpacaGet(`/stocks/${ticker}/snapshot`, ALPACA_DATA);
-  if (snap && snap.latestTrade) return parseFloat(snap.latestTrade.p || 0);
+  if (snap && snap !== ALPACA_CONN_DROP && snap.latestTrade) return parseFloat(snap.latestTrade.p || 0);
   return null;
 }
 
