@@ -36,8 +36,18 @@ const BONUS_AMOUNT        = 1000;
 const MAX_HEAT            = 0.60;
 const MAX_SECTOR_PCT      = 0.50;
 
+// ─── Data-gather mode ────────────────────────────────────────────
+// 6/30 (Harrison): master switch for the paper data-gathering phase. When true, the loss-based
+// TRADING HALTS are disabled so a bad day doesn't stop APEX from taking setups — we want continuous
+// data across all tapes. This ONLY removes the "stop trading because we lost too much" circuit
+// breakers. It does NOT touch: per-setup entry gates (score floors, D2 veto, cooldowns, re-entry
+// penalty), exit logic (stops, trail-floor, 3:15 flatten), or position sizing caps (MAX_CONTRACTS,
+// MAX_LOSS_PER_TRADE). Those all stay live so each trade still resolves cleanly and the win/loss
+// data stays interpretable. Flip to false to restore normal circuit-breaker behavior.
+const DATA_GATHER_MODE    = false;
+
 // ─── Exit parameters ─────────────────────────────────────────────
-const STOP_LOSS_PCT       = 0.15;   // 6/29: tightened 0.35→0.15 for data-gather phase (Harrison). NOTE: ~0.3-0.4% adverse underlying move trips this on a 0.4-delta call — expect more stop-outs incl. on dips that later recover.
+const STOP_LOSS_PCT       = 0.125;  // 6/30: tightened 0.15→0.125 (Harrison). Down 12.5% → sell. Paired with same-week DTE switch — expect frequent stop-outs on gamma noise; that is the data being gathered.
 const FAST_STOP_PCT       = 0.20;
 const FAST_STOP_HOURS     = 48;
 const TAKE_PROFIT_PCT     = 0.50;
@@ -389,7 +399,7 @@ module.exports = {
   ALPACA_OPT_SNAP, ALPACA_NEWS, OPTION_FEED, GMAIL_USER, RESEND_API_KEY,
   ANTHROPIC_API_KEY, ANTHROPIC_MODEL, REDIS_URL, REDIS_TOKEN, REDIS_KEY,
   REDIS_SAVE_INTERVAL, MARKETAUX_KEY, MONTHLY_BUDGET, CAPITAL_FLOOR,
-  REVENUE_THRESHOLD, BONUS_AMOUNT, MAX_HEAT, MAX_SECTOR_PCT,
+  REVENUE_THRESHOLD, BONUS_AMOUNT, MAX_HEAT, MAX_SECTOR_PCT, DATA_GATHER_MODE,
   STOP_LOSS_PCT, FAST_STOP_PCT, FAST_STOP_HOURS, TAKE_PROFIT_PCT,
   PARTIAL_CLOSE_PCT, TRAIL_ACTIVATE_PCT, TRAIL_STOP_PCT, BREAKEVEN_LOCK_PCT,
   RIDE_TARGET_PCT, TIME_STOP_DAYS, TIME_STOP_MOVE, IV_COLLAPSE_PCT,
