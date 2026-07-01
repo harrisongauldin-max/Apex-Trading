@@ -26,7 +26,7 @@ const REDIS_URL         = process.env.UPSTASH_REDIS_REST_URL  || '';
 const REDIS_TOKEN       = process.env.UPSTASH_REDIS_REST_TOKEN || '';
 const REDIS_KEY         = 'spt1:state';
 const REDIS_SAVE_INTERVAL = 30 * 1000;
-const MARKETAUX_KEY     = process.env.MARKETAUX_API_KEY || '';
+const MARKETAUX_KEY     = process.env.MARKETAUX_API_KEY || process.env.MARKETAUX_KEY || '';  // 7/1 fix: accept either name (market.js read MARKETAUX_KEY; constants read MARKETAUX_API_KEY — a keyless path failed silently)
 
 // ─── Capital / risk ──────────────────────────────────────────────
 const MONTHLY_BUDGET      = 10000; // Reset 6/8/2026: $10K to match planned live capital (post-FINRA PDT alignment)
