@@ -1955,7 +1955,7 @@ async function runScan() {
     const _creditType    = null;
     const _debitCallScore = (!isBearTrend) ? callSetup.score : null;
     const _debitCallActive = (!isBearTrend && _debitCallScore !== null);
-    const _effectiveMin  = _creditType ? MIN_SCORE_CREDIT : (_debitCallActive ? 75 : MIN_SCORE);
+    const _effectiveMin  = dataGatherActive(DATA_GATHER_MODE) ? 50 : (_creditType ? MIN_SCORE_CREDIT : (_debitCallActive ? 75 : MIN_SCORE));  // 7/1: verdict floor tracks the data-gather gate (50) so [VERDICT] logs + dashboard match actual entries
     const _rrEst = (state._lastCreditRR && state._lastCreditRR[stock.ticker]) ? state._lastCreditRR[stock.ticker] : null;
 
     state._scoreDebug[stock.ticker] = {
@@ -2276,7 +2276,8 @@ async function runScan() {
         recentSameDir: recentSameDirMins, existingProfitPct, existingCreditProfitPct,
         drawdownMinScore: ddProtocol.minScore || MIN_SCORE, drawdownLevel: ddProtocol.level || "normal",
         agentSignal: (state._agentMacro || {}).signal || "neutral",
-        experimentMode: paperDataActive(state), experimentMinScore: EXPERIMENT_CALL_FLOOR, experimentMinScorePut: EXPERIMENT_PUT_FLOOR }
+        experimentMode: paperDataActive(state), experimentMinScore: EXPERIMENT_CALL_FLOOR, experimentMinScorePut: EXPERIMENT_PUT_FLOOR,
+        dataGather: dataGatherActive(DATA_GATHER_MODE) }   // 7/1 (Harrison): data-gather → entryEngine floors the gate at score 50
     );
     if (eeResult.pass && eeResult.minScoreTrace && eeResult.minScoreTrace.experiment) {
       const _expSideTag = optionType === "put" ? "PUT under-85-wall" : "CALL";
