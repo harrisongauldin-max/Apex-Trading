@@ -39,7 +39,7 @@ let apiCallsThisMinute = 0;
 // ─── Circuit breaker ─────────────────────────────────────────────
 let _alpacaConsecFails       = 0;
 let _alpacaCircuitOpen       = false;
-let _lastAlpacaConnDropped   = false;   // 6/30: set true when the last alpacaGet failed on a connection error (Premature close etc.), so feed-fallback loops can bail instead of re-trying the same dead socket under a different feed name.
+const ALPACA_CONN_DROP = Symbol("alpaca-conn-drop");   // 6/30: distinct return from alpacaGet on a NETWORK/socket failure (vs null for empty/bad data). Callers use it to skip retrying other feeds on a dead connection — no shared mutable state, safe under concurrent calls.
 const ALPACA_CIRCUIT_THRESHOLD = 5;
 
 function getCircuitState() {
@@ -75,12 +75,12 @@ function withTimeout(promise, ms = 5000) {
 // Resets on first successful call
 
 async function alpacaGet(endpoint, base = ALPACA_BASE) {
+  let text;
   try {
     trackAPICall();
-    const res  = await withTimeout(fetch(`${base}${endpoint}`, { headers: alpacaHeaders() }));
-    const text = await res.text();
+    const res = await withTimeout(fetch(`${base}${endpoint}`, { headers: alpacaHeaders() }));
+    text = await res.text();
     if (text.startsWith("<")) {
-      _lastAlpacaConnDropped = false;   // HTML/status error is a completed response, not a connection drop
       _alpacaConsecFails++;
       if (res.status === 429) { _log("warn", `Rate limit hit: ${endpoint} - slowing down`); await new Promise(r => setTimeout(r, 2000)); }
       else if (res.status === 401 || res.status === 403) { _log("error", `Auth error ${res.status} on ${endpoint} - check API keys`); }
@@ -91,25 +91,32 @@ async function alpacaGet(endpoint, base = ALPACA_BASE) {
         if (_alertFn) _alertFn("APEX ALERT - Alpaca API degraded",
           `<p>${_alpacaConsecFails} consecutive Alpaca failures. New entries paused. Check Railway logs.</p>`).catch(()=>{});
       }
-      return null;
+      return null;   // completed response, just an error status — callers cascade normally
     }
-    // Successful call - reset circuit
-    _lastAlpacaConnDropped = false;   // got a real HTTP response (even if empty) — not a connection drop
-    if (_alpacaConsecFails > 0) {
-      _log("scan", `[CIRCUIT] Alpaca API recovered after ${_alpacaConsecFails} failures`);
-      _alpacaConsecFails = 0;
-      _alpacaCircuitOpen = false;
-    }
-    return JSON.parse(text);
   } catch(e) {
-    _lastAlpacaConnDropped = true;   // network/socket failure — feed-fallback loops should NOT retry other feeds
+    // Network/socket failure (Premature close, ECONNRESET, timeout). Return a distinct sentinel so the
+    // caller can tell a DEAD CONNECTION from empty data and skip retrying other feeds on the same socket.
     _alpacaConsecFails++;
     if (_alpacaConsecFails >= ALPACA_CIRCUIT_THRESHOLD && !_alpacaCircuitOpen) {
       _alpacaCircuitOpen = true;
       _log("warn", `[CIRCUIT] Alpaca API circuit open after network failures`);
     }
     _log("error", `alpacaGet(${endpoint}): ${e.message}`);
-    return null;
+    return ALPACA_CONN_DROP;
+  }
+  // Got a real HTTP response body. Parse OUTSIDE the try so a JSON error is NOT misread as a connection
+  // drop — a bad body is a data problem, not a socket problem, and callers should cascade normally.
+  try {
+    const parsed = JSON.parse(text);
+    if (_alpacaConsecFails > 0) {
+      _log("scan", `[CIRCUIT] Alpaca API recovered after ${_alpacaConsecFails} failures`);
+      _alpacaConsecFails = 0;
+      _alpacaCircuitOpen = false;
+    }
+    return parsed;
+  } catch(pe) {
+    _log("warn", `alpacaGet(${endpoint}): bad JSON body - ${pe.message}`);
+    return null;   // completed response, unparseable — cascade like an empty result, do NOT treat as conn drop
   }
 }
 
@@ -168,15 +175,15 @@ async function getStockBars(ticker, limit = 60) {
     for (const feed of feeds) {
       const url  = `/stocks/${ticker}/bars?timeframe=1Day&start=${start}&end=${end}&limit=${limit}&feed=${feed}`;
       const data = await alpacaGet(url, ALPACA_DATA);
+      if (data === ALPACA_CONN_DROP) return [];   // 6/30: connection died — next feed hits the same dead socket, don't cascade
       if (data && data.bars && data.bars.length > 1) {
         // Daily bars don't change intraday - cache for 60 minutes
         return setCache('bars:' + ticker + ':' + limit, data.bars);
       }
-      if (_lastAlpacaConnDropped) return [];   // 6/30: connection died — next feed hits the same dead socket, don't cascade
     }
-    // Last resort - no feed param (skip if the connection just dropped — it would only fail again)
-    if (_lastAlpacaConnDropped) return [];
+    // Last resort - no feed param
     const last = await alpacaGet(`/stocks/${ticker}/bars?timeframe=1Day&start=${start}&end=${end}&limit=${limit}`, ALPACA_DATA);
+    if (last === ALPACA_CONN_DROP) return [];
     return last && last.bars ? last.bars : [];
   } catch(e) { return []; }
 
@@ -217,9 +224,9 @@ async function getIntradayBars(ticker, minutes = 390) {
     for (const feed of feeds) {
       const url  = `/stocks/${ticker}/bars?timeframe=1Min&start=${startISO}&end=${endISO}&limit=390&feed=${feed}`;
       const data = await alpacaGet(url, ALPACA_DATA);
+      if (data === ALPACA_CONN_DROP) return [];   // 6/30: connection died — don't cascade to the next feed
       if (data && data.bars && data.bars.length >= 5)
         return setCache(_intradayCacheKey, data.bars);
-      if (_lastAlpacaConnDropped) return [];   // 6/30: connection died — don't cascade to the next feed
     }
     return [];
   } catch(e) { return []; }
