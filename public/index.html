@@ -555,6 +555,13 @@ input[type=text]:focus{border-color:var(--blue)}
       </div>
       <span id="pdm-toggle-label" style="font-size:9px;color:var(--muted)">off</span>
     </div>
+    <div style="display:flex;align-items:center;gap:8px;padding:5px 10px;border:1px solid rgba(140,120,240,.4);border-radius:6px;background:rgba(140,120,240,.08)">
+      <span style="font-size:10px;color:#9c88ff;letter-spacing:.5px" title="Twin-entry A/B: opens a same-week (0-8 DTE) leg AND a standard (30-50 DTE) leg on every qualifying signal. Lifts the daily loss halt, same-underlying block, and re-entry cooldowns. Exits, floors, and sizing stay normal.">DATA-GATHER A/B</span>
+      <div id="dgm-toggle" onclick="toggleDataGather()" style="width:36px;height:18px;border-radius:9px;background:var(--border);cursor:pointer;position:relative;transition:background .2s">
+        <div id="dgm-toggle-knob" style="position:absolute;top:2px;left:2px;width:14px;height:14px;border-radius:50%;background:#555;transition:left .2s"></div>
+      </div>
+      <span id="dgm-toggle-label" style="font-size:9px;color:var(--muted)">off</span>
+    </div>
     <button class="btn btn-green" onclick="triggerScan()">▶ MANUAL SCAN</button>
     <button class="btn" onclick="triggerDryRun()" style="background:#1a2a10;border-color:#4a7a20;color:#aadd44">⚡ DRY RUN</button>
     <button class="btn" onclick="triggerTestScan()" style="background:#1a1a2a;border-color:#6644aa;color:#aa88ff" title="Forces a dry run scan regardless of market hours — safe for after-hours testing">🧪 TEST SCAN</button>
@@ -1367,6 +1374,28 @@ function updatePaperDataModeUI() {
   if (banner) banner.style.display = on ? 'block' : 'none';
 }
 
+function toggleDataGather() {
+  const next = !(state.dataGatherActive === true);
+  const h = secretHeaders(); if (!h) return;
+  fetch('/api/data-gather', { method:'POST', headers:h, body: JSON.stringify({ on: next }) })
+    .then(r => r.json().then(d => ({ ok: r.ok, d })))
+    .then(({ ok, d }) => {
+      if (!ok) { alert(d.error || 'Failed to toggle data-gather mode'); return; }
+      state.dataGatherActive = d.active;
+      updateDataGatherUI();
+    })
+    .catch(e => alert('Error: ' + e.message));
+}
+function updateDataGatherUI() {
+  const on = state.dataGatherActive === true;
+  const t = document.getElementById('dgm-toggle');
+  const knob = document.getElementById('dgm-toggle-knob');
+  const label = document.getElementById('dgm-toggle-label');
+  if (t) t.style.background = on ? '#8c78f0' : 'var(--border)';
+  if (knob) { knob.style.left = on ? '20px' : '2px'; knob.style.background = on ? '#fff' : '#555'; }
+  if (label) { label.textContent = on ? 'ON' : 'off'; label.style.color = on ? '#9c88ff' : 'var(--muted)'; }
+}
+
 async function rescorePos(ticker) {
   // Show loading state
   const btn = document.querySelector(`button[onclick="rescorePos('${ticker}')"]`);
@@ -1473,6 +1502,7 @@ function renderAll() {
   renderPortfolioChart();
   renderAgentPanel();
   updatePaperDataModeUI();
+  updateDataGatherUI();
 }
 
 function renderMarketContext() { /* handled in renderMetrics */ }
