@@ -17,7 +17,7 @@ const SCORE_DELTA  = 3;               // |score| move that counts as material
 const MAX_ROWS     = 6000;            // safety cap on a runaway day
 const BLOCKER_MAX  = 60;              // truncate the headline blocker text
 
-const TELEMETRY_HEADER = "time,tkr,px,iRSI,dRSI,call,put,isMR,curl,vwap%,blocker,drivers";
+const TELEMETRY_HEADER = "time,tkr,px,iRSI,dRSI,call,put,isMR,curl,vwap%,blocker,drivers,shadow";
 
 // intraday-RSI tier — a crossing is "material" so dips/spikes always log a row
 function _rsiTier(r) {
@@ -46,6 +46,17 @@ function topDrivers(reasons) {
   return scored.slice(0, 3).map(d => `${d.label}${d.v > 0 ? "+" : ""}${d.v}`).join(";");
 }
 
+// Pull the four shadow turn-confirmation booleans from the [MR-SHADOW] reason line (logging-only
+// gates added 6/30). Emits a compact "L1A0V0C0" tag (lift/age/vwap/combo) or "" if no flush row.
+// Kept separate from topDrivers because the shadow line intentionally has no (+N) score tag.
+function shadowTag(reasons) {
+  if (!Array.isArray(reasons)) return "";
+  const line = reasons.find(r => String(r).includes("[MR-SHADOW]"));
+  if (!line) return "";
+  const g = (re) => (re.exec(line) || [,"?"])[1];
+  return `L${g(/lift [\d.]+pt=(\d)/)}A${g(/lowAge [\d.]+m=(\d)/)}V${g(/vwapReclaim=(\d)/)}C${g(/COMBO\(lift&age\)=(\d)/)}`;
+}
+
 function _etTime() {
   return new Date().toLocaleTimeString("en-US", { hour12: false, timeZone: "America/New_York" });
 }
@@ -65,17 +76,20 @@ function recordTelemetry(state, rec) {
     const prev = state._telemetryLast[rec.tkr];
     const tier = _rsiTier(rec.iRSI);
 
+    const _shadowNow = shadowTag(rec.direction === "put" ? rec.putReasons : rec.callReasons);
     const material =
       !prev ||
       Math.abs((rec.call || 0) - (prev.call || 0)) >= SCORE_DELTA ||
       Math.abs((rec.put  || 0) - (prev.put  || 0)) >= SCORE_DELTA ||
       (!!rec.isMR !== !!prev.isMR) ||
       ((rec.blocker || "") !== (prev.blocker || "")) ||
+      (_shadowNow !== (prev.shadow || "")) ||
       (tier !== prev.tier) ||
       (now - (prev.ts || 0)) >= HEARTBEAT_MS;
     if (!material) return false;
 
     const drivers = topDrivers(rec.direction === "put" ? rec.putReasons : rec.callReasons);
+    const shadow  = shadowTag(rec.direction === "put" ? rec.putReasons : rec.callReasons);
     const blocker = String(rec.blocker || "").replace(/\s+/g, " ").trim().slice(0, BLOCKER_MAX);
 
     const row = [
@@ -91,6 +105,7 @@ function recordTelemetry(state, rec) {
       rec.vwapPct == null ? "" : (rec.vwapPct >= 0 ? "+" : "") + Number(rec.vwapPct).toFixed(1),
       blocker,
       drivers,
+      shadow,
     ].map(_csv).join(",");
 
     state._telemetryBuffer.push(row);
@@ -98,7 +113,7 @@ function recordTelemetry(state, rec) {
       state._telemetryBuffer = state._telemetryBuffer.slice(-MAX_ROWS);
 
     state._telemetryLast[rec.tkr] = {
-      call: rec.call, put: rec.put, isMR: !!rec.isMR, blocker: rec.blocker || "", tier, ts: now,
+      call: rec.call, put: rec.put, isMR: !!rec.isMR, blocker: rec.blocker || "", tier, ts: now, shadow: _shadowNow,
     };
     return true;
   } catch (_) {
