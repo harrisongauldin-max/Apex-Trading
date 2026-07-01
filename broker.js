@@ -39,6 +39,7 @@ let apiCallsThisMinute = 0;
 // ─── Circuit breaker ─────────────────────────────────────────────
 let _alpacaConsecFails       = 0;
 let _alpacaCircuitOpen       = false;
+let _lastAlpacaConnDropped   = false;   // 6/30: set true when the last alpacaGet failed on a connection error (Premature close etc.), so feed-fallback loops can bail instead of re-trying the same dead socket under a different feed name.
 const ALPACA_CIRCUIT_THRESHOLD = 5;
 
 function getCircuitState() {
@@ -79,6 +80,7 @@ async function alpacaGet(endpoint, base = ALPACA_BASE) {
     const res  = await withTimeout(fetch(`${base}${endpoint}`, { headers: alpacaHeaders() }));
     const text = await res.text();
     if (text.startsWith("<")) {
+      _lastAlpacaConnDropped = false;   // HTML/status error is a completed response, not a connection drop
       _alpacaConsecFails++;
       if (res.status === 429) { _log("warn", `Rate limit hit: ${endpoint} - slowing down`); await new Promise(r => setTimeout(r, 2000)); }
       else if (res.status === 401 || res.status === 403) { _log("error", `Auth error ${res.status} on ${endpoint} - check API keys`); }
@@ -92,6 +94,7 @@ async function alpacaGet(endpoint, base = ALPACA_BASE) {
       return null;
     }
     // Successful call - reset circuit
+    _lastAlpacaConnDropped = false;   // got a real HTTP response (even if empty) — not a connection drop
     if (_alpacaConsecFails > 0) {
       _log("scan", `[CIRCUIT] Alpaca API recovered after ${_alpacaConsecFails} failures`);
       _alpacaConsecFails = 0;
@@ -99,6 +102,7 @@ async function alpacaGet(endpoint, base = ALPACA_BASE) {
     }
     return JSON.parse(text);
   } catch(e) {
+    _lastAlpacaConnDropped = true;   // network/socket failure — feed-fallback loops should NOT retry other feeds
     _alpacaConsecFails++;
     if (_alpacaConsecFails >= ALPACA_CIRCUIT_THRESHOLD && !_alpacaCircuitOpen) {
       _alpacaCircuitOpen = true;
@@ -168,8 +172,10 @@ async function getStockBars(ticker, limit = 60) {
         // Daily bars don't change intraday - cache for 60 minutes
         return setCache('bars:' + ticker + ':' + limit, data.bars);
       }
+      if (_lastAlpacaConnDropped) return [];   // 6/30: connection died — next feed hits the same dead socket, don't cascade
     }
-    // Last resort - no feed param
+    // Last resort - no feed param (skip if the connection just dropped — it would only fail again)
+    if (_lastAlpacaConnDropped) return [];
     const last = await alpacaGet(`/stocks/${ticker}/bars?timeframe=1Day&start=${start}&end=${end}&limit=${limit}`, ALPACA_DATA);
     return last && last.bars ? last.bars : [];
   } catch(e) { return []; }
@@ -213,6 +219,7 @@ async function getIntradayBars(ticker, minutes = 390) {
       const data = await alpacaGet(url, ALPACA_DATA);
       if (data && data.bars && data.bars.length >= 5)
         return setCache(_intradayCacheKey, data.bars);
+      if (_lastAlpacaConnDropped) return [];   // 6/30: connection died — don't cascade to the next feed
     }
     return [];
   } catch(e) { return []; }
