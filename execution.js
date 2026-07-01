@@ -7,12 +7,12 @@ let dryRunMode = false; // set by scanner via setDryRunMode()
 function setDryRunMode(v) { dryRunMode = v; }
 const fmt = (n) => '$' + (n||0).toFixed(2);
 const MAX_LOSS_PER_TRADE = 900;
-const MAX_CONTRACTS = 3;
+const MAX_CONTRACTS = 1;   // 6/30 (Harrison): 3→1. Single contract per position keeps per-leg heat minimal so twin-entry pairs aren't throttled by MAX_HEAT; also makes the same-week vs standard legs directly comparable (equal contract count).
 const VIX_REDUCE50 = 35;
 const VIX_REDUCE25 = 28;
 
 const { alpacaGet, alpacaPost, alpacaDelete, getStockBars } = require('./broker');
-const { state, logEvent, markDirty, saveStateNow }          = require('./state');
+const { state, logEvent, markDirty, saveStateNow, dataGatherActive }          = require('./state');
 const { calcGreeks, getETTime,
         openRisk, heatPct, getDeployableCash, effectiveHeatCap,
         calcCreditSpreadTP ,
@@ -22,7 +22,7 @@ const { CAPITAL_FLOOR, MIN_OPTION_PREMIUM, MIN_OI,
         MAX_SPREAD_PCT, EARLY_SPREAD_PCT, TARGET_DELTA_MIN,
         TARGET_DELTA_MAX, MONTHLY_BUDGET, INDIVIDUAL_STOCKS_ENABLED,
         WATCHLIST, ALPACA_OPT_SNAP, ALPACA_OPTIONS, OPTION_FEED,
-        MAX_HEAT, STOP_LOSS_PCT, TAKE_PROFIT_PCT,
+        MAX_HEAT, STOP_LOSS_PCT, TAKE_PROFIT_PCT, DATA_GATHER_MODE,
 }                                          = require('./constants');
 const { confirmPendingOrder } = require('./closeEngine');
 const { writeJournalEntry } = require('./state');
@@ -83,8 +83,9 @@ async function findContract(ticker, optionType, targetDelta, targetDTE, vix, sto
       fetchMin = fixedExpiry;
       fetchMax = fixedExpiry;
     } else {
-      const minDays = Math.max(7, targetDTE - 7);
-      const maxDays = Math.min(120, targetDTE + 21);
+      // 6/30: band-aware window. Same-week profile (small targetDTE) → 0-8 DTE. Monthly profile → ±10 (30-50).
+      const minDays = targetDTE <= 10 ? 0 : Math.max(0, targetDTE - 10);
+      const maxDays = targetDTE <= 10 ? 8 : Math.min(120, targetDTE + 10);
       fetchMin = new Date(today.getTime() + minDays * 86400000).toISOString().split("T")[0];
       fetchMax = new Date(today.getTime() + maxDays * 86400000).toISOString().split("T")[0];
     }
@@ -139,9 +140,11 @@ async function findContract(ticker, optionType, targetDelta, targetDTE, vix, sto
       if (delta < deltaMin || delta > deltaMax) continue;
       const strike = parseFloat(c.strike_price);
       const expDTE = Math.round((new Date(c.expiration_date) - today) / 86400000);
-      const DTE_ENTRY_CAP = 45;
+      // Cap derives from the requested band: a same-week request (targetDTE<=10) caps at 8; a standard
+      // request caps at 55 (covers 30-50). Keeps each twin-entry leg inside its own band.
+      const DTE_ENTRY_CAP = targetDTE <= 10 ? 8 : 55;
       if (expDTE > DTE_ENTRY_CAP) {
-        logEvent("filter", `${ticker} findContract: skipping $${strike} ${expDTE}DTE — exceeds ${DTE_ENTRY_CAP}DTE entry cap (Tier 3 framework not yet implemented)`);
+        logEvent("filter", `${ticker} findContract: skipping $${strike} ${expDTE}DTE — exceeds ${DTE_ENTRY_CAP}DTE entry cap (${targetDTE <= 10 ? "same-week" : "standard"} band)`);
         continue;
       }
       const _rawIV = parseFloat(snap.impliedVolatility || 0);   // Q3.1: raw feed IV (pre sigma-fallback)
@@ -240,7 +243,7 @@ function calcPositionSize(premium, score, vix) {
   return contracts;
 }
 
-async function executeTrade(stock, price, score, scoreReasons, vix, optionType = "call", isMeanReversion = false, sizeMod = 1.0) {
+async function executeTrade(stock, price, score, scoreReasons, vix, optionType = "call", isMeanReversion = false, sizeMod = 1.0, dteBand = null) {
   const estimatedMinCost = price * 0.03 * 100;
   if (state.cash - estimatedMinCost < CAPITAL_FLOOR) {
     logEvent("skip", `${stock.ticker} - insufficient cash pre-check (est. min cost ${fmt(estimatedMinCost)})`);
@@ -248,8 +251,31 @@ async function executeTrade(stock, price, score, scoreReasons, vix, optionType =
   }
 
   const targetDelta = isMeanReversion ? 0.42 : 0.35;
-  const targetDTE   = isMeanReversion ? 14   : 38;
-  let contract = stock._cachedContract || await findContract(stock.ticker, optionType, targetDelta, targetDTE, vix, stock);
+  // 6/30 (Harrison): DTE resolution.
+  //   dteBand === "sameweek" → force 0-8 DTE leg.  dteBand === "standard" → force the 30-50 momentum band.
+  //   dteBand === null (normal call) → DATA_GATHER_MODE forces same-week; otherwise per-profile default.
+  // Twin-entry A/B (data-gather on) calls this TWICE with each band so both expiries open on one signal.
+  const _dgm = dataGatherActive(DATA_GATHER_MODE);
+  const targetDTE = dteBand === "sameweek" ? 3
+                  : dteBand === "standard" ? 40
+                  : (_dgm ? 3 : (isMeanReversion ? 3 : 40));
+  const _sameWeekLeg = (dteBand === "sameweek") || (dteBand === null && _dgm);
+  // Twin-entry: the prefetch caches ONE contract. Only the same-week leg may use it; the standard leg
+  // must select its own (else it would inherit the same-week cache). Validate the cache against the band.
+  let contract;
+  if (dteBand === "standard") {
+    contract = await findContract(stock.ticker, optionType, targetDelta, targetDTE, vix, stock);
+  } else {
+    contract = stock._cachedContract || await findContract(stock.ticker, optionType, targetDelta, targetDTE, vix, stock);
+    if (contract && _sameWeekLeg) {
+      const _cDTE = contract.expDays || contract.dte ||
+        (contract.expiration_date ? Math.round((new Date(contract.expiration_date) - new Date()) / 86400000) : 0);
+      if (_cDTE > 8) {
+        logEvent("filter", `${stock.ticker} - cached ${_cDTE}DTE contract rejected (same-week leg) — re-selecting`);
+        contract = await findContract(stock.ticker, optionType, targetDelta, targetDTE, vix, stock);
+      }
+    }
+  }
   delete stock._cachedContract;
 
   if (!contract) {
@@ -258,7 +284,7 @@ async function executeTrade(stock, price, score, scoreReasons, vix, optionType =
     state.dataQuality.estimatedTrades++;
     state.dataQuality.totalTrades++;
     const iv       = 0.25 + stock.ivr * 0.003;
-    const expDays = isMeanReversion ? 21 : 28;
+    const expDays = _sameWeekLeg ? 4 : (dteBand === "standard" ? 35 : (isMeanReversion ? 21 : 28));   // 6/30: leg-aware fallback DTE
     const _expDate = new Date(Date.now() + expDays * 86400000);
     const expDate = _expDate.toLocaleDateString('en-US', { month: 'short', day: '2-digit', year: 'numeric' });
     const expiryType = 'weekly';
@@ -483,6 +509,7 @@ async function executeTrade(stock, price, score, scoreReasons, vix, optionType =
     fastStopPct:    exitParams.fastStopPct,
     dteLabel:       exitParams.label,
     isMeanReversion: isMeanReversion,
+    dteBand:        dteBand || (_sameWeekLeg ? "sameweek" : "standard"),   // 6/30: A/B leg tag for twin-entry comparison
     isTier3:        (contract.expDays || contract.dte || 0) > 45 && !isMeanReversion,
     entryVIX:       vix,
     partialClosed:  false,
