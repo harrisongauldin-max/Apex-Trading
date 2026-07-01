@@ -684,7 +684,17 @@ async function restoreBuffersFromRedis() {
   } catch(e) { console.error("[BOOT] telemetry restore failed:", e.message); }
 }
 
-module.exports = { state, markDirty, saveStateNow, flushStateIfDirty, logEvent,
+// 6/30 (Harrison): runtime resolver for the data-gather A/B switch. Returns the live state override
+// if it has been set via /api/data-gather, otherwise the DATA_GATHER_MODE constant default. Persists
+// in state (Redis-backed) so a toggle survives restarts/redeploys. Every read-site calls this instead
+// of the raw constant so the switch is flippable without a code change.
+function dataGatherActive(defaultVal) {
+  return (state._dataGatherMode === true || state._dataGatherMode === false)
+    ? state._dataGatherMode
+    : !!defaultVal;
+}
+
+module.exports = { state, markDirty, saveStateNow, flushStateIfDirty, logEvent, dataGatherActive,
                    redisSave, redisLoad, defaultState, saveDailyLogToRedis, saveTelemetryToRedis, getETDateStr,
                    restoreBuffersFromRedis, parseRedisBlob,
                    writeJournalEntry, updateJournalExit, loadJournalDay, saveJournalDay, getJournalRange,
