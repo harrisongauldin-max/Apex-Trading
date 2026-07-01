@@ -1276,6 +1276,25 @@ async function runScan() {
       continue;
     }
 
+    // 7/1 (Harrison): PRICE-SANITY GUARD. getStockQuote can hand back an off-market value — e.g. a quote
+    // whose response was crossed at the transport layer during a connection storm (QQQ receiving SPY-range
+    // data — see 7/1 telemetry), or a bad/wide ask. Cross-check the quote against the ticker's OWN most
+    // recent bar; if it deviates too far, the quote is untrusted, so skip scoring this ticker this scan
+    // rather than generate phantom scores + strikes off a wrong underlying. Next scan gets a clean quote.
+    // Root fix is the keep-alive/transport change; this makes any future cross non-fatal. 0.015 is tunable.
+    const _refBar = (intradayBars && intradayBars.length && intradayBars[intradayBars.length-1]?.c > 0)
+                      ? intradayBars[intradayBars.length-1].c
+                      : (bars && bars.length && bars[bars.length-1]?.c > 0 ? bars[bars.length-1].c : 0);
+    if (_refBar > 0) {
+      const _pxDev = Math.abs(price - _refBar) / _refBar;
+      if (_pxDev > 0.015) {
+        logEvent("filter", `${stock.ticker} PRICE-SANITY: quote $${price.toFixed(2)} is ${(_pxDev*100).toFixed(1)}% off own bar $${_refBar.toFixed(2)} — untrusted, skipping this scan`);
+        if (!state._scoreDebug) state._scoreDebug = {};
+        state._scoreDebug[stock.ticker] = { ts: Date.now(), price, putScore: 0, callScore: 0, effectiveMin: MIN_SCORE, putReasons: [], callReasons: [], signals: {}, blocked: [`price-sanity: quote ${(_pxDev*100).toFixed(1)}% off own bar $${_refBar.toFixed(2)}`] };
+        continue;
+      }
+    }
+
     if (bars.length >= 2) {
       const overnightGap = Math.abs(bars[bars.length-1].o - bars[bars.length-2].c) / bars[bars.length-2].c;
       const _gapDir = bars[bars.length-1].o - bars[bars.length-2].c;
