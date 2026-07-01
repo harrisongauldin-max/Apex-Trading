@@ -476,6 +476,23 @@ function scoreMeanReversionCall(stock, relStrength, adx, bars, vix, intradayBars
     else if (_intraDD >= MR_FLUSH_DD1) _flush = 8;
     const _applied = Math.max(0, _flush - _dailyDiscount);   // max vs daily, no double-count
     if (_applied > 0) score += _applied;
+    // ── 6/30 SHADOW GATES (logging only — do NOT gate entry). Two days disagree on whether the
+    // flush credit should require a confirmed turn (6/29 V-day: no; 6/30 open: yes, the 9:04 knives
+    // that keep falling are exactly what an ungated credit rewards). We log what each candidate
+    // "turn has started" signal WOULD decide on every flush row, then pair vs forward outcome in the
+    // telemetry table. The signal that cleanly separates the 9:04 knives from the 9:15 bounces wins
+    // on evidence. When one proves out, it becomes the real gate; until then entry is unchanged.
+    const _shadowVwap    = stock.intradayVWAP || stock.vwap || 0;
+    const _shadowLowAgeM = _mrSessLowAt > 0 ? (Date.now() - _mrSessLowAt) / 60000 : 0;
+    const _sgLift   = _mrLiftOff >= MR_INTRA_LIFTOFF_PTS;              // RSI lifted ≥4 off session low
+    const _sgAge    = _shadowLowAgeM >= 5;                            // low is ≥5 min old (not new-low now)
+    const _sgVwap   = _shadowVwap > 0 && _ibCur >= _shadowVwap;       // price reclaimed VWAP
+    const _sgCombo  = _sgLift && _sgAge;                             // earlyTurn-style: lifted AND based
+    reasons.push(
+      `[MR-SHADOW] lift ${_mrLiftOff.toFixed(1)}pt=${_sgLift?1:0} | lowAge ${_shadowLowAgeM.toFixed(1)}m=${_sgAge?1:0} ` +
+      `| vwapReclaim=${_sgVwap?1:0} (px ${_ibCur.toFixed(2)} vwap ${_shadowVwap.toFixed(2)}) | COMBO(lift&age)=${_sgCombo?1:0} ` +
+      `| creditWas +${_applied}`
+    );
     reasons.push(
       `[MR-FLUSH] intraDD ${(_intraDD*100).toFixed(2)}% offHigh → flush +${_flush} ` +
       `(applied +${_applied} max-vs-daily +${_dailyDiscount}) | sessLowRSI ${Number(_mrSessLowRSI).toFixed(1)} ` +
