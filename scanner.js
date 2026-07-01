@@ -8,7 +8,7 @@ const {
   getStockBars, getIntradayBars, getStockQuote, getCircuitState,
 } = require('./broker');
 
-const { state, logEvent, markDirty, saveStateNow, flushStateIfDirty, paperDataActive } = require('./state');
+const { state, logEvent, markDirty, saveStateNow, flushStateIfDirty, paperDataActive, dataGatherActive } = require('./state');
 const { recordTelemetry } = require('./telemetry');
 
 const {
@@ -75,7 +75,7 @@ const {
 const { sendMorningBriefing, sendEmail, setReportingContext, getBenchmarkComparison, sendResendEmail } = require('./reporting');
 
 const {
-  WATCHLIST, CAPITAL_FLOOR, MIN_SCORE, MIN_SCORE_CREDIT, MAX_HEAT,
+  WATCHLIST, CAPITAL_FLOOR, MIN_SCORE, MIN_SCORE_CREDIT, MAX_HEAT, DATA_GATHER_MODE,
   MAX_SECTOR_PCT, STOP_LOSS_PCT, FAST_STOP_PCT, FAST_STOP_HOURS,
   TAKE_PROFIT_PCT, PARTIAL_CLOSE_PCT, TRAIL_ACTIVATE_PCT, TRAIL_STOP_PCT,
   BREAKEVEN_LOCK_PCT, PDT_RULE_ACTIVE, PDT_LIMIT, PDT_PROFIT_EXIT, PDT_STOP_LOSS,
@@ -1024,14 +1024,19 @@ async function runScan() {
     const todayPnL = (state.todayRealizedPnL || 0) + unrealizedPnL;
     const dailyLossLimit = (state.alpacaCash || state.cash || 30000) * -0.03;
     state._dailyPnL = parseFloat(todayPnL.toFixed(2));
-    if (todayPnL < dailyLossLimit && !dryRunMode) {
+    if (todayPnL < dailyLossLimit && !dryRunMode && !dataGatherActive(DATA_GATHER_MODE)) {
       logEvent("warn", `[DAILY CIRCUIT] Daily P&L $${todayPnL.toFixed(0)} below -3% limit — halting new entries`);
       state._dailyCircuitOpen = false;
     } else if (state._dailyCircuitOpen === false && todayPnL >= dailyLossLimit * 0.75) {
       logEvent("scan", `[DAILY CIRCUIT] Auto-reset — P&L $${todayPnL.toFixed(0)} recovered`);
       state._dailyCircuitOpen = true;
     }
-    if (state._dailyCircuitOpen === false) {
+    if (dataGatherActive(DATA_GATHER_MODE) && todayPnL < dailyLossLimit && !dryRunMode) {
+      logEvent("scan", `[DAILY CIRCUIT] data-gather mode — P&L $${todayPnL.toFixed(0)} below -3% but NOT halting (gathering data)`);
+    }
+    if (dataGatherActive(DATA_GATHER_MODE)) {
+      state._circuitHaltEntries = false;   // data-gather: never let a stale _dailyCircuitOpen=false keep entries halted
+    } else if (state._dailyCircuitOpen === false) {
       state._circuitHaltEntries = true;
     } else {
       state._circuitHaltEntries = false;
@@ -2044,7 +2049,7 @@ async function runScan() {
       if (cooldownMins < 30) { logEvent("filter", `${stock.ticker} defensive cooldown ${cooldownMins.toFixed(0)}/30min`); continue; }
     }
     const sameTickerSameDir = state.positions.filter(p => p.ticker === stock.ticker && p.optionType === optionType);
-    if (sameTickerSameDir.length >= 1) { logEvent("filter", `${stock.ticker} already have ${sameTickerSameDir.length} position(s)`); continue; }
+    if (sameTickerSameDir.length >= 1 && !dataGatherActive(DATA_GATHER_MODE)) { logEvent("filter", `${stock.ticker} already have ${sameTickerSameDir.length} position(s)`); continue; }
 
     const macdSignal    = liveStock.macd || "neutral";
     const macdBullish   = macdSignal.includes("bullish");
@@ -2107,7 +2112,7 @@ async function runScan() {
 
     const recentClose = (state._recentCloses || {})[stock.ticker];
     const recentCloseSameDir = recentClose && (!recentClose.optionType || recentClose.optionType === optionType);
-    if (recentCloseSameDir) {
+    if (recentCloseSameDir && !dataGatherActive(DATA_GATHER_MODE)) {
       const minsSinceClose = (Date.now() - recentClose.closedAt) / 60000;
       const _closePnl = parseFloat(recentClose.pnl) || 0;
       const CLOSE_COOLDOWN_MINS = _closePnl > 0 ? 5 : 10;   // 6/29: shortened win 10→5, loss 20→10 (Harrison, data-gather)
@@ -2129,7 +2134,7 @@ async function runScan() {
     // 6/30 (Harrison): window shortened 4h→2h. The score-75 floor is the real filter — a stopped
     // name re-entering must print a high-conviction setup regardless of clock — so the duration is
     // backup, not the gate. 2h lets a name re-base after a stop without benching it most of a session.
-    if (recentLossSameDir && _wasHardStop && (Date.now() - recentLoss.closedAt) < 2 * 3600 * 1000) {
+    if (recentLossSameDir && _wasHardStop && !dataGatherActive(DATA_GATHER_MODE) && (Date.now() - recentLoss.closedAt) < 2 * 3600 * 1000) {
       const hoursSinceLoss = ((Date.now() - recentLoss.closedAt) / 3600000).toFixed(1);
       const lossRSI    = recentLoss.exitRSI || recentLoss.entryRSI || 50;
       const currentRSI = liveStock.rsi || signals.rsi || 50;
@@ -2366,7 +2371,18 @@ async function runScan() {
       }
       logEvent("filter", `${stock.ticker} execution: naked_${optionType} (MR:${isMeanReversion}) delta:${_contractDelta.toFixed(3)}`);
       const _sizeModNaked = sizeMod || 1.0;
-      entered = await executeTrade(stock, price, score, reasons, state.vix, optionType, isMeanReversion, _sizeModNaked);
+      if (dataGatherActive(DATA_GATHER_MODE)) {
+        // 6/30 (Harrison): A/B twin-entry. One signal → two positions, one per DTE band, each sized
+        // independently under the normal caps. Legs tagged (dteBand) for comparison. A leg failing to
+        // fill (no contract in its band) does not block the other.
+        logEvent("filter", `[TWIN-ENTRY] ${stock.ticker} ${optionType.toUpperCase()} score ${score} — opening same-week + standard legs`);
+        const _legSW  = await executeTrade(stock, price, score, reasons, state.vix, optionType, isMeanReversion, _sizeModNaked, "sameweek");
+        const _legStd = await executeTrade(stock, price, score, reasons, state.vix, optionType, isMeanReversion, _sizeModNaked, "standard");
+        entered = _legSW || _legStd;
+        logEvent("filter", `[TWIN-ENTRY] ${stock.ticker} result — sameweek:${_legSW ? "FILLED" : "no-fill"} standard:${_legStd ? "FILLED" : "no-fill"}`);
+      } else {
+        entered = await executeTrade(stock, price, score, reasons, state.vix, optionType, isMeanReversion, _sizeModNaked);
+      }
     }
 
     if (entered) {
