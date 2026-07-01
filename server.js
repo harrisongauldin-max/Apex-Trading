@@ -1670,6 +1670,23 @@ app.post("/api/reset-baseline", requireSecret, async (req, res) => {
   } catch(e) { res.status(500).json({ ok: false, error: e.message }); }
 });
 
+app.post("/api/sync-cash", requireSecret, async (req, res) => {
+  // 7/1 (Harrison): on-demand cash resync. The automatic syncCashFromAlpaca() only fires on the
+  // market-hours 5-min interval; this forces it now and works after hours too (it's a manual pull).
+  // syncCashFromAlpaca sets state.cash from Alpaca /account cash when drift > $1 (and rebaselines on
+  // drift > $500); if drift ≤ $1 it's already in sync and applied will be 0.
+  try {
+    const before = state.cash;
+    await syncCashFromAlpaca();
+    await saveStateNow();
+    const cash    = state.cash;
+    const applied = parseFloat((cash - before).toFixed(2));
+    logEvent("reset", `[CASH SYNC] Manual resync — APEX $${before.toFixed(2)} → $${cash.toFixed(2)} (Alpaca cash $${(state.alpacaCash||0).toFixed(2)})`);
+    res.json({ ok: true, before, cash, applied,
+      alpacaCash: state.alpacaCash ?? null, buyingPower: state.alpacaBuyPower ?? null, equity: state.alpacaEquity ?? null });
+  } catch(e) { res.status(500).json({ ok: false, error: e.message }); }
+});
+
 app.post("/api/reset-account", requireSecret, async (req, res) => {
   const prevCash = state.cash;
   state.positions = []; state.closedTrades = []; state.tradeJournal = [];
