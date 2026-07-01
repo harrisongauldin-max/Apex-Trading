@@ -807,6 +807,7 @@ app.get("/api/state", async (req, res) => {
   res.json({
     ...state,
     positions: enrichedPositions,
+    dataGatherActive: require('./state').dataGatherActive(require('./constants').DATA_GATHER_MODE),
     heatPct:       parseFloat((heatPct()*100).toFixed(1)),
     heatCap:       parseFloat((effectiveHeatCap()*100).toFixed(0)),
     fillQuality:   state._fillQuality || { count: 0, totalSlippage: 0, misses: 0, avgSlippage: 0 },
@@ -1338,6 +1339,34 @@ app.post("/api/reset-circuit", requireSecret, async (req, res) => {
   state._vixSpikeAt = null;
   logEvent("circuit", "Circuit breaker manually reset - resuming normal operations");
   res.json({ ok: true, cash: state.cash, positions: state.positions.length });
+});
+
+// 6/30 (Harrison): runtime toggle for the data-gather A/B switch (twin-entry + loss-halt bypass).
+// POST { "on": true|false } to flip; persists in state (Redis-backed) so it survives restarts.
+// Omit body or send { "on": null } to CLEAR the override and fall back to the DATA_GATHER_MODE constant.
+app.post("/api/data-gather", requireSecret, async (req, res) => {
+  const { DATA_GATHER_MODE } = require('./constants');
+  const { dataGatherActive } = require('./state');
+  const body = req.body || {};
+  if (body.on === null || typeof body.on === "undefined") {
+    delete state._dataGatherMode;   // clear override → resolver falls back to the constant default
+  } else {
+    state._dataGatherMode = body.on === true || body.on === "true";
+  }
+  await saveStateNow();
+  const active = dataGatherActive(DATA_GATHER_MODE);
+  logEvent("scan", `[DATA-GATHER] mode ${active ? "ON" : "OFF"} (override:${typeof state._dataGatherMode === "boolean" ? state._dataGatherMode : "none, using default"})`);
+  res.json({ ok: true, active, override: (typeof state._dataGatherMode === "boolean" ? state._dataGatherMode : null), default: !!DATA_GATHER_MODE });
+});
+
+app.get("/api/data-gather", (req, res) => {
+  const { DATA_GATHER_MODE } = require('./constants');
+  const { dataGatherActive } = require('./state');
+  res.json({
+    active:   dataGatherActive(DATA_GATHER_MODE),
+    override: (typeof state._dataGatherMode === "boolean" ? state._dataGatherMode : null),
+    default:  !!DATA_GATHER_MODE,
+  });
 });
 
 function normalizeJournalTimestamps(entries) {
