@@ -17,6 +17,13 @@ function isMarketHours() {
   const h = et.getHours() + et.getMinutes()/60;
   return h >= 9.5 && h < 16;
 }
+// 6/30 (Harrison): true while a dry-run test is active. Lazy require avoids a load-order/circular
+// dependency — resolved at call time, when state is initialized. Lets the after-hours bars guards
+// stand down during a deliberate dry run (which SHOULD fetch real data) while still silencing the
+// automated overnight scans.
+function _dryRunActive() {
+  try { return require('./state').state._dryRunMode === true; } catch (_) { return false; }
+}
 
 const fetch = require('node-fetch');
 const {
@@ -169,7 +176,8 @@ async function getStockBars(ticker, limit = 60) {
   // 6/30 (Harrison): don't fetch bars after hours. Daily bars don't change overnight, nothing that runs
   // after the close needs fresh bars, and Alpaca drops these connections at night (Premature close spam
   // + circuit trips). Serve cache if present (above), otherwise return empty without calling Alpaca.
-  if (!isMarketHours()) return cached || [];
+  // EXCEPTION: a dry run is a deliberate human test — allow it to fetch real bars even after hours.
+  if (!isMarketHours() && !_dryRunActive()) return cached || [];
   try {
     // Always use date range - more reliable than limit param across all Alpaca tiers
     const end   = new Date().toISOString().split("T")[0];
@@ -213,7 +221,8 @@ async function getIntradayBars(ticker, minutes = 390) {
   }
   // 6/30 (Harrison): no intraday fetch after hours — there's no live session, the last session's bars
   // are already cached, and Alpaca drops these 1-Min connections at night. Serve cache or return empty.
-  if (!isMarketHours()) return [];   // 6/30: cache already served above; nothing to fetch after hours
+  // EXCEPTION: allow it during a deliberate dry-run test.
+  if (!isMarketHours() && !_dryRunActive()) return [];   // 6/30: cache already served above; nothing to fetch after hours
   try {
     // Calculate market open in ET (Railway runs UTC - must use ET explicitly)
     const nowET       = getETTime();
