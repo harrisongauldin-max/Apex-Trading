@@ -73,65 +73,40 @@ function withTimeout(promise, ms = 5000) {
 // Consecutive Alpaca failures pause trading to prevent state corruption
 // Resets on first successful call
 
-// 6/30 (Harrison): transient network errors (Premature close / ECONNRESET / timeout) are Alpaca or
-// egress dropping a connection mid-response — NOT a real outage. Retry these a few times with backoff
-// BEFORE they count against the circuit, so one dropped socket doesn't march toward tripping the breaker.
-const ALPACA_GET_RETRIES   = 3;
-const ALPACA_RETRY_BASE_MS = 250;
-function _isTransientNetErr(msg) {
-  const m = String(msg || "").toLowerCase();
-  return m.includes("premature close") || m.includes("econnreset") || m.includes("api timeout") ||
-         m.includes("socket hang up") || m.includes("etimedout") || m.includes("network") ||
-         m.includes("fetch failed") || m.includes("und_err");
-}
-
 async function alpacaGet(endpoint, base = ALPACA_BASE) {
-  let _lastErr = null;
-  for (let _attempt = 1; _attempt <= ALPACA_GET_RETRIES; _attempt++) {
-    try {
-      trackAPICall();
-      const res  = await withTimeout(fetch(`${base}${endpoint}`, { headers: alpacaHeaders() }));
-      const text = await res.text();
-      if (text.startsWith("<")) {
-        _alpacaConsecFails++;
-        if (res.status === 429) { _log("warn", `Rate limit hit: ${endpoint} - slowing down`); await new Promise(r => setTimeout(r, 2000)); }
-        else if (res.status === 401 || res.status === 403) { _log("error", `Auth error ${res.status} on ${endpoint} - check API keys`); }
-        else { _log("warn", `API returned HTML on ${endpoint} (status ${res.status}) - skipping`); }
-        if (_alpacaConsecFails >= ALPACA_CIRCUIT_THRESHOLD && !_alpacaCircuitOpen) {
-          _alpacaCircuitOpen = true;
-          _log("warn", `[CIRCUIT] Alpaca API degraded (${_alpacaConsecFails} consecutive failures) - new entries paused`);
-          if (_alertFn) _alertFn("APEX ALERT - Alpaca API degraded",
-            `<p>${_alpacaConsecFails} consecutive Alpaca failures. New entries paused. Check Railway logs.</p>`).catch(()=>{});
-        }
-        return null;   // HTML/error status is not a transient socket drop — don't retry
+  try {
+    trackAPICall();
+    const res  = await withTimeout(fetch(`${base}${endpoint}`, { headers: alpacaHeaders() }));
+    const text = await res.text();
+    if (text.startsWith("<")) {
+      _alpacaConsecFails++;
+      if (res.status === 429) { _log("warn", `Rate limit hit: ${endpoint} - slowing down`); await new Promise(r => setTimeout(r, 2000)); }
+      else if (res.status === 401 || res.status === 403) { _log("error", `Auth error ${res.status} on ${endpoint} - check API keys`); }
+      else { _log("warn", `API returned HTML on ${endpoint} (status ${res.status}) - skipping`); }
+      if (_alpacaConsecFails >= ALPACA_CIRCUIT_THRESHOLD && !_alpacaCircuitOpen) {
+        _alpacaCircuitOpen = true;
+        _log("warn", `[CIRCUIT] Alpaca API degraded (${_alpacaConsecFails} consecutive failures) - new entries paused`);
+        if (_alertFn) _alertFn("APEX ALERT - Alpaca API degraded",
+          `<p>${_alpacaConsecFails} consecutive Alpaca failures. New entries paused. Check Railway logs.</p>`).catch(()=>{});
       }
-      // Successful call - reset circuit
-      if (_alpacaConsecFails > 0) {
-        _log("scan", `[CIRCUIT] Alpaca API recovered after ${_alpacaConsecFails} failures`);
-        _alpacaConsecFails = 0;
-        _alpacaCircuitOpen = false;
-      }
-      return JSON.parse(text);
-    } catch(e) {
-      _lastErr = e;
-      // Retry only transient network drops, and only if attempts remain. Non-transient errors fall through.
-      if (_isTransientNetErr(e.message) && _attempt < ALPACA_GET_RETRIES) {
-        const _backoff = ALPACA_RETRY_BASE_MS * _attempt;   // 250ms, 500ms
-        _log("scan", `alpacaGet(${endpoint}): transient (${e.message}) - retry ${_attempt}/${ALPACA_GET_RETRIES - 1} in ${_backoff}ms`);
-        await new Promise(r => setTimeout(r, _backoff));
-        continue;
-      }
-      break;   // out of retries, or a non-transient error → count it against the circuit below
+      return null;
     }
+    // Successful call - reset circuit
+    if (_alpacaConsecFails > 0) {
+      _log("scan", `[CIRCUIT] Alpaca API recovered after ${_alpacaConsecFails} failures`);
+      _alpacaConsecFails = 0;
+      _alpacaCircuitOpen = false;
+    }
+    return JSON.parse(text);
+  } catch(e) {
+    _alpacaConsecFails++;
+    if (_alpacaConsecFails >= ALPACA_CIRCUIT_THRESHOLD && !_alpacaCircuitOpen) {
+      _alpacaCircuitOpen = true;
+      _log("warn", `[CIRCUIT] Alpaca API circuit open after network failures`);
+    }
+    _log("error", `alpacaGet(${endpoint}): ${e.message}`);
+    return null;
   }
-  // All attempts exhausted (or non-transient error): NOW it counts against the circuit.
-  _alpacaConsecFails++;
-  if (_alpacaConsecFails >= ALPACA_CIRCUIT_THRESHOLD && !_alpacaCircuitOpen) {
-    _alpacaCircuitOpen = true;
-    _log("warn", `[CIRCUIT] Alpaca API circuit open after network failures`);
-  }
-  _log("error", `alpacaGet(${endpoint}): ${_lastErr ? _lastErr.message : "unknown"} (after ${ALPACA_GET_RETRIES} attempts)`);
-  return null;
 }
 
 async function alpacaPost(endpoint, body, method = "POST") {
