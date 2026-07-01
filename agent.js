@@ -1,7 +1,17 @@
 // agent.js — APEX
 // Claude AI agent: macro analysis, position rescoring, morning briefing.
 'use strict';
-const fetch = require('node-fetch');
+const _nodeFetch = require('node-fetch');
+const http  = require('http');
+const https = require('https');
+// 7/1 fix (Premature-close storm): Node 19+ made the global http/https agent keepAlive:true by default.
+// node-fetch v2 reuses those pooled sockets; when Alpaca/Railway's edge closes an idle keep-alive socket,
+// the next reuse fails mid-response with "Premature close" — the storm hitting every endpoint AND every host
+// (data.alpaca, paper-api, anthropic, marketaux) at once. Forcing a fresh connection per request kills reuse.
+const _noKeepAliveHttp  = new http.Agent({ keepAlive: false });
+const _noKeepAliveHttps = new https.Agent({ keepAlive: false });
+const _agentFor = (parsedURL) => parsedURL.protocol === 'http:' ? _noKeepAliveHttp : _noKeepAliveHttps;
+const fetch = (url, opts = {}) => _nodeFetch(url, { agent: _agentFor, ...opts });
 const { ANTHROPIC_API_KEY, ANTHROPIC_MODEL, PDT_RULE_ACTIVE, PDT_LIMIT,
         MS_PER_DAY, OVERNIGHT_INTERVAL, SAME_DAY_INTERVAL, TRIGGER_COOLDOWN_MS,
   AGENT_MACRO_CACHE_MS,
