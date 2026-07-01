@@ -2,8 +2,18 @@
 // Market data: macro news, breadth, VIX, sentiment, economic indicators.
 'use strict';
 const MARKETAUX_CACHE_MS = 60 * 60 * 1000  // 60 minutes;
-const fetch = require('node-fetch');
-const { alpacaGet, getStockBars, getStockQuote, withTimeout, getIntradayBars } = require('./broker');
+const _nodeFetch = require('node-fetch');
+const http  = require('http');
+const https = require('https');
+// 7/1 fix (Premature-close storm): Node 19+ made the global http/https agent keepAlive:true by default.
+// node-fetch v2 reuses those pooled sockets; when Alpaca/Railway's edge closes an idle keep-alive socket,
+// the next reuse fails mid-response with "Premature close" — the storm hitting every endpoint AND every host
+// (data.alpaca, paper-api, anthropic, marketaux) at once. Forcing a fresh connection per request kills reuse.
+const _noKeepAliveHttp  = new http.Agent({ keepAlive: false });
+const _noKeepAliveHttps = new https.Agent({ keepAlive: false });
+const _agentFor = (parsedURL) => parsedURL.protocol === 'http:' ? _noKeepAliveHttp : _noKeepAliveHttps;
+const fetch = (url, opts = {}) => _nodeFetch(url, { agent: _agentFor, ...opts });
+const { alpacaGet, getStockBars, getStockQuote, withTimeout, getIntradayBars, ALPACA_CONN_DROP } = require('./broker');
 const { state, logEvent, markDirty }             = require('./state');
 
 // Macro calendar — key events that affect options pricing
@@ -200,7 +210,9 @@ function getCached(key, ttl = SLOW_CACHE_TTL) {
 function setCache(key, data) { _slowCache.set(key, { data, ts: Date.now() }); return data; }
 
 async function getMarketauxNews() {
-  const MARKETAUX_KEY = process.env.MARKETAUX_KEY || "";
+  // 7/1 fix: use the reconciled module-level MARKETAUX_KEY (reads MARKETAUX_API_KEY || MARKETAUX_KEY)
+  // instead of a local process.env.MARKETAUX_KEY shadow, which was keyless whenever only the
+  // MARKETAUX_API_KEY name was set on Railway.
   if (!MARKETAUX_KEY) return [];
   // Return cached data if fresh enough
   if (_marketauxCache.data.length > 0 && Date.now() - _marketauxCache.fetchedAt < MARKETAUX_CACHE_MS) {
@@ -345,11 +357,18 @@ async function getNewsForTicker(ticker) {
   if (cached) return cached;
   try {
     const data = await alpacaGet(`/news?symbols=${ticker}&limit=5`, ALPACA_NEWS);
+    // 7/1 fix (root cause of Marketaux daily-cap breach): a dead Alpaca socket returns the
+    // ALPACA_CONN_DROP sentinel — a TRUTHY Symbol, not null. A dead connection is NOT evidence that
+    // "Alpaca has no news," so we must NOT fall through to the Marketaux fallback on it. Before this
+    // guard, every Alpaca /news connection drop (which is what "Premature close" is) was silently
+    // converted into a Marketaux API request, per ticker, per scan — blowing the daily cap. Cache a
+    // short empty so a drop storm can't re-hit this ticker every 10s scan.
+    if (data === ALPACA_CONN_DROP) return setCache('news:' + ticker, []);
     const articles = data && data.news ? data.news : [];
     if (articles.length > 0) return setCache('news:' + ticker, articles);
 
-    // Alpaca returned nothing - try Marketaux with company name
-    const MARKETAUX_KEY = process.env.MARKETAUX_KEY || "";
+    // Alpaca genuinely returned empty (not a dead connection) - try Marketaux with company name.
+    // MARKETAUX_KEY is the reconciled module-level constant (reads MARKETAUX_API_KEY || MARKETAUX_KEY).
     if (MARKETAUX_KEY) {
       const name    = COMPANY_NAMES[ticker] || ticker;
       const url     = `https://api.marketaux.com/v1/news/all?search=${encodeURIComponent(name)}&language=en&limit=3&api_token=${MARKETAUX_KEY}`;
@@ -369,7 +388,7 @@ async function getNewsForTicker(ticker) {
       }
     }
     return setCache('news:' + ticker, []);
-  } catch(e) { return []; }
+  } catch(e) { return setCache('news:' + ticker, []); }   // 7/1 fix: cache empty even on throw so a transient Marketaux/Alpaca failure can't retry this ticker every 10s scan (was the self-sustaining loop)
 }
 
 async function getMacroNews(stateRef = null) {
