@@ -437,7 +437,17 @@ setInterval(() => {
   }
 }, 15 * 1000);
 
-setInterval(syncCashFromAlpaca, 5 * 60 * 1000);
+setInterval(() => {
+  // 6/30 (Harrison): gate cash-sync to market hours. Previously ran every 5 min around the clock,
+  // polling /account overnight — Alpaca's paper-api drops those connections at night (Premature close
+  // + circuit trips). Sibling getAlpacaTruth poll already gates this way; this one was missing it.
+  const et  = getETTime();
+  const day = et.getDay();
+  if (day < 1 || day > 5) return;
+  const h = et.getHours();
+  if (h < 9 || h > 16) return;
+  syncCashFromAlpaca();
+}, 5 * 60 * 1000);
 
 let _lastAgentInterval = 0;
 
