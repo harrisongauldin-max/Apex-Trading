@@ -2,7 +2,17 @@
 // Email delivery, morning briefings, end-of-day reports.
 'use strict';
 const fmt = (n) => '$' + (n||0).toFixed(2);
-const fetch = require('node-fetch');
+const _nodeFetch = require('node-fetch');
+const http  = require('http');
+const https = require('https');
+// 7/1 fix (Premature-close storm): Node 19+ made the global http/https agent keepAlive:true by default.
+// node-fetch v2 reuses those pooled sockets; when Alpaca/Railway's edge closes an idle keep-alive socket,
+// the next reuse fails mid-response with "Premature close" — the storm hitting every endpoint AND every host
+// (data.alpaca, paper-api, anthropic, marketaux) at once. Forcing a fresh connection per request kills reuse.
+const _noKeepAliveHttp  = new http.Agent({ keepAlive: false });
+const _noKeepAliveHttps = new https.Agent({ keepAlive: false });
+const _agentFor = (parsedURL) => parsedURL.protocol === 'http:' ? _noKeepAliveHttp : _noKeepAliveHttps;
+const fetch = (url, opts = {}) => _nodeFetch(url, { agent: _agentFor, ...opts });
 const { withTimeout ,
   alpacaGet, getStockBars
 } = require('./broker');
