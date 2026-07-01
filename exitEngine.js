@@ -613,7 +613,12 @@ async function checkExits(positions, posSnapshots, posQuotes, posNewsCache, ctx)
     }
 
     // ── Expiry roll ───────────────────────────────────────────────────────────
-    if (dte <= 7 && chg > 0) {
+    // 7/1 (Harrison): exempt the same-week twin leg. It is OPENED at ~3-4 DTE by design, so it is
+    // born inside this dte<=7 window and was insta-closing on its first green tick (held ~0.02h,
+    // realizing the open/close spread as a ~-0.3% loss) — which silently killed the same-week side of
+    // every data-gather A/B pair. This guard is meant to roll a MONTHLY position that has AGED down to
+    // <=7 DTE, not a leg that started there. Aged standard/monthly legs (dteBand !== "sameweek") still roll.
+    if (dte <= 7 && chg > 0 && pos.dteBand !== "sameweek") {
       logEvent("scan", `${pos.ticker} expiry-roll — ${dte}DTE with profit`);
       if (!_closedThisCycle.has(pi)) {
         _closedThisCycle.add(pi);
