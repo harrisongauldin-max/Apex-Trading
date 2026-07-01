@@ -1241,6 +1241,23 @@ async function runScan() {
         }
       })
     );
+    // 7/1 (Harrison): PRICE-SANITY at the source. getStockQuote can return a stale/FROZEN value when a
+    // reused keep-alive socket serves a buffered old response during a connection storm — 7/1 telemetry
+    // showed QQQ quotes frozen flat at ~729/~735 while real QQQ drifted ~719, with 0.06 correlation to
+    // SPY (so NOT an SPY cross — QQQ's own desynced responses). The ticker's own most-recent minute-bar
+    // close is the reliable price, so if the quote disagrees with it by >0.75%, distrust the quote and
+    // use the bar close. This corrects BOTH scoring and strike selection deterministically, and unlike a
+    // skip it keeps the real price in play. Root cure is keepAlive:false in broker.js (no socket reuse →
+    // no stale responses); this is the net that holds even if a desynced response slips through. 0.0075 tunable.
+    for (const _r of results) {
+      const _ref = (_r.intradayBars && _r.intradayBars.length && _r.intradayBars[_r.intradayBars.length-1]?.c > 0)
+                     ? _r.intradayBars[_r.intradayBars.length-1].c
+                     : (_r.bars && _r.bars.length && _r.bars[_r.bars.length-1]?.c > 0 ? _r.bars[_r.bars.length-1].c : 0);
+      if (_ref > 0 && _r.price > 0 && Math.abs(_r.price - _ref) / _ref > 0.0075) {
+        logEvent("filter", `${_r.stock.ticker} PRICE-SANITY: quote $${_r.price.toFixed(2)} is ${(((_r.price-_ref)/_ref)*100).toFixed(1)}% off own bar $${_ref.toFixed(2)} — distrusting quote, using bar price`);
+        _r.price = parseFloat(_ref.toFixed(2));
+      }
+    }
     stockData.push(...results);
   }
 
@@ -1274,25 +1291,6 @@ async function runScan() {
       if (!state._scoreDebug) state._scoreDebug = {};
       state._scoreDebug[stock.ticker] = { ts: Date.now(), price: price||0, putScore: 0, callScore: 0, effectiveMin: MIN_SCORE, putReasons: [], callReasons: [], signals: {}, blocked: ["no price data"] };
       continue;
-    }
-
-    // 7/1 (Harrison): PRICE-SANITY GUARD. getStockQuote can hand back an off-market value — e.g. a quote
-    // whose response was crossed at the transport layer during a connection storm (QQQ receiving SPY-range
-    // data — see 7/1 telemetry), or a bad/wide ask. Cross-check the quote against the ticker's OWN most
-    // recent bar; if it deviates too far, the quote is untrusted, so skip scoring this ticker this scan
-    // rather than generate phantom scores + strikes off a wrong underlying. Next scan gets a clean quote.
-    // Root fix is the keep-alive/transport change; this makes any future cross non-fatal. 0.015 is tunable.
-    const _refBar = (intradayBars && intradayBars.length && intradayBars[intradayBars.length-1]?.c > 0)
-                      ? intradayBars[intradayBars.length-1].c
-                      : (bars && bars.length && bars[bars.length-1]?.c > 0 ? bars[bars.length-1].c : 0);
-    if (_refBar > 0) {
-      const _pxDev = Math.abs(price - _refBar) / _refBar;
-      if (_pxDev > 0.015) {
-        logEvent("filter", `${stock.ticker} PRICE-SANITY: quote $${price.toFixed(2)} is ${(_pxDev*100).toFixed(1)}% off own bar $${_refBar.toFixed(2)} — untrusted, skipping this scan`);
-        if (!state._scoreDebug) state._scoreDebug = {};
-        state._scoreDebug[stock.ticker] = { ts: Date.now(), price, putScore: 0, callScore: 0, effectiveMin: MIN_SCORE, putReasons: [], callReasons: [], signals: {}, blocked: [`price-sanity: quote ${(_pxDev*100).toFixed(1)}% off own bar $${_refBar.toFixed(2)}`] };
-        continue;
-      }
     }
 
     if (bars.length >= 2) {
