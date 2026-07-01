@@ -1036,6 +1036,7 @@ async function runScan() {
     }
     if (dataGatherActive(DATA_GATHER_MODE)) {
       state._circuitHaltEntries = false;   // data-gather: never let a stale _dailyCircuitOpen=false keep entries halted
+      state._dailyCircuitOpen   = true;    // and clear any stale trip, so flipping back OFF mid-day starts clean
     } else if (state._dailyCircuitOpen === false) {
       state._circuitHaltEntries = true;
     } else {
