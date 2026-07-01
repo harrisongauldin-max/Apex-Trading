@@ -371,6 +371,15 @@ function evaluateEntry(candidate, rulebook, state, context = {}) {
     if (_expFloor < minScore) { minScore = _expFloor; _expApplied = true; _expSide = optionType; }
   }
 
+  // 7/1 (Harrison): DATA-GATHER floor. When the data-gather A/B switch is on, entries clear at score 50
+  // (both sides) so the run collects more fills for analysis. Applied LAST so it caps every prior lift
+  // (regime floor, afternoon/MACD/drawdown lifts, and the experiment override).
+  let _dgApplied = false;
+  if (context.dataGather === true) {
+    const _dgFloor = 50;
+    if (_dgFloor < minScore) { minScore = _dgFloor; _dgApplied = true; }
+  }
+
   // V3.2 (6/19) additive floor-composition trace — observability only, never alters pass/fail.
   // carveOut shows at a glance whether the oversold-dip exemption fired; isMR/isIndex are the
   // candidate fields it depends on (both were silently absent from the eeCandidate before 6/19,
@@ -388,6 +397,7 @@ function evaluateEntry(candidate, rulebook, state, context = {}) {
     intradayRsi,
     experiment: _expApplied,
     expSide: _expSide,
+    dataGather: _dgApplied,
   };
 
   if (score < minScore)
