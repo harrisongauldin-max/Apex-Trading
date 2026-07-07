@@ -243,7 +243,7 @@ function calcPositionSize(premium, score, vix) {
   return contracts;
 }
 
-async function executeTrade(stock, price, score, scoreReasons, vix, optionType = "call", isMeanReversion = false, sizeMod = 1.0, dteBand = null) {
+async function executeTrade(stock, price, score, scoreReasons, vix, optionType = "call", isMeanReversion = false, sizeMod = 1.0, dteBand = null, targetCost = null) {
   const estimatedMinCost = price * 0.03 * 100;
   if (state.cash - estimatedMinCost < CAPITAL_FLOOR) {
     logEvent("skip", `${stock.ticker} - insufficient cash pre-check (est. min cost ${fmt(estimatedMinCost)})`);
@@ -312,6 +312,22 @@ async function executeTrade(stock, price, score, scoreReasons, vix, optionType =
   if (sizeMod < 1.0) {
     contracts = Math.max(1, Math.floor(contracts * sizeMod));
     logEvent("scan", `[SIZING] ${stock.ticker} sizeMod ${sizeMod}x applied - ${contracts} contracts (oversold bear trend)`);
+  }
+  // 7/7 (Harrison): COST-MATCH the same-week twin leg to the standard leg's dollar cost. The A/B compares
+  // same-week vs standard on EQUAL CAPITAL, not equal contract count — a 3-DTE option is far cheaper than a
+  // 40-DTE one, so 1 contract each deployed lopsided capital. When targetCost (the standard leg's finalCost)
+  // is passed for the same-week leg, size to match it, buying more of the cheaper weekly. Still bounded by
+  // the normal per-trade risk caps and a hard contract cap so a very cheap weekly can't blow up the count.
+  if (targetCost && targetCost > 0 && _sameWeekLeg) {
+    const _perContract = contract.premium * 100;
+    if (_perContract > 0) {
+      const _riskCap   = MAX_LOSS_PER_TRADE / STOP_LOSS_PCT;                       // max $ cost/trade
+      const _dollarCap = Math.min(targetCost * 1.15, _riskCap, state.cash * 0.20); // don't exceed standard by >15%, or the normal caps
+      const _capN      = Math.max(1, Math.floor(_dollarCap / _perContract));
+      const _matchN    = Math.max(1, Math.round(targetCost / _perContract));
+      contracts        = Math.min(_matchN, _capN, 25);                            // 25 = hard sanity cap (liquidity/slippage on cheap weeklies)
+      logEvent("scan", `[COST-MATCH] ${stock.ticker} same-week sized ${contracts}x @ $${contract.premium} ≈ $${(contracts*_perContract).toFixed(0)} to match standard leg cost $${targetCost.toFixed(0)}`);
+    }
   }
   if (contracts < 1) {
     logEvent("skip", `${stock.ticker} - position size too small`);
@@ -475,7 +491,7 @@ async function executeTrade(stock, price, score, scoreReasons, vix, optionType =
 
   if (_dryRunMode) {
     logEvent("dryrun", `WOULD BUY ${stock.ticker} ${optionType.toUpperCase()} $${contract.strike} | ${contracts}x @ $${contract.premium} | cost ${fmt(finalCost)} | score ${score} | delta ${contract.greeks.delta}`);
-    return true;
+    return { filled: true, cost: finalCost, contracts, premium: contract.premium };   // 7/7: return cost so twin-entry can size the same-week leg to match (object is truthy → all existing `if (entered)` / `_leg || _leg` checks still work)
   }
 
   const projectedHeat = (openRisk() + finalCost) / totalCap();
@@ -546,7 +562,7 @@ async function executeTrade(stock, price, score, scoreReasons, vix, optionType =
 
   state.positions.push(position);
 
-  const _singleSlipEst = parseFloat((0.08 * (contract.contracts || 1)).toFixed(2));
+  const _singleSlipEst = parseFloat((0.08 * (contracts || 1)).toFixed(2));   // 7/7: was contract.contracts (never set → always 1); now uses the real (possibly cost-matched) contract count so paper-slippage isn't undercounted on multi-contract legs
   if (!state._paperSlippage) state._paperSlippage = { trades: 0, totalEst: 0 };
   state._paperSlippage.trades++;
   state._paperSlippage.totalEst = parseFloat((state._paperSlippage.totalEst + _singleSlipEst).toFixed(2));
@@ -684,7 +700,7 @@ async function executeTrade(stock, price, score, scoreReasons, vix, optionType =
     `cost ${fmt(finalCost)} | score ${score} | delta ${contract.greeks.delta} | ${isMeanReversion ? "MEAN-REV" : exitParams.label} | [${dataLabel}] | ` +
     `OI:${contract.oi} spread:${(contract.spread*100).toFixed(1)}% | cash ${fmt(state.cash)} | heat ${(heatPct()*100).toFixed(0)}%`
   );
-  return true;
+  return { filled: true, cost: finalCost, contracts, premium: contract.premium };   // 7/7: return cost so twin-entry can cost-match the same-week leg
 }
 
 function executeCreditSpread() {
