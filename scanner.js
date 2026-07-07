@@ -385,7 +385,7 @@ async function runScan() {
         }
       } else if (state._zweigThrust?.detected) {
         const age = (now - new Date(state._zweigThrust.detectedAt).getTime()) / MS_PER_DAY;
-        if (age > 2) state._zweigThrust = { detected: false };
+        if (age > 2 || bPct < 50) state._zweigThrust = { detected: false };  // 7/7 (Harrison): also clear when breadth falls back below 50 — the recovery is invalidated the moment current breadth no longer supports it. Was time-only (2 days), so on weak-breadth sessions scoring kept emitting "recovery stale (+0)" every scan.
       }
     }
 
@@ -1999,7 +1999,7 @@ async function runScan() {
       const _vReasons = (optionType === "put" ? putSetup.reasons : callSetup.reasons) || [];
       const _vFloor   = _effectiveMin;
       const _clears   = bestScore >= _vFloor;
-      const _killer   = _vReasons.find(r => /\(-|too low|not oversold|wrong|bearish|no bounce|skip|block|\+0\)/i.test(r)) || _vReasons[_vReasons.length - 1] || "no reasons";
+      const _killer   = _vReasons.find(r => /\(-|too low|not oversold|wrong|bearish|no bounce|skip|block/i.test(r)) || _vReasons[_vReasons.length - 1] || "no reasons";  // 7/7 (Harrison): dropped |\+0\) — a (+0) reason has ZERO score impact and never blocks anything; matching it mislabeled neutral reasons (e.g. "recovery stale (+0)") as the headline blocker, which is what dominated the 7/2 blocker column. Now only genuinely negative reasons qualify; falls back to last reason otherwise.
       logEvent("filter",
         `[VERDICT] ${stock.ticker} ${optionType.toUpperCase()} ${bestScore} vs scanner-floor ${_vFloor} → ${_clears ? "CLEARS→entryEngine" : "BELOW"}` +
         ` | isMR:${callSetup.isMeanReversion ? "Y" : "N"} curl:${liveStock.macdCurl || "none"} dRSI:${(liveStock.dailyRsi || 0).toFixed(0)} c/p:${callScore}/${putScore}` +
@@ -2395,8 +2395,9 @@ async function runScan() {
         // independently under the normal caps. Legs tagged (dteBand) for comparison. A leg failing to
         // fill (no contract in its band) does not block the other.
         logEvent("filter", `[TWIN-ENTRY] ${stock.ticker} ${optionType.toUpperCase()} score ${score} — opening same-week + standard legs`);
-        const _legSW  = await executeTrade(stock, price, score, reasons, state.vix, optionType, isMeanReversion, _sizeModNaked, "sameweek");
         const _legStd = await executeTrade(stock, price, score, reasons, state.vix, optionType, isMeanReversion, _sizeModNaked, "standard");
+        const _stdCost = (_legStd && _legStd.cost) ? _legStd.cost : null;   // 7/7 (Harrison): standard leg's actual cost → size the same-week leg to match it (equal capital A/B). null if standard didn't fill → same-week falls back to normal 1-contract sizing.
+        const _legSW  = await executeTrade(stock, price, score, reasons, state.vix, optionType, isMeanReversion, _sizeModNaked, "sameweek", _stdCost);
         entered = _legSW || _legStd;
         logEvent("filter", `[TWIN-ENTRY] ${stock.ticker} result — sameweek:${_legSW ? "FILLED" : "no-fill"} standard:${_legStd ? "FILLED" : "no-fill"}`);
       } else {
