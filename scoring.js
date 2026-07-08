@@ -22,7 +22,8 @@ const { MIN_SCORE, MIN_SCORE_CREDIT ,
   IVP_CALL_PENALTY_STEEP = false, DIP_REQUIRES_MULTIDAY_ANCHOR = false, DIP_MAX_DAYCHANGE = 0.003,
   MR_INTRADAY_OVERSOLD = false,
   OVERSOLD_CALL_NEEDS_CORROBORATION = false, CORROBORATION_MAX_BREADTH = 45,
-  MACD_CURL_SCORING = true   // V3.2 (6/19) Phase-1 curl: default ON; add MACD_CURL_SCORING:false to constants.js to disable
+  MACD_CURL_SCORING = true,   // V3.2 (6/19) Phase-1 curl: default ON; add MACD_CURL_SCORING:false to constants.js to disable
+  DEFAULT_VIX
 }     = require('./constants');
 const { calcADX, getETTime } = require('./signals');
 const { setCache } = require('./market');
@@ -574,7 +575,7 @@ function scoreIndexSetup(stock, optionType, spyRSI, spyMACD, spyMomentum, breadt
     const ts = isDataFresh(state._termStructure) ? state._termStructure : null;
     if (ts) {
       if (optionType === "put"  && ts.creditFavorable) { supplementScore += 8; reasons.push(`Vol backwardation (${ts.ratio}) - near-term fear premium elevated (+8)`); }
-      if (optionType === "call" && ts.callFavorable && (vix || 25) < 24) {
+      if (optionType === "call" && ts.callFavorable && (vix || DEFAULT_VIX) < 24) {
         supplementScore += 8; reasons.push(`Vol contango (${ts.ratio}) - calls relatively cheap at VIX ${vix} (+8)`);
       } else if (optionType === "call" && ts.callFavorable) {
         reasons.push(`Vol contango (${ts.ratio}) - calls not cheap at VIX ${vix} (+0)`);
