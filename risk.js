@@ -7,7 +7,7 @@ const { openRisk, openCostBasis, heatPct, realizedPnL,
 const { CAPITAL_FLOOR, MONTHLY_BUDGET, MAX_HEAT, MAX_SECTOR_PCT,
         PDT_LIMIT, MS_PER_DAY, STOP_LOSS_PCT,
         WATCHLIST, EARNINGS_SKIP_DAYS, MIN_SCORE, MIN_STOCK_PRICE,
-        PDT_DAYS, PREMARKET_NEGATIVE, PREMARKET_STRONG_MOVE, RESISTANCE_BUFFER, SUPPORT_BUFFER, VIX_PAUSE,
+        PDT_DAYS, PREMARKET_NEGATIVE, PREMARKET_STRONG_MOVE, RESISTANCE_BUFFER, SUPPORT_BUFFER, VIX_PAUSE, DEFAULT_VIX,
 } = require('./constants');
 const { alpacaPost, getStockBars } = require('./broker');
 const { effectiveHeatCap, getBusinessDaysAgo, isEntryWindow } = require('./signals');
@@ -56,11 +56,19 @@ function getDrawdownProtocol() {
   const trades    = state.closedTrades || [];
   // Use accountBaseline as the reference point - stable starting value from Alpaca sync
   // peakCash fluctuates with mark-to-market and doesn't represent actual starting capital
-  const peak      = state.accountBaseline || state.peakCash || MONTHLY_BUDGET;
+  let peak        = state.accountBaseline || state.peakCash || MONTHLY_BUDGET;
   // Fix 3: Use alpacaEquity (mark-to-market) for drawdown — same approach as profit-lock below.
   // Cost basis hid real losses: positions down 25% each showed no drawdown until closed.
   // alpacaEquity reflects actual market value. Falls back to cash + cost if not yet synced.
   const current   = state.alpacaEquity || (state.cash + openCostBasis());
+  // 7/7 (Harrison): SANITY CLAMP. accountBaseline has gone stale/corrupt before (the preservation-phase
+  // flip, the $100K Alpaca glitch). A baseline wildly out of line with live equity silently either halts
+  // all entries (false CRITICAL) or slashes sizing (false profit-lock). If it diverges from current
+  // equity by >3x either way, distrust it and use equity as the reference (→ ~0 drawdown, no false halt).
+  if (current > 0 && peak > 0 && (peak > current * 3 || peak < current / 3)) {
+    logEvent("warn", `[DRAWDOWN] baseline $${peak.toFixed(0)} diverges >3x from equity $${current.toFixed(0)} — distrusting, using equity (re-sync baseline)`);
+    peak = current;
+  }
   const drawdown  = (current - peak) / peak * 100;
 
   // Only trigger if we have actual trade history
@@ -87,7 +95,9 @@ function getDrawdownProtocol() {
   // Falls back to cash + openCostBasis() if Alpaca equity not yet synced
   const monthStart  = state.accountBaseline || state.dayStartCash || MONTHLY_BUDGET;
   const currentVal  = state.alpacaEquity || (state.cash + openCostBasis());
-  const monthReturn = monthStart > 0 ? (currentVal - monthStart) / monthStart : 0;
+  // 7/7: same sanity clamp — a grossly divergent baseline would fake a profit-lock and slash sizing.
+  const _saneStart  = (currentVal > 0 && monthStart > 0 && (monthStart > currentVal * 3 || monthStart < currentVal / 3)) ? currentVal : monthStart;
+  const monthReturn = _saneStart > 0 ? (currentVal - _saneStart) / _saneStart : 0;
   if (monthReturn >= 0.15) {
     return { level: "profit_lock", sizeMultiplier: 0.25, message: `Profit-lock: up ${(monthReturn*100).toFixed(1)}% vs baseline $${monthStart.toFixed(0)} - protecting gains.`, minScore: MIN_SCORE };
   } else if (monthReturn >= 0.10) {
@@ -313,7 +323,7 @@ async function checkAllFilters(stock, price, prefetchedBars = null) { // OPT3: a
   if (price < MIN_STOCK_PRICE) return { pass:false, reason:`Price $${price} below $${MIN_STOCK_PRICE} minimum` };
 
   // 13. VIX check — nuanced by trade type
-  const vix = state.vix || 15;
+  const vix = state.vix || DEFAULT_VIX;
   // Index instruments: no hard VIX block — credit spreads thrive in high VIX
   // Individual stocks: pause above 35 (wide spreads, unreliable fills)
   if (!stock.isIndex && vix >= VIX_PAUSE) return { pass:false, reason:`VIX ${vix} above pause threshold (${VIX_PAUSE}) for individual stocks` };
