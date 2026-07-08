@@ -443,8 +443,11 @@ async function getDynamicSignals(ticker, bars, intradayBars = null, realOptionsI
 
 function calcBetaWeightedDelta() {
   if (!state.positions || !state.positions.length) return 0;
-  // Use cached SPY price from scan context, or fetch fresh - never use hardcoded value
-  const spyPrice = (state.positions.find(p => p.ticker === "SPY")?.price) || state._liveSPY || 560;
+  // Use cached SPY price from scan context, or last-known live — never a hardcoded guess (a wrong SPY
+  // here is a DENOMINATOR and skews beta-weighted delta). 7/7 (Harrison): was `|| 560` (real SPY ~748,
+  // ~34% skew). If no real SPY price is available, bail (0) rather than report a distorted exposure.
+  const spyPrice = (state.positions.find(p => p.ticker === "SPY")?.price) || state._liveSPY || 0;
+  if (spyPrice <= 0) return 0;
   let totalBWD   = 0;
   for (const pos of state.positions) {
     const delta    = parseFloat(pos.greeks?.delta || 0);
@@ -547,7 +550,14 @@ function getAccountPhase() {
   const accountVal = (state.alpacaCash || state.cash || 0) + openCostBasis();
   // Phase thresholds are relative to baseline — not fixed dollar amounts
   // A $30k account reaching $36k (20% gain) = preservation, same as $10k reaching $12k
-  const baseline = state.accountBaseline || state.dayStartCash || 10000;
+  let baseline = state.accountBaseline || state.dayStartCash || 10000;
+  // 7/7 (Harrison): sanity clamp — a stale/corrupt baseline flipped this to "preservation" off a phantom
+  // gain (the preservation-phase incident, the $100K glitch). If it diverges >3x from live account value,
+  // distrust it and use the live value → gainPct ~0 → "growth" (no false preservation heat-cap squeeze).
+  if (accountVal > 0 && baseline > 0 && (baseline > accountVal * 3 || baseline < accountVal / 3)) {
+    _log("warn", `[PHASE] baseline $${baseline.toFixed(0)} diverges >3x from account $${accountVal.toFixed(0)} — distrusting, using account value`);
+    baseline = accountVal;
+  }
   const gainPct  = baseline > 0 ? (accountVal - baseline) / baseline : 0;
   if (gainPct >= 0.20) return "preservation";  // up 20%+ from baseline
   if (gainPct >= 0.10) return "transition";     // up 10-20%
