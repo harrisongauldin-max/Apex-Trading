@@ -30,6 +30,7 @@ const MARKETAUX_KEY     = process.env.MARKETAUX_API_KEY || process.env.MARKETAUX
 
 // ─── Capital / risk ──────────────────────────────────────────────
 const MONTHLY_BUDGET      = 10000; // Reset 6/8/2026: $10K to match planned live capital (post-FINRA PDT alignment)
+const DEFAULT_VIX         = 20;    // 7/7 (Harrison): single source of truth for "VIX when state.vix is null". Was diverging across files (risk 15, scoring 25, agent 28) → subsystems disagreed on volatility on a null-VIX scan.
 const CAPITAL_FLOOR       = 2500;  // 25% of $10K — halt entries if cash drops below $2,500
 const REVENUE_THRESHOLD   = 2000;
 const BONUS_AMOUNT        = 1000;
@@ -398,7 +399,7 @@ module.exports = {
   ALPACA_KEY, ALPACA_SECRET, ALPACA_BASE, ALPACA_DATA, ALPACA_OPTIONS,
   ALPACA_OPT_SNAP, ALPACA_NEWS, OPTION_FEED, GMAIL_USER, RESEND_API_KEY,
   ANTHROPIC_API_KEY, ANTHROPIC_MODEL, REDIS_URL, REDIS_TOKEN, REDIS_KEY,
-  REDIS_SAVE_INTERVAL, MARKETAUX_KEY, MONTHLY_BUDGET, CAPITAL_FLOOR,
+  REDIS_SAVE_INTERVAL, MARKETAUX_KEY, MONTHLY_BUDGET, DEFAULT_VIX, CAPITAL_FLOOR,
   REVENUE_THRESHOLD, BONUS_AMOUNT, MAX_HEAT, MAX_SECTOR_PCT, DATA_GATHER_MODE,
   STOP_LOSS_PCT, FAST_STOP_PCT, FAST_STOP_HOURS, TAKE_PROFIT_PCT,
   PARTIAL_CLOSE_PCT, TRAIL_ACTIVATE_PCT, TRAIL_STOP_PCT, BREAKEVEN_LOCK_PCT,
