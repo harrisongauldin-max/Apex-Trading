@@ -15,7 +15,7 @@ const fetch = (url, opts = {}) => _nodeFetch(url, { agent: _agentFor, ...opts })
 const { ANTHROPIC_API_KEY, ANTHROPIC_MODEL, PDT_RULE_ACTIVE, PDT_LIMIT,
         MS_PER_DAY, OVERNIGHT_INTERVAL, SAME_DAY_INTERVAL, TRIGGER_COOLDOWN_MS,
   AGENT_MACRO_CACHE_MS,
-  BEAR_DD_PCT, BEAR_DD_LOOKBACK, BEAR_VIX_SUSTAINED, BEAR_EXIT_DD_PCT, BEAR_EXIT_VIX, BEAR_EXIT_SESSIONS,
+  BEAR_DD_PCT, BEAR_DD_LOOKBACK, BEAR_VIX_SUSTAINED, BEAR_EXIT_DD_PCT, BEAR_EXIT_VIX, BEAR_EXIT_SESSIONS, DEFAULT_VIX,
 } = require('./constants');
 const { state } = require('./state');
 const { alpacaGet, getStockQuote, getStockBars, getIntradayBars } = require('./broker');
@@ -1389,7 +1389,7 @@ async function getAgentOvernightScan(scanType = "midnight-digest") {
 
       // Compute expected strikes for each instrument at VIX-appropriate parameters
       // VIX-tiered: width = 1.0% of price at VIX 28+, R/R floor = 26%
-      const vix = state.vix || 28;
+      const vix = state.vix || DEFAULT_VIX;
       const widthPct = vix >= 35 ? 0.015 : vix >= 28 ? 0.010 : 0.008;
       const computeStrike = (price, deltaOTM = 0.04) => {
         if (!price) return null;
