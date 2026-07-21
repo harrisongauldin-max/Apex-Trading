@@ -17,7 +17,7 @@ const SCORE_DELTA  = 3;               // |score| move that counts as material
 const MAX_ROWS     = 6000;            // safety cap on a runaway day
 const BLOCKER_MAX  = 60;              // truncate the headline blocker text
 
-const TELEMETRY_HEADER = "time,tkr,px,iRSI,dRSI,call,put,isMR,curl,vwap%,blocker,drivers,shadow";
+const TELEMETRY_HEADER = "time,tkr,px,iRSI,dRSI,call,put,isMR,curl,vwap%,blocker,drivers,shadow,adx,gate";
 
 // intraday-RSI tier — a crossing is "material" so dips/spikes always log a row
 function _rsiTier(r) {
@@ -68,6 +68,18 @@ function _csv(s) {
 
 // rec: { tkr, px, iRSI, dRSI, call, put, isMR, curl, vwapPct, blocker, callReasons, putReasons, direction }
 // Returns true if a row was written. Never throws — instrumentation must not halt a scan.
+function _vetoGate(vwapPct, iRSI, adx) {
+  // Scan-level shadow of the call falling-knife veto (entryEngine _intradayDown).
+  // Reflects the veto's INPUTS at scan time, not the final entry decision (which also
+  // weighs bull_curl / reversal carve-outs). Constants mirror entryEngine exactly:
+  //   CARVE_CALL_VWAP_BREAK 0.5% below own VWAP · CALL_MACD_CARVEOUT_RSI 35 · ADX_TREND_MIN 20.
+  if (vwapPct == null) return "";
+  if (vwapPct > -0.5) return "ok";                       // not a real break below own VWAP
+  if (iRSI != null && iRSI <= 35) return "os-carve";     // oversold → carve-exempt (allowed)
+  if (adx == null) return "below?";                      // below VWAP, ADX unknown
+  return adx >= 20 ? "VETO" : "chop";                    // trending → veto fires; low-ADX chop → relaxed
+}
+
 function recordTelemetry(state, rec) {
   try {
     if (!state._telemetryBuffer) state._telemetryBuffer = [];
@@ -75,6 +87,7 @@ function recordTelemetry(state, rec) {
     const now  = Date.now();
     const prev = state._telemetryLast[rec.tkr];
     const tier = _rsiTier(rec.iRSI);
+    const gate = _vetoGate(rec.vwapPct, rec.iRSI, rec.adx);
 
     const _shadowNow = shadowTag(rec.direction === "put" ? rec.putReasons : rec.callReasons);
     const material =
@@ -85,6 +98,7 @@ function recordTelemetry(state, rec) {
       ((rec.blocker || "") !== (prev.blocker || "")) ||
       (_shadowNow !== (prev.shadow || "")) ||
       (tier !== prev.tier) ||
+      (gate !== (prev.gate || "")) ||
       (now - (prev.ts || 0)) >= HEARTBEAT_MS;
     if (!material) return false;
 
@@ -106,6 +120,8 @@ function recordTelemetry(state, rec) {
       blocker,
       drivers,
       shadow,
+      rec.adx == null ? "" : Number(rec.adx).toFixed(0),
+      gate,
     ].map(_csv).join(",");
 
     state._telemetryBuffer.push(row);
@@ -113,7 +129,7 @@ function recordTelemetry(state, rec) {
       state._telemetryBuffer = state._telemetryBuffer.slice(-MAX_ROWS);
 
     state._telemetryLast[rec.tkr] = {
-      call: rec.call, put: rec.put, isMR: !!rec.isMR, blocker: rec.blocker || "", tier, ts: now, shadow: _shadowNow,
+      call: rec.call, put: rec.put, isMR: !!rec.isMR, blocker: rec.blocker || "", tier, ts: now, shadow: _shadowNow, gate,
     };
     return true;
   } catch (_) {
