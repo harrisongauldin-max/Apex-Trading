@@ -560,7 +560,28 @@ async function executeTrade(stock, price, score, scoreReasons, vix, optionType =
     agentHistory:    [],
   };
 
-  state.positions.push(position);
+  // ── ADDON MERGE (fix: duplicate-position → fabricated close/reconcile P&L) ──
+  // state.positions holds only OPEN positions (closed are spliced in closeEngine),
+  // so a match here means we're scaling into a live contract. A 2nd buy must
+  // blend into it (weighted-avg premium, summed contracts) — NOT push a duplicate.
+  // Duplicates are what the reconciler inflates (contracts→Alpaca qty on every copy)
+  // and what orphan-close later force-closes into phantom P&L.
+  const _openSame = state.positions.find(p => p.contractSymbol === position.contractSymbol);
+  if (_openSame) {
+    const _oldQty = _openSame.contracts || 0;
+    const _addQty = position.contracts || 0;
+    const _newQty = _oldQty + _addQty;
+    const _oldPrem = _openSame.premium;
+    if (_newQty > 0) {
+      _openSame.premium   = parseFloat((((_openSame.premium * _oldQty) + (position.premium * _addQty)) / _newQty).toFixed(4));
+      _openSame.contracts = _newQty;
+      _openSame.cost      = parseFloat(((_openSame.cost || 0) + (position.cost || 0)).toFixed(2));
+      _openSame.partialClosed = false;
+      logEvent("scan", `[ADDON MERGE] ${position.contractSymbol}: +${_addQty}@$${position.premium} → ${_newQty}@avg $${_openSame.premium} (was ${_oldQty}@$${_oldPrem})`);
+    }
+  } else {
+    state.positions.push(position);
+  }
 
   const _singleSlipEst = parseFloat((0.08 * (contracts || 1)).toFixed(2));   // 7/7: was contract.contracts (never set → always 1); now uses the real (possibly cost-matched) contract count so paper-slippage isn't undercounted on multi-contract legs
   if (!state._paperSlippage) state._paperSlippage = { trades: 0, totalEst: 0 };
@@ -569,7 +590,7 @@ async function executeTrade(stock, price, score, scoreReasons, vix, optionType =
   state._paperSlippage.avgEst   = parseFloat((state._paperSlippage.totalEst / state._paperSlippage.trades).toFixed(2));
   logEvent("trade", `[SLIPPAGE EST] $${_singleSlipEst} this trade | $${state._paperSlippage.totalEst} cumulative across ${state._paperSlippage.trades} trades (paper mid-fill assumption)`);
   const isEarningsPlay = scoreReasons.some(r => r.includes("Earnings play"));
-  if (isEarningsPlay) position.earningsPlay = true;
+  if (isEarningsPlay) (_openSame || position).earningsPlay = true;  // live position (merged or pushed) — not the discarded local on an addon merge
 
   state.tradeJournal.unshift({
     time:          new Date().toISOString(),
