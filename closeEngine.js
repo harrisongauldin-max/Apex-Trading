@@ -372,7 +372,7 @@ async function _doClosePosition(ticker, reason, exitPremium = null, contractSym 
 
   if (pnl < 0) {
     state._recentLosses = state._recentLosses || {};
-    const _lossPos = state.positions.find(p => p.ticker === ticker) || {};
+    const _lossPos = pos || {};  // fix: use the position being closed, not a ticker re-find (twin-leg ambiguity; pos already spliced above)
     const _exitRSI = _lossPos._prevRSI || _lossPos.rsi || _lossPos.entryRSI || 50;
     state._recentLosses[ticker] = {
       closedAt:    Date.now(),
@@ -388,7 +388,7 @@ async function _doClosePosition(ticker, reason, exitPremium = null, contractSym 
   }
 
   state._recentCloses = state._recentCloses || {};
-  const _closingPos = state.positions.find(p => p.ticker === ticker) || {};
+  const _closingPos = pos || {};  // fix: same — the closed position is already in scope
   state._recentCloses[ticker] = {
     closedAt:   Date.now(),
     optionType: _closingPos.optionType || null,
