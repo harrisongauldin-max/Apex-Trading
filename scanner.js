@@ -1492,6 +1492,7 @@ async function runScan() {
       dailyRsi:      (signals && signals.dailyRsi != null) ? parseFloat(signals.dailyRsi) : parseFloat(signals?.rsi || 50),
       macd:          signals.macd,
       macdCurl:      signals.macdCurl || "none",   // V3.2 (6/19) histogram bull/bear-curl → scoreIndexSetup
+      adx:           signals.adx,                    // intraday ADX(14) — carried to the entry gate for the trend-strength veto gate
       _gapState:     _carveGapState,                // #3 carve-out: present-tense gap/VWAP state
       _gapVwapRatio: _carveVwapRatio,               // #3 carve-out: price/vwap ratio
       macdHist:      typeof signals.macdHist === 'number' ? signals.macdHist : null,
@@ -2288,7 +2289,7 @@ async function runScan() {
         isMeanReversion: isMeanReversion === true, isIndex: stock.isIndex === true },  // V3.2 (6/19) FIX: evaluateEntry carve-outs depend on these — were absent, forcing oversold MR calls to the 85 floor
       rb, state,
       { etHour: etHourNow, isLateDay, isLastHour, volDecline: _volDeclineExec,
-        signals: { rsi: stock.rsi, dailyRsi: stock.dailyRsi || 50, macd: stock.macd || "neutral", macdCurl: stock.macdCurl || "none" },  // FIX (6/23, scope-corrected): plumb intraday rsi from the scored candidate. `stock` here is liveStock (see scored.push ~2093), and liveStock.rsi IS the intraday RSI. The prior version referenced `signals`, which lives in the SCORING loop (closes ~2104), not this execution loop — so it threw "signals is not defined" and crashed every scan at the evaluateEntry call.
+        signals: { rsi: stock.rsi, dailyRsi: stock.dailyRsi || 50, macd: stock.macd || "neutral", macdCurl: stock.macdCurl || "none", adx: stock.adx ?? 20 },  // FIX (6/23, scope-corrected): plumb intraday rsi from the scored candidate. `stock` here is liveStock (see scored.push ~2093), and liveStock.rsi IS the intraday RSI. The prior version referenced `signals`, which lives in the SCORING loop (closes ~2104), not this execution loop — so it threw "signals is not defined" and crashed every scan at the evaluateEntry call.
         gapState: stock._gapState || "flat", gapVwapRatio: stock._gapVwapRatio ?? 1, breadthMom: state._breadthMomentum ?? 0,  // #3 D2 carve-out inputs (present-tense tape)
         recentSameDir: recentSameDirMins, existingProfitPct, existingCreditProfitPct,
         drawdownMinScore: ddProtocol.minScore || MIN_SCORE, drawdownLevel: ddProtocol.level || "normal",
