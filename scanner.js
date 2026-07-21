@@ -2011,7 +2011,7 @@ async function runScan() {
       try {
         const _vwapPx = signals.intradayVWAP || 0;
         recordTelemetry(state, {
-          tkr: stock.ticker, px: price,
+          tkr: stock.ticker, px: price, adx: signals.adx,
           iRSI: signals.rsi, dRSI: signals.dailyRsi,
           call: callScore, put: putScore,
           isMR: callSetup.isMeanReversion === true,
