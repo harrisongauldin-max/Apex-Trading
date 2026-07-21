@@ -640,7 +640,16 @@ function scoreIndexSetup(stock, optionType, spyRSI, spyMACD, spyMomentum, breadt
     else if (_isOverboughtMRPutSoft) {
       score -= 15; reasons.push(`Regime: ${regime} - overbought MR put (soft, dailyRSI 70-75) (-15)`);
     }
-    else if (["trending_bull","recovery"].includes(regime))                       { score -= 25; reasons.push(`Regime: ${regime} - wrong for puts (-25)`); }
+    else if (["trending_bull","recovery"].includes(regime)) {
+      // v2: a confirmed intraday breakdown relieves the bull-regime put penalty. The underlying is
+      // below its OWN VWAP with breadth falling, so a put isn't "wrong" here even in a weekly-bull
+      // regime. Reduced (-8), NOT waived — removes the -25 structural cliff, keeps puts gated.
+      const _ivPut = stock.intradayVWAP || 0;
+      const _pxPut = stock.lastPrice || stock.price || 0;
+      const _breakdownNow = _ivPut > 0 && _pxPut <= _ivPut * (1 - 0.005) && (state._breadthTrend || "flat") === "falling";  // read state directly — bMom is scoped to an earlier block
+      if (_breakdownNow) { score -= 8;  reasons.push(`Regime: ${regime} but confirmed intraday breakdown (below own VWAP, breadth falling) - reduced put penalty (-8)`); }
+      else               { score -= 25; reasons.push(`Regime: ${regime} - wrong for puts (-25)`); }
+    }
 
     const regimeDuration    = state._regimeDuration || 0;
     const vixSustainedAvg   = state._vixSustained   || 0;
