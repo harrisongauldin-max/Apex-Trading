@@ -33,6 +33,11 @@ const CARVE_CALL_VWAP_MAX    = 0.01;  // call: price within +1% above VWAP — e
 const CARVE_PUT_BREADTH_MOM  = -10;   // put : breadthMom <= -10 (stricter than call's mirror -5)
 const CARVE_PUT_VWAP_BREAK   = 0.005; // put : price <= vwap*(1-0.005), a real break not a touch
 const CARVE_MIN_SESSION_MIN  = 30;    // both: VWAP unreliable before 30 session-minutes
+// v2 regime re-key (per-ticker intraday trend). Engage the falling-knife veto and the put
+// breakdown carve-out off the ticker's OWN intraday downtrend (price below its own VWAP),
+// not only the lagging DAILY macd that let single-session grind-downs through. Flag = kill switch.
+const INTRADAY_TREND_STANDDOWN = true;
+const CARVE_CALL_VWAP_BREAK    = 0.005; // call: price <= vwap*(1-0.005) below own VWAP = intraday downtrend
 
 // ── INSTRUMENT CONSTRAINTS ───────────────────────────────────
 // APEX trades SPY and QQQ naked options only.
@@ -317,6 +322,10 @@ function evaluateEntry(candidate, rulebook, state, context = {}) {
       const _breadthMom   = context.breadthMom ?? 0;
       const _sessionMin   = (context.etHour && context.etHour >= 9.5) ? (context.etHour - 9.5) * 60 : 0;
       const _vwapReliable = _sessionMin >= CARVE_MIN_SESSION_MIN;
+      // v2: the ticker's OWN intraday downtrend — a real break below its own VWAP once VWAP is
+      // reliable. Per-ticker (own vwap), independent of the lagging daily macd.
+      const _intradayDown = INTRADAY_TREND_STANDDOWN && _vwapReliable
+        && _gapVwapRatio <= (1 - CARVE_CALL_VWAP_BREAK);
       // Call stand-down: RISING-TAPE rebound (6/26 reframe — not gap-based). Price reclaimed VWAP
       // and is still EARLY (within CARVE_CALL_VWAP_MAX of it, not extended), breadth rising, bull-curl
       // confirming. Catches "SPY/QQQ is rising, call opportunity" that D2 vetoes for stale MACD.
@@ -326,14 +335,23 @@ function evaluateEntry(candidate, rulebook, state, context = {}) {
         && _aboveVwapEarly && _breadthMom >= CARVE_BREADTH_MOM_MIN
         && _curl === "bull_curl" && _vwapReliable;
       // Put stand-down (STRICTER): confirmed breakdown — gap-down holding, REAL vwap break, breadth falling hard.
+      // v2 widen: was gap-only (_gapState==="gap-down-holding"), which excluded slow grind-downs.
+      // A confirmed break below the ticker's OWN VWAP + breadth falling hard now qualifies whether or
+      // not the session gapped — so QQQ can stand its own puts up against the -25 bull penalty on a grind.
       const _putCarveBreakdown = optionType === "put" && candidate.isIndex === true
-        && _gapState === "gap-down-holding" && _gapVwapRatio <= (1 - CARVE_PUT_VWAP_BREAK)
+        && (_gapState === "gap-down-holding" || _intradayDown)
+        && _gapVwapRatio <= (1 - CARVE_PUT_VWAP_BREAK)
         && _breadthMom <= CARVE_PUT_BREADTH_MOM && _vwapReliable;
+      // v2 VIX-decouple: read the TAPE for a "confirmed bottoming dip" (intraday-oversold + bull_curl
+      // on an index) instead of candidate.isMeanReversion, which is VIX>=25 gated (dormant at VIX~20)
+      // AND drives sizing/delta in execution — so decoupling here activates the exemption in low VIX
+      // WITHOUT changing sizing. Guarded by !_intradayDown: a dip is only exempted from the veto when
+      // it is NOT also a break below its own VWAP, so this can't re-admit a below-VWAP knife-catch.
       const carvedOut    = optionType === "call"
-        && candidate.isMeanReversion === true
         && candidate.isIndex === true
         && _oversoldNow
-        && _curl === "bull_curl";                 // confirmed bottoming dip — not a contradiction
+        && _curl === "bull_curl"
+        && !_intradayDown;                        // confirmed bottoming dip, not a downtrend knife
       _trCarveOut = carvedOut;
       if (optionType === "put" && macdBullish && dailyRsi < 65) {
         if (_putCarveBreakdown) {
@@ -341,13 +359,13 @@ function evaluateEntry(candidate, rulebook, state, context = {}) {
         } else {
           _trMacdLift = true; minScore = Math.max(minScore, 85);             // puts: unchanged
         }
-      } else if (optionType === "call" && macdBearish && !carvedOut) {
+      } else if (optionType === "call" && (macdBearish || _intradayDown) && !carvedOut) {
         if (_callCarveReversal) {
           _trCarveOut = true; _trCarveKind = "reversal";   // #3: confirmed rebound — stand D2 down (no veto, no 85 lift); score still clears floor
         } else if (_oversoldNow) {
           _trMacdLift = true; minScore = Math.max(minScore, 85);           // intraday-oversold, curl unconfirmed → high floor, not veto
         } else {
-          return { pass: false, reason: `MACD bearish on long call & intraday RSI ${intradayRsi.toFixed(0)} not oversold (D2 falling-knife veto)` };
+          return { pass: false, reason: `long call into ${macdBearish ? "bearish MACD" : "intraday downtrend (below own VWAP)"} & intraday RSI ${intradayRsi.toFixed(0)} not oversold (falling-knife veto)` };
         }
       }
     }
