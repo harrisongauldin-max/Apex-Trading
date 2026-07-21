@@ -692,6 +692,10 @@ async function executeTrade(stock, price, score, scoreReasons, vix, optionType =
                        : null,
     entryMACD:      stock.macd || null,
     entryMomentum:  stock.momentum || null,
+    dteBand:         dteBand || (_sameWeekLeg ? "sameweek" : "standard"),   // leg tag — was missing from the journal (needed for the leg A/B)
+    entryADX:        stock._adx ?? stock.adx ?? 0,                            // intraday trend strength at entry — was missing from the journal
+    isMeanReversion: isMeanReversion || false,                               // entry type — was missing from the journal
+    entryRelStr:     stock._relStrength || 1.0,                              // relative strength at entry — for the SPY/QQQ divergence
     macroSignal:    (state._agentMacro || {}).signal || 'neutral',
     _isGapDayEntry: (state._todayGapAbs || 0) >= 1.5,
     regimeAtEntry:  (state._marketRegime || {}).regime || 'unknown',
