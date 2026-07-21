@@ -597,6 +597,27 @@ async function syncPositionPnLFromAlpaca() {
     const alpacaBySymbol = {};
     for (const ap of alpacaPositions) alpacaBySymbol[ap.symbol] = ap;
 
+    // fix: collapse any pre-existing duplicate OPEN positions sharing a contract
+    // (legacy scale-in dupes created before merge-on-addon). One record per contract:
+    // summed contracts, weighted-avg premium. New dupes can't form post-fix.
+    {
+      const _seen = {};
+      for (const p of _state.positions) {
+        if (!p.contractSymbol) continue;
+        if (!_seen[p.contractSymbol]) { _seen[p.contractSymbol] = p; continue; }
+        const a = _seen[p.contractSymbol];
+        const qa = a.contracts || 0, qb = p.contracts || 0, q = qa + qb;
+        if (q > 0) a.premium = parseFloat(((a.premium*qa + p.premium*qb)/q).toFixed(4));
+        a.contracts = q;
+        a.cost = parseFloat(((a.cost||0) + (p.cost||0)).toFixed(2));
+        p._dupCollapsed = true;
+      }
+      if (_state.positions.some(p => p._dupCollapsed)) {
+        _state.positions = _state.positions.filter(p => !p._dupCollapsed);
+        _log('warn', `[RECONCILE] collapsed duplicate open positions (legacy scale-in)`);
+      }
+    }
+
     for (const pos of _state.positions) {
       const ap = alpacaBySymbol[pos.contractSymbol];
       if (!ap) continue;
@@ -607,10 +628,17 @@ async function syncPositionPnLFromAlpaca() {
         pos._currentPriceUpdatedAt = Date.now();
         pos.realData = true;
       }
-      const alpacaQty = Math.abs(parseInt(ap.qty || 1));
+      const alpacaQty  = Math.abs(parseInt(ap.qty || 1));
+      const _avgEntry  = parseFloat(ap.avg_entry_price || 0);
       if (alpacaQty !== pos.contracts) {
         _log('scan', `[ALPACA SYNC] ${pos.ticker} contracts: ${pos.contracts} → ${alpacaQty}`);
         pos.contracts = alpacaQty;
+        // fix: on ANY qty change, re-sync cost basis to Alpaca's blended avg —
+        // otherwise a scale-in leaves premium at the first fill → wrong P&L at close.
+        if (_avgEntry > 0 && Math.abs(_avgEntry - pos.premium) > 0.01) {
+          _log('scan', `[ALPACA SYNC] ${pos.ticker} premium: ${pos.premium} → ${_avgEntry} (blended avg_entry_price)`);
+          pos.premium = _avgEntry;
+        }
       }
       if (pos.currentPrice > 0 && pos.premium > 0) {
         pos.unrealizedPnL = parseFloat(((pos.currentPrice - pos.premium) * 100 * pos.contracts).toFixed(2));
