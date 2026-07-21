@@ -38,6 +38,7 @@ const CARVE_MIN_SESSION_MIN  = 30;    // both: VWAP unreliable before 30 session
 // not only the lagging DAILY macd that let single-session grind-downs through. Flag = kill switch.
 const INTRADAY_TREND_STANDDOWN = true;
 const CARVE_CALL_VWAP_BREAK    = 0.005; // call: price <= vwap*(1-0.005) below own VWAP = intraday downtrend
+const ADX_TREND_MIN            = 20;    // veto only fires in a TRENDING tape (ADX>=this). In chop (ADX<20) the veto relaxes so oversold bounces are taken. Raise → more MR bounces taken (better in chop, worse at trend onset). ADX lags, so trend-onset knife-catches can slip through.
 
 // ── INSTRUMENT CONSTRAINTS ───────────────────────────────────
 // APEX trades SPY and QQQ naked options only.
@@ -324,8 +325,10 @@ function evaluateEntry(candidate, rulebook, state, context = {}) {
       const _vwapReliable = _sessionMin >= CARVE_MIN_SESSION_MIN;
       // v2: the ticker's OWN intraday downtrend — a real break below its own VWAP once VWAP is
       // reliable. Per-ticker (own vwap), independent of the lagging daily macd.
+      const _adx = signals.adx ?? 20;   // intraday ADX(14), per-ticker trend strength
       const _intradayDown = INTRADAY_TREND_STANDDOWN && _vwapReliable
-        && _gapVwapRatio <= (1 - CARVE_CALL_VWAP_BREAK);
+        && _gapVwapRatio <= (1 - CARVE_CALL_VWAP_BREAK)
+        && _adx >= ADX_TREND_MIN;        // only stand down in a TRENDING tape; relax in chop (low ADX)
       // Call stand-down: RISING-TAPE rebound (6/26 reframe — not gap-based). Price reclaimed VWAP
       // and is still EARLY (within CARVE_CALL_VWAP_MAX of it, not extended), breadth rising, bull-curl
       // confirming. Catches "SPY/QQQ is rising, call opportunity" that D2 vetoes for stale MACD.
