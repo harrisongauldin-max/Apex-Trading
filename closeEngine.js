@@ -160,6 +160,8 @@ async function _doClosePosition(ticker, reason, exitPremium = null, contractSym 
   const contractsToSell = pos.contracts === 1 ? 1 : Math.max(1, Math.floor(pos.contracts * mult));
   const ev   = parseFloat((ep * 100 * contractsToSell).toFixed(2));
   const costBasis = parseFloat((pos.premium * 100 * contractsToSell).toFixed(2));
+  const NAKED_ONLY = true;
+  if (NAKED_ONLY) { pos.isCreditSpread = false; pos.isSpread = false; }   // APEX is naked-only — neutralize any phantom spread flag so P&L/cash/tradeType all use the naked path (the credit formula inverts the sign)
   let pnl;
   if (pos.isCreditSpread) {
     pnl = parseFloat(((pos.premium - ep) * 100 * contractsToSell).toFixed(2));
