@@ -9,6 +9,7 @@ const { WATCHLIST,
   ALPACA_KEY, INDIVIDUAL_STOCKS_ENABLED, MS_PER_DAY, STOP_LOSS_PCT, TAKE_PROFIT_PCT
 } = require('./constants');
 const { findContract } = require('./execution');
+const NAKED_ONLY = true;   // APEX trades naked options only — no spread construction/maintenance/P&L
 
 // ─── Injected dependencies (set by server.js at boot) ────────────
 let _state        = null;
@@ -330,7 +331,7 @@ async function runReconciliation() {
           const sameTickerExp = a.ticker === b.ticker && a.expDate === b.expDate && a.optType === b.optType;
           const widthOk = Math.abs(a.strike - b.strike) >= 1 && Math.abs(a.strike - b.strike) <= 100;
           const oppDir  = (a.qty > 0 && b.qty < 0) || (a.qty < 0 && b.qty > 0);
-          if (sameTickerExp && widthOk && oppDir) {
+          if (!NAKED_ONLY && sameTickerExp && widthOk && oppDir) {
             const longLeg  = a.qty > 0 ? a : b;
             const shortLeg = a.qty > 0 ? b : a;
             const buyLeg   = longLeg;
@@ -506,7 +507,7 @@ async function runReconciliation() {
         const bIsShort = b.sellSymbol && !b.buySymbol;
         const oppDir   = aIsShort !== bIsShort;
 
-        if (sameTickerExp && widthOk && oppDir) {
+        if (!NAKED_ONLY && sameTickerExp && widthOk && oppDir) {
           const buyLeg  = !aIsShort ? a : b;
           const sellLeg = aIsShort  ? a : b;
           const buyIdx  = !aIsShort ? i : j;
@@ -591,6 +592,7 @@ async function runReconciliation() {
 async function syncPositionPnLFromAlpaca() {
   if (!ALPACA_KEY) return;
   if (!_state || !_state.positions) return;
+  if (NAKED_ONLY) _state.positions = _state.positions.filter(p => !p.isSpread);   // drop phantom spreads — APEX holds only naked legs (reconciled individually from Alpaca)
   try {
     const alpacaPositions = await alpacaGet('/positions');
     if (!alpacaPositions || !Array.isArray(alpacaPositions)) return;
