@@ -267,10 +267,15 @@ async function checkExits(positions, posSnapshots, posQuotes, posNewsCache, ctx)
             const prevRSI  = pos._prevRSI || liveRSI;
             pos._prevRSI   = liveRSI;
             const putThesisDegrading  = pos.optionType === "put"  && entryRSI >= 65 && liveRSI > 60 && prevRSI <= 55;
+            // BREAKDOWN-PUT MIRROR (7/25): a put entered on an intraday breakdown enters at LOW
+            // RSI, so entryRSI>=65 never matches it and it had NO thesis exit at all. Its thesis
+            // is "the downtrend continues", so it degrades when the tape BOUNCES — same shape as
+            // callRSIDegrading. entryRSI < 65 cleanly separates breakdown puts from fade puts.
+            const putBreakdownDegrading = pos.optionType === "put" && entryRSI < 65 && liveRSI > 55 && prevRSI <= 50;
             const callRSIDegrading    = pos.optionType === "call" && entryRSI <= 40 && liveRSI > 55 && prevRSI <= 50;
             const _liveMACD           = pos._lastMACD || pos.entryMACD || "";
             const callMACDDegrading   = pos.optionType === "call" && _liveMACD.includes("bearish crossover") && !(pos.entryMACD||"").includes("bearish");
-            if (putThesisDegrading || callRSIDegrading || callMACDDegrading) {
+            if (putThesisDegrading || putBreakdownDegrading || callRSIDegrading || callMACDDegrading) {
               const reason = callMACDDegrading ? "macd-crossover-bearish" : `rsi-reversal: entry ${entryRSI} → now ${liveRSI.toFixed(0)}`;
               triggerRescore(pos, reason);
             }
@@ -540,8 +545,11 @@ async function checkExits(positions, posSnapshots, posQuotes, posNewsCache, ctx)
     const _entryDRSI    = pos.entryDailyRSI || pos.entryRSI || 50;
     const _curDRSI      = pos.dailyRsi || _curRSI;
     const _putFulfilled  = pos.optionType === "put"  && _entryDRSI >= 65 && _curDRSI < 50;
+    // BREAKDOWN-PUT MIRROR: a fade put is fulfilled when RSI normalizes DOWN from overbought.
+    // A breakdown put is fulfilled when the fall has DELIVERED — intraday RSI now deeply oversold.
+    const _putBDFulfilled = pos.optionType === "put" && _entryDRSI < 65 && _curRSI <= 30;
 
-    if ((_callFulfilled || _putFulfilled) && !pos._thesisFulfilled) {
+    if ((_callFulfilled || _putFulfilled || _putBDFulfilled) && !pos._thesisFulfilled) {
       pos._thesisFulfilled   = true;
       pos._thesisFulfilledAt = Date.now();
       logEvent("scan", `[THESIS FULFILLED] ${pos.ticker} RSI ${_entryRSITC}→${_curRSI.toFixed(0)} | gain: ${chg >= 0 ? '+' : ''}${(chg*100).toFixed(1)}%`);
@@ -585,7 +593,14 @@ async function checkExits(positions, posSnapshots, posQuotes, posNewsCache, ctx)
         if (tBars.length >= 15) {
           const curRSI  = calcRSI(tBars);
           const entryRSI = pos.entryRSI || (pos.optionType === "put" ? 75 : 30);
-          if (pos.optionType === "put" && entryRSI >= 65 && curRSI < 50 && !pos.partialClosed && chg < 0.10) {
+          // BREAKDOWN-PUT MIRROR: fade put degrades when RSI falls back from overbought; a
+          // breakdown put degrades when RSI RECOVERS (the breakdown failed). Both lock to breakeven.
+          // Classify with the SAME expression block A uses (prefers entryDailyRSI) so the two
+          // exit paths cannot disagree about whether a put is a breakdown or a fade. Leaves the
+          // pre-existing intraday `entryRSI` (and the fade condition below) untouched.
+          const _bdEntryRSI = pos.entryDailyRSI || pos.entryRSI || 75;
+          const _bdPutDegrade = pos.optionType === "put" && _bdEntryRSI < 65 && curRSI > 55 && !pos.partialClosed && chg < 0.10;
+          if (_bdPutDegrade || (pos.optionType === "put" && entryRSI >= 65 && curRSI < 50 && !pos.partialClosed && chg < 0.10)) {
             logEvent("scan", `${pos.ticker} PUT thesis degradation — RSI ${entryRSI}→${curRSI.toFixed(0)}`);
             if (pos.trailFloorPct == null || pos.trailFloorPct < 0) {
               pos.trailFloorPct = 0; // lock to breakeven on degradation
