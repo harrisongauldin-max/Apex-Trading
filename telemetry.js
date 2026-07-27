@@ -17,7 +17,7 @@ const SCORE_DELTA  = 3;               // |score| move that counts as material
 const MAX_ROWS     = 6000;            // safety cap on a runaway day
 const BLOCKER_MAX  = 60;              // truncate the headline blocker text
 
-const TELEMETRY_HEADER = "time,tkr,px,iRSI,dRSI,call,put,isMR,curl,vwap%,blocker,drivers,shadow,adx,gate";
+const TELEMETRY_HEADER = "time,tkr,px,iRSI,dRSI,call,put,isMR,curl,vwap%,blocker,drivers,shadow,adx,gate,pgate";
 
 // intraday-RSI tier — a crossing is "material" so dips/spikes always log a row
 function _rsiTier(r) {
@@ -80,6 +80,19 @@ function _vetoGate(vwapPct, iRSI, adx) {
   return adx >= 20 ? "VETO" : "chop";                    // trending → veto fires; low-ADX chop → relaxed
 }
 
+function _putGate(vwapPct, adx) {
+  // Scan-level shadow of the PUT breakdown trigger (scoring.js PUT_BREAKDOWN_MODE).
+  // Mirrors those constants exactly: deep = >=0.5% below own VWAP AND ADX>=30;
+  // confirmed = >=0.3% below AND ADX>=20. Logging only — puts fire live, this just
+  // makes it readable WHY they did or didn't (threshold vs score vs never-qualified).
+  if (vwapPct == null) return "";
+  const depth = -vwapPct;                       // positive = below own VWAP
+  if (adx == null) return depth >= 0.3 ? "below?" : "no";
+  if (depth >= 0.5 && adx >= 30) return "deep";
+  if (depth >= 0.3 && adx >= 20) return "confirmed";
+  return "no";
+}
+
 function recordTelemetry(state, rec) {
   try {
     if (!state._telemetryBuffer) state._telemetryBuffer = [];
@@ -87,7 +100,8 @@ function recordTelemetry(state, rec) {
     const now  = Date.now();
     const prev = state._telemetryLast[rec.tkr];
     const tier = _rsiTier(rec.iRSI);
-    const gate = _vetoGate(rec.vwapPct, rec.iRSI, rec.adx);
+    const gate  = _vetoGate(rec.vwapPct, rec.iRSI, rec.adx);
+    const pgate = _putGate(rec.vwapPct, rec.adx);
 
     const _shadowNow = shadowTag(rec.direction === "put" ? rec.putReasons : rec.callReasons);
     const material =
@@ -99,6 +113,7 @@ function recordTelemetry(state, rec) {
       (_shadowNow !== (prev.shadow || "")) ||
       (tier !== prev.tier) ||
       (gate !== (prev.gate || "")) ||
+      (pgate !== (prev.pgate || "")) ||
       (now - (prev.ts || 0)) >= HEARTBEAT_MS;
     if (!material) return false;
 
@@ -122,6 +137,7 @@ function recordTelemetry(state, rec) {
       shadow,
       rec.adx == null ? "" : Number(rec.adx).toFixed(0),
       gate,
+      pgate,
     ].map(_csv).join(",");
 
     state._telemetryBuffer.push(row);
@@ -129,7 +145,7 @@ function recordTelemetry(state, rec) {
       state._telemetryBuffer = state._telemetryBuffer.slice(-MAX_ROWS);
 
     state._telemetryLast[rec.tkr] = {
-      call: rec.call, put: rec.put, isMR: !!rec.isMR, blocker: rec.blocker || "", tier, ts: now, shadow: _shadowNow, gate,
+      call: rec.call, put: rec.put, isMR: !!rec.isMR, blocker: rec.blocker || "", tier, ts: now, shadow: _shadowNow, gate, pgate,
     };
     return true;
   } catch (_) {
