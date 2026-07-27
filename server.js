@@ -181,6 +181,21 @@ async function initState() {
   }
 
   if (state.positions) {
+    // NAKED_ONLY (7/27): APEX trades naked options only. Any spread flag restored from Redis is
+    // a legacy ghost — neutralize it at boot so the UI and every downstream consumer see a naked
+    // position immediately, not after the first Alpaca reconcile. Clearing maxProfit/maxLoss also
+    // kills the bogus "% of max profit" display (P&L / maxProfit -> +$94 / $4 = 2350%).
+    let _deghosted = 0;
+    for (const p of state.positions) {
+      if (p.isSpread || p.isCreditSpread) {
+        p.isSpread = false; p.isCreditSpread = false;
+        delete p.maxProfit; delete p.maxLoss; delete p.buySymbol; delete p.sellSymbol;
+        delete p.buyStrike; delete p.sellStrike;
+        _deghosted++;
+      }
+    }
+    if (_deghosted > 0) console.log(`[STARTUP] NAKED_ONLY: neutralized ${_deghosted} legacy spread flag(s) on restored positions`);
+
     const creditSpreads = state.positions.filter(p => p.isCreditSpread);
     const seen = new Map();
     const toRemove = new Set();
