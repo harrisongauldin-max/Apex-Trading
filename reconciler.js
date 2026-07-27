@@ -592,7 +592,9 @@ async function runReconciliation() {
 async function syncPositionPnLFromAlpaca() {
   if (!ALPACA_KEY) return;
   if (!_state || !_state.positions) return;
-  if (NAKED_ONLY) _state.positions = _state.positions.filter(p => !p.isSpread);   // drop phantom spreads — APEX holds only naked legs (reconciled individually from Alpaca)
+  // v2 (7/27): the original filter checked ONLY isSpread, so a position carrying
+  // isCreditSpread WITHOUT isSpread survived every sync. Check BOTH flags.
+  if (NAKED_ONLY) _state.positions = _state.positions.filter(p => !p.isSpread && !p.isCreditSpread);
   try {
     const alpacaPositions = await alpacaGet('/positions');
     if (!alpacaPositions || !Array.isArray(alpacaPositions)) return;
