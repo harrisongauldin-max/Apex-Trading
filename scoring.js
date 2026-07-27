@@ -632,6 +632,28 @@ function scoreIndexSetup(stock, optionType, spyRSI, spyMACD, spyMomentum, breadt
       && spyRSI >= 65
       && _dailyRsiForPut >= 70 && _dailyRsiForPut < 75;
 
+    // ── PUT BREAKDOWN MODE (7/24) — puts RIDE breakdowns, not only fade bounces ──
+    // Design intent: the put side is meant to trade intraday breakdowns. Symmetry with the
+    // call side — a call in trending_bull earns +21 for "intraday aligned (above VWAP)", so a
+    // put that is confirmed broken-down intraday should not be dominated by the DAILY regime.
+    // Deliberately reuses the SAME construct that vetoes calls (price below the ticker's own
+    // VWAP + ADX trending): a call stand-down now routes to the put side instead of sitting flat.
+    // ADX missing => 0 => no breakdown put (fails toward NOT trading).
+    const PUT_BREAKDOWN_MODE = true;                  // kill switch
+    const _bdVwap  = stock.intradayVWAP || 0;
+    const _bdPx    = stock.lastPrice || stock.price || 0;
+    const _bdAdx   = Number.isFinite(stock.adx) ? stock.adx : 0;   // intraday ADX(14), per-ticker
+    const _bdDepth = (_bdVwap > 0 && _bdPx > 0) ? (_bdVwap - _bdPx) / _bdVwap : 0;
+    // Thresholds CALIBRATED on live telemetry 7/21-7/23, not convention. Critical finding:
+    // VWAP TRAILS a decline, so depth-below-VWAP is a weak magnitude measure — QQQ fell 3.92%
+    // on 7/23 yet never got more than 0.70% below its own VWAP. ADX carries the magnitude
+    // (45 on 7/23 vs 15 on the flat 7/22). Hence shallow depth + high ADX, not deep depth.
+    // Measured: these fire on 7/23 only (33 QQQ / 3 SPY deep scans) and ZERO times on the
+    // 7/21 up day and 7/22 flat day — inert except on a genuine breakdown.
+    const _bdDeep      = PUT_BREAKDOWN_MODE && _bdDepth >= 0.005 && _bdAdx >= 30;
+    const _bdConfirmed = PUT_BREAKDOWN_MODE && _bdDepth >= 0.003 && _bdAdx >= 20;
+    const _bdPct = (_bdDepth * 100).toFixed(1);
+
     if (["trending_bear","breakdown"].includes(regime))                           { score += 21; reasons.push(`Regime: ${regime} (+21)`); }
     else if (regime === "choppy")                                                  { score -= 10; reasons.push("Choppy regime - puts risky (-10)"); }
     else if (_isOverboughtMRPut) {
@@ -641,15 +663,22 @@ function scoreIndexSetup(stock, optionType, spyRSI, spyMACD, spyMomentum, breadt
       score -= 15; reasons.push(`Regime: ${regime} - overbought MR put (soft, dailyRSI 70-75) (-15)`);
     }
     else if (["trending_bull","recovery"].includes(regime)) {
-      // v2: a confirmed intraday breakdown relieves the bull-regime put penalty. The underlying is
-      // below its OWN VWAP with breadth falling, so a put isn't "wrong" here even in a weekly-bull
-      // regime. Reduced (-8), NOT waived — removes the -25 structural cliff, keeps puts gated.
-      const _ivPut = stock.intradayVWAP || 0;
-      const _pxPut = stock.lastPrice || stock.price || 0;
-      const _breakdownNow = _ivPut > 0 && _pxPut <= _ivPut * (1 - 0.005) && (state._breadthTrend || "flat") === "falling";  // read state directly — bMom is scoped to an earlier block
-      if (_breakdownNow) { score -= 8;  reasons.push(`Regime: ${regime} but confirmed intraday breakdown (below own VWAP, breadth falling) - reduced put penalty (-8)`); }
-      else               { score -= 25; reasons.push(`Regime: ${regime} - wrong for puts (-25)`); }
+      // v3 BREAKDOWN MODE: the daily regime no longer dominates a confirmed intraday breakdown.
+      // (v2 required breadth FALLING, which was the binding constraint — on 7/23 breadth read
+      // 69-92% RISING during a -2.45% SPY / -3.92% QQQ session, so the v2 relief never fired.)
+      if (_bdDeep) {
+        score += 11; reasons.push(`Regime: ${regime} but DEEP intraday breakdown (${_bdPct}% below own VWAP, ADX ${_bdAdx.toFixed(0)}) - intraday overrides daily regime (+11)`);
+      } else if (_bdConfirmed) {
+        reasons.push(`Regime: ${regime} but confirmed intraday breakdown (${_bdPct}% below own VWAP, ADX ${_bdAdx.toFixed(0)}) - regime penalty waived (0)`);
+      } else {
+        score -= 25; reasons.push(`Regime: ${regime} - wrong for puts (-25)`);
+      }
     }
+
+    // v3: primary breakdown-momentum channel — the put-side mirror of the call's mean-reversion
+    // bonus. Previously NOTHING in the put path could score "this is breaking down intraday".
+    if (_bdDeep)           { score += 21; reasons.push(`Breakdown put - riding confirmed intraday downtrend, ${_bdPct}% below own VWAP on ADX ${_bdAdx.toFixed(0)} (+21)`); }
+    else if (_bdConfirmed) { score += 12; reasons.push(`Breakdown put - intraday downtrend confirmed, ${_bdPct}% below own VWAP (+12)`); }
 
     const regimeDuration    = state._regimeDuration || 0;
     const vixSustainedAvg   = state._vixSustained   || 0;
@@ -702,6 +731,10 @@ function scoreIndexSetup(stock, optionType, spyRSI, spyMACD, spyMomentum, breadt
       const inBearRegimeForPuts = ["trending_bear","breakdown"].includes(regime);
       if (inBearRegimeForPuts) {
         score += 6; reasons.push(`${stock.ticker} RSI ${spyRSI} oversold in bear trend — brief bounce, put thesis intact (+6)`);
+      } else if (stock.isIndex && _bdConfirmed) {
+        // v3 BREAKDOWN MODE: low RSI encodes "already crashed, too late to short" — correct for a
+        // fade design, WRONG when riding a breakdown. During a confirmed breakdown the penalty is waived.
+        reasons.push(`${stock.ticker} RSI ${spyRSI} oversold BUT confirmed intraday breakdown - trend intact, penalty waived (breakdown mode)`);
       } else if (stock.isIndex) {
         // C2 FIX: Index macro catalyst path — no hard zero
         score -= 10;
@@ -723,6 +756,8 @@ function scoreIndexSetup(stock, optionType, spyRSI, spyMACD, spyMomentum, breadt
         } else {
           score += 0; reasons.push(`${stock.ticker} RSI ${spyRSI} oversold in bear trend - downtrend intact, no penalty (+0)`);
         }
+      } else if (_bdConfirmed) {
+        reasons.push(`${stock.ticker} RSI ${spyRSI} low but confirmed intraday breakdown - downtrend intact, penalty waived (breakdown mode)`);
       } else {
         score -= 15; reasons.push(`${stock.ticker} RSI ${spyRSI} oversold for puts - stock already crashed in bull regime (-15)`);
       }
