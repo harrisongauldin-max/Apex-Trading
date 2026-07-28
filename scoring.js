@@ -696,8 +696,11 @@ function scoreIndexSetup(stock, optionType, spyRSI, spyMACD, spyMomentum, breadt
 
     // v3: primary breakdown-momentum channel — the put-side mirror of the call's mean-reversion
     // bonus. Previously NOTHING in the put path could score "this is breaking down intraday".
-    if (_bdEarly)          { score += 18; reasons.push(`Breakdown put - EARLY structural break below opening-range low${_bdVwapTurn ? ", VWAP turning down" : ""}${_bdBreadthRoll ? ", breadth rolling over" : ""} (+18)`); }
-    else if (_bdDeep)      { score += 21; reasons.push(`Breakdown put - riding confirmed intraday downtrend, ${_bdPct}% below own VWAP on ADX ${_bdAdx.toFixed(0)} (+21)`); }
+    // 7/28 ORDERING FIX: this ran EARLY-first, so a setup that was BOTH early AND deep scored 18 —
+    // LESS than deep alone at 21. Adding a true condition must never lower the score. Highest
+    // applicable tier now wins (21 > 18 > 12), which is max() by construction.
+    if (_bdDeep)           { score += 21; reasons.push(`Breakdown put - riding confirmed intraday downtrend, ${_bdPct}% below own VWAP on ADX ${_bdAdx.toFixed(0)}${_bdEarly ? " (also broke the opening-range low)" : ""} (+21)`); }
+    else if (_bdEarly)     { score += 18; reasons.push(`Breakdown put - EARLY structural break below opening-range low${_bdVwapTurn ? ", VWAP turning down" : ""}${_bdBreadthRoll ? ", breadth rolling over" : ""} (+18)`); }
     else if (_bdConfirmed) { score += 12; reasons.push(`Breakdown put - intraday downtrend confirmed, ${_bdPct}% below own VWAP (+12)`); }
 
     const regimeDuration    = state._regimeDuration || 0;
