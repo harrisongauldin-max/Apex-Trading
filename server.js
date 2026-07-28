@@ -827,7 +827,20 @@ app.get("/api/state", async (req, res) => {
     }
     const displayPnLPct = maxProfitVal > 0 ? parseFloat((displayPnL / maxProfitVal * 100).toFixed(1)) : 0;
     const costToClose   = parseFloat((cur * 100 * c).toFixed(2));
-    return { ...pos, displayPnL, displayPnLPct, costToClose };
+    // NAKED_ONLY BOUNDARY GUARD (7/28): three source-side layers (creation guards, boot
+    // neutralize, reconcile-sync filter) have each failed to stop the phantom, so defend where
+    // it is *observable* instead. Every UI read passes through this one map, so stripping the
+    // spread shape here is source-independent — whatever creates it, the UI can never render it
+    // as a spread and no downstream consumer of this payload can act on it.
+    const _clean = { ...pos, displayPnL, displayPnLPct, costToClose };
+    if (_clean.isSpread || _clean.isCreditSpread) {
+      _clean.isSpread = false; _clean.isCreditSpread = false;
+      delete _clean.maxProfit; delete _clean.maxLoss;
+      delete _clean.buyStrike; delete _clean.sellStrike;
+      delete _clean.buySymbol; delete _clean.sellSymbol;
+      delete _clean.spreadWidth; delete _clean.netCredit;
+    }
+    return _clean;
   });
   res.json({
     ...state,
