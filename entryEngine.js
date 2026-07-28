@@ -371,10 +371,15 @@ function evaluateEntry(candidate, rulebook, state, context = {}) {
       } else if (optionType === "call" && (macdBearish || _intradayDown) && !carvedOut) {
         if (_callCarveReversal) {
           _trCarveOut = true; _trCarveKind = "reversal";   // #3: confirmed rebound — stand D2 down (no veto, no 85 lift); score still clears floor
-        } else if (_oversoldNow) {
+        } else if (_oversoldNow && !_orBreak) {
           _trMacdLift = true; minScore = Math.max(minScore, 85);           // intraday-oversold, curl unconfirmed → high floor, not veto
         } else {
-          return { pass: false, reason: `long call into ${macdBearish ? "bearish MACD" : "intraday downtrend (below own VWAP)"} & intraday RSI ${intradayRsi.toFixed(0)} not oversold (falling-knife veto)` };
+          // 7/28: the oversold 85-FLOOR was a SECOND escape hatch the carvedOut guard never touched.
+          // QQQ 10:17 was oversold (iRSI 34) and scored 105, cleared the floor, and entered a call
+          // straight into a confirmed breakdown. Once price has broken the opening-range low the
+          // tape has said "trend, not dip" — an oversold reading is the LEAST trustworthy signal
+          // there, so it no longer buys a floor; it gets the veto.
+          return { pass: false, reason: `long call into ${_orBreak ? "a STRUCTURAL breakdown (broke opening-range low)" : (macdBearish ? "bearish MACD" : "intraday downtrend (below own VWAP)")} & intraday RSI ${intradayRsi.toFixed(0)}${_oversoldNow ? " — oversold, but the OR break overrides the dip read" : " not oversold"} (falling-knife veto)` };
         }
       }
     }
