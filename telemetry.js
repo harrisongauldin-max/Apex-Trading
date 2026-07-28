@@ -80,16 +80,36 @@ function _vetoGate(vwapPct, iRSI, adx) {
   return adx >= 20 ? "VETO" : "chop";                    // trending → veto fires; low-ADX chop → relaxed
 }
 
-function _putGate(vwapPct, adx) {
+function _putGate(state, rec) {
   // Scan-level shadow of the PUT breakdown trigger (scoring.js PUT_BREAKDOWN_MODE).
-  // Mirrors those constants exactly: deep = >=0.5% below own VWAP AND ADX>=30;
-  // confirmed = >=0.3% below AND ADX>=20. Logging only — puts fire live, this just
-  // makes it readable WHY they did or didn't (threshold vs score vs never-qualified).
+  // 7/28: this previously mirrored only the depth/ADX constants and knew NOTHING about the
+  // episode-age gate or the EARLY tier added the same day — so it would print "deep" on scans
+  // scoring actually rejects as stale, and "no" on scans where EARLY fires. An observability
+  // column that disagrees with the logic it observes is worse than no column, because the
+  // analysis built on it is silently wrong. Now mirrors all three tiers plus the gate.
+  const vwapPct = rec.vwapPct, adx = rec.adx;
   if (vwapPct == null) return "";
   const depth = -vwapPct;                       // positive = below own VWAP
+  const tkr   = rec.tkr;
+
+  // episode freshness — same rule as scoring (BD_EPISODE_MAX_MIN = 30)
+  const ep     = state._bdEpisode && state._bdEpisode[tkr];
+  const epAge  = (ep && ep.active) ? (Date.now() - ep.startedAt) / 60000 : 0;
+  const fresh  = !ep || !ep.active || epAge <= 30;
+
+  // EARLY structural tier — opening-range break + a rate corroborator
+  const or       = state._openRange && state._openRange[tkr];
+  const orBreak  = !!(or && or.locked && rec.px > 0 && rec.px < or.low);
+  const vwapTurn = ((state._vwapSlope && state._vwapSlope[tkr]) ?? 0) <= -0.0005;
+  const bRoll    = (state._breadthMomentum ?? 0) <= -10;
+  if (fresh && orBreak && (vwapTurn || bRoll)) return "early";
+
   if (adx == null) return depth >= 0.3 ? "below?" : "no";
-  if (depth >= 0.5 && adx >= 30) return "deep";
-  if (depth >= 0.3 && adx >= 20) return "confirmed";
+  const deep = depth >= 0.5 && adx >= 30;
+  const conf = depth >= 0.3 && adx >= 20;
+  if (!fresh && (deep || conf)) return "stale";   // qualifies on depth/ADX but the episode aged out
+  if (deep) return "deep";
+  if (conf) return "confirmed";
   return "no";
 }
 
@@ -101,7 +121,7 @@ function recordTelemetry(state, rec) {
     const prev = state._telemetryLast[rec.tkr];
     const tier = _rsiTier(rec.iRSI);
     const gate  = _vetoGate(rec.vwapPct, rec.iRSI, rec.adx);
-    const pgate = _putGate(rec.vwapPct, rec.adx);
+    const pgate = _putGate(state, rec);
 
     const _shadowNow = shadowTag(rec.direction === "put" ? rec.putReasons : rec.callReasons);
     const material =
