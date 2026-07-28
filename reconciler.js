@@ -594,7 +594,17 @@ async function syncPositionPnLFromAlpaca() {
   if (!_state || !_state.positions) return;
   // v2 (7/27): the original filter checked ONLY isSpread, so a position carrying
   // isCreditSpread WITHOUT isSpread survived every sync. Check BOTH flags.
-  if (NAKED_ONLY) _state.positions = _state.positions.filter(p => !p.isSpread && !p.isCreditSpread);
+  if (NAKED_ONLY) {
+    // Log BEFORE dropping so the source becomes diagnosable from the live log — if this fires
+    // mid-session we finally learn when a phantom is being minted, which static analysis of the
+    // three known creation paths has not revealed.
+    const _ghosts = _state.positions.filter(p => p.isSpread || p.isCreditSpread);
+    if (_ghosts.length) {
+      _log('warn', `[NAKED_ONLY] dropping ${_ghosts.length} phantom spread position(s): ` +
+        _ghosts.map(p => `${p.ticker} ${p.contractSymbol || p.buySymbol || '?'} isSpread=${!!p.isSpread} isCreditSpread=${!!p.isCreditSpread} strikes=${p.buyStrike ?? '-'}/${p.sellStrike ?? '-'}`).join(' | '));
+    }
+    _state.positions = _state.positions.filter(p => !p.isSpread && !p.isCreditSpread);
+  }
   try {
     const alpacaPositions = await alpacaGet('/positions');
     if (!alpacaPositions || !Array.isArray(alpacaPositions)) return;
