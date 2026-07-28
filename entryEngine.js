@@ -341,10 +341,23 @@ function evaluateEntry(candidate, rulebook, state, context = {}) {
       // v2 widen: was gap-only (_gapState==="gap-down-holding"), which excluded slow grind-downs.
       // A confirmed break below the ticker's OWN VWAP + breadth falling hard now qualifies whether or
       // not the session gapped — so QQQ can stand its own puts up against the -25 bull penalty on a grind.
+      // Zero-lag structural break of the opening-range low (scanner supplies it). Declared HERE,
+      // above its FIRST consumer (_putCarveBreakdown) — it is used again by carvedOut further down.
+      const _orBreak     = signals.orBreak === true;
+
+      // 7/28 ASYMMETRY FIX: calls got the _orBreak guard, puts never got the _orBreak ENABLER, so
+      // the EARLY tier was half-wired. When daily MACD is bullish (the "weekly bull / intraday bear"
+      // case this whole put build targets) an EARLY put with no carve falls to the 85 floor and dies
+      // — EARLY scores ~29 + supplements, nowhere near 85. Added a second path: a structural break of
+      // the opening-range low with breadth rolling over. That path needs NO depth (depth is what
+      // builds LATE) and no _vwapReliable (it does not read VWAP), so it works from 9:45 onward.
       const _putCarveBreakdown = optionType === "put" && candidate.isIndex === true
-        && (_gapState === "gap-down-holding" || _intradayDown)
-        && _gapVwapRatio <= (1 - CARVE_PUT_VWAP_BREAK)
-        && _breadthMom <= CARVE_PUT_BREADTH_MOM && _vwapReliable;
+        && (
+             (_vwapReliable && (_gapState === "gap-down-holding" || _intradayDown)
+               && _gapVwapRatio <= (1 - CARVE_PUT_VWAP_BREAK)
+               && _breadthMom <= CARVE_PUT_BREADTH_MOM)
+          || (_orBreak && _breadthMom <= CARVE_PUT_BREADTH_MOM)
+           );
       // v2 VIX-decouple: read the TAPE for a "confirmed bottoming dip" (intraday-oversold + bull_curl
       // on an index) instead of candidate.isMeanReversion, which is VIX>=25 gated (dormant at VIX~20)
       // AND drives sizing/delta in execution — so decoupling here activates the exemption in low VIX
@@ -354,7 +367,6 @@ function evaluateEntry(candidate, rulebook, state, context = {}) {
       // then blocked QQQ PUTS via the same-ticker-opposite rule during the best part of the
       // breakdown. A structural break of the opening-range low is the tape saying "trend, not dip",
       // so the oversold carve is withdrawn there — zero-lag, unlike the ADX-based _intradayDown.
-      const _orBreak     = signals.orBreak === true;
       const carvedOut    = optionType === "call"
         && candidate.isIndex === true
         && _oversoldNow
