@@ -350,11 +350,17 @@ function evaluateEntry(candidate, rulebook, state, context = {}) {
       // AND drives sizing/delta in execution — so decoupling here activates the exemption in low VIX
       // WITHOUT changing sizing. Guarded by !_intradayDown: a dip is only exempted from the veto when
       // it is NOT also a break below its own VWAP, so this can't re-admit a below-VWAP knife-catch.
+      // 7/27: on the QQQ 10:00 case the oversold carve let two calls in (-$345) AND those calls
+      // then blocked QQQ PUTS via the same-ticker-opposite rule during the best part of the
+      // breakdown. A structural break of the opening-range low is the tape saying "trend, not dip",
+      // so the oversold carve is withdrawn there — zero-lag, unlike the ADX-based _intradayDown.
+      const _orBreak     = signals.orBreak === true;
       const carvedOut    = optionType === "call"
         && candidate.isIndex === true
         && _oversoldNow
         && _curl === "bull_curl"
-        && !_intradayDown;                        // confirmed bottoming dip, not a downtrend knife
+        && !_intradayDown
+        && !_orBreak;                             // confirmed bottoming dip, not a downtrend knife
       _trCarveOut = carvedOut;
       if (optionType === "put" && macdBullish && dailyRsi < 65) {
         if (_putCarveBreakdown) {
