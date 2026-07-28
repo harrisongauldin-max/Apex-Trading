@@ -590,6 +590,12 @@ async function executeTrade(stock, price, score, scoreReasons, vix, optionType =
   state._paperSlippage.avgEst   = parseFloat((state._paperSlippage.totalEst / state._paperSlippage.trades).toFixed(2));
   logEvent("trade", `[SLIPPAGE EST] $${_singleSlipEst} this trade | $${state._paperSlippage.totalEst} cumulative across ${state._paperSlippage.trades} trades (paper mid-fill assumption)`);
   const isEarningsPlay = scoreReasons.some(r => r.includes("Earnings play"));
+  // 7/28: stamp breakdown-vs-fade EXPLICITLY at entry. exitEngine previously inferred it from
+  // entryDailyRSI < 65, but the breakdown channel does not require low RSI — a put entering on an
+  // opening-range break with dRSI 68 would be misread as a FADE put and given the wrong thesis
+  // exits. The "Breakdown put -" reason is emitted by scoring ONLY when a breakdown tier fired,
+  // so it is true by construction. (All 7/27 puts had dRSI ~61, just under the line — luck.)
+  const isBreakdownPut = optionType === "put" && (scoreReasons || []).some(r => r.startsWith("Breakdown put"));
   if (isEarningsPlay) (_openSame || position).earningsPlay = true;  // live position (merged or pushed) — not the discarded local on an addon merge
 
   state.tradeJournal.unshift({
@@ -604,6 +610,7 @@ async function executeTrade(stock, price, score, scoreReasons, vix, optionType =
     cost:          finalCost,
     score,
     scoreReasons:  scoreReasons,
+    isBreakdownPut,                 // explicit: drives exitEngine's breakdown-vs-fade thesis exits
     delta:         contract.greeks.delta,
     iv:            parseFloat(((contract.iv||0.3)*100).toFixed(1)),
     vix,
