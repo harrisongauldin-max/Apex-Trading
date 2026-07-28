@@ -1138,6 +1138,7 @@ async function runScan() {
   }
 
   const _sessionMinsNow   = etHourNow >= 9.5 ? (etHourNow - 9.5) * 60 : 0;
+  state._sessionMinsNow   = _sessionMinsNow;   // persisted so per-ticker session signals below can read it
   const _msSinceLastEntry = Date.now() - (state._lastEntryAt || 0);
   const _minsSinceEntry   = _msSinceLastEntry / 60000;
   const _todayGapAbs      = Math.abs(state._todayMaxGap || 0);
@@ -1546,6 +1547,70 @@ async function runScan() {
         }
       }
       state._rsiHistory[stock.ticker] = rsiHist;
+
+      // ═══ EARLY-BREAKDOWN SIGNALS (7/27) — catch the START of a move, not its confirmation ═══
+      // ADX/depth are CONFIRMING measures: by construction they only read high once the move is
+      // largely done (7/27: the breakdown window opened after SPY had already made its move, and
+      // every re-fire after the first 30min lost money). These three fire at or near the start.
+      // Stored on `state` keyed by ticker so ordering vs the liveStock build can't matter.
+      if (!state._openRange) state._openRange = {};
+      if (!state._vwapSlope) state._vwapSlope = {};
+      if (!state._vwapHist)  state._vwapHist  = {};
+      if (!state._bdEpisode) state._bdEpisode = {};
+      {
+        const _tk   = stock.ticker;
+        const _sm   = state._sessionMinsNow ?? 0;
+        const _pxN  = price;
+        const _vwN  = signals.intradayVWAP || 0;
+
+        // (1) OPENING RANGE — zero lag by construction: the level is fixed BEFORE the break, so
+        // the instant price crosses it we know, with no indicator to catch up.
+        if (_pxN > 0) {
+          if (!state._openRange[_tk] || state._openRange[_tk].day !== new Date().toDateString()) {
+            state._openRange[_tk] = { high: _pxN, low: _pxN, locked: false, day: new Date().toDateString() };
+          }
+          const _or = state._openRange[_tk];
+          if (!_or.locked) {
+            if (_pxN > _or.high) _or.high = _pxN;
+            if (_pxN < _or.low)  _or.low  = _pxN;
+            if (_sm >= 30) _or.locked = true;      // OR = first 30 session minutes
+          }
+        }
+
+        // (2) VWAP SLOPE — the first derivative. VWAP TURNING DOWN precedes price being a fixed
+        // distance below it, so it leads the depth measure the breakdown tier currently uses.
+        if (_vwN > 0) {
+          const _h = state._vwapHist[_tk] || [];
+          const _lastT = _h.length ? _h[_h.length - 1].t : 0;
+          if (Date.now() - _lastT > 60000) {                 // sample at most once a minute
+            _h.push({ v: _vwN, t: Date.now() });
+            while (_h.length > 3) _h.shift();
+            state._vwapHist[_tk] = _h;
+          }
+          state._vwapSlope[_tk] = _h.length >= 2 ? (_h[_h.length - 1].v - _h[0].v) / _h[0].v : 0;
+        }
+
+        // (3) BREAKDOWN EPISODE AGE — a breakdown stays "true" for hours, so the signal re-fires
+        // all day. 7/27: first 30min = +$528, every later re-fire = -$317. Track when the episode
+        // STARTED so entries can be gated on its age instead of its mere existence.
+        // HYSTERESIS: start on a raw breakdown, but end ONLY when price RECLAIMS its VWAP.
+        // Measured on 7/27 SPY: without hysteresis the episode fragments into 8 pieces (price
+        // ticks briefly back above the 0.3% line), the age gate then fails to block the losing
+        // re-fires, and the gated day is +$411. With hysteresis it is ONE episode 09:59->close
+        // and the gated day is +$528 (vs +$211 actual). The move is one event; track it as one.
+        const _bdOn  = _vwN > 0 && _pxN > 0
+          && ((_vwN - _pxN) / _vwN) >= 0.003
+          && (signals.adx ?? 0) >= 20;
+        const _bdOff = _vwN > 0 && _pxN > 0 && _pxN > _vwN;     // reclaimed VWAP => episode over
+        const _today = new Date().toDateString();
+        let _epNow = state._bdEpisode[_tk];
+        if (_epNow && _epNow.day !== _today) { _epNow = null; delete state._bdEpisode[_tk]; }
+        if (_bdOn && (!_epNow || !_epNow.active)) {
+          state._bdEpisode[_tk] = { active: true, startedAt: Date.now(), day: _today };
+        } else if (_epNow && _epNow.active && _bdOff) {
+          _epNow.active = false;
+        }
+      }
 
       if (!state._intradayOversoldScans)  state._intradayOversoldScans  = {};
       if (!state._sessionLowRSI)          state._sessionLowRSI          = {};
@@ -2289,7 +2354,7 @@ async function runScan() {
         isMeanReversion: isMeanReversion === true, isIndex: stock.isIndex === true },  // V3.2 (6/19) FIX: evaluateEntry carve-outs depend on these — were absent, forcing oversold MR calls to the 85 floor
       rb, state,
       { etHour: etHourNow, isLateDay, isLastHour, volDecline: _volDeclineExec,
-        signals: { rsi: stock.rsi, dailyRsi: stock.dailyRsi || 50, macd: stock.macd || "neutral", macdCurl: stock.macdCurl || "none", adx: stock.adx ?? 20 },  // FIX (6/23, scope-corrected): plumb intraday rsi from the scored candidate. `stock` here is liveStock (see scored.push ~2093), and liveStock.rsi IS the intraday RSI. The prior version referenced `signals`, which lives in the SCORING loop (closes ~2104), not this execution loop — so it threw "signals is not defined" and crashed every scan at the evaluateEntry call.
+        signals: { rsi: stock.rsi, dailyRsi: stock.dailyRsi || 50, macd: stock.macd || "neutral", macdCurl: stock.macdCurl || "none", adx: stock.adx ?? 20, orBreak: !!(state._openRange?.[stock.ticker]?.locked && (stock.lastPrice || stock.price || 0) > 0 && (stock.lastPrice || stock.price) < state._openRange[stock.ticker].low) },  // FIX (6/23, scope-corrected): plumb intraday rsi from the scored candidate. +orBreak (7/27) for the os-carve suppression. `stock` here is liveStock (see scored.push ~2093), and liveStock.rsi IS the intraday RSI. The prior version referenced `signals`, which lives in the SCORING loop (closes ~2104), not this execution loop — so it threw "signals is not defined" and crashed every scan at the evaluateEntry call.
         gapState: stock._gapState || "flat", gapVwapRatio: stock._gapVwapRatio ?? 1, breadthMom: state._breadthMomentum ?? 0,  // #3 D2 carve-out inputs (present-tense tape)
         recentSameDir: recentSameDirMins, existingProfitPct, existingCreditProfitPct,
         drawdownMinScore: ddProtocol.minScore || MIN_SCORE, drawdownLevel: ddProtocol.level || "normal",
