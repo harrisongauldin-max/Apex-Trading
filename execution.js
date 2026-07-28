@@ -69,6 +69,10 @@ async function getOptionsPrice(symbol) {
   } catch(e) { return null; }
 }
 
+// Two open contracts on the same ticker+optionType+expiry within this many strikes are the SAME
+// trade, not two signals. Twin-leg legs differ by EXPIRY so they are unaffected.
+const MIN_STRIKE_DISTINCT = 5;
+
 async function findContract(ticker, optionType, targetDelta, targetDTE, vix, stock, fixedExpiry = null) {
   try {
     const today = getETTime();
@@ -178,6 +182,24 @@ async function findContract(ticker, optionType, targetDelta, targetDTE, vix, sto
       const _covPct = (100 * state._ivCoverage.withIV / state._ivCoverage.total).toFixed(0);
       logEvent("filter", `[IV-COVERAGE] ${ticker} chosen ${_bestRawIV > 0 ? `feed IV ${_bestRawIV.toFixed(3)}` : "feed IV MISSING (realized-vol proxy)"} | window ${_ivWin.withIV}/${_ivWin.total} | session ${_covPct}% (${state._ivCoverage.withIV}/${state._ivCoverage.total})`);
       logEvent("filter", `${ticker} findContract: ${optionType} $${_best.strike} | ${_best.expDays}DTE | delta${Math.abs(parseFloat(_best.greeks.delta)).toFixed(3)} | $${_best.premium} | target delta${targetDelta} strike $${targetStrike} (closest in-window)`);
+      // ── MATERIAL-DISTINCTNESS GATE (7/28) ────────────────────────────────────────────────
+      // With data-gather live, scanner's same-ticker-same-direction block is BYPASSED by design
+      // (state._dataGatherMode overrides DATA_GATHER_MODE=false), so consecutive signals can stack
+      // near-identical contracts. 7/28: QQQ 701C and 702C, SAME expiry 9/04, both ~37 DTE, both
+      // score 95 — one idea bought twice for double the premium, together -$127. That is not a
+      // second data point, it is the same trade. The twin-leg A/B is preserved because its legs
+      // use DIFFERENT expiries (sameweek vs standard); only same-expiry near-strikes are rejected.
+      const _dupOpen = (state.positions || []).find(p =>
+        p.ticker === ticker
+        && p.optionType === optionType
+        && String(p.expDate || "") === String(_best.expDate || "")
+        && Math.abs((parseFloat(p.strike) || 0) - (parseFloat(_best.strike) || 0)) <= MIN_STRIKE_DISTINCT
+      );
+      if (_dupOpen) {
+        logEvent("filter", );
+        return null;
+      }
+
       return _best;
     }
 
