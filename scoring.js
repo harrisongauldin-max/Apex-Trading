@@ -650,8 +650,27 @@ function scoreIndexSetup(stock, optionType, spyRSI, spyMACD, spyMomentum, breadt
     // (45 on 7/23 vs 15 on the flat 7/22). Hence shallow depth + high ADX, not deep depth.
     // Measured: these fire on 7/23 only (33 QQQ / 3 SPY deep scans) and ZERO times on the
     // 7/21 up day and 7/22 flat day — inert except on a genuine breakdown.
-    const _bdDeep      = PUT_BREAKDOWN_MODE && _bdDepth >= 0.005 && _bdAdx >= 30;
-    const _bdConfirmed = PUT_BREAKDOWN_MODE && _bdDepth >= 0.003 && _bdAdx >= 20;
+    // ── EPISODE-AGE GATE (7/27) — the edge is in the FIRST break, not the persistence ──
+    // A breakdown stays true for hours (7/27: 09:59-14:37), so the signal re-fired 7x. First 30min
+    // = +$528; every later re-fire = -$317, and those re-fires also ate the heat budget that
+    // starved QQQ (the stronger breakdown). Gate on episode AGE, not mere existence.
+    const BD_EPISODE_MAX_MIN = 30;
+    const _bdEp     = state._bdEpisode && state._bdEpisode[stock.ticker];
+    const _bdEpAge  = (_bdEp && _bdEp.active) ? (Date.now() - _bdEp.startedAt) / 60000 : 0;
+    const _bdFresh  = !_bdEp || !_bdEp.active || _bdEpAge <= BD_EPISODE_MAX_MIN;
+
+    // ── EARLY STRUCTURAL TRIGGER — fires at the START, no ADX wait ──
+    // ADX/depth confirm late by construction. An opening-range break is ZERO LAG (the level is
+    // fixed before the break), corroborated by VWAP turning down or breadth rolling over — both
+    // RATES, which marked the start on 7/27, vs breadth LEVEL which marked the exhaustion.
+    const _bdOr       = state._openRange && state._openRange[stock.ticker];
+    const _bdOrBreak  = !!(_bdOr && _bdOr.locked && _bdPx > 0 && _bdPx < _bdOr.low);
+    const _bdVwapTurn = ((state._vwapSlope && state._vwapSlope[stock.ticker]) ?? 0) <= -0.0005;
+    const _bdBreadthRoll = (state._breadthMomentum ?? 0) <= -10;
+    const _bdEarly     = PUT_BREAKDOWN_MODE && _bdFresh && _bdOrBreak && (_bdVwapTurn || _bdBreadthRoll);
+
+    const _bdDeep      = PUT_BREAKDOWN_MODE && _bdFresh && _bdDepth >= 0.005 && _bdAdx >= 30;
+    const _bdConfirmed = PUT_BREAKDOWN_MODE && _bdFresh && _bdDepth >= 0.003 && _bdAdx >= 20;
     const _bdPct = (_bdDepth * 100).toFixed(1);
 
     if (["trending_bear","breakdown"].includes(regime))                           { score += 21; reasons.push(`Regime: ${regime} (+21)`); }
@@ -666,8 +685,8 @@ function scoreIndexSetup(stock, optionType, spyRSI, spyMACD, spyMomentum, breadt
       // v3 BREAKDOWN MODE: the daily regime no longer dominates a confirmed intraday breakdown.
       // (v2 required breadth FALLING, which was the binding constraint — on 7/23 breadth read
       // 69-92% RISING during a -2.45% SPY / -3.92% QQQ session, so the v2 relief never fired.)
-      if (_bdDeep) {
-        score += 11; reasons.push(`Regime: ${regime} but DEEP intraday breakdown (${_bdPct}% below own VWAP, ADX ${_bdAdx.toFixed(0)}) - intraday overrides daily regime (+11)`);
+      if (_bdEarly || _bdDeep) {
+        score += 11; reasons.push(`Regime: ${regime} but ${_bdEarly ? `EARLY structural breakdown (broke opening-range low ${_bdOr ? _bdOr.low.toFixed(2) : ""})` : `DEEP intraday breakdown (${_bdPct}% below own VWAP, ADX ${_bdAdx.toFixed(0)})`} - intraday overrides daily regime (+11)`);
       } else if (_bdConfirmed) {
         reasons.push(`Regime: ${regime} but confirmed intraday breakdown (${_bdPct}% below own VWAP, ADX ${_bdAdx.toFixed(0)}) - regime penalty waived (0)`);
       } else {
@@ -677,7 +696,8 @@ function scoreIndexSetup(stock, optionType, spyRSI, spyMACD, spyMomentum, breadt
 
     // v3: primary breakdown-momentum channel — the put-side mirror of the call's mean-reversion
     // bonus. Previously NOTHING in the put path could score "this is breaking down intraday".
-    if (_bdDeep)           { score += 21; reasons.push(`Breakdown put - riding confirmed intraday downtrend, ${_bdPct}% below own VWAP on ADX ${_bdAdx.toFixed(0)} (+21)`); }
+    if (_bdEarly)          { score += 18; reasons.push(`Breakdown put - EARLY structural break below opening-range low${_bdVwapTurn ? ", VWAP turning down" : ""}${_bdBreadthRoll ? ", breadth rolling over" : ""} (+18)`); }
+    else if (_bdDeep)      { score += 21; reasons.push(`Breakdown put - riding confirmed intraday downtrend, ${_bdPct}% below own VWAP on ADX ${_bdAdx.toFixed(0)} (+21)`); }
     else if (_bdConfirmed) { score += 12; reasons.push(`Breakdown put - intraday downtrend confirmed, ${_bdPct}% below own VWAP (+12)`); }
 
     const regimeDuration    = state._regimeDuration || 0;
@@ -786,7 +806,16 @@ function scoreIndexSetup(stock, optionType, spyRSI, spyMACD, spyMomentum, breadt
     else if (spyMACD && spyMACD.includes("bullish crossover")) { score -= Math.round(15*macdMultPut); reasons.push(`SPY MACD bullish crossover (-${Math.round(15*macdMultPut)})`); }
     else if (spyMACD && spyMACD.includes("bullish"))           { score -= Math.round(8*macdMultPut);  reasons.push(`SPY MACD bullish (-${Math.round(8*macdMultPut)})`); }
 
-    if (breadth <= 30)       { score += 16; reasons.push(`Breadth ${breadth}% - severe weakness (+16)`); }
+    // 7/27: +16 rewarded DEEPER breadth weakness, but every breadth-23% BREAKDOWN put was late in
+    // the move and lost (-$317, 1 win / 10) — the level marks exhaustion, the momentum (+8 above)
+    // marks the start. CAPPED ONLY IN BREAKDOWN CONTEXT: for a FADE put (shorting an overbought
+    // bounce) severe breadth weakness is genuinely confirming, and a blanket cap would have killed
+    // it — the 7/13 fade puts scored 50/50/53/53 and made +$269 (the only profitable side of that
+    // fortnight); -7 points would have put all four under the 50 gate and none would have fired.
+    if (breadth <= 30) {
+      if (_bdEarly || _bdDeep || _bdConfirmed) { score += 9;  reasons.push(`Breadth ${breadth}% - severe weakness (+9, capped in breakdown mode: level lags the move)`); }
+      else                                     { score += 16; reasons.push(`Breadth ${breadth}% - severe weakness (+16)`); }
+    }
     else if (breadth <= 45)  { score += 9;  reasons.push(`Breadth ${breadth}% - weak (+9)`); }
     else if (breadth <= 65 && inBearOrChoppy) { score += 5; reasons.push(`Breadth ${breadth}% - below neutral in bear regime (+5)`); }
     else if (breadth >= 70)  {
