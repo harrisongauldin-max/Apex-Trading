@@ -1565,7 +1565,13 @@ async function runScan() {
 
         // (1) OPENING RANGE — zero lag by construction: the level is fixed BEFORE the break, so
         // the instant price crosses it we know, with no indicator to catch up.
-        if (_pxN > 0) {
+        // FRESHNESS GUARD (7/28): the first 2 scans of every session carry a STALE cached price
+        // (7/28 QQQ read 696.06 vs a real 675.48 open). Today the stale value was HIGH so only
+        // _or.high was poisoned and nothing used it — but on a GAP-UP day the stale price sits
+        // BELOW the session range, poisoning _or.low too low so `_orBreak` could never fire, with
+        // no error and no log. intradayVWAP needs >=5 intraday bars, so `_vwN > 0` is exactly the
+        // proof that the feed is live — the stale scans have no VWAP.
+        if (_pxN > 0 && _vwN > 0) {
           if (!state._openRange[_tk] || state._openRange[_tk].day !== new Date().toDateString()) {
             state._openRange[_tk] = { high: _pxN, low: _pxN, locked: false, day: new Date().toDateString() };
           }
@@ -1573,7 +1579,7 @@ async function runScan() {
           if (!_or.locked) {
             if (_pxN > _or.high) _or.high = _pxN;
             if (_pxN < _or.low)  _or.low  = _pxN;
-            if (_sm >= 30) _or.locked = true;      // OR = first 30 session minutes
+            if (_sm >= 15) _or.locked = true;      // OR = first 15 session minutes — matches APEX's 9:45 entry hard-block, so the level is ready the moment entries are
           }
         }
 
@@ -1800,8 +1806,15 @@ async function runScan() {
     }
 
     if (signals.volPaceRatio > 2.0 && signals.hasIntraday) {
-      putSetup.score  = Math.min(100, putSetup.score + 8); putSetup.reasons.push(`Volume ${signals.volPaceRatio.toFixed(1)}x pace (+8)`);
-      callSetup.score = Math.min(100, callSetup.score + 8); callSetup.reasons.push(`Volume ${signals.volPaceRatio.toFixed(1)}x pace (+8)`);
+      // 7/28: this awarded +8 to BOTH sides identically, but volume expansion CONFIRMS whichever
+      // direction the tape is already moving — it is not symmetric evidence. On the 7/28 QQQ
+      // breakdown "Volume 2.4x pace (+8)" was handed to a CALL that was buying into a confirmed
+      // decline (heavy volume on a decline is DISTRIBUTION). Award it to the side the tape is on.
+      if (priceAboveOpen) {
+        callSetup.score = Math.min(100, callSetup.score + 8); callSetup.reasons.push(`Volume ${signals.volPaceRatio.toFixed(1)}x pace on an UP tape (+8)`);
+      } else {
+        putSetup.score  = Math.min(100, putSetup.score  + 8); putSetup.reasons.push(`Volume ${signals.volPaceRatio.toFixed(1)}x pace on a DOWN tape (+8)`);
+      }
     } else if (signals.volPaceRatio < 0.4 && signals.hasIntraday) {
       putSetup.score  = Math.max(0, putSetup.score - 5);
       callSetup.score = Math.max(0, callSetup.score - 5);
