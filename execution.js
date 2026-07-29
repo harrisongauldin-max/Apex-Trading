@@ -725,6 +725,14 @@ async function executeTrade(stock, price, score, scoreReasons, vix, optionType =
     entryADX:        stock._adx ?? stock.adx ?? 0,                            // intraday trend strength at entry — was missing from the journal
     isMeanReversion: isMeanReversion || false,                               // entry type — was missing from the journal
     entryRelStr:     stock._relStrength || 1.0,                              // relative strength at entry — for the SPY/QQQ divergence
+    entryIntradayScore: (() => {                                             // 7/28: logging-only intraday score, for ranking validation vs the legacy score
+      const _is = (state._intradayScore || {})[stock.ticker];
+      return _is && _is[optionType] ? _is[optionType].score : null;
+    })(),
+    entryIntradayReasons: (() => {
+      const _is = (state._intradayScore || {})[stock.ticker];
+      return _is && _is[optionType] ? _is[optionType].reasons.join(" · ") : null;
+    })(),
     macroSignal:    (state._agentMacro || {}).signal || 'neutral',
     _isGapDayEntry: (state._todayGapAbs || 0) >= 1.5,
     regimeAtEntry:  (state._marketRegime || {}).regime || 'unknown',
