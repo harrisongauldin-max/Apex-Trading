@@ -20,6 +20,7 @@ const {
   ANTHROPIC_API_KEY,
   EARNINGS_SKIP_DAYS,
   GIVEBACK_EXIT_ENABLED = false, GIVEBACK_PEAK_MIN = 0.01, GIVEBACK_FLOOR = 0, GIVEBACK_MIN_HOLD_MIN = 10,
+  LIVE_WIDE_SPREAD_PCT,
 } = require('./constants');
 
 
@@ -172,8 +173,29 @@ async function checkExits(positions, posSnapshots, posQuotes, posNewsCache, ctx)
       const bid    = parseFloat(quote.bp || 0);
       const ask    = parseFloat(quote.ap || 0);
       const realPrice = bid > 0 && ask > 0 ? parseFloat(((bid + ask) / 2).toFixed(2)) : null;
-      if (bid > 0) pos.bid = bid;
+      if (bid > 0) { pos.bid = bid; pos._bidAt = Date.now(); }
       if (ask > 0) pos.ask = ask;
+      // LIVE SPREAD MONITOR (7/29). The entry cap (MAX_SPREAD_PCT) only sees the spread at
+      // ENTRY. The 7/29 QQQ 680C entered legally and then widened to ~42% during the hold:
+      // mid $6.36 vs bid $5.01. APEX marked it +9.5% and logged HOLD one scan before selling
+      // at -13.8%. The mid was honest (it tracked delta to the cent) - it just was not a price
+      // anyone would pay. QQQ moved 0.16% over the whole trade, so the spread WAS the loss.
+      if (bid > 0 && ask > 0) {
+        const _mid = (bid + ask) / 2;
+        if (_mid > 0) {
+          pos.spreadPct = parseFloat(((ask - bid) / _mid).toFixed(4));
+          if (pos._entrySpreadPct == null) pos._entrySpreadPct = pos.spreadPct;
+          if (pos.spreadPct > (pos._maxSpreadPct || 0)) pos._maxSpreadPct = pos.spreadPct;
+          if (pos.spreadPct >= LIVE_WIDE_SPREAD_PCT && !pos._wideSpreadLogged) {
+            pos._wideSpreadLogged = true;
+            logEvent("warn",
+              `[WIDE-SPREAD-LIVE] ${pos.ticker} ${pos.contractSymbol || ""} spread ` +
+              `${(pos.spreadPct * 100).toFixed(0)}% (bid $${bid.toFixed(2)} / ask $${ask.toFixed(2)}) ` +
+              `- first seen at ${((pos._entrySpreadPct || 0) * 100).toFixed(0)}%. Mid is NOT ` +
+              `realisable; profit floor suppressed while wide.`);
+          }
+        }
+      }
       const _staleSecs = pos._currentPriceUpdatedAt ? (Date.now() - pos._currentPriceUpdatedAt) / 1000 : 9999;
       const _freshCurrentPrice = _staleSecs < 30 ? pos.currentPrice : null;
       // FIX (6/17): when there's no live quote AND the cache is stale, carry forward the
@@ -235,17 +257,23 @@ async function checkExits(positions, posSnapshots, posQuotes, posNewsCache, ctx)
     // immediately whipsaw through. In a genuine rally each new high confirms one scan
     // later, so the floor lags real moves by ~1 cycle but is never set by a lone wick.
     // _confirmedPeak is monotonic non-decreasing → the floor only ever ratchets up.
+    // 7/29: when the live spread is WIDE the mid is not a sellable price, so it must not
+    // ratchet a profit floor - that is exactly how the 680C armed a floor off a +9.8% MID peak
+    // the bid never supported. NARROW spreads are untouched: the trail floor is a working
+    // mechanism (114 trades, 51.8% win, avg +$39.44) and this leaves it exactly as it was.
+    const _spreadWide = (pos.spreadPct || 0) >= LIVE_WIDE_SPREAD_PCT;
+    const _peakMark   = (_spreadWide && pos.bid > 0) ? pos.bid : curP;
     if (pos._confirmedPeak == null) pos._confirmedPeak = pos.premium;
-    if (curP > pos._confirmedPeak) {
-      if (pos._peakStaged && curP >= (pos._peakStagedValue || 0) * 0.98) {
+    if (_peakMark > pos._confirmedPeak) {
+      if (pos._peakStaged && _peakMark >= (pos._peakStagedValue || 0) * 0.98) {
         // Second scan: the new high held → confirm it (to the higher of staged/current).
-        pos._confirmedPeak   = Math.max(pos._peakStagedValue || curP, curP);
+        pos._confirmedPeak   = Math.max(pos._peakStagedValue || _peakMark, _peakMark);
         pos._peakStaged      = false;
         pos._peakStagedValue = null;
       } else {
         // First scan seeing this new high (or price slipped vs the stage) — stage, don't act.
         pos._peakStaged      = true;
-        pos._peakStagedValue = curP;
+        pos._peakStagedValue = _peakMark;
       }
     } else if (pos._peakStaged) {
       // Price fell back below the confirmed peak before confirming → discard the spike.
