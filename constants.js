@@ -110,7 +110,7 @@ const MIN_OPEN_INTEREST   = 100;
 const MIN_STOCK_PRICE     = 20;
 const MIN_OPTION_PREMIUM  = 0.50;
 const MIN_OI              = 5;
-const MAX_SPREAD_PCT      = 0.10; // C1-E Sunday 6/8: tightened from 0.30 → 0.10
+const MAX_SPREAD_PCT      = 0.05; // 6/8: 0.30->0.10; 7/29: ->0.05. A 10% round-trip spread dwarfed the +$39/trade trail-floor average. If [WIDE-SPREAD] BLOCKED becomes frequent, 0.07 is the next stop.
 
 // ── VIX CALL QUALITY GATE (V2.96) ────────────────────────────────────────
 // At VIX >= 25, naked call entries require RSI < 38 (deeply oversold).
@@ -122,7 +122,12 @@ const VIX_CALLS_BLOCKED   = 30;    // VIX >= 30: calls fully blocked
 const VIX_HIGH_CALL_SCORE = 90;    // score floor when VIX >= 25
 const VIX_HIGH_CALL_RSI   = 38;    // RSI must be < 38 when VIX >= 25
 // ── END VIX CALL QUALITY GATE ────────────────────────────────────────────
-const EARLY_SPREAD_PCT    = 0.10;
+const EARLY_SPREAD_PCT    = 0.10; // NOTE (7/29): DEAD CONSTANT - exported and imported by execution.js but never consumed. MAX_SPREAD_PCT is the live gate.
+// 7/29: LIVE spread monitor for OPEN positions. The entry cap only sees the spread at ENTRY;
+// the QQQ 680C entered legally and then blew out to ~42% mid-hold, so APEX marked it +9.5% on
+// the MID and logged HOLD one scan before selling at the BID for -13.8%. Above this level a
+// position's mid is not a realisable price and must not be trusted to arm a profit floor.
+const LIVE_WIDE_SPREAD_PCT = 0.15;
 const MAX_GAP_PCT         = 0.03;
 // Gap classifier (6/26, logged-only). gapType boundary: |gapPct| >= this → up/down, else flat.
 // Distinct from MAX_GAP_PCT (a 3% extreme-gap SAFETY cutoff). This is a label threshold only.
@@ -410,7 +415,7 @@ module.exports = {
   MR_FLUSH_DD1, MR_FLUSH_DD2, MR_FLUSH_DD3,
   MR_SESSLOW_RECENCY_MIN,
   EARNINGS_SKIP_DAYS, MIN_OPEN_INTEREST, MIN_STOCK_PRICE, MIN_OPTION_PREMIUM,
-  MIN_OI, MAX_SPREAD_PCT, EARLY_SPREAD_PCT, MAX_GAP_PCT, GAP_MIN_PCT,
+  MIN_OI, MAX_SPREAD_PCT, EARLY_SPREAD_PCT, LIVE_WIDE_SPREAD_PCT, MAX_GAP_PCT, GAP_MIN_PCT,
   CARVEOUT_BREADTH_MOM_MIN, CARVEOUT_CALL_VWAP_MAX, CARVEOUT_PUT_BREADTH_MOM, CARVEOUT_PUT_VWAP_BREAK, CARVEOUT_MIN_SESSION_MIN,
   BEAR_DD_PCT, BEAR_DD_LOOKBACK, BEAR_VIX_SUSTAINED, BEAR_EXIT_DD_PCT, BEAR_EXIT_VIX, BEAR_EXIT_SESSIONS,
   TARGET_DELTA_MIN,
