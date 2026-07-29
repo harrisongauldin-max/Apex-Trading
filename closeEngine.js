@@ -495,6 +495,12 @@ async function _doClosePosition(ticker, reason, exitPremium = null, contractSym 
     peakPrice:          pos.peakPremium || ep,
     peakPct:            _peakPct,
     mfe_pct:            _peakPct,
+    // 7/29: spread telemetry. mfe_pct is a MID series; on a wide-spread contract it can show a
+    // gain the bid never supported (QQQ 680C: +9.8% mid peak, sold at -13.8%). Recording the
+    // spread at entry and its worst level makes that cost measurable per trade instead of
+    // something we reconstruct from server logs.
+    entry_spread_pct:   pos._entrySpreadPct != null ? parseFloat((pos._entrySpreadPct * 100).toFixed(1)) : null,
+    max_spread_pct:     pos._maxSpreadPct   != null ? parseFloat((pos._maxSpreadPct   * 100).toFixed(1)) : null,
     mae_pct:            _maePct,
     peakTime:           pos._peakTime ? new Date(pos._peakTime).toISOString() : null,
     minsToPeak:         _minsToPeak,
