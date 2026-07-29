@@ -1612,9 +1612,20 @@ async function runScan() {
         let _epNow = state._bdEpisode[_tk];
         if (_epNow && _epNow.day !== _today) { _epNow = null; delete state._bdEpisode[_tk]; }
         if (_bdOn && (!_epNow || !_epNow.active)) {
-          state._bdEpisode[_tk] = { active: true, startedAt: Date.now(), day: _today };
+          state._bdEpisode[_tk] = { active: true, startedAt: Date.now(), day: _today, extreme: _pxN, extremeAt: Date.now() };
         } else if (_epNow && _epNow.active && _bdOff) {
           _epNow.active = false;
+          _epNow.endedAt = Date.now();
+        }
+        // 7/29: track the episode's EXTREME so scoring can ask "is this breakdown still
+        // PROGRESSING?" rather than only "how old is it?". Age conflates two states: old-and-
+        // stalled (7/27 pm, SPY sideways, late re-fires lost -$317) vs old-and-still-trending
+        // (7/29, QQQ made new lows all morning). Only the first should stop trading.
+        const _epLive = state._bdEpisode[_tk];
+        if (_epLive && _epLive.active && _pxN > 0) {
+          if (!(_epLive.extreme > 0) || _pxN < _epLive.extreme) {
+            _epLive.extreme = _pxN; _epLive.extremeAt = Date.now();
+          }
         }
       }
 
@@ -2390,7 +2401,21 @@ async function runScan() {
         isMeanReversion: isMeanReversion === true, isIndex: stock.isIndex === true },  // V3.2 (6/19) FIX: evaluateEntry carve-outs depend on these — were absent, forcing oversold MR calls to the 85 floor
       rb, state,
       { etHour: etHourNow, isLateDay, isLastHour, volDecline: _volDeclineExec,
-        signals: { rsi: stock.rsi, dailyRsi: stock.dailyRsi || 50, macd: stock.macd || "neutral", macdCurl: stock.macdCurl || "none", adx: stock.adx ?? 20, orBreak: !!(state._openRange?.[stock.ticker]?.locked && (stock.lastPrice || stock.price || 0) > 0 && (stock.lastPrice || stock.price) < state._openRange[stock.ticker].low) },  // FIX (6/23, scope-corrected): plumb intraday rsi from the scored candidate. +orBreak (7/27) for the os-carve suppression. `stock` here is liveStock (see scored.push ~2093), and liveStock.rsi IS the intraday RSI. The prior version referenced `signals`, which lives in the SCORING loop (closes ~2104), not this execution loop — so it threw "signals is not defined" and crashed every scan at the evaluateEntry call.
+        signals: { rsi: stock.rsi, dailyRsi: stock.dailyRsi || 50, macd: stock.macd || "neutral", macdCurl: stock.macdCurl || "none", adx: stock.adx ?? 20, orBreak: (() => {
+          // 7/29 LATCH FIX: orBreak was a raw price-vs-level test, so once price broke the
+          // opening-range low it stayed TRUE for the whole session with no way to clear. On a
+          // sustained trend that is correct (7/29: QQQ faded 6% from the open and every blocked
+          // call was iRSI 15-25 into it) — but on a BREAK-THEN-RECOVER day it would veto the
+          // entire recovery leg. Release on a VWAP RECLAIM: the same signal that already ends the
+          // put breakdown episode (_bdOff), so both sides now agree on when a breakdown is over.
+          const _or = state._openRange?.[stock.ticker];
+          const _px = stock.lastPrice || stock.price || 0;
+          const _vw = stock.intradayVWAP || 0;   // liveStock carries it (scanner:1506); `signals` is scoped to the SCAN loop, not this execution loop
+          if (!_or || !_or.locked || _px <= 0) return false;
+          const _brokeOR   = _px < _or.low;
+          const _reclaimed = _vw > 0 && _px > _vw;      // above own VWAP => breakdown is over
+          return _brokeOR && !_reclaimed;
+        })() },  // FIX (6/23, scope-corrected): plumb intraday rsi from the scored candidate. +orBreak (7/27) for the os-carve suppression. `stock` here is liveStock (see scored.push ~2093), and liveStock.rsi IS the intraday RSI. The prior version referenced `signals`, which lives in the SCORING loop (closes ~2104), not this execution loop — so it threw "signals is not defined" and crashed every scan at the evaluateEntry call.
         gapState: stock._gapState || "flat", gapVwapRatio: stock._gapVwapRatio ?? 1, breadthMom: state._breadthMomentum ?? 0,  // #3 D2 carve-out inputs (present-tense tape)
         recentSameDir: recentSameDirMins, existingProfitPct, existingCreditProfitPct,
         drawdownMinScore: ddProtocol.minScore || MIN_SCORE, drawdownLevel: ddProtocol.level || "normal",
