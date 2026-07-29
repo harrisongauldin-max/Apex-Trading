@@ -519,6 +519,102 @@ function scoreMeanReversionCall(stock, relStrength, adx, bars, vix, intradayBars
 
 // scoreCreditSpread removed — APEX uses naked options, not credit spreads
 
+
+// ═══════════════════════════════════════════════════════════════════════════════════════
+// INTRADAY SCORE (7/28) — a ranking score built ONLY from terms that vary within a session.
+//
+// WHY: measured on the six separate QQQ signals of 7/28 (same ticker, 4 hours apart), FIVE
+// terms of the legacy score carried an IDENTICAL value in every entry — daily RSI (+11),
+// daily MACD (-3), VIX bucket (+9), low-volume-pullback (+8), breadth-recovery (+10) = +35
+// points of frozen baseline. The legacy score is therefore mostly a measure of THE DAY, not
+// THE ENTRY, which is why it does not rank: corr(score, P&L) = -0.14, corr(score, peak%) =
+// -0.11, and gather (<70) beats normal (>=70) by +$16.21 vs -$10.26 per trade over 81 trades.
+//
+// Every term below is sourced from something that provably moves inside a session, and every
+// weight traces to an observed result this week (cited inline). Base 50, clamped 0-100.
+// LOGGED ONLY — nothing gates on this yet (see INTRADAY_SCORE_GATING in scanner).
+// ═══════════════════════════════════════════════════════════════════════════════════════
+function computeIntradayScore(ticker, optionType, price, signals, state) {
+  const R = [];
+  let s = 50;
+  const dir  = optionType === "call" ? 1 : -1;      // +1 = we want up, -1 = we want down
+  const vwap = signals.intradayVWAP || 0;
+  const adx  = Number.isFinite(signals.adx) ? signals.adx : 0;
+  const iRSI = Number.isFinite(signals.rsi) ? signals.rsi : 50;
+  const sm   = state._sessionMinsNow ?? 0;
+
+  // 1) FLUSH / BREAKDOWN FRESHNESS (0..+22) — the single strongest observed discriminator.
+  //    7/22 SPY +$174 entered at flush age 24m; 7/24 QQQ -$152 at age 49m. 7/27 puts: first
+  //    30 min of the breakdown episode +$528, every later re-fire -$317.
+  const lowAt = (state._sessionLowRSIAt || {})[ticker];
+  const ageMin = lowAt ? (Date.now() - lowAt) / 60000 : null;
+  if (optionType === "call") {
+    //    FRESHNESS DOMINATES DEPTH — calibrated on the pair that broke the first draft:
+    //    7/22 SPY iRSI 39 @ age 24m = +$174, vs 7/24 QQQ iRSI 28 @ age 49m = -$152. The deeper
+    //    flush LOST. A stale flush is scored negative outright, not merely un-rewarded.
+    const deep  = iRSI <= 30 ? 6 : iRSI <= 35 ? 4 : iRSI <= 42 ? 2 : 0;
+    const fresh = ageMin == null ? 0 : ageMin <= 10 ? 14 : ageMin <= 25 ? 10 : ageMin <= 45 ? 3 : -6;
+    if (deep + fresh !== 0) { s += deep + fresh; R.push(`flush iRSI ${iRSI.toFixed(0)}${ageMin != null ? ` age ${ageMin.toFixed(0)}m` : ""} (${deep + fresh > 0 ? "+" : ""}${deep + fresh})`); }
+  } else {
+    const ep = (state._bdEpisode || {})[ticker];
+    const epAge = (ep && ep.active) ? (Date.now() - ep.startedAt) / 60000 : null;
+    const fresh = epAge == null ? 0 : epAge <= 10 ? 14 : epAge <= 30 ? 8 : 0;
+    if (fresh > 0) { s += fresh; R.push(`breakdown episode age ${epAge.toFixed(0)}m (+${fresh})`); }
+    else if (epAge != null) { s -= 12; R.push(`STALE breakdown episode ${epAge.toFixed(0)}m (-12)`); }
+  }
+
+  // 2) VWAP POSITION (±12, direction-aware). 7/23: the os-carve 0.7% BELOW VWAP won +$171.
+  if (vwap > 0 && price > 0) {
+    const off      = (price - vwap) / vwap;        // + above, - below
+    const below    = off <= -0.001;
+    const trending = adx >= 25;                    // established trend => fading it is the knife
+    let pts = 0, why = "";
+    if (below && trending)       { pts = dir > 0 ? -14 : 14; why = `${(off*100).toFixed(2)}% below own VWAP in an ADX ${adx.toFixed(0)} DOWNTREND — knife, not dip`; }
+    else if (below)              { pts = dir > 0 ?   8 : 4;  why = `${(off*100).toFixed(2)}% below own VWAP in chop (ADX ${adx.toFixed(0)}) — dip`; }
+    else if (off >= 0.001)       { pts = dir > 0 ?   4 : -8; why = `${(off*100).toFixed(2)}% above own VWAP`; }
+    if (pts !== 0) { s += pts; R.push(`${why} (${pts > 0 ? "+" : ""}${pts})`); }
+  }
+
+  // 3) BREADTH **RATE**, never the level (±10). 7/27's winner logged "Breadth falling -23.0pts";
+  //    the LEVEL term marked exhaustion instead (every 23%-breadth put entry lost).
+  const bMom = state._breadthMomentum ?? 0;
+  if (Math.abs(bMom) >= 3) {
+    const pts = Math.max(-10, Math.min(10, Math.round(dir * bMom / 2.5)));
+    if (pts !== 0) { s += pts; R.push(`breadth ${bMom > 0 ? "rising" : "falling"} ${Math.abs(bMom).toFixed(1)}pts — RATE (${pts > 0 ? "+" : ""}${pts})`); }
+  }
+
+  // 4) OPENING-RANGE POSITION (±10). Zero lag: the level is fixed before the break.
+  const or = (state._openRange || {})[ticker];
+  if (or && or.locked && price > 0) {
+    if (price < or.low)  { const p = -dir * 10; s += p; R.push(`broke OR low ${or.low.toFixed(2)} (${p > 0 ? "+" : ""}${p})`); }
+    else if (price > or.high) { const p = dir * 10; s += p; R.push(`broke OR high ${or.high.toFixed(2)} (${p > 0 ? "+" : ""}${p})`); }
+  }
+
+  // 5) VWAP SLOPE (±8) — the derivative leads the depth measure.
+  const slope = (state._vwapSlope || {})[ticker] ?? 0;
+  if (Math.abs(slope) >= 0.0003) {
+    const pts = Math.max(-8, Math.min(8, Math.round(dir * slope * 12000)));
+    if (pts !== 0) { s += pts; R.push(`VWAP ${slope < 0 ? "turning down" : "turning up"} (${pts > 0 ? "+" : ""}${pts})`); }
+  }
+
+  // 6) VOLUME PACE, DIRECTIONAL (±8). Expansion confirms whichever way the tape is moving —
+  //    it is not symmetric evidence (fixed 7/28 in the legacy path for the same reason).
+  const vp = signals.volPaceRatio || 1;
+  if (vp > 1.8 && vwap > 0 && price > 0) {
+    const up = price >= vwap;
+    const pts = (up === (dir > 0)) ? 8 : -8;
+    s += pts; R.push(`volume ${vp.toFixed(1)}x on ${up ? "an UP" : "a DOWN"} tape (${pts > 0 ? "+" : ""}${pts})`);
+  }
+
+  // 7) TREND STRENGTH (±10, direction-aware) — ADX says trend; fading a trend is the knife-catch.
+  // (trend strength is folded into the VWAP term above — a standalone ADX term double-counted it)
+
+  // 8) SESSION WARM-UP — before 15 session minutes the intraday inputs are not trustworthy.
+  if (sm < 15) { s -= 10; R.push(`session only ${sm.toFixed(0)}min old — intraday inputs unreliable (-10)`); }
+
+  return { score: Math.max(0, Math.min(100, Math.round(s))), reasons: R };
+}
+
 function scoreIndexSetup(stock, optionType, spyRSI, spyMACD, spyMomentum, breadth, vix, agentMacro, intradayRsi) {
   let score = 0;
   const reasons = [];
@@ -1216,7 +1312,7 @@ function isHYGEntryAllowed(optionType, creditStress, hygRelStr, hygRSI) {
   }
 }
 
-module.exports = {
+module.exports = { computeIntradayScore,
   scoreIndexSetup, scorePutSetup, scoreMeanReversionCall,
   detectMarketRegime, getRegimeModifier, applyIntradayRegimeOverride,
   updateOversoldTracker, recordGateBlock, checkMacroShift,
