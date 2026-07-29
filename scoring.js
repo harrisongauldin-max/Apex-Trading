@@ -753,7 +753,14 @@ function scoreIndexSetup(stock, optionType, spyRSI, spyMACD, spyMomentum, breadt
     const BD_EPISODE_MAX_MIN = 30;
     const _bdEp     = state._bdEpisode && state._bdEpisode[stock.ticker];
     const _bdEpAge  = (_bdEp && _bdEp.active) ? (Date.now() - _bdEp.startedAt) / 60000 : 0;
-    const _bdFresh  = !_bdEp || !_bdEp.active || _bdEpAge <= BD_EPISODE_MAX_MIN;
+    // 7/29: a breakdown stays tradeable while it is still PROGRESSING, not merely while it is
+    // young. Measured against both days: 7/27's losing afternoon re-fires had NO new low for
+    // hours (move over -> block), while 7/29's QQQ made new lows continuously (trend live ->
+    // trade it). Pure age blocked BOTH, which is why APEX sat flat through a 6% fade.
+    const BD_PROGRESS_MAX_MIN = 20;
+    const _bdExtAge = (_bdEp && _bdEp.active && _bdEp.extremeAt) ? (Date.now() - _bdEp.extremeAt) / 60000 : null;
+    const _bdProgressing = _bdExtAge != null && _bdExtAge <= BD_PROGRESS_MAX_MIN;
+    const _bdFresh  = !_bdEp || !_bdEp.active || _bdEpAge <= BD_EPISODE_MAX_MIN || _bdProgressing;
 
     // ── EARLY STRUCTURAL TRIGGER — fires at the START, no ADX wait ──
     // ADX/depth confirm late by construction. An opening-range break is ZERO LAG (the level is
