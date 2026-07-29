@@ -17,7 +17,7 @@ const SCORE_DELTA  = 3;               // |score| move that counts as material
 const MAX_ROWS     = 6000;            // safety cap on a runaway day
 const BLOCKER_MAX  = 60;              // truncate the headline blocker text
 
-const TELEMETRY_HEADER = "time,tkr,px,iRSI,dRSI,call,put,isMR,curl,vwap%,blocker,drivers,shadow,adx,gate,pgate";
+const TELEMETRY_HEADER = "time,tkr,px,iRSI,dRSI,call,put,isMR,curl,vwap%,blocker,drivers,shadow,adx,gate,pgate,isC,isP";
 
 // intraday-RSI tier — a crossing is "material" so dips/spikes always log a row
 function _rsiTier(r) {
@@ -122,6 +122,7 @@ function recordTelemetry(state, rec) {
     const tier = _rsiTier(rec.iRSI);
     const gate  = _vetoGate(rec.vwapPct, rec.iRSI, rec.adx);
     const pgate = _putGate(state, rec);
+    const _is   = (state._intradayScore || {})[rec.tkr] || {};   // intraday score, logging-only
 
     const _shadowNow = shadowTag(rec.direction === "put" ? rec.putReasons : rec.callReasons);
     const material =
@@ -134,6 +135,7 @@ function recordTelemetry(state, rec) {
       (tier !== prev.tier) ||
       (gate !== (prev.gate || "")) ||
       (pgate !== (prev.pgate || "")) ||
+      (Math.abs((_is.call ? _is.call.score : 0) - (prev.isC || 0)) >= 8) ||
       (now - (prev.ts || 0)) >= HEARTBEAT_MS;
     if (!material) return false;
 
@@ -158,6 +160,8 @@ function recordTelemetry(state, rec) {
       rec.adx == null ? "" : Number(rec.adx).toFixed(0),
       gate,
       pgate,
+      _is.call ? _is.call.score : "",
+      _is.put  ? _is.put.score  : "",
     ].map(_csv).join(",");
 
     state._telemetryBuffer.push(row);
@@ -165,7 +169,7 @@ function recordTelemetry(state, rec) {
       state._telemetryBuffer = state._telemetryBuffer.slice(-MAX_ROWS);
 
     state._telemetryLast[rec.tkr] = {
-      call: rec.call, put: rec.put, isMR: !!rec.isMR, blocker: rec.blocker || "", tier, ts: now, shadow: _shadowNow, gate, pgate,
+      call: rec.call, put: rec.put, isMR: !!rec.isMR, blocker: rec.blocker || "", tier, ts: now, shadow: _shadowNow, gate, pgate, isC: _is.call ? _is.call.score : 0,
     };
     return true;
   } catch (_) {
