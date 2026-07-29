@@ -35,7 +35,7 @@ const {
   detectMarketRegime, getRegimeModifier, applyIntradayRegimeOverride,
   updateOversoldTracker, recordGateBlock, checkMacroShift,
   checkSectorETF, isGLDEntryAllowed, isXLEEntryAllowed, isTLTEntryAllowed,
-  isIYREntryAllowed, isHYGEntryAllowed,
+  isIYREntryAllowed, isHYGEntryAllowed, computeIntradayScore,
 } = require('./scoring');
 
 const {
@@ -1615,6 +1615,29 @@ async function runScan() {
           state._bdEpisode[_tk] = { active: true, startedAt: Date.now(), day: _today };
         } else if (_epNow && _epNow.active && _bdOff) {
           _epNow.active = false;
+        }
+      }
+
+      // INTRADAY SCORE (7/28) — computed here because every input above is now in state.
+      // LOGGED ONLY: INTRADAY_SCORE_GATING is false, so nothing routes on it yet. The point is
+      // to collect it alongside the legacy score so we can measure whether it actually RANKS
+      // (corr with peak%/P&L) before letting it decide anything. The legacy score fails that
+      // test — corr -0.11 / -0.14 — and we should not swap one unvalidated ranker for another.
+      if (!state._intradayScore) state._intradayScore = {};
+      try {
+        state._intradayScore[stock.ticker] = {
+          call: computeIntradayScore(stock.ticker, "call", price, signals, state),
+          put:  computeIntradayScore(stock.ticker, "put",  price, signals, state),
+          at:   Date.now(),
+        };
+      } catch (e) {
+        // Logging must never break a scan — but a BARE silent catch is the exact anti-pattern
+        // that hid the dead sector signals for weeks (fire-and-forget + `catch(e){}` = a broken
+        // feature indistinguishable from an inactive one). Log ONCE per session so a failure is
+        // visible without spamming the scan loop.
+        if (!state._intradayScoreErrLogged) {
+          state._intradayScoreErrLogged = true;
+          logEvent("error", `[INTRADAY-SCORE] disabled for this session — ${e.message}`);
         }
       }
 
