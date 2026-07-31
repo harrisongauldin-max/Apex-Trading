@@ -807,10 +807,24 @@ async function closeNContracts(ticker, n, reason, exitPremium = null) {
   await saveStateNow();
 }
 
+const PRESUBMIT_MAX_AGE_S = 120;   // 7/30: a pre-submit order older than this never reached Alpaca
+
 async function confirmPendingOrder() {
   const pending = state._pendingOrder;
   if (!pending) return;
-  if (pending._preSubmit) return;
+  if (pending._preSubmit) {
+    // 7/30: _preSubmit means "built, not yet sent to Alpaca". It is normally cleared within seconds
+    // by executeTrade's submit block. If it is still here minutes later the submit never happened
+    // (see the Black-Scholes deadlock note in execution.js) and nothing else will ever clear it —
+    // scanner:248 would block entries for the rest of the session. Expire it.
+    const _preAge = (Date.now() - (pending.submittedAt || 0)) / 1000;
+    if (_preAge > PRESUBMIT_MAX_AGE_S) {
+      logEvent("warn", `[PENDING] clearing stale pre-submit order ${pending.orderId} after ${_preAge.toFixed(0)}s — it never reached the broker`);
+      state._pendingOrder = null;
+      markDirty();
+    }
+    return;
+  }
 
   const age = (Date.now() - pending.submittedAt) / 1000;
   if (!pending.orderId) { state._pendingOrder = null; markDirty(); return; }
