@@ -249,6 +249,22 @@ async function checkExits(positions, posSnapshots, posQuotes, posNewsCache, ctx)
     }
     if (!pos._peakTime) pos._peakTime = new Date(pos.openDate || Date.now()).getTime();
 
+    // ── 7/30: TROUGH RATCHET, mirroring the peak above. ───────────────────────
+    // pos.troughPremium feeds mae_pct in the close record (closeEngine:448). It was
+    // previously only written by the RECONCILER (reconciler:665), which runs on Alpaca
+    // sync cycles roughly every 5 minutes — so a trade held 7 minutes got one sample or
+    // none, and max adverse excursion was unusable for sizing a tighter stop. Ratcheting
+    // it here puts it on the same 10-second cadence as the peak. The reconciler write is
+    // left in place: it is the same one-way min, so whichever fires first simply wins.
+    if (curP > 0 && !isNaN(curP) && curP < (pos.troughPremium ?? Infinity)) {
+      pos.troughPremium = curP;
+      pos._troughTime   = Date.now();
+    }
+    if (pos.troughPremium == null && curP > 0 && !isNaN(curP)) {
+      pos.troughPremium = curP;
+      pos._troughTime   = Date.now();
+    }
+
     // ── Confirmed peak (bolt-on 2: anti-whipsaw) ──────────────────────────────
     // The trail floor ratchets off _confirmedPeak, NOT the raw peakPremium above.
     // A new high must be corroborated by a SECOND consecutive scan (price still at/
@@ -761,7 +777,13 @@ async function checkExits(positions, posSnapshots, posQuotes, posNewsCache, ctx)
     pos.price        = price;
     pos.currentPrice = curP;
     const _floorStr  = pos.trailFloorPct != null ? `+${(pos.trailFloorPct*100).toFixed(1)}%` : 'none';
-    logEvent("scan", `${pos.ticker} | chg:${(chg*100).toFixed(1)}% | cur:$${curP} | peak:$${(pos.peakPremium||curP).toFixed(2)} | DTE:${dte} | floor:${_floorStr} | HOLD`);
+    // 7/30: trough + minutes-held added. This line is written EVERY scan for EVERY open
+    // position and the daily log is already persisted to Redis (argo:logs:<date>), so with
+    // these two fields it becomes a complete per-position trajectory at 10s granularity —
+    // enough to answer "what was this worth at minute 20" without a new telemetry stream.
+    const _minsHeld = pos.openDate ? Math.round((Date.now() - new Date(pos.openDate).getTime()) / 60000) : 0;
+    const _troughStr = pos.troughPremium != null ? `$${Number(pos.troughPremium).toFixed(2)}` : 'n/a';
+    logEvent("scan", `${pos.ticker} | chg:${(chg*100).toFixed(1)}% | cur:$${curP} | peak:$${(pos.peakPremium||curP).toFixed(2)} | trough:${_troughStr} | mins:${_minsHeld} | DTE:${dte} | floor:${_floorStr} | HOLD`);
     markDirty();
 
     } catch(posErr) {
