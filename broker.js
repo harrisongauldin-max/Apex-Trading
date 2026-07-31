@@ -21,6 +21,25 @@ function isMarketHours() {
 // dependency — resolved at call time, when state is initialized. Lets the after-hours bars guards
 // stand down during a deliberate dry run (which SHOULD fetch real data) while still silencing the
 // automated overnight scans.
+// 7/31: daily bars silently ran a week-plus stale because Alpaca's `limit` truncated the
+// NEWEST end of the range (see getStockBars). Nothing noticed for days, and dailyRSI / MACD /
+// 50MA / the regime call all quietly used the old series. This makes a recurrence loud.
+// Lazy require mirrors _dryRunActive below — resolved at call time, avoiding a load-order
+// / circular dependency on state.
+function _warnIfStaleBars(ticker, bars) {
+  try {
+    if (!Array.isArray(bars) || !bars.length) return;
+    const _t = bars[bars.length - 1].t || bars[bars.length - 1].timestamp;
+    if (!_t) return;
+    const _ageDays = (Date.now() - new Date(_t).getTime()) / 86400000;
+    if (_ageDays > 4) {   // 4 covers a long weekend; anything beyond is a real fault
+      require('./state').logEvent("warn",
+        `[BARS] ${ticker} newest daily bar is ${String(_t).split('T')[0]} — ${_ageDays.toFixed(0)} days old. ` +
+        `dailyRSI, daily MACD, the 50MA and the regime call are ALL computed off this series.`);
+    }
+  } catch (_) {}
+}
+
 function _dryRunActive() {
   try { return require('./state').state._dryRunMode === true; } catch (_) { return false; }
 }
@@ -197,21 +216,34 @@ async function getStockBars(ticker, limit = 60) {
     // Always use date range - more reliable than limit param across all Alpaca tiers
     const end   = new Date().toISOString().split("T")[0];
     const start = new Date(Date.now() - Math.ceil(limit * 1.6) * MS_PER_DAY).toISOString().split("T")[0];
+    // ── 7/31: DO NOT PASS `limit` TO ALPACA. ──────────────────────────────────────────
+    // Alpaca returns daily bars ASCENDING FROM `start` and caps the response at `limit`, so
+    // passing limit=N over an (N*1.6)-day window truncates the NEWEST bars, not the oldest.
+    // Observed 7/31: limit=60 over a 96-day window returned a series ending 2026-07-22 —
+    // seven trading days stale — and limit=200 runs about thirty days behind. It looked
+    // FROZEN across sessions because the window slides a day at a time, so the truncation
+    // point barely moves. dailyRSI, the daily MACD, the 50MA and the regime call all fed on it.
+    // Request the whole window in one page, then take the newest `limit` bars here.
+    const _PAGE = 10000;   // Alpaca's max page size for bars; even a 320-day window is ~230
+    const _tail = (arr) => (Array.isArray(arr) ? arr.slice(-limit) : []);
     // Try SIP feed first (Pro tier), fall back to IEX (free tier)
     const feeds = ["sip", "iex"];
     for (const feed of feeds) {
-      const url  = `/stocks/${ticker}/bars?timeframe=1Day&start=${start}&end=${end}&limit=${limit}&feed=${feed}`;
+      const url  = `/stocks/${ticker}/bars?timeframe=1Day&start=${start}&end=${end}&limit=${_PAGE}&feed=${feed}`;
       const data = await alpacaGet(url, ALPACA_DATA);
       if (data === ALPACA_CONN_DROP) return [];   // 6/30: connection died — next feed hits the same dead socket, don't cascade
       if (data && data.bars && data.bars.length > 1) {
+        const _bars = _tail(data.bars);
+        _warnIfStaleBars(ticker, _bars);
         // Daily bars don't change intraday - cache for 60 minutes
-        return setCache('bars:' + ticker + ':' + limit, data.bars);
+        return setCache('bars:' + ticker + ':' + limit, _bars);
       }
     }
     // Last resort - no feed param
-    const last = await alpacaGet(`/stocks/${ticker}/bars?timeframe=1Day&start=${start}&end=${end}&limit=${limit}`, ALPACA_DATA);
+    const last = await alpacaGet(`/stocks/${ticker}/bars?timeframe=1Day&start=${start}&end=${end}&limit=${_PAGE}`, ALPACA_DATA);
     if (last === ALPACA_CONN_DROP) return [];
-    return last && last.bars ? last.bars : [];
+    if (last && last.bars) { const _lb = _tail(last.bars); _warnIfStaleBars(ticker, _lb); return _lb; }
+    return [];
   } catch(e) { return []; }
 
 }
