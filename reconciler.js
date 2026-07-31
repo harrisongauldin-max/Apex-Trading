@@ -384,16 +384,32 @@ async function runReconciliation() {
           // Skip if CLOSED journal entry already exists today (pending fill scenario)
           const _today = new Date().toLocaleDateString('en-US', {timeZone:'America/New_York', year:'numeric', month:'2-digit', day:'2-digit'}).split('/');
           const _todayStr = `${_today[2]}-${_today[0]}-${_today[1]}`;
+          // 7/31: THIS SKIP NOW EXPIRES. It exists for the seconds between submitting a sell
+          // and it filling. It had no timeout, so when a close order never filled the position
+          // stayed live at Alpaca and permanently invisible to APEX — no stop, no trail floor,
+          // not flattened at 3:15. If the contract is STILL open at Alpaca past the grace
+          // window, the sell did not fill and the position must be managed again.
+          const CLOSED_SKIP_GRACE_S = 120;
           let _alreadyClosed = false;
+          let _closeAgeS = Infinity;
           try {
             const _todayEntries = await loadJournalDay(_todayStr);
-            _alreadyClosed = _todayEntries.some(e =>
+            const _closedEntry = _todayEntries.find(e =>
               e.contractSymbol === p.sym && e.status === 'CLOSED'
             );
+            if (_closedEntry) {
+              _closeAgeS = _closedEntry.closeDate
+                ? (Date.now() - new Date(_closedEntry.closeDate).getTime()) / 1000
+                : Infinity;
+              _alreadyClosed = _closeAgeS <= CLOSED_SKIP_GRACE_S;
+              if (!_alreadyClosed) {
+                _log('warn', `[RECONCILE] ${p.ticker} (${p.sym}) journal says CLOSED ${isFinite(_closeAgeS) ? _closeAgeS.toFixed(0)+'s' : 'at an unknown time'} ago but it is STILL OPEN at Alpaca — the sell never filled. Reconstructing so it can be managed.`);
+              }
+            }
           } catch(_) {}
 
           if (_alreadyClosed) {
-            _log('warn', `[RECONCILE] Skipping ${p.ticker} (${p.sym}) — CLOSED journal entry exists (sell order pending fill)`);
+            _log('warn', `[RECONCILE] Skipping ${p.ticker} (${p.sym}) — closed ${_closeAgeS.toFixed(0)}s ago, sell order still pending fill (grace ${CLOSED_SKIP_GRACE_S}s)`);
             continue;
           }
 
@@ -481,6 +497,52 @@ async function runReconciliation() {
       _log("warn", `[RECONCILE] ${ghosts} ghost(s) removed, ${orphans} orphan(s) reconstructed`);
       await _redisSave(_state);
       _markDirty();
+    }
+
+    // ── 7/31: STATE ASSERTION — APEX vs ALPACA, BOTH DIRECTIONS ───────────────
+    // Three incidents in three days were one problem wearing different clothes: our position
+    // set and the broker's silently disagreeing. 7/30 we held a synthetic contract Alpaca
+    // never had. 7/30 a pending-order flag deadlocked entries for 78 minutes. 7/31 Alpaca
+    // held 4x SPY260803P00735000 at -$464 that we had booked CLOSED at +$40 — invisible to
+    // every stop, the trail floor and the 3:15 flatten. Each got its own patch; none of them
+    // catches the next variant. This does, whatever shape it takes.
+    //
+    // Runs AFTER ghost removal and orphan reconstruction, so what it reports is RESIDUAL
+    // divergence the normal paths did not resolve. Pure observation — the try/catch means a
+    // failure here can never break a reconcile cycle.
+    try {
+      const _isOptSym  = (s) => /\d{6}[CP]\d{8}$/.test(s);          // ignore any equity leg
+      const _alpOpts   = new Set([...alpacaSymbols].filter(_isOptSym));
+      const _apexSyms  = new Set((_state.positions || []).map(p => p.contractSymbol).filter(Boolean));
+      const _apexNoSym = (_state.positions || []).filter(p => !p.contractSymbol);
+
+      const _onlyApex   = [..._apexSyms].filter(s => !_alpOpts.has(s));
+      const _onlyAlpaca = [..._alpOpts].filter(s => !_apexSyms.has(s));
+
+      if (_onlyApex.length || _onlyAlpaca.length || _apexNoSym.length) {
+        _log('warn',
+          `[STATE-DIVERGENCE] APEX ${_apexSyms.size} vs Alpaca ${_alpOpts.size}` +
+          (_onlyApex.length
+            ? ` | IN APEX ONLY (broker has no such position): ${_onlyApex.join(', ')}` : '') +
+          (_onlyAlpaca.length
+            ? ` | AT ALPACA ONLY — UNMANAGED, no stop / no trail floor / not flattened at 3:15: ${_onlyAlpaca.join(', ')}` : '') +
+          (_apexNoSym.length
+            ? ` | NO contractSymbol (cannot be priced or closed): ${_apexNoSym.map(p => `${p.ticker} $${p.strike}${p.optionType === 'put' ? 'P' : 'C'}`).join(', ')}` : '')
+        );
+        _state._lastDivergence = {
+          at:         new Date().toISOString(),
+          onlyApex:   _onlyApex,
+          onlyAlpaca: _onlyAlpaca,
+          noSymbol:   _apexNoSym.length,
+        };
+        _markDirty();
+      } else if (_state._lastDivergence) {
+        _log('scan', `[STATE-DIVERGENCE] cleared — APEX and Alpaca agree on ${_apexSyms.size} option position(s)`);
+        delete _state._lastDivergence;
+        _markDirty();
+      }
+    } catch (_dvErr) {
+      _log('error', `[STATE-DIVERGENCE] check failed (non-fatal): ${_dvErr.message}`);
     }
 
     // ── Re-pair individual legs into spreads ──────────────────────────────────
