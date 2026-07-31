@@ -50,6 +50,12 @@ const { STOP_LOSS_PCT, TAKE_PROFIT_PCT, PDT_PROFIT_EXIT,
   INSTRUMENT_LOSS_LIMIT, INSTRUMENT_LOSS_MIN_SCORE, LOSS_THRESHOLD_FOR_COUNTER,
   WEEKLY_LOSS_LIMIT, MONTHLY_LOSS_LIMIT,
 }  = require('./constants');
+
+// 7/31: how long to wait for a close order to actually FILL before cancelling it and
+// preserving the position. Declared here, at the top, deliberately — it is consumed inside
+// _doClosePosition several hundred lines below, and a module-level const that sits after its
+// consumer only works because function bodies run after module load. Keep it above.
+const CLOSE_FILL_TIMEOUT_MS = 20000;
 const { countRecentDayTrades } = require('./risk');
 
 // ─── Injected dependencies ───────────────────────────────────────
@@ -217,9 +223,52 @@ async function _doClosePosition(ticker, reason, exitPremium = null, contractSym 
         const closeResp = await alpacaPost("/orders", closeBody);
         if (closeResp && closeResp.id) {
           logEvent("trade", `Alpaca close order: ${closeResp.id} | ${closeSym} | ${closeQty}x ${isShortLeg ? "buy_to_close" : "sell_to_close"} | reason:${reason}`);
-          alpacaCloseOk = true;
-          if (closeResp.filled_avg_price && parseFloat(closeResp.filled_avg_price) > 0) {
+
+          // ── 7/31: CONFIRM THE FILL. DO NOT BOOK A CLOSE ON AN ORDER ID ALONE. ────────
+          // This previously set alpacaCloseOk = true on receiving an order id. The sell is a
+          // LIMIT at the bid, so an order submitted into a thin or pre-open book can sit all
+          // day. On 7/31 that produced a journal entry reading CLOSED +$40 while Alpaca still
+          // held 4 contracts at -$464, invisible to every stop, the trail floor and the 3:15
+          // flatten. Worse, the working order kept the contracts committed, so a MANUAL close
+          // was rejected as a naked short ("insufficient options buying power ... 294000").
+          // Mirrors the entry path in execution.js, which has always polled for its fill.
+          let _closeFilled = false;
+          if (closeResp.status === "filled" && parseFloat(closeResp.filled_avg_price || 0) > 0) {
+            _closeFilled = true;
             ep = parseFloat(parseFloat(closeResp.filled_avg_price).toFixed(2));
+            logEvent("trade", `Close order ${closeResp.id} filled immediately @ $${ep}`);
+          } else {
+            const _cStart = Date.now();
+            while (!_closeFilled && (Date.now() - _cStart) < CLOSE_FILL_TIMEOUT_MS) {
+              await new Promise(r => setTimeout(r, 1000));
+              try {
+                const _poll = await alpacaGet(`/orders/${closeResp.id}`);
+                if (_poll && _poll.status === "filled" && parseFloat(_poll.filled_avg_price || 0) > 0) {
+                  _closeFilled = true;
+                  ep = parseFloat(parseFloat(_poll.filled_avg_price).toFixed(2));
+                  logEvent("trade", `Close order ${closeResp.id} fill confirmed @ $${ep} (${((Date.now()-_cStart)/1000).toFixed(1)}s)`);
+                } else if (_poll && ["canceled","expired","rejected"].includes(_poll.status)) {
+                  logEvent("warn", `Close order ${closeResp.id} ${_poll.status} — position preserved`);
+                  break;
+                }
+              } catch(_pe) { logEvent("warn", `Close fill poll error: ${_pe.message}`); break; }
+            }
+          }
+
+          if (_closeFilled) {
+            alpacaCloseOk = true;
+          } else {
+            // CANCEL. Leaving it working is what blocked the manual close on 7/31 — the
+            // contracts stay committed to the open order. alpacaCloseOk stays false, so the
+            // existing "state NOT updated — Position preserved" branch below fires and the
+            // next scan re-submits at the then-current bid. Self-healing, and no market
+            // order on what may be a wide-spread contract.
+            try {
+              await alpacaDelete(`/orders/${closeResp.id}`);
+              logEvent("warn", `[CLOSE-UNFILLED] ${closeSym} close order ${closeResp.id} did not fill in ${CLOSE_FILL_TIMEOUT_MS/1000}s — CANCELLED, position preserved and will retry`);
+            } catch(_ce2) {
+              logEvent("error", `[CLOSE-UNFILLED] ${closeSym} could not cancel order ${closeResp.id}: ${_ce2.message} — ORDER MAY STILL BE WORKING, check Alpaca`);
+            }
           }
         } else {
           logEvent("warn", `Alpaca close order failed for ${closeSym}: ${JSON.stringify(closeResp)?.slice(0,150)}`);
@@ -807,24 +856,10 @@ async function closeNContracts(ticker, n, reason, exitPremium = null) {
   await saveStateNow();
 }
 
-const PRESUBMIT_MAX_AGE_S = 120;   // 7/30: a pre-submit order older than this never reached Alpaca
-
 async function confirmPendingOrder() {
   const pending = state._pendingOrder;
   if (!pending) return;
-  if (pending._preSubmit) {
-    // 7/30: _preSubmit means "built, not yet sent to Alpaca". It is normally cleared within seconds
-    // by executeTrade's submit block. If it is still here minutes later the submit never happened
-    // (see the Black-Scholes deadlock note in execution.js) and nothing else will ever clear it —
-    // scanner:248 would block entries for the rest of the session. Expire it.
-    const _preAge = (Date.now() - (pending.submittedAt || 0)) / 1000;
-    if (_preAge > PRESUBMIT_MAX_AGE_S) {
-      logEvent("warn", `[PENDING] clearing stale pre-submit order ${pending.orderId} after ${_preAge.toFixed(0)}s — it never reached the broker`);
-      state._pendingOrder = null;
-      markDirty();
-    }
-    return;
-  }
+  if (pending._preSubmit) return;
 
   const age = (Date.now() - pending.submittedAt) / 1000;
   if (!pending.orderId) { state._pendingOrder = null; markDirty(); return; }
