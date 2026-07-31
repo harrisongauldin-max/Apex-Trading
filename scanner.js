@@ -1363,7 +1363,12 @@ async function runScan() {
 
     const vwap = signals.intradayVWAP > 0 ? signals.intradayVWAP : calcVWAP(bars.slice(-5));
     let _carveGapState = "flat";   // #3: present-tense gap state, set by classifier below if vwap valid
-    let _carveVwapRatio = 1;       // #3: price/vwap, <1 below >1 above
+    // 7/31: computed HERE, not inside the gap classifier below. This is a pure price/VWAP
+    // ratio that needs no daily bars, but it used to be assigned only inside the bars block —
+    // so whenever daily bars were missing, short or stale it stayed at 1 ("exactly at VWAP"),
+    // which makes _intradayDown false at entryEngine:330 and silently blinds the call
+    // falling-knife veto AND the put carve-out. The live tape read must never depend on bars.
+    let _carveVwapRatio = vwap > 0 ? price / vwap : 1;   // <1 below, >1 above
     if (vwap > 0) {
       const vwapBias = price < vwap ? "below_vwap" : "above_vwap";
       const vwapPct  = ((price - vwap) / vwap * 100).toFixed(1);
@@ -1374,6 +1379,27 @@ async function runScan() {
       // open vs prior regular close; gapState combines gapType with the live VWAP relationship.
       // Faded = gapped one way but price now on the other side of VWAP (the trap to watch).
       if (Array.isArray(bars) && bars.length >= 2) {
+        // ── 7/31: VERIFY THE BARS ARE TODAY'S BEFORE CLASSIFYING A GAP. ──────────────
+        // This block used to read bars[last].o / bars[last-1].c unconditionally. On 7/30
+        // and 7/31 it printed IDENTICAL values on both days (QQQ open 703.62 prevC 708.97,
+        // SPY open 746.62 prevC 748.28) — a days-old bar set presented as today's gap.
+        // It is not just a log cosmetic: _carveGapState below feeds entryEngine's PUT
+        // CARVE-OUT, so a frozen "gap-down-holding" gates live put entries on stale data.
+        // If the newest bar is not today's, emit NOTHING and leave _carveGapState at its
+        // "flat" default — the carve-out then falls back to _intradayDown, which is
+        // computed fresh every scan. A loud unknown beats a confident wrong number.
+        const _todayET     = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+        const _lastBarRaw  = bars[bars.length - 1].t || bars[bars.length - 1].timestamp || null;
+        const _lastBarDate = _lastBarRaw ? String(_lastBarRaw).split('T')[0] : null;
+        const _barsAreToday = _lastBarDate === _todayET;
+
+        if (!_barsAreToday) {
+          // logEvent dedups on message text, so this will not spam every scan.
+          logEvent("warn",
+            `[GAP] ${stock.ticker} SKIPPED — newest daily bar is ${_lastBarDate || "undated"}, not today (${_todayET}). ` +
+            `Gap/prevClose would be stale; gapState left "flat" so the put carve-out uses the live intraday read instead.`
+          );
+        } else {
         const _gapOpen  = bars[bars.length - 1].o;
         const _gapPrevC = bars[bars.length - 2].c;
         if (_gapOpen > 0 && _gapPrevC > 0) {
@@ -1387,13 +1413,15 @@ async function runScan() {
           // #3 carve-out inputs: capture present-tense tape state; assigned onto liveStock below
           // (liveStock is constructed later in this loop, ~1462, so stash in loop-scoped vars now).
           _carveGapState = _gapState;
-          _carveVwapRatio = vwap > 0 ? price / vwap : 1;   // <1 below, >1 above
+          // _carveVwapRatio is set above, outside this bars-dependent block (7/31) — do not
+          // reassign it here; that is what tied the live VWAP read to the daily bar fetch.
           logEvent("scan",
             `[GAP] ${stock.ticker} gapPct ${(_gapPct*100).toFixed(2)}% (${_gapType}) | ` +
             `open ${_gapOpen.toFixed(2)} prevC ${_gapPrevC.toFixed(2)} | px ${price.toFixed(2)} ` +
             `${_aboveVwap ? "≥" : "<"} vwap ${vwap.toFixed(2)} → ${_gapState}`
           );
         }
+        }   // end else (bars are today's)
       }
       const _sessionMinutes = etHourNow >= 9.5 ? (etHourNow - 9.5) * 60 : 0;
       const _vwapReliable = _sessionMinutes >= 30;
