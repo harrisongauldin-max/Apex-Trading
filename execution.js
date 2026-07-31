@@ -301,28 +301,31 @@ async function executeTrade(stock, price, score, scoreReasons, vix, optionType =
   delete stock._cachedContract;
 
   if (!contract) {
-    logEvent("warn", `- ${stock.ticker} - NO REAL OPTIONS DATA - using Black-Scholes estimate. Check Alpaca Pro subscription.`);
-    if (!state.dataQuality) state.dataQuality = { realTrades: 0, estimatedTrades: 0, totalTrades: 0 };
-    state.dataQuality.estimatedTrades++;
-    state.dataQuality.totalTrades++;
-    const iv       = 0.25 + stock.ivr * 0.003;
-    const expDays = _sameWeekLeg ? 4 : (dteBand === "standard" ? 35 : (isMeanReversion ? 21 : 28));   // 6/30: leg-aware fallback DTE
-    const _expDate = new Date(Date.now() + expDays * 86400000);
-    const expDate = _expDate.toLocaleDateString('en-US', { month: 'short', day: '2-digit', year: 'numeric' });
-    const expiryType = 'weekly';
-    const otmPct   = stock.momentum === "strong" ? 0.035 : 0.045;
-    const strike   = optionType === "put"
-      ? Math.round(price * (1 - otmPct) / 5) * 5
-      : Math.round(price * (1 + otmPct) / 5) * 5;
-    const t        = expDays / 365;
-    const premium  = parseFloat((price * iv * Math.sqrt(t) * 0.4 + 0.3).toFixed(2));
-    const greeks   = calcGreeks(price, strike, expDays, iv, optionType);
-    contract = { symbol: null, strike, expDate, expDays, expiryType,
-      premium, bid: premium * 0.95, ask: premium * 1.05,
-      greeks, iv, oi: 0, vol: 0, optionType };
+    // ── 7/30: THE BLACK-SCHOLES ESTIMATE FALLBACK THAT LIVED HERE IS REMOVED. DO NOT RESTORE. ──
+    // It fabricated a contract with symbol:null when findContract came back empty. Because the
+    // Alpaca submit block is gated on contract.symbol, no order was ever sent — yet the position
+    // was still pushed to state.positions and cash was still debited. Three separate failures
+    // traced to it: (a) phantom positions exitEngine cannot price (it skips positions with no
+    // contractSymbol), (b) cash drift — 7/30 logged "[CASH SYNC] Drift $2851.66", (c) worst, on
+    // 7/30 it armed state._pendingOrder and could never clear it, so scanner:248 blocked EVERY
+    // entry for 78+ minutes. The premium it invents is not even close: $28.51 against a real
+    // $13.04 contract on the same scan. A trade we cannot price is not a trade — abort.
+    logEvent("skip", `${stock.ticker} - no tradeable contract from findContract - entry aborted (synthetic fallback removed)`);
+    return false;
   } else {
     if (!state.dataQuality) state.dataQuality = { realTrades: 0, estimatedTrades: 0, totalTrades: 0 };
     state.dataQuality.totalTrades++;
+  }
+
+  // 7/30: NO SYMBOL, NO TRADE. The post-submit abort further down reads
+  //   if (contract.symbol && !_dryRunMode && alpacaOrderId === null && contract.symbol)
+  // i.e. it only fires when a symbol EXISTS — so a symbol-less contract slips past both the submit
+  // block and that abort and opens a position with no broker order behind it. That is the phantom
+  // shape that caused the 7/29 zombie positions and the 7/30 entry deadlock. Rejecting here makes
+  // the whole class structurally impossible regardless of what produced the contract.
+  if (!contract.symbol) {
+    logEvent("skip", `${stock.ticker} - contract has no tradeable symbol - entry aborted`);
+    return false;
   }
 
   if (contract.premium < MIN_OPTION_PREMIUM) {
@@ -378,7 +381,12 @@ async function executeTrade(stock, price, score, scoreReasons, vix, optionType =
     logEvent("filter", `${stock.ticker} pending order exists - skipping naked/MR submission`);
     return false;
   }
-  if (!_dryRunMode) {
+  // 7/30: arm the pending-order flag ONLY when an order will really be sent. This condition is
+  // DELIBERATELY BYTE-IDENTICAL to the submit guard below (contract.symbol && contract.ask > 0 &&
+  // !_dryRunMode). If the two ever diverge, a contract that passes here but fails there arms the
+  // flag with no submission to clear it, and scanner:248 blocks every entry for the session —
+  // exactly the 7/30 deadlock. Keep them in lockstep.
+  if (contract.symbol && contract.ask > 0 && !_dryRunMode) {
     state._pendingOrder = {
       orderId:        `argo-naked-${stock.ticker}-${Date.now()}`,
       ticker:         stock.ticker,
