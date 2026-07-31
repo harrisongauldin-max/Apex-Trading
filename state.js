@@ -93,6 +93,11 @@ function defaultState() {
     _dailyLossLockTriggeredAt: null,
     // C1 Sunday 6/8 — per-instrument loss count (C1-B)
     _instrumentLossCount:     {},
+    // 7/31: parallel freshness registry — see markFresh() below. Deliberately NOT an
+    // updatedAt on each value: four of the five untracked scoring inputs are primitives
+    // (_regimeClass string, _breadth/_vixSustained numbers, _creditStress boolean) and
+    // wrapping them to carry a timestamp would change their type for every consumer.
+    _freshness:               {},
     // C1 Sunday 6/8 — weekly/monthly hard halts (C1-G)
     _weeklyLossLockActive:    false,
     _monthlyLossLockActive:   false,
@@ -704,7 +709,52 @@ function dataGatherActive(defaultVal) {
     : !!defaultVal;
 }
 
+// ── 7/31: FRESHNESS REGISTRY ────────────────────────────────────────────────────────
+// The daily-bar truncation bug fed a week-old dailyRSI / MACD / 50MA / regime into scoring
+// for nine days and nothing caught it, because most scoring inputs carry no timestamp at all.
+// markFresh() is called at each write site; auditFreshness() is called once per scan and
+// complains about anything past its expected refresh interval. Cheap, and it converts a
+// silent wrong number into a log line.
+function markFresh(key) {
+  try {
+    if (!state._freshness) state._freshness = {};
+    state._freshness[key] = Date.now();
+  } catch (_) {}
+}
+
+// Expected max age in MINUTES per input. scoring:true means scoring.js reads it, so staleness
+// moves real numbers rather than just a display. Generous by design — these are fault
+// thresholds, not refresh targets.
+const FRESHNESS_EXPECT = {
+  _agentMacro:    { max: 120,   scoring: true  },   // agent macro signal
+  _breadth:       { max: 15,    scoring: true  },   // market breadth, recomputed per scan
+  _creditStress:  { max: 120,   scoring: true  },   // HYG/TLT relative strength
+  _regimeClass:   { max: 1440,  scoring: true  },   // regime A/B/C, changes rarely
+  _vixSustained:  { max: 120,   scoring: true  },   // rolling VIX mean
+};
+
+let _lastFreshnessWarnAt = 0;
+function auditFreshness() {
+  try {
+    const now = Date.now();
+    if (now - _lastFreshnessWarnAt < 5 * 60 * 1000) return;   // at most one report per 5 min
+    const bad = [];
+    for (const [k, cfg] of Object.entries(FRESHNESS_EXPECT)) {
+      if (state[k] === undefined || state[k] === null) continue;   // never set — not stale
+      const ts = (state._freshness || {})[k];
+      if (!ts) { bad.push(`${k}=UNSTAMPED`); continue; }
+      const ageMin = (now - ts) / 60000;
+      if (ageMin > cfg.max) bad.push(`${k}=${ageMin < 1440 ? ageMin.toFixed(0)+'m' : (ageMin/1440).toFixed(1)+'d'} (max ${cfg.max}m)`);
+    }
+    if (bad.length) {
+      _lastFreshnessWarnAt = now;
+      logEvent("warn", `[FRESHNESS] SCORING INPUTS STALE — ${bad.join(' · ')}. Scores are being computed from old data.`);
+    }
+  } catch (_) {}
+}
+
 module.exports = { state, markDirty, saveStateNow, flushStateIfDirty, logEvent, dataGatherActive,
+                   markFresh, auditFreshness,
                    redisSave, redisLoad, defaultState, saveDailyLogToRedis, saveTelemetryToRedis, getETDateStr,
                    restoreBuffersFromRedis, parseRedisBlob,
                    writeJournalEntry, updateJournalExit, loadJournalDay, saveJournalDay, getJournalRange,
