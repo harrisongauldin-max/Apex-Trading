@@ -8,7 +8,7 @@ const {
   getStockBars, getIntradayBars, getStockQuote, getCircuitState,
 } = require('./broker');
 
-const { state, logEvent, markDirty, saveStateNow, flushStateIfDirty, paperDataActive, dataGatherActive } = require('./state');
+const { state, logEvent, markDirty, saveStateNow, flushStateIfDirty, paperDataActive, dataGatherActive , markFresh, auditFreshness } = require('./state');
 const { recordTelemetry } = require('./telemetry');
 
 const {
@@ -278,6 +278,7 @@ async function runScan() {
         const hygRelStr  = state._sectorRelStr?.HYG?.sectorPct || 0;
         const tltRelStr  = state._sectorRelStr?.TLT?.sectorPct || 0;
         state._creditStress = hygRelStr < -1.0 && tltRelStr < -0.5;
+        markFresh('_creditStress');   // 7/31: scoring input, boolean — freshness tracked alongside
         if (state._creditStress) {
           logEvent("scan", `[CREDIT STRESS] HYG ${hygRelStr.toFixed(1)}% + TLT ${tltRelStr.toFixed(1)}% both falling — forced liquidation signal`);
         }
@@ -348,6 +349,7 @@ async function runScan() {
     const bPct = parseFloat((marketContext.breadth.breadthPct || 50).toString());
     state._lastBreadthPct = bPct;
     state._breadth        = bPct;   // BUGFIX: was never assigned → scorer read a phantom 50
+    markFresh('_breadth');           // 7/31: scoring input, number — freshness tracked alongside
     state._breadthHistory.push({ t: now, v: bPct });
     if (state._breadthHistory.length > 10) state._breadthHistory = state._breadthHistory.slice(-10);
 
@@ -1423,6 +1425,10 @@ async function runScan() {
         }
         }   // end else (bars are today's)
       }
+      // 7/31: one freshness sweep per scan. Self-throttles to one report per 5 minutes, and only
+      // speaks when something is actually past its expected refresh interval — silent otherwise.
+      auditFreshness();
+
       const _sessionMinutes = etHourNow >= 9.5 ? (etHourNow - 9.5) * 60 : 0;
       const _vwapReliable = _sessionMinutes >= 30;
       const _callLikelyPath = signals.rsi !== null && signals.rsi < 40;
