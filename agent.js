@@ -17,7 +17,7 @@ const { ANTHROPIC_API_KEY, ANTHROPIC_MODEL, PDT_RULE_ACTIVE, PDT_LIMIT,
   AGENT_MACRO_CACHE_MS,
   BEAR_DD_PCT, BEAR_DD_LOOKBACK, BEAR_VIX_SUSTAINED, BEAR_EXIT_DD_PCT, BEAR_EXIT_VIX, BEAR_EXIT_SESSIONS, DEFAULT_VIX,
 } = require('./constants');
-const { state } = require('./state');
+const { state , markFresh } = require('./state');
 const { alpacaGet, getStockQuote, getStockBars, getIntradayBars } = require('./broker');
 const { getAccountPhase, effectiveHeatCap , isMarketHours } = require('./signals');
 
@@ -453,6 +453,7 @@ SCORING CONTEXT:
   state._vixHistory.push(mktStatus.vix || state.vix || 20);
   if (state._vixHistory.length > 5) state._vixHistory.shift();
   state._vixSustained = parseFloat((state._vixHistory.reduce((s,v)=>s+v,0)/state._vixHistory.length).toFixed(1));
+  markFresh('_vixSustained');   // 7/31: scoring input, primitive — freshness tracked alongside
   // SPY drawdown from 52-week high
   const spy52wHigh = spyBarsForAgent.length > 0 ? Math.max(...spyBarsForAgent.map(b=>b.h)) : spyPrice;
   state._spyDrawdown = spy52wHigh > 0 ? parseFloat(((spyPrice - spy52wHigh) / spy52wHigh * 100).toFixed(1)) : 0;
@@ -476,6 +477,7 @@ SCORING CONTEXT:
   // (falls through to regimeA=false, regimeB=false → defaults to A in classification)
   const prevRegimeClass = state._regimeClass;
   state._regimeClass = regimeC ? "C" : regimeB ? "B" : "A";
+  markFresh('_regimeClass');    // 7/31: scoring input, primitive — freshness tracked alongside
   // Regime change B→A: reset signal anchor to neutral so the agent re-evaluates fresh
   // Without this, the stability system keeps the old bearish signal locked in for 2+ tiers
   // even though the market context has fundamentally changed
@@ -856,6 +858,8 @@ Respond with ONLY the JSON object. No words before or after.`;
     // state._agentMacro.timestamp; nothing on the success path wrote it, so it was
     // perpetually undefined → signalAge fell to Infinity ("Infinitymin") and the
     // agent re-ran every scan. Persist the signal + timestamp here on every success.
+    markFresh('_agentMacro');   // 7/31: 10.8 DAYS stale on 7/31 (Anthropic key out of credit) and
+                                // nothing could detect it. This is the one that mattered most.
     state._agentMacro = {
       ...(state._agentMacro || {}),
       signal:     parsed.signal,
