@@ -12,7 +12,10 @@
 // score trend AND what drove it, light enough to digest whole.
 // ============================================================
 
-const HEARTBEAT_MS = 5 * 60 * 1000;   // force a row at least every 5 min/ticker
+const HEARTBEAT_MS = 2 * 60 * 1000;   // 7/30: 5min -> 2min. Rows are event-driven (material
+                                      // score/gate/tier change); this is only the FLOOR for a
+                                      // quiet tape. 7/30 averaged ~1.4 min/row already, so the
+                                      // extra volume is modest and MAX_ROWS 6000 is untouched.
 const SCORE_DELTA  = 3;               // |score| move that counts as material
 const MAX_ROWS     = 6000;            // safety cap on a runaway day
 const BLOCKER_MAX  = 60;              // truncate the headline blocker text
