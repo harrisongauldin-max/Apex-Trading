@@ -14,7 +14,7 @@ const _noKeepAliveHttps = new https.Agent({ keepAlive: false });
 const _agentFor = (parsedURL) => parsedURL.protocol === 'http:' ? _noKeepAliveHttp : _noKeepAliveHttps;
 const fetch = (url, opts = {}) => _nodeFetch(url, { agent: _agentFor, ...opts });
 const { alpacaGet, getStockBars, getStockQuote, withTimeout, getIntradayBars, ALPACA_CONN_DROP } = require('./broker');
-const { state, logEvent, markDirty }             = require('./state');
+const { state, logEvent, markDirty , markFresh } = require('./state');
 
 // Macro calendar — key events that affect options pricing
 // Update dates as needed; daysTo is computed live from today
@@ -513,6 +513,7 @@ async function getMacroNews(stateRef = null) {
                          : signal === "bullish"          ? "trending_bull"
                          : "neutral";
       markDirty(); // C6: persist agent macro immediately -- drives all gate decisions
+      markFresh('_agentMacro');   // 7/31: freshness registry
       state._agentMacro = {
         signal:      seededSignal,
         confidence:  "medium", // keyword is less reliable than agent - medium confidence
