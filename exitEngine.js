@@ -12,6 +12,12 @@ const { calcRSI, openRisk, realizedPnL,
         getETTime, isMarketHours }             = require('./signals');
 const { getCached, setCache }                  = require('./market');
 const { analyzeNews }                          = require('./market');
+
+// 7/31: the 20-minute time cut. See the [TIME-CUT] block further down for the evidence.
+// TIME_CUT_MIN is the single tunable; SAMEWEEK_DTE_MAX only classifies legacy positions
+// opened before pos.dteBand existed.
+const TIME_CUT_MIN     = 20;   // minutes held before the cut is evaluated
+const SAMEWEEK_DTE_MAX = 10;   // DTE fallback for classifying an untagged same-week leg
 const { calcThesisIntegrity, isDayTrade }      = require('./risk');
 const {
   STOP_LOSS_PCT, FAST_STOP_PCT, FAST_STOP_HOURS,
@@ -590,6 +596,54 @@ async function checkExits(positions, posSnapshots, posQuotes, posNewsCache, ctx)
         );
         _closedThisCycle.add(pi);
         decisions.push({ pi, ticker: pos.ticker, action: 'close', reason: 'trail-floor', exitPremium: null, contractSym: pos.contractSymbol || null }); continue;
+      }
+    }
+
+    // ── 7/31: TIME CUT ON POSITIONS THAT HAVE NOT DONE ANYTHING ───────────────
+    // Sits AFTER the ladder ratchet (so trailFloorPct reflects this scan's confirmed peak)
+    // and AFTER floor enforcement (so the designed trail-floor exit gets first refusal).
+    // Only catches what survives both.
+    //
+    // Corrected week 7/27-7/31: the whole book was 14 trades that cleared the +12.5% rung
+    // (+$1,768). The other 43 netted -$1,081, and the deepest hole was the 18 whose peak
+    // never reached +5% at all (-$1,065). Motivation is HEAT as much as P&L — an unarmed
+    // position still counts in openRisk() and blocks better entries.
+    if (!pos._timeCutFired) {
+      const _tcEntry = new Date(pos.openDate || pos.entryTime || Date.now()).getTime();
+      const _tcMins  = (Date.now() - _tcEntry) / 60000;
+
+      if (_tcMins >= TIME_CUT_MIN) {
+        // trailFloorPct IS the ladder's own record of what the confirmed peak achieved:
+        //   null -> never reached +5%  ·  0 -> reached +5%  ·  0.05 -> reached +10%
+        //   >= 0.10 -> reached +12.5%, the tight rung
+        // So both rules read one field and introduce no new computation.
+        const _armed     = pos.trailFloorPct != null;
+        const _tightRung = _armed && pos.trailFloorPct >= 0.10;
+        const _isSameWk  = pos.dteBand === "sameweek" ||
+                           (pos.dteBand == null && Number.isFinite(dte) && dte <= SAMEWEEK_DTE_MAX);
+
+        let _tcReason = null;
+        // RULE B — both legs. Cannot touch a winner: anything that eventually peaked
+        // >=12.5% passed through +5% early, so a floor is armed well before minute 20.
+        if (!_armed) {
+          _tcReason = "no floor armed — peak never reached +5%";
+        }
+        // SAME-WEEK ONLY — higher bar, and deliberately NOT applied to the standard leg:
+        // all seven >20-minute winners that week were standard (+$769), none were same-week.
+        else if (_isSameWk && !_tightRung) {
+          _tcReason = "same-week leg has not cleared the +12.5% rung";
+        }
+
+        if (_tcReason && !_closedThisCycle.has(pi)) {
+          pos._timeCutFired = true;
+          logEvent("scan",
+            `[TIME-CUT] ${pos.ticker} ${pos.dteBand || (_isSameWk ? "sameweek?" : "standard?")} — ` +
+            `held ${_tcMins.toFixed(0)}min, peak +${(peakChg*100).toFixed(1)}%, ` +
+            `floor ${_armed ? (pos.trailFloorPct*100).toFixed(1)+"%" : "none"} — ${_tcReason}; freeing the capital`
+          );
+          _closedThisCycle.add(pi);
+          decisions.push({ pi, ticker: pos.ticker, action: 'close', reason: 'time-cut', exitPremium: null, contractSym: pos.contractSymbol || null }); continue;
+        }
       }
     }
 
