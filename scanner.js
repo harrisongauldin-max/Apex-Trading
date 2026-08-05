@@ -89,7 +89,10 @@ const {
   APEX_PAPER_EXPERIMENT = false, EXPERIMENT_CALL_FLOOR = 50, EXPERIMENT_PUT_FLOOR = 60,   // V3.2 (6/22) paper-experiment mode: default OFF
   VIX_DAILY_SEED = [],   // V3.2 (6/23) real CBOE VIX year — seeds the IV-Rank baseline (_vixDaily)
   SPIRAL_COOLDOWN_MIN = 45,   // D3 (6/24) spiral-block auto-clear cooldown (min) — fallback 45 if not in constants
-  MR_INTRA_LIFTOFF_PTS = 4,   // D3 (6/24) intraday RSI lift-off pts off session low — shared early-turn threshold (scoring + VWAP gate)
+  MR_INTRA_LIFTOFF_PTS = 4,   // D3 (6/24) intraday RSI lift-off pts off session low — shared early-turn threshold (scoring + VWAP gate),
+  CALL_MOMENTUM_MIN, CALL_MOMENTUM_ENFORCE, CALL_MOMO_STRICT,
+  CALL_MOMO_SLOPE_MIN, CALL_MOMO_VOLPACE_MIN, CALL_MOMO_BREADTH_MIN,
+  MOMO_SHADOW_MINS, MOMO_SHADOW_MAX,
 } = require('./constants');
 
 let scanRunning  = false;
@@ -2479,6 +2482,18 @@ async function runScan() {
           const _reclaimed = _vw > 0 && _px > _vw;      // above own VWAP => breakdown is over
           return _brokeOR && !_reclaimed;
         })() },  // FIX (6/23, scope-corrected): plumb intraday rsi from the scored candidate. +orBreak (7/27) for the os-carve suppression. `stock` here is liveStock (see scored.push ~2093), and liveStock.rsi IS the intraday RSI. The prior version referenced `signals`, which lives in the SCORING loop (closes ~2104), not this execution loop — so it threw "signals is not defined" and crashed every scan at the evaluateEntry call.
+        // 8/05: the UPSIDE mirror of orBreak — price above the opening-range HIGH and still above
+        // its own VWAP. Same shape as the orBreak IIFE above, same scoping caveat (`stock` is
+        // liveStock; `signals` is not in scope in this execution loop). Feeds the call momentum gate.
+        orBreakUp: (() => {
+          const _or = state._openRange?.[stock.ticker];
+          const _px = stock.lastPrice || stock.price || 0;
+          const _vw = stock.intradayVWAP || 0;
+          if (!_or || !_or.locked || _px <= 0) return false;
+          return _px > _or.high && (_vw <= 0 || _px > _vw);
+        })(),
+        vwapSlope: (state._vwapSlope || {})[stock.ticker] ?? 0,
+        volPace:   stock.volPaceRatio ?? 1,
         gapState: stock._gapState || "flat", gapVwapRatio: stock._gapVwapRatio ?? 1, breadthMom: state._breadthMomentum ?? 0,  // #3 D2 carve-out inputs (present-tense tape)
         recentSameDir: recentSameDirMins, existingProfitPct, existingCreditProfitPct,
         drawdownMinScore: ddProtocol.minScore || MIN_SCORE, drawdownLevel: ddProtocol.level || "normal",
@@ -2529,6 +2544,67 @@ async function runScan() {
       }
     }
     if (state._staggerCooling) { logEvent("filter", `${stock.ticker} entry blocked — stagger cooldown`); continue; }
+
+    // ── 8/05: CALL MOMENTUM GATE ────────────────────────────────────────────────────────
+    // The put path requires a CONJUNCTION of measured movement before it may enter
+    // (scoring.js:780-786: break the opening-range low AND vwap turning down OR breadth rolling,
+    // AND the episode is fresh). Over 7/06-8/05 that discipline produced 25 puts, +$664, and
+    // ZERO never-green trades. The call path requires nothing and produced 193 calls, -$2,348,
+    // and 12% never-green. No scoring input predicts a call reaching the +12.5% rung — every
+    // bucket of breadth, score, IVP and entry-RSI sits between 7% and 26% against a 19% base.
+    // The score is not missing an input; it pools ~26 points of momentum with ~60+ of context,
+    // and context alone clears the floor. 8/05's score-86 and score-61 entries contained not one
+    // momentum term. This asks for the same evidence the put side uses, mirrored upward.
+    // 8/05: report any BLOCKED calls for this ticker that have now matured. Runs before the gate
+    // so it fires on every scan of the ticker, not only when a new candidate appears.
+    try {
+      const _spxNow = stock.lastPrice || stock.price || 0;
+      if (_spxNow > 0 && Array.isArray(state._momoShadow) && state._momoShadow.length) {
+        const _now = Date.now(); const _keep = [];
+        for (const _sh of state._momoShadow) {
+          if (_sh.t !== stock.ticker) { _keep.push(_sh); continue; }
+          const _mins = (_now - _sh.at) / 60000;
+          if (_mins < MOMO_SHADOW_MINS) { _keep.push(_sh); continue; }
+          const _mv = _sh.px > 0 ? ((_spxNow - _sh.px) / _sh.px * 100) : 0;
+          logEvent("scan",
+            `[CALL-MOMO-SHADOW] ${_sh.t} blocked ${_mins.toFixed(0)}min ago at ${_sh.px.toFixed(2)} ` +
+            `(score ${_sh.score}, evidence ${_sh.ev}) — underlying now ${_spxNow.toFixed(2)}, ` +
+            `moved ${_mv >= 0 ? "+" : ""}${_mv.toFixed(2)}%`);
+        }
+        state._momoShadow = _keep;
+      }
+    } catch (_shErr) { /* observation only */ }
+
+    if (optionType === "call") {
+      const _or        = state._openRange?.[stock.ticker];
+      const _px        = stock.lastPrice || stock.price || 0;
+      const _vw        = stock.intradayVWAP || 0;
+      const _mOrUp     = !!(_or && _or.locked && _px > 0 && _px > _or.high && (_vw <= 0 || _px > _vw));
+      const _mSlope    = ((state._vwapSlope || {})[stock.ticker] ?? 0) >= CALL_MOMO_SLOPE_MIN;
+      const _mVol      = (stock.volPaceRatio ?? 1) > CALL_MOMO_VOLPACE_MIN && _vw > 0 && _px >= _vw;
+      const _mBreadth  = (state._breadthMomentum ?? 0) >= CALL_MOMO_BREADTH_MIN;
+      const _mCount    = [_mOrUp, _mSlope, _mVol, _mBreadth].filter(Boolean).length;
+      const _mWhich    = [_mOrUp && "OR-high", _mSlope && "vwap-up", _mVol && "vol-pace", _mBreadth && "breadth-up"]
+                           .filter(Boolean).join("+") || "none";
+      // STRICT: mirror the put conjunction — structure mandatory, plus one confirmation.
+      const _mPass = CALL_MOMO_STRICT
+        ? (_mOrUp && (_mSlope || _mVol || _mBreadth))
+        : (_mCount >= CALL_MOMENTUM_MIN);
+      if (!_mPass) {
+        if (CALL_MOMENTUM_ENFORCE) {
+          logEvent("filter", `[CALL-MOMO] ${stock.ticker} BLOCKED — ${CALL_MOMO_STRICT ? "strict: needs OR-high + 1 confirm" : `needs ${CALL_MOMENTUM_MIN}`}, have ${_mWhich} | score ${score}`);
+          try {
+            if (!Array.isArray(state._momoShadow)) state._momoShadow = [];
+            if (_px > 0) state._momoShadow.push({ t: stock.ticker, at: Date.now(), px: _px, score, ev: _mWhich });
+            while (state._momoShadow.length > MOMO_SHADOW_MAX) state._momoShadow.shift();
+          } catch (_shErr2) { /* observation only */ }
+          continue;
+        }
+        logEvent("filter", `[CALL-MOMO] ${stock.ticker} would BLOCK — ${CALL_MOMO_STRICT ? "strict: needs OR-high + 1 confirm" : `needs ${CALL_MOMENTUM_MIN}`}, have ${_mWhich} | score ${score} | SHADOW ONLY`);
+      } else {
+        logEvent("scan", `[CALL-MOMO] ${stock.ticker} pass — ${_mCount} evidence (${_mWhich})`);
+      }
+    }
 
     if (state._callCapActive && optionType === "call") { logEvent("filter", `${stock.ticker} call blocked — call cap`); continue; }
     if (openCalls === 1 && optionType === "call") {
