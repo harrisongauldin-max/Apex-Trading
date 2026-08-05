@@ -44,8 +44,7 @@ const {
   ANTHROPIC_API_KEY,
   EARNINGS_SKIP_DAYS,
   GIVEBACK_EXIT_ENABLED = false, GIVEBACK_PEAK_MIN = 0.01, GIVEBACK_FLOOR = 0, GIVEBACK_MIN_HOLD_MIN = 10,
-  LIVE_WIDE_SPREAD_PCT,
-} = require('./constants');
+  LIVE_WIDE_SPREAD_PCT, LEG_STOP_PCT } = require('./constants');
 
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -523,7 +522,18 @@ async function checkExits(positions, posSnapshots, posQuotes, posNewsCache, ctx)
 
     // ── Hard stop ─────────────────────────────────────────────────────────────
     const _isOvernightCarry = hoursOpen >= 16 && pos.premium > 0;
-    const _activeHardStop   = _isOvernightCarry && chg <= -0.10 ? 0.28 : STOP_LOSS_PCT;
+    // 8/05: the hard stop is now PER LEG. LEG_STOP_PCT maps dteBand -> threshold; anything not
+    // in the table (i.e. "standard") keeps STOP_LOSS_PCT unchanged. The overnight-carry widening
+    // still takes precedence — a position held overnight is a different risk and keeps 28%.
+    // Legacy positions with no dteBand fall back to DTE so pre-8/03 holdings are still covered.
+    const _legBand = pos.dteBand
+      || (Number.isFinite(dte) ? (dte <= 8 ? "sameweek" : (dte <= 16 ? "biweekly" : "standard")) : "standard");
+    const _legStop = (LEG_STOP_PCT && LEG_STOP_PCT[_legBand] != null) ? LEG_STOP_PCT[_legBand] : STOP_LOSS_PCT;
+    const _activeHardStop   = _isOvernightCarry && chg <= -0.10 ? 0.28 : _legStop;
+    if (!pos._legStopLogged && _legStop !== STOP_LOSS_PCT) {
+      pos._legStopLogged = true;
+      logEvent("scan", `[LEG-STOP] ${pos.ticker} ${_legBand} ${dte}DTE — hard stop ${(_legStop*100).toFixed(1)}% (default ${(STOP_LOSS_PCT*100).toFixed(1)}%)`);
+    }
     // 8/03: recovery above the stop cancels a pending breach. Placed BEFORE the breach test so
     // a position that dips and recovers inside the confirmation window is released cleanly.
     if (chg > -_activeHardStop && pos._stopBreachAt) {
