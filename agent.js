@@ -314,6 +314,82 @@ function _shouldRunMacroAgent(headlines) {
   return { shouldRun: true, reason: `${delta.newCount}_new_headlines`, isEmergency: false };
 }
 
+// ── 8/03: REGIME STATE, DECOUPLED FROM THE NEWS AGENT ────────────────────────────────
+// This used to live inline inside getAgentMacroAnalysis, behind five early returns, so the
+// regime froze whenever the agent didn't run — including in normal throttled operation, not
+// just when the API key died. It needs price, VIX and SPY bars and nothing else. Called once
+// per scan from scanner.js AND from getAgentMacroAnalysis (so a run of the agent is unchanged).
+//
+// _regimeDuration and _vixHistory are DAY counters — see the date guards below. They must not
+// advance per scan or the "5-day VIX average" becomes a 50-second average and regimeB/regimeC
+// thresholds flip. Guarding them here also fixes their pre-existing drift with agent frequency.
+async function updateRegimeState() {
+  try {
+    const mktStatus = await agentTool_getMarketStatus().catch(() => ({}));
+    const spyBars   = await getStockBars("SPY", 60).catch(() => []);
+    const spyPrice  = mktStatus.spy?.price || state._liveSPY || 0;
+    if (!spyPrice) return;   // nothing usable — leave prior state untouched
+
+    let spyMA50 = null, spyMA200 = null;
+    if (spyBars.length >= 50)  spyMA50  = spyBars.slice(-50).map(b => b.c).reduce((s,c)=>s+c,0) / 50;
+    if (spyBars.length >= 200) spyMA200 = spyBars.slice(-200).map(b => b.c).reduce((s,c)=>s+c,0) / 200;
+    if (spyMA50)  state._spyMA50  = spyMA50;
+    if (spyMA200) state._spyMA200 = spyMA200;
+
+    const spyBelowNow = spyMA200 && spyPrice && spyPrice < spyMA200;
+
+    // ── DAY-KEYED SECTION. Runs at most once per ET calendar day. ──
+    const _etDay = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+    if (state._regimeDayStamp !== _etDay) {
+      state._regimeDayStamp = _etDay;
+      // days below the 200MA — one increment per day, not per call
+      state._regimeDuration = spyBelowNow ? (state._regimeDuration || 0) + 1 : 0;
+      // 5-DAY rolling VIX mean — one sample per day, not per call
+      if (!state._vixHistory) state._vixHistory = [];
+      state._vixHistory.push(mktStatus.vix || state.vix || 20);
+      if (state._vixHistory.length > 5) state._vixHistory.shift();
+    } else if (spyBelowNow === false && (state._regimeDuration || 0) > 0) {
+      state._regimeDuration = 0;   // intraday recovery above the 200MA resets immediately
+    }
+
+    // ── PER-SCAN SECTION. Cheap, and these should track the live tape. ──
+    if (state._vixHistory && state._vixHistory.length) {
+      state._vixSustained = parseFloat(
+        (state._vixHistory.reduce((s,v)=>s+v,0) / state._vixHistory.length).toFixed(1));
+    }
+    const spy52wHigh = spyBars.length > 0 ? Math.max(...spyBars.map(b=>b.h)) : spyPrice;
+    state._spyDrawdown = spy52wHigh > 0
+      ? parseFloat(((spyPrice - spy52wHigh) / spy52wHigh * 100).toFixed(1)) : 0;
+
+    const regimeA = !spyBelowNow && state._vixSustained < 20;
+    const regimeC = state._spyDrawdown < -20 && state._vixSustained > 35 && state._regimeDuration > 10;
+    const hasBearPriceEvidence = spyBelowNow || (state._regimeDuration || 0) > 0;
+    const hasSustainedFear     = (state._vixSustained || state.vix || 20) > 24;
+    const regimeB = !regimeA && !regimeC && hasBearPriceEvidence && hasSustainedFear;
+
+    const prevRegimeClass = state._regimeClass;
+    state._regimeClass = regimeC ? "C" : regimeB ? "B" : "A";
+    markFresh('_regimeClass');
+    markFresh('_vixSustained');
+
+    // Regime transition — clear the agent's signal anchor and history so stale framing from the
+    // previous regime does not carry over. Preserved verbatim from the original inline block.
+    if (prevRegimeClass !== state._regimeClass && prevRegimeClass) {
+      if (state._agentMacro) {
+        _log("warn", `[REGIME] ${prevRegimeClass}→${state._regimeClass} transition — resetting signal anchor from '${state._agentMacro.signal}' to neutral`);
+        state._agentMacro = { ...state._agentMacro, signal: "neutral", modifier: 0, _stabilityHeld: false };
+      }
+      if (state._agentMacroHistory && state._agentMacroHistory.length > 0) {
+        _log("warn", `[REGIME] ${prevRegimeClass}→${state._regimeClass} transition — clearing ${state._agentMacroHistory.length} stale history entries`);
+        state._agentMacroHistory = [];
+      }
+      _markDirty();
+    }
+  } catch (e) {
+    _log("warn", `[REGIME] updateRegimeState failed (non-fatal): ${e.message}`);
+  }
+}
+
 async function getAgentMacroAnalysis(headlines, forceRun = false) {
   if (!ANTHROPIC_API_KEY || !headlines || headlines.length === 0) return null;
 
@@ -443,20 +519,11 @@ SCORING CONTEXT:
   // Track how long SPY has been below 200MA, sustained VIX, SPY drawdown
   // Powers regime A/B/C classification and strategy selection
   const spyBelowNow = spyMA200 && spyPrice && spyPrice < spyMA200;
-  if (spyBelowNow) {
-    state._regimeDuration = (state._regimeDuration || 0) + 1; // days below 200MA
-  } else {
-    state._regimeDuration = 0; // reset when SPY recovers above 200MA
-  }
-  // 5-day rolling VIX average (sustained fear vs spike)
-  if (!state._vixHistory) state._vixHistory = [];
-  state._vixHistory.push(mktStatus.vix || state.vix || 20);
-  if (state._vixHistory.length > 5) state._vixHistory.shift();
-  state._vixSustained = parseFloat((state._vixHistory.reduce((s,v)=>s+v,0)/state._vixHistory.length).toFixed(1));
-  markFresh('_vixSustained');   // 7/31: scoring input, primitive — freshness tracked alongside
-  // SPY drawdown from 52-week high
-  const spy52wHigh = spyBarsForAgent.length > 0 ? Math.max(...spyBarsForAgent.map(b=>b.h)) : spyPrice;
-  state._spyDrawdown = spy52wHigh > 0 ? parseFloat(((spyPrice - spy52wHigh) / spy52wHigh * 100).toFixed(1)) : 0;
+  // 8/03: the duration / VIX-history / drawdown / classification work that used to sit here is
+  // now in updateRegimeState(), which scanner.js calls every scan. Delegating keeps the agent
+  // path and the scan path from ever diverging, and the day guards inside it mean calling from
+  // both places cannot double-count. Everything below still reads the same state fields.
+  await updateRegimeState();
   // Regime classification: A (bull), B (bear/trending), C (crisis)
   // Regime A: SPY above 200MA AND VIX sustained < 20 (clear bull)
   // Regime A_elevated: SPY above 200MA AND VIX 20-28 — elevated fear but uptrend intact
@@ -1553,6 +1620,7 @@ What is your ${scanType === "premarket-compute" ? "pre-market assessment and ent
 }
 
 module.exports = {
+  updateRegimeState,          // 8/03: called per-scan by scanner.js
   callClaudeAgent, stripThinking,
   getAgentMacroAnalysis, getAgentRescore, getAgentDayPlan,
   getAgentMorningBriefing, runAgentRescore, triggerRescore,
