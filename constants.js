@@ -352,13 +352,24 @@ const SUNDAY_C1_FEATURE_FLAGS = {
 };
 
 // C1-A thresholds
-const DAILY_LOSS_LOCK_THRESHOLD = -300;  // todayRealizedPnL floor before soft lock
+const DAILY_LOSS_LOCK_THRESHOLD = -500;  // 8/03: -300 -> -500. This is now the PRIMARY daily
+                                         // guard: C1-B no longer gates entries at all, so the
+                                         // dollar-based lock carries the job on its own.
 const DAILY_LOSS_LOCK_MIN_SCORE =  85;   // minScore when daily lock is active
 
 // C1-B thresholds
 const INSTRUMENT_LOSS_LIMIT     =   2;   // losses on same ticker before per-instrument lock
 const INSTRUMENT_LOSS_MIN_SCORE =  90;   // minScore when per-instrument lock is active
 const LOSS_THRESHOLD_FOR_COUNTER = -10;  // pnl must be < -$10 to count toward C1-B
+
+// 8/03: EXITS THAT DO NOT COUNT AS "LOSSES" FOR ANY COUNT-BASED BREAKER.
+// These fire on a CLOCK, not on price. They close a position that never performed, and the loss
+// is bounded by construction — anything that fell to the stop would have exited on the stop
+// first, so a timed-exit loss can never exceed a stop loss. On 8/03 two time-cuts worth -$61
+// combined pushed QQQ's counter from 1 to 3 and locked it out of the entire afternoon while the
+// dollar-based daily lock, the thing that measures real damage, never came close to firing.
+// Price-based exits (stop, tiered-stop, dte) and give-backs (trail-floor) still count.
+const NON_COUNTING_EXIT_REASONS = ["time-cut", "progress-check"];
 
 // C1-C threshold
 const HIGH_RISK_MIN_SCORE       =  85;   // minScore on HIGH RISK day plan days
@@ -438,6 +449,7 @@ module.exports = {
   SUNDAY_C1_FEATURE_FLAGS,
   DAILY_LOSS_LOCK_THRESHOLD, DAILY_LOSS_LOCK_MIN_SCORE,
   INSTRUMENT_LOSS_LIMIT, INSTRUMENT_LOSS_MIN_SCORE, LOSS_THRESHOLD_FOR_COUNTER,
+  NON_COUNTING_EXIT_REASONS,
   HIGH_RISK_MIN_SCORE,
   WEEKLY_LOSS_LIMIT, MONTHLY_LOSS_LIMIT,
 };
