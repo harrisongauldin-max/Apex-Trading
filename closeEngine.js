@@ -48,6 +48,7 @@ const { STOP_LOSS_PCT, TAKE_PROFIT_PCT, PDT_PROFIT_EXIT,
   // C1 Sunday 6/8
   DAILY_LOSS_LOCK_THRESHOLD, DAILY_LOSS_LOCK_MIN_SCORE,
   INSTRUMENT_LOSS_LIMIT, INSTRUMENT_LOSS_MIN_SCORE, LOSS_THRESHOLD_FOR_COUNTER,
+  NON_COUNTING_EXIT_REASONS,
   WEEKLY_LOSS_LIMIT, MONTHLY_LOSS_LIMIT,
 }  = require('./constants');
 
@@ -351,7 +352,12 @@ async function _doClosePosition(ticker, reason, exitPremium = null, contractSym 
     }
 
     // C1-B: Per-instrument loss count — increment when loss exceeds threshold
-    if (tradeOutcome.pnl < LOSS_THRESHOLD_FOR_COUNTER) {
+    // 8/03: a timed exit is housekeeping, not a thesis failure. See NON_COUNTING_EXIT_REASONS.
+    const _countsAsLoss = !NON_COUNTING_EXIT_REASONS.includes(reason);
+    if (!_countsAsLoss && tradeOutcome.pnl < LOSS_THRESHOLD_FOR_COUNTER) {
+      logEvent("scan", `[C1-B] ${ticker} ${reason} exit $${tradeOutcome.pnl.toFixed(0)} — NOT counted toward the loss breaker (timed exit, not a stop)`);
+    }
+    if (_countsAsLoss && tradeOutcome.pnl < LOSS_THRESHOLD_FOR_COUNTER) {
       if (!state._instrumentLossCount) state._instrumentLossCount = {};
       state._instrumentLossCount[ticker] = (state._instrumentLossCount[ticker] || 0) + 1;
       const _instrCount = state._instrumentLossCount[ticker];
@@ -384,7 +390,10 @@ async function _doClosePosition(ticker, reason, exitPremium = null, contractSym 
 
   if (!state._spiralTracker) state._spiralTracker = { put: 0, call: 0 };
   const posType = pos.optionType || "unknown";
-  if (pnl <= 0) {
+  // 8/03: same exemption as C1-B — the spiral tracker is also COUNT-based, so a run of timed
+  // exits would trip it without any real thesis failure behind them.
+  const _spiralCounts = !NON_COUNTING_EXIT_REASONS.includes(reason);
+  if (_spiralCounts && pnl <= 0) {
     state._spiralTracker[posType] = (state._spiralTracker[posType] || 0) + 1;
     const consecLosses = state._spiralTracker[posType];
     const totalTrades = (state.closedTrades || []).length;
@@ -418,8 +427,12 @@ async function _doClosePosition(ticker, reason, exitPremium = null, contractSym 
   logEvent("scan", `Exit stats [${reason}]: ${es.count} trades | win ${es.winRate}% | avg P&L $${es.avgPnl}`);
   await saveStateNow();
 
-  if (pnl < 0) state.consecutiveLosses++;
-  else state.consecutiveLosses = 0;
+  // 8/03: consecutiveLosses decays Kelly sizing at signals.js:511-515, so letting timed exits
+  // increment it would quietly shrink position size off housekeeping rather than off real losses.
+  if (!NON_COUNTING_EXIT_REASONS.includes(reason)) {
+    if (pnl < 0) state.consecutiveLosses++;
+    else state.consecutiveLosses = 0;
+  }
 
   if (pnl < 0) {
     state._recentLosses = state._recentLosses || {};
@@ -497,6 +510,24 @@ async function _doClosePosition(ticker, reason, exitPremium = null, contractSym 
   const _maePct    = (pos.premium > 0 && pos.troughPremium != null)
     ? parseFloat(((pos.troughPremium - pos.premium) / pos.premium * 100).toFixed(1))
     : null;
+  // ── 8/04: NEVER-GREEN SHADOW REPORT. One line per armed threshold, at close. ──
+  // This is the payoff line: it states plainly what the rule would have done versus what
+  // actually happened, so the decision to build it for real rests on measured forward data.
+  // Positive delta = the shadow cut would have been BETTER than the real exit.
+  try {
+    if (pos._ngShadow && Object.keys(pos._ngShadow).length) {
+      const _realPct = (typeof pct === "number") ? pct : null;
+      for (const _k of Object.keys(pos._ngShadow).sort((a, b) => a - b)) {
+        const _s = pos._ngShadow[_k];
+        const _delta = (_realPct != null) ? (_s.pct - _realPct) : null;
+        logEvent("scan",
+          `[NEVER-GREEN-RESULT] ${ticker} ${pos.dteBand || "?"} thr-${_k}% | shadow exit ${_s.pct}% at ${_s.mins}min ` +
+          `| ACTUAL ${_realPct != null ? _realPct.toFixed(1) + "%" : "?"} via ${reason} ` +
+          `| delta ${_delta != null ? (_delta > 0 ? "+" : "") + _delta.toFixed(1) + " pts (" + (_delta > 0 ? "shadow BETTER" : "shadow WORSE") + ")" : "?"}`);
+      }
+    }
+  } catch (_ngErr) { /* reporting only */ }
+
   const _minsToPeak = pos.openDate && pos._peakTime
     ? parseFloat(((pos._peakTime - new Date(pos.openDate).getTime()) / 60000).toFixed(0))
     : null;
@@ -856,10 +887,24 @@ async function closeNContracts(ticker, n, reason, exitPremium = null) {
   await saveStateNow();
 }
 
+const PRESUBMIT_MAX_AGE_S = 120;   // 7/30: a pre-submit order older than this never reached Alpaca
+
 async function confirmPendingOrder() {
   const pending = state._pendingOrder;
   if (!pending) return;
-  if (pending._preSubmit) return;
+  if (pending._preSubmit) {
+    // 7/30: _preSubmit means "built, not yet sent to Alpaca". It is normally cleared within seconds
+    // by executeTrade's submit block. If it is still here minutes later the submit never happened
+    // (see the Black-Scholes deadlock note in execution.js) and nothing else will ever clear it —
+    // scanner:248 would block entries for the rest of the session. Expire it.
+    const _preAge = (Date.now() - (pending.submittedAt || 0)) / 1000;
+    if (_preAge > PRESUBMIT_MAX_AGE_S) {
+      logEvent("warn", `[PENDING] clearing stale pre-submit order ${pending.orderId} after ${_preAge.toFixed(0)}s — it never reached the broker`);
+      state._pendingOrder = null;
+      markDirty();
+    }
+    return;
+  }
 
   const age = (Date.now() - pending.submittedAt) / 1000;
   if (!pending.orderId) { state._pendingOrder = null; markDirty(); return; }
