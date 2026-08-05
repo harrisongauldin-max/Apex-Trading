@@ -88,8 +88,11 @@ async function findContract(ticker, optionType, targetDelta, targetDTE, vix, sto
       fetchMax = fixedExpiry;
     } else {
       // 6/30: band-aware window. Same-week profile (small targetDTE) → 0-8 DTE. Monthly profile → ±10 (30-50).
-      const minDays = targetDTE <= 10 ? 0 : Math.max(0, targetDTE - 10);
-      const maxDays = targetDTE <= 10 ? 8 : Math.min(120, targetDTE + 10);
+      // 8/03: biweekly gets an EXPLICIT 9-16 window. The generic targetDTE±10 would give 3-23,
+      // which overlaps the same-week band and would let the two legs resolve to the same contract.
+      const _isBiweekly = targetDTE > 10 && targetDTE <= 20;
+      const minDays = _isBiweekly ? 9 : (targetDTE <= 10 ? 0 : Math.max(0, targetDTE - 10));
+      const maxDays = _isBiweekly ? 16 : (targetDTE <= 10 ? 8 : Math.min(120, targetDTE + 10));
       fetchMin = new Date(today.getTime() + minDays * 86400000).toISOString().split("T")[0];
       fetchMax = new Date(today.getTime() + maxDays * 86400000).toISOString().split("T")[0];
     }
@@ -146,9 +149,12 @@ async function findContract(ticker, optionType, targetDelta, targetDTE, vix, sto
       const expDTE = Math.round((new Date(c.expiration_date) - today) / 86400000);
       // Cap derives from the requested band: a same-week request (targetDTE<=10) caps at 8; a standard
       // request caps at 55 (covers 30-50). Keeps each twin-entry leg inside its own band.
-      const DTE_ENTRY_CAP = targetDTE <= 10 ? 8 : 55;
+      // 8/03: biweekly caps at 16 so it cannot drift up into the standard band.
+      const _bwBand = targetDTE > 10 && targetDTE <= 20;
+      const DTE_ENTRY_CAP = targetDTE <= 10 ? 8 : (_bwBand ? 16 : 55);
+      const _bandName = targetDTE <= 10 ? "same-week" : (_bwBand ? "biweekly" : "standard");
       if (expDTE > DTE_ENTRY_CAP) {
-        logEvent("filter", `${ticker} findContract: skipping $${strike} ${expDTE}DTE — exceeds ${DTE_ENTRY_CAP}DTE entry cap (${targetDTE <= 10 ? "same-week" : "standard"} band)`);
+        logEvent("filter", `${ticker} findContract: skipping $${strike} ${expDTE}DTE — exceeds ${DTE_ENTRY_CAP}DTE entry cap (${_bandName} band)`);
         continue;
       }
       const _rawIV = parseFloat(snap.impliedVolatility || 0);   // Q3.1: raw feed IV (pre sigma-fallback)
@@ -278,7 +284,10 @@ async function executeTrade(stock, price, score, scoreReasons, vix, optionType =
   //   dteBand === null (normal call) → DATA_GATHER_MODE forces same-week; otherwise per-profile default.
   // Twin-entry A/B (data-gather on) calls this TWICE with each band so both expiries open on one signal.
   const _dgm = dataGatherActive(DATA_GATHER_MODE);
+  // 8/03: THIRD BAND. 13 sits mid-window of an empty 9-16 DTE gap between the two existing
+  // legs — 20 sessions produced literally zero trades there, so its behaviour is unknown.
   const targetDTE = dteBand === "sameweek" ? 3
+                  : dteBand === "biweekly" ? 13
                   : dteBand === "standard" ? 40
                   : (_dgm ? 3 : (isMeanReversion ? 3 : 40));
   const _sameWeekLeg = (dteBand === "sameweek") || (dteBand === null && _dgm);
