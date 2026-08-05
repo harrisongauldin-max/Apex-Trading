@@ -58,8 +58,7 @@ const {
 } = require('./reconciler');
 
 const {
-  getAgentDayPlan, getAgentMacroAnalysis, runAgentRescore, triggerRescore,
-} = require('./agent');
+  getAgentDayPlan, getAgentMacroAnalysis, runAgentRescore, triggerRescore, updateRegimeState } = require('./agent');
 
 const {
   getDrawdownProtocol, checkConcentrationRisk, checkAllFilters,
@@ -746,21 +745,23 @@ async function runScan() {
     ? { ..._rbBase, gates: { ..._rbBase.gates, choppyDebitBlock: false, crisisDebitBlock: false, avoidHoldActive: false, postReversalBlock: false, vixFallingPause: false } }
     : _rbBase;
 
-  // C1-C: HIGH RISK day plan raises effective minScore to 85
+  // C1-C: HIGH RISK day plan. 8/04 — THIS NO LONGER TOUCHES THE SCORE FLOOR, and the log below
+  // now says what actually happens instead of what used to be claimed.
+  //
+  // History, so nobody "restores" this by accident: the 85 floor lived in _computeEffectiveMinScore,
+  // which was only ever called INSIDE the daily-loss-lock branch — so C1-C only applied when C1-A
+  // was also active, and never worked as an independent gate. When C1-A became a hard block (8/03)
+  // that call site disappeared and the function went dead while the log kept claiming a raise.
+  // The function is deleted rather than re-wired, because:
+  //   - HIGH RISK days ARE still guarded, by C1-D below (~:2499): it disables the stagger bypass
+  //     outright, which is a real behavioural block, not a score nudge.
+  //   - the standing rule since 8/03 is that no loss/risk breaker raises the entry-score floor;
+  //     per-trade risk is carried by the stop, the trail floor and the time-cut.
+  // NOTE state._dayPlan is written only by agent.js, so this flag depends on the macro agent
+  // actually running — it is currently failing on API credit and may not fire at all.
   const _dayPlanHighRisk = (state._dayPlan?.riskLevel === 'high') && !dryRunMode;
   if (_dayPlanHighRisk) {
-    logEvent("filter", `[C1-C] Day plan HIGH RISK — effective minScore raised to 85`);
-  }
-
-  // C1-A: Compute effective min score based on daily loss lock state
-  function _computeEffectiveMinScore(baseMin) {
-    let effectiveMin = baseMin;
-    // C1-C: HIGH RISK day plan
-    if (_dayPlanHighRisk) effectiveMin = Math.max(effectiveMin, 85);
-    // C1-A: Daily loss lock active → raise to 85
-    if (state._dailyLossLockActive && !paperDataActive(state)) effectiveMin = Math.max(effectiveMin, 85);
-    // C1-B: Per-instrument loss count >= 2 → raise to 90
-    return effectiveMin;
+    logEvent("filter", `[C1-C] Day plan HIGH RISK — stagger bypass disabled for the session (C1-D); entry score floor unchanged`);
   }
 
   const macroBullish      = rb.gates.macroBullishBlock;
@@ -1425,6 +1426,11 @@ async function runScan() {
         }
         }   // end else (bars are today's)
       }
+      // 8/03: refresh market regime every scan. It used to update only when the news agent ran,
+      // so a dead or throttled agent froze _vixSustained / _regimeClass — and regime drives
+      // strategy selection. Day counters inside are date-guarded, so this cadence is safe.
+      await updateRegimeState();
+
       // 7/31: one freshness sweep per scan. Self-throttles to one report per 5 minutes, and only
       // speaks when something is actually past its expected refresh interval — silent otherwise.
       auditFreshness();
@@ -2261,12 +2267,15 @@ async function runScan() {
     const sameTickerOpposite = state.positions.find(p => p.ticker === stock.ticker && p.optionType !== optionType);
     if (sameTickerOpposite) { logEvent("filter", `${stock.ticker} same ticker opposite direction blocked`); continue; }
 
-    // C1-B: per-instrument loss count check
+    // C1-B: 8/03 — THE ENTRY GATE IS REMOVED. It used to require score 90 after 2 counted losses
+    // on a ticker. Two problems: the threshold and the 90 were HARDCODED here, so the constants
+    // INSTRUMENT_LOSS_LIMIT / INSTRUMENT_LOSS_MIN_SCORE only ever affected the log message; and
+    // raising the entry bar is the wrong instrument now that stop + trail floor + time-cut carry
+    // per-trade risk. The dollar-based daily lock (C1-A, now -$500) is the daily guard.
+    // The counter is still maintained in closeEngine for telemetry — it just no longer gates.
     const _instrLossCount = (state._instrumentLossCount || {})[stock.ticker] || 0;
-    const _c1bMinScore = _instrLossCount >= 2 ? 90 : MIN_SCORE;
-    if (_instrLossCount >= 2 && bestScore < 90 && !dryRunMode) {
-      logEvent("filter", `[C1-B] ${stock.ticker} ${_instrLossCount} losses today — require score 90 (have ${bestScore})`);
-      continue;
+    if (_instrLossCount >= 2 && !dryRunMode) {
+      logEvent("scan", `[C1-B] ${stock.ticker} ${_instrLossCount} counted losses today — noted, not blocking (entry gate removed 8/03)`);
     }
 
     const recentLoss = (state._recentLosses || {})[stock.ticker];
@@ -2516,12 +2525,12 @@ async function runScan() {
 
     // C1-A: daily loss lock gates entries (catches here in case c1AnyLock was bypassed above in dryRun)
     if (state._dailyLossLockActive && !dryRunMode && !paperDataActive(state)) {
-      const _effectiveMin = _computeEffectiveMinScore(MIN_SCORE);
-      if (score < _effectiveMin) {
-        logEvent("filter", `[C1-A] ${stock.ticker} blocked — daily loss lock active, need score ${_effectiveMin} (have ${score})`);
-        continue;
-      }
-      logEvent("filter", `[C1-A] ${stock.ticker} entry PERMITTED — score ${score} >= ${_effectiveMin} despite daily loss lock`);
+      // 8/03: was a score raise to 85 with a high-score bypass; now a HARD HALT. With C1-B no
+      // longer gating entries, this dollar-based lock at -$500 is the only daily guard left, so
+      // it should stop trading rather than make trading marginally harder. A bypass would defeat
+      // the point. Exits are unaffected and keep running.
+      logEvent("filter", `[C1-A] ${stock.ticker} blocked — daily loss lock active (todayRealizedPnL $${(state.todayRealizedPnL||0).toFixed(0)} ); no new entries for the rest of the session`);
+      continue;
     }
 
     logEvent("filter", `${stock.ticker} entry approved — intent:${intentType} score:${score} regime:${rb.regimeName}`);
@@ -2555,12 +2564,17 @@ async function runScan() {
         // 6/30 (Harrison): A/B twin-entry. One signal → two positions, one per DTE band, each sized
         // independently under the normal caps. Legs tagged (dteBand) for comparison. A leg failing to
         // fill (no contract in its band) does not block the other.
-        logEvent("filter", `[TWIN-ENTRY] ${stock.ticker} ${optionType.toUpperCase()} score ${score} — opening same-week + standard legs`);
+        // 8/03 (Harrison): now A/B/C. The 9-16 DTE band had ZERO trades in 20 sessions, so the
+        // biweekly leg is here to BUY that data, not because it is expected to win. Cost-matched
+        // to the standard leg like same-week, so the three are directly comparable on P&L.
+        // NOTE this deploys ~50% more capital per signal — watch heat rejections.
+        logEvent("filter", `[TWIN-ENTRY] ${stock.ticker} ${optionType.toUpperCase()} score ${score} — opening same-week + biweekly + standard legs`);
         const _legStd = await executeTrade(stock, price, score, reasons, state.vix, optionType, isMeanReversion, _sizeModNaked, "standard");
-        const _stdCost = (_legStd && _legStd.cost) ? _legStd.cost : null;   // 7/7 (Harrison): standard leg's actual cost → size the same-week leg to match it (equal capital A/B). null if standard didn't fill → same-week falls back to normal 1-contract sizing.
+        const _stdCost = (_legStd && _legStd.cost) ? _legStd.cost : null;   // 7/7 (Harrison): standard leg's actual cost → size the other legs to match it (equal capital A/B/C). null if standard didn't fill → they fall back to normal 1-contract sizing.
         const _legSW  = await executeTrade(stock, price, score, reasons, state.vix, optionType, isMeanReversion, _sizeModNaked, "sameweek", _stdCost);
-        entered = _legSW || _legStd;
-        logEvent("filter", `[TWIN-ENTRY] ${stock.ticker} result — sameweek:${_legSW ? "FILLED" : "no-fill"} standard:${_legStd ? "FILLED" : "no-fill"}`);
+        const _legBW  = await executeTrade(stock, price, score, reasons, state.vix, optionType, isMeanReversion, _sizeModNaked, "biweekly", _stdCost);
+        entered = _legSW || _legBW || _legStd;
+        logEvent("filter", `[TWIN-ENTRY] ${stock.ticker} result — sameweek:${_legSW ? "FILLED" : "no-fill"} biweekly:${_legBW ? "FILLED" : "no-fill"} standard:${_legStd ? "FILLED" : "no-fill"}`);
       } else {
         entered = await executeTrade(stock, price, score, reasons, state.vix, optionType, isMeanReversion, _sizeModNaked);
       }
