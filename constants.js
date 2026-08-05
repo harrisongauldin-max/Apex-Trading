@@ -371,6 +371,14 @@ const LOSS_THRESHOLD_FOR_COUNTER = -10;  // pnl must be < -$10 to count toward C
 // Price-based exits (stop, tiered-stop, dte) and give-backs (trail-floor) still count.
 const NON_COUNTING_EXIT_REASONS = ["time-cut", "progress-check"];
 
+// 8/05 (Harrison): PER-LEG HARD STOP. Short DTE is nearly all gamma and theta and cannot wait
+// out a drawdown; long DTE can. One stop across bands spanning 2 to 44 DTE was a compromise.
+// A band absent from this table falls back to STOP_LOSS_PCT, so "standard" is unchanged.
+// NOTE the trail floor arms at breakeven once the confirmed peak reaches +5%, so these stops
+// can essentially only fire on positions that never confirmed +5% — see apply_legstop.js.
+// ★ biweekly 0.10 is UNMEASURED: only 5 biweekly trades exist and all are from 8/05.
+const LEG_STOP_PCT = { sameweek: 0.075, biweekly: 0.10 };
+
 // C1-C threshold
 const HIGH_RISK_MIN_SCORE       =  85;   // minScore on HIGH RISK day plan days
 
@@ -450,6 +458,7 @@ module.exports = {
   DAILY_LOSS_LOCK_THRESHOLD, DAILY_LOSS_LOCK_MIN_SCORE,
   INSTRUMENT_LOSS_LIMIT, INSTRUMENT_LOSS_MIN_SCORE, LOSS_THRESHOLD_FOR_COUNTER,
   NON_COUNTING_EXIT_REASONS,
+  LEG_STOP_PCT,
   HIGH_RISK_MIN_SCORE,
   WEEKLY_LOSS_LIMIT, MONTHLY_LOSS_LIMIT,
 };
