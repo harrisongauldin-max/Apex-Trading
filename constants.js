@@ -379,6 +379,31 @@ const NON_COUNTING_EXIT_REASONS = ["time-cut", "progress-check"];
 // ★ biweekly 0.10 is UNMEASURED: only 5 biweekly trades exist and all are from 8/05.
 const LEG_STOP_PCT = { sameweek: 0.075, biweekly: 0.10 };
 
+// 8/05: CALL MOMENTUM GATE. The put side requires a conjunction of measured movement before it
+// may enter; the call side never has. Over 7/06-8/05 puts went 0% never-green on 25 trades while
+// calls went 12% never-green on 193, and no scoring input predicts a call reaching the +12.5%
+// rung. This requires at least CALL_MOMENTUM_MIN pieces of directional evidence for a CALL.
+// ENFORCE=false means SHADOW ONLY — it logs what it would block and blocks nothing. Set true
+// after reading a session of [CALL-MOMO] lines.
+// 8/05: STRICT = a true mirror of the put conjunction — opening-range break MANDATORY plus at
+// least one confirmation (vwap up / volume pace / breadth up). false falls back to the plain
+// CALL_MOMENTUM_MIN count, which is a disjunction and materially weaker. The put side also
+// requires episode freshness (<=30min); there is no call-side episode tracker, so that leg is
+// deliberately omitted rather than faked — strict mode is still slightly looser than the put gate.
+// 8/05: with the gate ENFORCING, a blocked call never opens and its outcome is unrecorded.
+// The shadow book restores the counterfactual by tracking the UNDERLYING after each block.
+const MOMO_SHADOW_MINS      = 30;    // how long to wait before reporting the forward move
+const MOMO_SHADOW_MAX       = 200;   // hard cap on tracked entries
+
+const CALL_MOMO_STRICT      = true;
+const CALL_MOMENTUM_MIN     = 1;
+const CALL_MOMENTUM_ENFORCE = true;    // 8/05 (Harrison): LIVE. Paper money — he chose enforcement
+                                       // over one session of shadow counterfactual. Set false to
+                                       // return to observe-only without touching any other logic.
+const CALL_MOMO_SLOPE_MIN   = 0.0005;   // VWAP slope up, mirrors the put side's -0.0005
+const CALL_MOMO_VOLPACE_MIN = 1.8;      // volume expansion, mirrors scoring.js:602
+const CALL_MOMO_BREADTH_MIN = 10;       // breadth momentum rising, mirrors the put -10
+
 // C1-C threshold
 const HIGH_RISK_MIN_SCORE       =  85;   // minScore on HIGH RISK day plan days
 
@@ -459,6 +484,9 @@ module.exports = {
   INSTRUMENT_LOSS_LIMIT, INSTRUMENT_LOSS_MIN_SCORE, LOSS_THRESHOLD_FOR_COUNTER,
   NON_COUNTING_EXIT_REASONS,
   LEG_STOP_PCT,
+  CALL_MOMENTUM_MIN, CALL_MOMENTUM_ENFORCE, CALL_MOMO_STRICT,
+  MOMO_SHADOW_MINS, MOMO_SHADOW_MAX,
+  CALL_MOMO_SLOPE_MIN, CALL_MOMO_VOLPACE_MIN, CALL_MOMO_BREADTH_MIN,
   HIGH_RISK_MIN_SCORE,
   WEEKLY_LOSS_LIMIT, MONTHLY_LOSS_LIMIT,
 };
