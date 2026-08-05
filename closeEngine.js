@@ -516,7 +516,11 @@ async function _doClosePosition(ticker, reason, exitPremium = null, contractSym 
   // Positive delta = the shadow cut would have been BETTER than the real exit.
   try {
     if (pos._ngShadow && Object.keys(pos._ngShadow).length) {
-      const _realPct = (typeof pct === "number") ? pct : null;
+      // 8/05: pct is a STRING here — closeEngine builds it with .toFixed(1). The original
+      // typeof check was therefore always false and every shadow line printed "ACTUAL ? | delta ?",
+      // which is precisely the number the experiment exists to produce. Parse it instead.
+      const _realPctNum = parseFloat(pct);
+      const _realPct = Number.isFinite(_realPctNum) ? _realPctNum : null;
       for (const _k of Object.keys(pos._ngShadow).sort((a, b) => a - b)) {
         const _s = pos._ngShadow[_k];
         const _delta = (_realPct != null) ? (_s.pct - _realPct) : null;
