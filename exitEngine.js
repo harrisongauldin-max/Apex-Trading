@@ -16,6 +16,18 @@ const { analyzeNews }                          = require('./market');
 // 7/31: the 20-minute time cut. See the [TIME-CUT] block further down for the evidence.
 // TIME_CUT_MIN is the single tunable; SAMEWEEK_DTE_MAX only classifies legacy positions
 // opened before pos.dteBand existed.
+// 8/03: the hard stop must stay breached this long before it fires. One extra scan, so a
+// single bad bid (wide spread, thin book) cannot close a position at -12.5% on noise. Measured
+// in TIME rather than scans because scan cadence varies under load.
+// 8/04: SHADOW-ONLY thresholds for the never-green early cut. Nothing acts on these; they
+// only decide when to write a [NEVER-GREEN] observation line. Three of them so one week of
+// live sessions tells us which threshold is worth acting on, instead of fitting one to the
+// past sample. Change these freely — they cannot affect a trade.
+const NEVER_GREEN_PCTS = [0.04, 0.06, 0.08];
+const NEVER_GREEN_MIN_MINS = 1.5;   // ignore the first 90s; entry fills and spreads settle
+
+const STOP_CONFIRM_MS  = 15000;
+
 const TIME_CUT_MIN     = 20;   // minutes held before the cut is evaluated
 const SAMEWEEK_DTE_MAX = 10;   // DTE fallback for classifying an untagged same-week leg
 const { calcThesisIntegrity, isDayTrade }      = require('./risk');
@@ -506,10 +518,28 @@ async function checkExits(positions, posSnapshots, posQuotes, posNewsCache, ctx)
     // ── Hard stop ─────────────────────────────────────────────────────────────
     const _isOvernightCarry = hoursOpen >= 16 && pos.premium > 0;
     const _activeHardStop   = _isOvernightCarry && chg <= -0.10 ? 0.28 : STOP_LOSS_PCT;
+    // 8/03: recovery above the stop cancels a pending breach. Placed BEFORE the breach test so
+    // a position that dips and recovers inside the confirmation window is released cleanly.
+    if (chg > -_activeHardStop && pos._stopBreachAt) {
+      const _heldFor = ((Date.now() - pos._stopBreachAt) / 1000).toFixed(1);
+      logEvent("scan", `[STOP-AVERTED] ${pos.ticker} was ${(_activeHardStop*100).toFixed(0)}% breached for ${_heldFor}s, now ${(chg*100).toFixed(1)}% — bad quote or a wick, not a real stop; position kept`);
+      pos._stopBreachAt = null;
+    }
+
     if (chg <= -_activeHardStop) {
       const _minsOpen = hoursOpen * 60;
       if (_minsOpen < 2 && chg <= -0.50) {
         logEvent("warn", `${pos.ticker} stop skipped — only ${_minsOpen.toFixed(1)}min old, ${(chg*100).toFixed(0)}% likely stale snapshot`);
+      } else if (pos._stopBreachAt == null) {
+        // FIRST scan at or below the stop. Do NOT close yet — the -12.5% may be a momentarily
+        // wide spread rather than a real move (cf. the 7/29 QQQ 680C spread blowout). Record
+        // the breach and require it to survive STOP_CONFIRM_MS. The risk cap is unchanged; the
+        // position is not being held for recovery, only checked twice.
+        pos._stopBreachAt = Date.now();
+        const _spreadPct = (pos.ask > 0 && pos.bid > 0) ? ((pos.ask - pos.bid) / pos.ask * 100) : null;
+        logEvent("scan", `[STOP-PENDING] ${pos.ticker} ${(chg*100).toFixed(1)}% <= -${(_activeHardStop*100).toFixed(0)}% — confirming over ${STOP_CONFIRM_MS/1000}s before closing${_spreadPct != null ? ` | spread ${_spreadPct.toFixed(1)}%` : ""}`);
+      } else if ((Date.now() - pos._stopBreachAt) < STOP_CONFIRM_MS) {
+        // still inside the confirmation window and still breached — wait one more scan
       } else {
         const _stopLabel = _activeHardStop < STOP_LOSS_PCT
           ? `overnight-tightened-stop (${(_activeHardStop*100).toFixed(0)}%)` : `stop-loss`;
@@ -608,6 +638,29 @@ async function checkExits(positions, posSnapshots, posQuotes, posNewsCache, ctx)
     // (+$1,768). The other 43 netted -$1,081, and the deepest hole was the 18 whose peak
     // never reached +5% at all (-$1,065). Motivation is HEAT as much as P&L — an unarmed
     // position still counts in openRisk() and blocks better entries.
+    // ── 8/04: NEVER-GREEN SHADOW TRACKER. OBSERVATION ONLY — NEVER CLOSES ANYTHING. ──
+    // Records the first instant a position is BOTH past a drawdown threshold AND has never
+    // traded above its entry. closeEngine prints the comparison against the real exit when the
+    // position closes. This is how the threshold gets chosen from forward data rather than a
+    // guess. Whole block is try/catch wrapped so an observation can never disturb a scan.
+    try {
+      const _ngMins = pos.openDate ? (Date.now() - new Date(pos.openDate).getTime()) / 60000 : 0;
+      // "never green" = the peak premium has never exceeded the entry premium.
+      const _everGreen = (pos.peakPremium || 0) > (_entryPremium || pos.premium || 0);
+      if (!_everGreen && _ngMins >= NEVER_GREEN_MIN_MINS) {
+        if (!pos._ngShadow) pos._ngShadow = {};
+        for (const _t of NEVER_GREEN_PCTS) {
+          const _key = String(Math.round(_t * 100));
+          if (pos._ngShadow[_key] == null && chg <= -_t) {
+            pos._ngShadow[_key] = { pct: parseFloat((chg * 100).toFixed(1)), mins: parseFloat(_ngMins.toFixed(1)) };
+            logEvent("scan",
+              `[NEVER-GREEN] ${pos.ticker} ${pos.dteBand || "?"} would cut at -${_key}% — ` +
+              `${_ngMins.toFixed(1)}min in, now ${(chg * 100).toFixed(1)}%, never traded above entry | SHADOW ONLY, position kept`);
+          }
+        }
+      }
+    } catch (_ngErr) { /* observation only — never disturb the scan */ }
+
     if (!pos._timeCutFired) {
       const _tcEntry = new Date(pos.openDate || pos.entryTime || Date.now()).getTime();
       const _tcMins  = (Date.now() - _tcEntry) / 60000;
