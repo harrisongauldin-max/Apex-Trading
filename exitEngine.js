@@ -27,6 +27,12 @@ const NEVER_GREEN_PCTS = [0.04, 0.06, 0.08];
 const NEVER_GREEN_MIN_MINS = 1.5;   // ignore the first 90s; entry fills and spreads settle
 
 const STOP_CONFIRM_MS  = 15000;
+// 8/05: only DEFER the stop when the spread is wide enough that the bid may be an artifact.
+// First live firing (8/05 09:30) deferred a stop at a 1.3% spread — a perfectly trustworthy
+// quote — and the position fell -13.8% -> -16.6% during the wait, about -$30. The confirmation
+// was built for the 7/29 QQQ 680C spread blowout, not for tight-book stops. Below this
+// threshold the stop fires immediately, exactly as it did before 8/03.
+const STOP_CONFIRM_MIN_SPREAD_PCT = 8;
 
 const TIME_CUT_MIN     = 20;   // minutes held before the cut is evaluated
 const SAMEWEEK_DTE_MAX = 10;   // DTE fallback for classifying an untagged same-week leg
@@ -530,7 +536,16 @@ async function checkExits(positions, posSnapshots, posQuotes, posNewsCache, ctx)
       const _minsOpen = hoursOpen * 60;
       if (_minsOpen < 2 && chg <= -0.50) {
         logEvent("warn", `${pos.ticker} stop skipped — only ${_minsOpen.toFixed(1)}min old, ${(chg*100).toFixed(0)}% likely stale snapshot`);
-      } else if (pos._stopBreachAt == null) {
+      } else if (pos._stopBreachAt == null &&
+                 (() => {
+                   // Trust a tight book. Only a wide (or unknown) spread earns a second look.
+                   const _sp = (pos.ask > 0 && pos.bid > 0) ? ((pos.ask - pos.bid) / pos.ask * 100) : null;
+                   if (_sp != null && _sp < STOP_CONFIRM_MIN_SPREAD_PCT) {
+                     logEvent("scan", `[STOP] ${pos.ticker} ${(chg*100).toFixed(1)}% — spread ${_sp.toFixed(1)}% is tight, bid trusted, closing immediately (no confirmation)`);
+                     return false;   // fall through to the close branch below
+                   }
+                   return true;      // wide or unknown spread — confirm
+                 })()) {
         // FIRST scan at or below the stop. Do NOT close yet — the -12.5% may be a momentarily
         // wide spread rather than a real move (cf. the 7/29 QQQ 680C spread blowout). Record
         // the breach and require it to survive STOP_CONFIRM_MS. The risk cap is unchanged; the
