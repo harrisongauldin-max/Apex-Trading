@@ -1391,20 +1391,40 @@ async function runScan() {
         // If the newest bar is not today's, emit NOTHING and leave _carveGapState at its
         // "flat" default — the carve-out then falls back to _intradayDown, which is
         // computed fresh every scan. A loud unknown beats a confident wrong number.
+        // ── 8/05 REWRITE. The 7/31 version demanded the newest DAILY bar be dated TODAY, but
+        // Alpaca does not publish today's daily bar at the open — so it skipped every morning
+        // (seen live 8/05 09:00:58 on both tickers) exactly when the gap matters most.
+        //
+        // A gap is (today's open − yesterday's close), and those two numbers live in DIFFERENT
+        // places. Yesterday's close is the newest COMPLETED daily bar and is available all day.
+        // Today's open is the first INTRADAY bar of the session and is never in the daily set
+        // until after the close. Reading both from the daily bars was the original mistake.
         const _todayET     = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
         const _lastBarRaw  = bars[bars.length - 1].t || bars[bars.length - 1].timestamp || null;
         const _lastBarDate = _lastBarRaw ? String(_lastBarRaw).split('T')[0] : null;
-        const _barsAreToday = _lastBarDate === _todayET;
+        const _lastBarIsToday = _lastBarDate === _todayET;
 
-        if (!_barsAreToday) {
-          // logEvent dedups on message text, so this will not spam every scan.
+        // Staleness is now an AGE check, not an exact-date match. >4 days covers a long weekend
+        // and still catches the real 9-day bar-truncation failure this guard was built for.
+        const _barAgeDays = _lastBarRaw ? (Date.now() - new Date(_lastBarRaw).getTime()) / 86400000 : Infinity;
+
+        // Today's open, from intraday. getIntradayBars can serve a cached 390-bar window that
+        // spans sessions, so filter by date rather than trusting index 0.
+        const _todaysIntraday = Array.isArray(intradayBars)
+          ? intradayBars.filter(b => String(b.t || b.timestamp || "").startsWith(_todayET))
+          : [];
+        const _sessionOpen = (_todaysIntraday.length && _todaysIntraday[0].o > 0) ? _todaysIntraday[0].o : null;
+
+        if (_barAgeDays > 4) {
           logEvent("warn",
-            `[GAP] ${stock.ticker} SKIPPED — newest daily bar is ${_lastBarDate || "undated"}, not today (${_todayET}). ` +
-            `Gap/prevClose would be stale; gapState left "flat" so the put carve-out uses the live intraday read instead.`
+            `[GAP] ${stock.ticker} SKIPPED — newest daily bar is ${_lastBarDate || "undated"}, ${_barAgeDays.toFixed(0)} days old. ` +
+            `prevClose would be stale; gapState left "flat" so the put carve-out uses the live intraday read instead.`
           );
+        } else if (_sessionOpen == null) {
+          // Normal before the first intraday bars land. Quiet on purpose — not a fault.
         } else {
-        const _gapOpen  = bars[bars.length - 1].o;
-        const _gapPrevC = bars[bars.length - 2].c;
+        const _gapOpen  = _sessionOpen;
+        const _gapPrevC = _lastBarIsToday ? bars[bars.length - 2].c : bars[bars.length - 1].c;
         if (_gapOpen > 0 && _gapPrevC > 0) {
           const _gapPct  = (_gapOpen - _gapPrevC) / _gapPrevC;
           const _gapType = _gapPct >=  GAP_MIN_PCT ? "up"
