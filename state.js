@@ -576,6 +576,32 @@ async function saveOutcomesToRedis(isEOD = false) {
   }
 }
 
+// Concatenate the last `days` sessions of outcome rows from Redis (+ today's live buffer) for the
+// efficacy report. Lists argo:outcomes:* keys, takes the most recent N, dedups exact rows, keeps
+// chronological order. Falls back to the in-memory buffer if Redis is unavailable.
+async function fetchRecentOutcomeRows(days = 20) {
+  const out = { header: OUTCOME_HEADER, rows: [], days: 0 };
+  const seen = new Set();
+  const addBuffer = () => { for (const r of (state._outcomeBuffer || [])) { if (!seen.has(r)) { seen.add(r); out.rows.push(r); } } };
+  if (!REDIS_URL || !REDIS_TOKEN) { addBuffer(); out.days = out.rows.length ? 1 : 0; return out; }
+  try {
+    const kr = await fetch(`${REDIS_URL}/keys/argo:outcomes:*`, { headers: { Authorization: `Bearer ${REDIS_TOKEN}` } });
+    const kd = await kr.json();
+    const keys = (kd.result || []).sort().reverse().slice(0, Math.max(1, days));   // newest N keys
+    for (const key of keys.slice().reverse()) {                                    // fetch oldest-first so rows stay chronological
+      try {
+        const gr = await fetch(`${REDIS_URL}/get/${key}`, { headers: { Authorization: `Bearer ${REDIS_TOKEN}` } });
+        const gd = await gr.json();
+        if (!gd || !gd.result) continue;
+        const p = parseRedisBlob(gd.result);
+        if (p && Array.isArray(p.rows)) { for (const r of p.rows) { if (!seen.has(r)) { seen.add(r); out.rows.push(r); } } out.days++; }
+      } catch(_) { /* skip a bad day, keep the rest */ }
+    }
+    addBuffer();   // today's not-yet-flushed closes
+  } catch(e) { addBuffer(); }
+  return out;
+}
+
 
 const state = defaultState();
 
@@ -810,7 +836,7 @@ function auditFreshness() {
 
 module.exports = { state, markDirty, saveStateNow, flushStateIfDirty, logEvent, dataGatherActive,
                    markFresh, auditFreshness,
-                   redisSave, redisLoad, defaultState, saveDailyLogToRedis, saveTelemetryToRedis, saveOutcomesToRedis, getETDateStr,
+                   redisSave, redisLoad, defaultState, saveDailyLogToRedis, saveTelemetryToRedis, saveOutcomesToRedis, fetchRecentOutcomeRows, getETDateStr,
                    restoreBuffersFromRedis, parseRedisBlob,
                    writeJournalEntry, updateJournalExit, loadJournalDay, saveJournalDay, getJournalRange,
                    closeOrphanJournalOpens, paperDataActive };

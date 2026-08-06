@@ -9,7 +9,7 @@ const fs      = require('fs');
 
 const { state, markDirty, saveStateNow, flushStateIfDirty,
         logEvent, redisSave, redisLoad, defaultState,
-        saveDailyLogToRedis, getETDateStr, restoreBuffersFromRedis, parseRedisBlob,
+        saveDailyLogToRedis, fetchRecentOutcomeRows, getETDateStr, restoreBuffersFromRedis, parseRedisBlob,
         writeJournalEntry, updateJournalExit,
         loadJournalDay, saveJournalDay, getJournalRange }              = require('./state');
 const { alpacaGet, alpacaPost, alpacaDelete,
@@ -1303,6 +1303,20 @@ app.get("/api/outcomes", async (req, res) => {
     res.setHeader("Content-Disposition", `attachment; filename="argo-outcomes-${date}.csv"`);
     res.setHeader("X-Outcomes-Source", source);
     res.send(header + "\n" + rows.join("\n"));
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// Efficacy report — the "which inputs predicted" readout over the trailing N sessions.
+// ?days=20 (default), ?format=json for the structured object, else plain-text.
+app.get("/api/efficacy", async (req, res) => {
+  try {
+    const { buildEfficacyReport, parseRows } = require('./efficacy');
+    const days = Math.max(1, Math.min(120, parseInt(req.query.days, 10) || 20));
+    const { header, rows } = await fetchRecentOutcomeRows(days);
+    const report = buildEfficacyReport(parseRows(header, rows), { days });
+    if (req.query.format === "json") return res.json(report.json);
+    res.setHeader("Content-Type", "text/plain; charset=utf-8");
+    res.send(report.text);
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 

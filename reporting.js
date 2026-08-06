@@ -16,9 +16,10 @@ const fetch = (url, opts = {}) => _nodeFetch(url, { agent: _agentFor, ...opts })
 const { withTimeout ,
   alpacaGet, getStockBars
 } = require('./broker');
-const { state, logEvent, saveStateNow, markDirty } = require('./state');
+const { state, logEvent, saveStateNow, markDirty, fetchRecentOutcomeRows } = require('./state');
 const { telemetryCSV } = require('./telemetry');
 const { outcomesCSV }  = require('./outcomes');
+const { buildEfficacyReport, parseRows: parseOutcomeRows } = require('./efficacy');
 const { realizedPnL, openRisk, openCostBasis,
         getETTime, isMarketHours ,
   heatPct, stockValue, calcRSI, calcGreeks
@@ -112,7 +113,18 @@ async function sendEmail(type) {
         }
       } catch (_outErr) { /* outcomes attachment is best-effort — never block the email */ }
     }
-    await sendResendEmail(subject, buildEmailHTML(type), attachments);
+    // 8/05: append the efficacy report (trailing 20 sessions) inline to the EOD email — the
+    // daily "which inputs predicted" readout. Best-effort: any failure falls back to the plain
+    // email body rather than blocking it.
+    let bodyHtml = buildEmailHTML(type);
+    if (type !== "morning") {
+      try {
+        const { header, rows, days } = await fetchRecentOutcomeRows(20);
+        const report = buildEfficacyReport(parseOutcomeRows(header, rows), { days });
+        bodyHtml += report.html;
+      } catch (_effErr) { logEvent("warn", `[EFFICACY] report skipped: ${_effErr.message}`); }
+    }
+    await sendResendEmail(subject, bodyHtml, attachments);
     logEvent("email", `${type} email sent to ${GMAIL_USER}${attachments.length ? " (+telemetry.csv)" : ""}`);
   } catch(e) { logEvent("error", `Email failed: ${e.message}`); }
 }
