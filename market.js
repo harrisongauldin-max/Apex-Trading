@@ -630,14 +630,37 @@ async function getFearAndGreed() {
   const cached = getCached("feargreed:v1");
   if (cached) return cached;
   try {
-    const res  = await withTimeout(fetch("https://production.dataviz.cnn.io/index/fearandgreed/graphdata"), 5000);
+    // 8/05: CNN's dataviz endpoint commonly rejects requests with no User-Agent. Every log from
+    // 7/30-8/05 shows F&G:50 on literally every scan — never 49, never 51 — which is the silent
+    // fallback below, not a real reading. Adding the header is the most likely fix; the logging
+    // is the part that matters regardless, because the old catch made diagnosis impossible.
+    const res  = await withTimeout(fetch("https://production.dataviz.cnn.io/index/fearandgreed/graphdata", {
+      headers: { "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0 Safari/537.36",
+                 "Accept": "application/json" }
+    }), 5000);
+    if (!res || !res.ok) {
+      logEvent("warn", `[F&G] fetch failed — HTTP ${res ? res.status : "no response"}. Returning null, not a fabricated 50.`);
+      return null;
+    }
     const data = await res.json();
-    const score  = data?.fear_and_greed?.score || 50;
-    const rating = data?.fear_and_greed?.rating || "neutral";
+    const _raw = data?.fear_and_greed?.score;
+    if (_raw == null) {
+      logEvent("warn", `[F&G] response shape changed — no fear_and_greed.score field. Keys: ${Object.keys(data || {}).join(",") || "(none)"}`);
+      return null;
+    }
+    // ?? not || : a REAL score of 0 is extreme fear, the single most informative reading there
+    // is, and the old `|| 50` silently converted it to neutral.
+    const score  = _raw ?? 50;
+    const rating = data?.fear_and_greed?.rating ?? "neutral";
     const result = { score: parseFloat(parseFloat(score).toFixed(0)), rating };
     setCache("feargreed:v1", result, 300); // 5 minute TTL - updates once per day
     return result;
-  } catch(e) { return { score: 50, rating: "neutral" }; }
+  } catch(e) {
+    // 8/05: was `return { score: 50, rating: "neutral" }` — indistinguishable from a real
+    // neutral reading, so a permanently broken feed looked like a permanently calm market.
+    logEvent("warn", `[F&G] fetch threw: ${e.message}. Returning null, not a fabricated 50.`);
+    return null;
+  }
 }
 
 async function getMarketBreadth() {
