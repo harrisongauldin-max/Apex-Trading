@@ -15,8 +15,7 @@ const fetch = (url, opts = {}) => _nodeFetch(url, { agent: _agentFor, ...opts })
 const { ANTHROPIC_API_KEY, ANTHROPIC_MODEL, PDT_RULE_ACTIVE, PDT_LIMIT,
         MS_PER_DAY, OVERNIGHT_INTERVAL, SAME_DAY_INTERVAL, TRIGGER_COOLDOWN_MS,
   AGENT_MACRO_CACHE_MS,
-  BEAR_DD_PCT, BEAR_DD_LOOKBACK, BEAR_VIX_SUSTAINED, BEAR_EXIT_DD_PCT, BEAR_EXIT_VIX, BEAR_EXIT_SESSIONS, DEFAULT_VIX,
-} = require('./constants');
+  BEAR_DD_PCT, BEAR_DD_LOOKBACK, BEAR_VIX_SUSTAINED, BEAR_EXIT_DD_PCT, BEAR_EXIT_VIX, BEAR_EXIT_SESSIONS, DEFAULT_VIX, AGENT_ENABLED } = require('./constants');
 const { state , markFresh } = require('./state');
 const { alpacaGet, getStockQuote, getStockBars, getIntradayBars } = require('./broker');
 const { getAccountPhase, effectiveHeatCap , isMarketHours } = require('./signals');
@@ -68,9 +67,18 @@ const AGENT_TOOLS = [
   { name: "getRegimeStatus",  description: "Get current regime class (A/B/C), days below 200MA, sustained VIX, SPY drawdown",
     input_schema: { type: "object", properties: {} } },
 ];
+let _agentOffLogged = false;   // 8/05: log the disabled notice once per process, not per call
+
 async function callClaudeAgent(systemPrompt, userPrompt, maxTokens = 800, useTools = false, timeoutMs = 30000) {
   // Note: prompt caching was removed. Agent runs at 90+ min intervals; Anthropic ephemeral
+  // 8/05: single kill switch. Every agent feature routes through this function, so one check
+  // here disables the lot with no ripple into the four modules that import from agent.js.
+  // Callers all handle null already — they had to, for API failures.
   // cache TTL is 5 min — every call was a write that expired before the next read. No benefit.
+  if (!AGENT_ENABLED) {
+    if (!_agentOffLogged) { _agentOffLogged = true; _log("scan", "[AGENT] disabled (AGENT_ENABLED=false) — no Anthropic calls will be made this session"); }
+    return null;
+  }
   if (!ANTHROPIC_API_KEY) return null;
   try {
     const messages = [{ role: "user", content: userPrompt }];
