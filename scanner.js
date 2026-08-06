@@ -325,7 +325,7 @@ async function runScan() {
     return;
   }
 
-  logEvent("scan", `Scan | VIX:${state.vix} | cash:${fmt(state.cash)} | positions:${state.positions.length} | breadth:${marketContext.breadth.breadthPct}% (${marketContext.breadth.advancing ?? '?'}\u2191/${marketContext.breadth.declining ?? '?'}\u2193) | F&G:${marketContext.fearGreed.score}`);
+  logEvent("scan", `Scan | VIX:${state.vix} | cash:${fmt(state.cash)} | positions:${state.positions.length} | breadth:${marketContext.breadth.breadthPct}% (${marketContext.breadth.advancing ?? '?'}\u2191/${marketContext.breadth.declining ?? '?'}\u2193) | F&G:${marketContext.fearGreed?.score ?? '--'}`);
 
   // C1-A: Daily loss lock check at scan top — halt entries if lock active
   if (state._dailyLossLockActive && !dryRunMode && !paperDataActive(state)) {
@@ -594,7 +594,12 @@ async function runScan() {
       marketContext.skew = state._skew;
     }
     if (sentiment) { marketContext.aaii = sentiment; state._aaii = { ...sentiment, updatedAt: Date.now() }; }
-    marketContext.fearGreed   = fg; state._fearGreed = fg;
+    // 8/05: getFearAndGreed now returns NULL on failure instead of a fabricated {score:50}.
+    // Only overwrite on a real reading — otherwise keep the last known good value (or the
+    // initialised default at the top of this file). Without this guard the null propagates to
+    // `marketContext.fearGreed.score` in the per-scan log line and throws a TypeError.
+    if (fg && fg.score != null) { marketContext.fearGreed = fg; state._fearGreed = fg; }
+    else if (fg === null) { state._fearGreedStale = true; }
     marketContext.dxy         = dxy;
     marketContext.yieldCurve  = yc;
     if (dxy) state._dxy = { ...dxy, updatedAt: Date.now() };
