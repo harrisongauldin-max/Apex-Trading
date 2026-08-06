@@ -140,7 +140,10 @@ async function redisSave(data) {
       };
     }),
     tradeLog: (data.tradeLog || []).slice(0, 1000),
-    closedTrades: (data.closedTrades || []).slice(0, 200),
+    // 8/05 fix: closedTrades is appended newest-LAST (.push), so slice(0,200) kept the OLDEST 200
+    // and silently dropped the most recent trades on every Redis save — and Redis is the load-of-
+    // record. slice(-200) keeps the newest 200, matching flushStateIfDirty's own trim convention.
+    closedTrades: (data.closedTrades || []).slice(-200),
   };
   delete slim._marketContextCache;
   delete slim._dailyLogBuffer;   // saved separately via saveDailyLogToRedis — keep it out of the state payload

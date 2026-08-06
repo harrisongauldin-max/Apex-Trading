@@ -177,11 +177,16 @@ async function runReconciliation() {
         const idx = _state.positions.indexOf(pos);
         if (idx === -1) { _log("warn", `[RECONCILE] splice guard: ${pos.ticker} not found`); continue; }
         _state.positions.splice(idx, 1);
-        _state.closedTrades.push({
+        // 8/05 fix: keep a reference to this record. It is pushed with pnl:0 because the real
+        // fill price is not known until the Alpaca activities fetch below — and it was never
+        // back-filled, so every risk.js aggregate over closedTrades counted a real ±$ close as a
+        // $0 breakeven. Once _ghostPnl is resolved (see below) we write it back into this object.
+        const _ghostClosedRec = {
           ticker: pos.ticker, pnl: 0, pct: "0", reason: "reconcile-removed",
           date: new Date().toLocaleDateString(), score: pos.score || 0, closeTime: Date.now(),
           tradeType: "naked",
-        });
+        };
+        _state.closedTrades.push(_ghostClosedRec);
 
         // Write _recentLosses so re-entry gate fires correctly
         const _ghostCurrentPrice = pos.currentPrice || pos.premium || 0;
@@ -229,6 +234,17 @@ async function runReconciliation() {
               _ghostPnl = parseFloat(((_ghostEp - pos.premium) * 100 * (pos.contracts || 1)).toFixed(2));
               _ghostReasoning = `Closed externally @ $${_ghostEp} via Alpaca fill.`;
               _log("info", `[RECONCILE] ${pos.ticker} ghost P&L from fill: $${_ghostPnl}`);
+              // 8/05 fix: back-fill the real P&L into the closedTrades record (pushed as pnl:0
+              // above) and the same-instrument cooldown record, so risk.js aggregates and the
+              // re-entry gate see the actual result instead of a $0 breakeven.
+              _ghostClosedRec.pnl = _ghostPnl;
+              _ghostClosedRec.pct = pos.premium > 0
+                ? ((_ghostPnl / (pos.premium * 100 * (pos.contracts || 1))) * 100).toFixed(1)
+                : "0";
+              _ghostClosedRec.won = _ghostPnl > 0;
+              if (_state._recentCloses && _state._recentCloses[pos.ticker]) {
+                _state._recentCloses[pos.ticker].pnl = _ghostPnl;
+              }
               const _ghostProceeds = parseFloat((parseFloat(sellFill.price || 0) * 100 * (pos.contracts || 1)).toFixed(2));
               const _ghostExitFields = {
                 actualFillProceeds: _ghostProceeds,

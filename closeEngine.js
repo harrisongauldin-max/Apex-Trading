@@ -59,6 +59,41 @@ const { STOP_LOSS_PCT, TAKE_PROFIT_PCT, PDT_PROFIT_EXIT,
 const CLOSE_FILL_TIMEOUT_MS = 20000;
 const { countRecentDayTrades } = require('./risk');
 
+// 8/05: shared close-fill confirmation. The full-close path (_doClosePosition, ~L236) has always
+// polled for a real fill before booking, but closeNContracts and the naked partialClose booked
+// cash + reduced contracts on the order-ID alone — the exact "CLOSED on paper while Alpaca still
+// holds the contracts" bug the full-close fix was written to prevent (a limit sell at the bid can
+// sit unfilled all day). This helper mirrors that logic for the partial paths: returns the fill
+// price on success; cancels the working order and returns null on timeout/reject so the caller
+// preserves state and retries next scan.
+async function _confirmCloseFill(resp, label) {
+  if (resp && resp.status === "filled" && parseFloat(resp.filled_avg_price || 0) > 0) {
+    return parseFloat(parseFloat(resp.filled_avg_price).toFixed(2));
+  }
+  const _start = Date.now();
+  while ((Date.now() - _start) < CLOSE_FILL_TIMEOUT_MS) {
+    await new Promise(r => setTimeout(r, 1000));
+    try {
+      const _poll = await alpacaGet(`/orders/${resp.id}`);
+      if (_poll && _poll.status === "filled" && parseFloat(_poll.filled_avg_price || 0) > 0) {
+        logEvent("partial", `${label} fill confirmed @ $${parseFloat(_poll.filled_avg_price).toFixed(2)} (${((Date.now()-_start)/1000).toFixed(1)}s)`);
+        return parseFloat(parseFloat(_poll.filled_avg_price).toFixed(2));
+      }
+      if (_poll && ["canceled","expired","rejected"].includes(_poll.status)) {
+        logEvent("warn", `${label} order ${resp.id} ${_poll.status} — position preserved`);
+        return null;
+      }
+    } catch(_pe) { logEvent("warn", `${label} fill poll error: ${_pe.message}`); break; }
+  }
+  try {
+    await alpacaDelete(`/orders/${resp.id}`);
+    logEvent("warn", `[CLOSE-UNFILLED] ${label} order ${resp.id} did not fill in ${CLOSE_FILL_TIMEOUT_MS/1000}s — CANCELLED, position preserved and will retry`);
+  } catch(_ce) {
+    logEvent("error", `[CLOSE-UNFILLED] ${label} could not cancel order ${resp.id}: ${_ce.message} — ORDER MAY STILL BE WORKING, check Alpaca`);
+  }
+  return null;
+}
+
 // ─── Injected dependencies ───────────────────────────────────────
 let _dryRunMode    = false;
 let _getOptionsPrice = async () => 0;
@@ -739,10 +774,15 @@ async function partialClose(ticker) {
       const partialResp = await alpacaPost("/orders", partialBody);
       if (partialResp && partialResp.id) {
         logEvent("partial", `Alpaca partial close: ${partialResp.id} | ${pos.contractSymbol} | ${half}x`);
-        if (partialResp.filled_avg_price && parseFloat(partialResp.filled_avg_price) > 0) {
-          ep = parseFloat(parseFloat(partialResp.filled_avg_price).toFixed(2));
+        // 8/05: confirm the FILL before booking. An unfilled limit-at-bid must book nothing, so
+        // set _partialOrderSubmitted=false on no-fill — the state guard below then skips cash/P&L.
+        const _fill = await _confirmCloseFill(partialResp, `partial ${pos.contractSymbol}`);
+        if (_fill == null) {
+          pos._partialOrderSubmitted = false;
+        } else {
+          ep = _fill;
+          pos._partialOrderSubmitted = true;
         }
-        pos._partialOrderSubmitted = true;
       } else {
         logEvent("warn", `Alpaca partial close FAILED for ${pos.contractSymbol}: ${JSON.stringify(partialResp)?.slice(0,100)} — state NOT mutated`);
         pos._partialOrderSubmitted = false;
@@ -760,22 +800,26 @@ async function partialClose(ticker) {
     return;
   }
 
-  state.cash = parseFloat((state.cash + ev).toFixed(2));
-  state.monthlyProfit = parseFloat((state.monthlyProfit + pnl).toFixed(2));
-  state.closedTrades.push({
-    ticker, pnl, pct: ((pnl/pos.cost)*100).toFixed(1),
-    date: new Date().toLocaleDateString(), reason: "partial",
-    tradeType:  pos.isCreditSpread ? "credit_spread" : (pos.isSpread || (pos.buySymbol && pos.sellSymbol)) ? "debit_spread" : "naked",
-    optionType: pos.optionType,
-    closeTime:  Date.now(),
-  });
+  // 8/05 fix: cash/P&L/closedTrades were booked UNCONDITIONALLY here — even when the Alpaca
+  // partial order was rejected (_partialOrderSubmitted === false), which the log above claims
+  // does NOT mutate state. That inflated cash by proceeds of a sale that never happened, booked a
+  // phantom win, and left pos.contracts full-size. All state mutation now lives inside the guard.
   if (pos._partialOrderSubmitted !== false) {
+    state.cash = parseFloat((state.cash + ev).toFixed(2));
+    state.monthlyProfit = parseFloat((state.monthlyProfit + pnl).toFixed(2));
+    state.closedTrades.push({
+      ticker, pnl, pct: ((pnl/pos.cost)*100).toFixed(1),
+      date: new Date().toLocaleDateString(), reason: "partial",
+      tradeType:  pos.isCreditSpread ? "credit_spread" : (pos.isSpread || (pos.buySymbol && pos.sellSymbol)) ? "debit_spread" : "naked",
+      optionType: pos.optionType,
+      closeTime:  Date.now(),
+    });
     pos.contracts     = Math.max(0, pos.contracts - half);
     pos.cost          = parseFloat((pos.premium * 100 * pos.contracts).toFixed(2));
     pos.partialClosed = false;
     logEvent("partial", `PARTIAL ${ticker} - ${half}x @ $${ep} | P&L:${pnl>=0?"+":""}${_fmt(pnl)} | ${pos.contracts}x remaining @ cost $${pos.cost} | cash ${_fmt(state.cash)}`);
   } else {
-    logEvent("warn", `[SPRINT-03] ${ticker} partial order rejected by Alpaca — pos.contracts unchanged at ${pos.contracts}`);
+    logEvent("warn", `[SPRINT-03] ${ticker} partial order rejected by Alpaca — no cash/P&L booked, pos.contracts unchanged at ${pos.contracts}`);
   }
   delete pos._partialOrderSubmitted;
   await saveStateNow();
@@ -833,11 +877,13 @@ async function closeNContracts(ticker, n, reason, exitPremium = null) {
       };
       const resp = await alpacaPost("/orders", body);
       if (resp && resp.id) {
-        orderConfirmed = true;
         logEvent("partial", `[TIERED] Alpaca close ${closeQty}x ${pos.contractSymbol} | orderId:${resp.id} | reason:${reason}`);
-        if (resp.filled_avg_price && parseFloat(resp.filled_avg_price) > 0) {
-          ep = parseFloat(parseFloat(resp.filled_avg_price).toFixed(2));
-        }
+        // 8/05: confirm the FILL before booking — was booking cash + reducing contracts on the
+        // order id alone, so an unfilled limit-at-bid drifted state from Alpaca (see helper note).
+        const _fill = await _confirmCloseFill(resp, `[TIERED] ${ticker} ${pos.contractSymbol}`);
+        if (_fill == null) return;   // unfilled/cancelled — preserve state, retry next scan
+        orderConfirmed = true;
+        ep = _fill;
       } else {
         logEvent("warn", `[TIERED] Alpaca order rejected for ${ticker} closeNContracts — state NOT mutated`);
         return;

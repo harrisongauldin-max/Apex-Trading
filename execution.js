@@ -380,6 +380,19 @@ async function executeTrade(stock, price, score, scoreReasons, vix, optionType =
     return false;
   }
 
+  // 8/05 fix (orphan-position bug): heat was ONLY checked post-fill (below, ~L540), where a
+  // failed check tried to cancel an already-filled order (a no-op) and returned false without
+  // recording the position — leaving a live contract in NO state.positions entry (no stop/exit
+  // ever touches it) and overstating cash. Gate heat HERE, before any order is submitted, using
+  // the pre-fill cost estimate. Mirrors the pre-submit cash check directly above.
+  if (!_dryRunMode) {
+    const _projHeatPre = (openRisk() + cost) / totalCap();
+    if (_projHeatPre > effectiveHeatCap()) {
+      logEvent("filter", `${stock.ticker} - projected heat ${(_projHeatPre*100).toFixed(0)}% would exceed ${(effectiveHeatCap()*100).toFixed(0)}% max - skipping before submit`);
+      return false;
+    }
+  }
+
   const delta = parseFloat(contract.greeks.delta || 0);
   if (Math.abs(delta) < TARGET_DELTA_MIN || Math.abs(delta) > TARGET_DELTA_MAX) {
     logEvent("filter", `${stock.ticker} - delta ${delta} outside target range`);
@@ -518,14 +531,16 @@ async function executeTrade(stock, price, score, scoreReasons, vix, optionType =
     : parseFloat((contract.strike + contract.premium).toFixed(2));
 
   if (finalCost > state.cash - CAPITAL_FLOOR) {
-    logEvent("skip", `${stock.ticker} - insufficient cash after fill price adjustment`);
     if (alpacaOrderId) {
-      try {
-        await alpacaDelete(`/orders/${alpacaOrderId}`);
-        logEvent("trade", `Alpaca order ${alpacaOrderId} cancelled - insufficient cash`);
-      } catch(e) { logEvent("error", `Failed to cancel order ${alpacaOrderId}: ${e.message}`); }
+      // Order already FILLED (alpacaOrderId is non-null only when fillConfirmed). Canceling a
+      // filled order is a no-op — we own the contract. Record it so it gets stops/exits and cash
+      // is debited; do NOT return false (that orphaned it). Cash may dip below the floor for one
+      // position, which the exit engine will resolve — strictly safer than an untracked position.
+      logEvent("warn", `${stock.ticker} - filled above estimate, cash tight (need ${fmt(finalCost)}) — recording position anyway; cannot un-buy filled order ${alpacaOrderId}`);
+    } else {
+      logEvent("skip", `${stock.ticker} - insufficient cash after fill price adjustment`);
+      return false;
     }
-    return false;
   }
 
   if (_dryRunMode) {
@@ -533,13 +548,16 @@ async function executeTrade(stock, price, score, scoreReasons, vix, optionType =
     return { filled: true, cost: finalCost, contracts, premium: contract.premium };   // 7/7: return cost so twin-entry can size the same-week leg to match (object is truthy → all existing `if (entered)` / `_leg || _leg` checks still work)
   }
 
+  // Post-fill heat is now a safety net only — the primary gate runs pre-submit (above). If it
+  // still trips here the order has already FILLED, so record the position rather than orphan it.
   const projectedHeat = (openRisk() + finalCost) / totalCap();
   if (projectedHeat > effectiveHeatCap()) {
-    logEvent("filter", `${stock.ticker} - projected heat ${(projectedHeat*100).toFixed(0)}% would exceed ${MAX_HEAT*100}% max - skipping`);
     if (alpacaOrderId) {
-      try { await alpacaDelete(`/orders/${alpacaOrderId}`); } catch(e) {}
+      logEvent("warn", `${stock.ticker} - projected heat ${(projectedHeat*100).toFixed(0)}% over ${(effectiveHeatCap()*100).toFixed(0)}% cap but order already filled — recording position rather than orphaning it`);
+    } else {
+      logEvent("filter", `${stock.ticker} - projected heat ${(projectedHeat*100).toFixed(0)}% would exceed ${MAX_HEAT*100}% max - skipping`);
+      return false;
     }
-    return false;
   }
 
   state.cash = parseFloat((state.cash - finalCost).toFixed(2));
