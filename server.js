@@ -1270,6 +1270,42 @@ app.get("/api/telemetry", async (req, res) => {
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
+// Outcome-joined table (the (X,y) trade table) — mirrors /api/telemetry. `?date=dates` lists
+// available days; `?date=YYYY-MM-DD` downloads that day's CSV (falls back to the live buffer for today).
+app.get("/api/outcomes", async (req, res) => {
+  if (!REDIS_URL || !REDIS_TOKEN) return res.status(503).json({ error: "Redis not configured" });
+  try {
+    const { OUTCOME_HEADER } = require('./outcomes');
+    const date = req.query.date;
+    if (!date || date === "dates") {
+      const resp = await fetch(`${REDIS_URL}/keys/argo:outcomes:*`, { headers: { Authorization: `Bearer ${REDIS_TOKEN}` } });
+      const data  = await resp.json();
+      const dates = (data.result || []).map(k => k.replace("argo:outcomes:", "")).sort().reverse();
+      return res.json({ available: dates, count: dates.length });
+    }
+    let header = OUTCOME_HEADER;
+    let rows = [], source = "redis";
+    const resp = await fetch(`${REDIS_URL}/get/argo:outcomes:${date}`, { headers: { Authorization: `Bearer ${REDIS_TOKEN}` } });
+    const data = await resp.json();
+    if (!data.result) {
+      const todayStr = getETDateStr();
+      if (date === todayStr && state._outcomeBuffer && state._outcomeBuffer.length) {
+        rows = state._outcomeBuffer; source = "live_buffer";
+      } else {
+        return res.status(404).json({ error: `No outcomes for ${date}` });
+      }
+    } else {
+      const parsed = parseRedisBlob(data.result);
+      header = (parsed && parsed.header) || header;
+      rows   = (parsed && parsed.rows) || [];
+    }
+    res.setHeader("Content-Type", "text/csv");
+    res.setHeader("Content-Disposition", `attachment; filename="argo-outcomes-${date}.csv"`);
+    res.setHeader("X-Outcomes-Source", source);
+    res.send(header + "\n" + rows.join("\n"));
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
 app.post("/api/scan", async (req,res) => { res.json({ok:true}); runScan(); });
 
 app.post("/api/test-scan", async (req, res) => {

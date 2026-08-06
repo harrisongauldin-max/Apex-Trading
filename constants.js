@@ -424,6 +424,13 @@ const CALL_MOMO_BREADTH_MIN = 10;       // breadth momentum rising, mirrors the 
 // standalone gate re-arms. The _buEpisode tracker in scanner.js runs regardless (observation is free).
 const CALL_BREAKOUT_MODE = true;
 
+// 8/05: OUTCOME-JOINED TABLE. Observation-only feedback-loop closure — on every FULL close, join
+// the entry decision-context (X) to the realized outcome (y: peak%/MAE%/rung-hits/minutes-held/
+// P&L) as one flat CSV row → argo:outcomes:<date>. Changes NO trading behavior; it only records.
+// This is the (X,y) table that makes signals/gates/thresholds measurable instead of hand-sampled.
+// Set false to stop recording (the close path then skips recordOutcome entirely).
+const OUTCOME_TABLE_ENABLED = true;
+
 // C1-C threshold
 const HIGH_RISK_MIN_SCORE       =  85;   // minScore on HIGH RISK day plan days
 
@@ -507,7 +514,7 @@ module.exports = {
   CALL_MOMENTUM_MIN, CALL_MOMENTUM_ENFORCE, CALL_MOMO_STRICT,
   MOMO_SHADOW_MINS, MOMO_SHADOW_MAX, AGENT_ENABLED,
   CALL_MOMO_SLOPE_MIN, CALL_MOMO_VOLPACE_MIN, CALL_MOMO_BREADTH_MIN,
-  CALL_BREAKOUT_MODE,
+  CALL_BREAKOUT_MODE, OUTCOME_TABLE_ENABLED,
   HIGH_RISK_MIN_SCORE,
   WEEKLY_LOSS_LIMIT, MONTHLY_LOSS_LIMIT,
 };

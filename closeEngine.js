@@ -50,7 +50,9 @@ const { STOP_LOSS_PCT, TAKE_PROFIT_PCT, PDT_PROFIT_EXIT,
   INSTRUMENT_LOSS_LIMIT, INSTRUMENT_LOSS_MIN_SCORE, LOSS_THRESHOLD_FOR_COUNTER,
   NON_COUNTING_EXIT_REASONS,
   WEEKLY_LOSS_LIMIT, MONTHLY_LOSS_LIMIT,
+  OUTCOME_TABLE_ENABLED = false,
 }  = require('./constants');
+const { recordOutcome } = require('./outcomes');
 
 // 7/31: how long to wait for a close order to actually FILL before cancelling it and
 // preserving the position. Declared here, at the top, deliberately — it is consumed inside
@@ -375,6 +377,10 @@ async function _doClosePosition(ticker, reason, exitPremium = null, contractSym 
     agentSignal:   (state._agentMacro || {}).signal || "neutral",
   };
   state.closedTrades.push(tradeOutcome);
+  // 8/05: outcome-joined table — one flat (X,y) row per FULL close for the feedback loop. The
+  // position still carries every entry field + hold extreme here (spliced from state.positions
+  // above, but this local `pos` ref is intact). Observation only; recordOutcome swallows any error.
+  if (OUTCOME_TABLE_ENABLED) recordOutcome(state, pos, tradeOutcome);
   // FIX 10: Track daily realized P&L for circuit breaker
   if (typeof tradeOutcome.pnl === 'number') {
     state.todayRealizedPnL = (state.todayRealizedPnL || 0) + tradeOutcome.pnl;

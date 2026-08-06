@@ -655,6 +655,21 @@ async function executeTrade(stock, price, score, scoreReasons, vix, optionType =
   const isBreakdownPut = optionType === "put" && (scoreReasons || []).some(r => r.startsWith("Breakdown put"));
   if (isEarningsPlay) (_openSame || position).earningsPlay = true;  // live position (merged or pushed) — not the discarded local on an addon merge
 
+  // 8/05: entry-feature snapshot for the outcome-joined table (outcomes.js) — the handful of
+  // decision inputs NOT already on the position, captured at DECISION time because state drifts
+  // by the close. Observation only; stamped on the live position (merged or freshly pushed).
+  (_openSame || position)._entryX = {
+    breadth:    (typeof state._breadth === "number") ? state._breadth : null,
+    breadthMom: (typeof state._breadthMomentum === "number") ? state._breadthMomentum : null,
+    ivp:        (typeof stock.ivPercentile === "number") ? stock.ivPercentile
+                : (typeof state._ivRank === "number" ? state._ivRank : null),
+    vwapDist:   (stock.intradayVWAP > 0 && price > 0)
+                ? parseFloat((((price - stock.intradayVWAP) / stock.intradayVWAP) * 100).toFixed(3)) : null,
+    buActive:   !!(state._buEpisode && state._buEpisode[stock.ticker] && state._buEpisode[stock.ticker].active),
+    gapState:   stock._gapState || null,
+    underlying: (typeof price === "number") ? parseFloat(price.toFixed(2)) : null,   // entry underlying (pos.price drifts to latest during the hold)
+  };
+
   state.tradeJournal.unshift({
     time:          new Date().toISOString(),
     ticker:        stock.ticker,

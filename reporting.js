@@ -18,6 +18,7 @@ const { withTimeout ,
 } = require('./broker');
 const { state, logEvent, saveStateNow, markDirty } = require('./state');
 const { telemetryCSV } = require('./telemetry');
+const { outcomesCSV }  = require('./outcomes');
 const { realizedPnL, openRisk, openCostBasis,
         getETTime, isMarketHours ,
   heatPct, stockValue, calcRSI, calcGreeks
@@ -100,6 +101,16 @@ async function sendEmail(type) {
           attachments = [{ filename: `argo-telemetry-${dateStr}.csv`, content: Buffer.from(csv, "utf8").toString("base64") }];
         }
       } catch (_telErr) { /* telemetry attachment is best-effort — never block the email */ }
+      // 8/05: attach the outcome-joined (X,y) table alongside telemetry, same base64 pattern.
+      // Best-effort: a failure here must never block the EOD email or drop the telemetry attachment.
+      try {
+        const oRows = state._outcomeBuffer || [];
+        if (oRows.length) {
+          const oCsv = outcomesCSV(oRows);
+          const dateStr = new Date().toLocaleDateString("en-CA", { timeZone: "America/New_York" });
+          attachments.push({ filename: `argo-outcomes-${dateStr}.csv`, content: Buffer.from(oCsv, "utf8").toString("base64") });
+        }
+      } catch (_outErr) { /* outcomes attachment is best-effort — never block the email */ }
     }
     await sendResendEmail(subject, buildEmailHTML(type), attachments);
     logEvent("email", `${type} email sent to ${GMAIL_USER}${attachments.length ? " (+telemetry.csv)" : ""}`);

@@ -20,6 +20,7 @@ const _noKeepAliveHttps = new https.Agent({ keepAlive: false });
 const _agentFor = (parsedURL) => parsedURL.protocol === 'http:' ? _noKeepAliveHttp : _noKeepAliveHttps;
 const fetch = (url, opts = {}) => _nodeFetch(url, { agent: _agentFor, ...opts });
 const { TELEMETRY_HEADER } = require('./telemetry');
+const { OUTCOME_HEADER } = require('./outcomes');
 const { REDIS_URL, REDIS_TOKEN, REDIS_KEY, REDIS_SAVE_INTERVAL, STATE_FILE, MONTHLY_BUDGET,
   IS_PAPER_ACCOUNT, APEX_PAPER_EXPERIMENT,
 } = require('./constants');
@@ -148,6 +149,7 @@ async function redisSave(data) {
   delete slim._marketContextCache;
   delete slim._dailyLogBuffer;   // saved separately via saveDailyLogToRedis — keep it out of the state payload
   delete slim._telemetryBuffer;  // saved separately via saveTelemetryToRedis
+  delete slim._outcomeBuffer;    // saved separately via saveOutcomesToRedis
   delete slim._telemetryLast;    // transient material-change tracker
 
   try { fs.writeFileSync(STATE_FILE, JSON.stringify(data, null, 2)); } catch(e) {}
@@ -495,6 +497,7 @@ async function saveDailyLogToRedis(isEOD = false) {
   }
 
   await saveTelemetryToRedis(isEOD);
+  await saveOutcomesToRedis(isEOD);
 }
 
 // Compact score-telemetry persistence — mirrors saveDailyLogToRedis. Rides its cadence
@@ -534,6 +537,42 @@ async function saveTelemetryToRedis(isEOD = false) {
     }
   } catch(e) {
     console.error("[TELEMETRY] save error:", e.message);
+  }
+}
+
+// Outcome-joined table persistence — mirrors saveTelemetryToRedis exactly (merge-on-save,
+// dedup, EOD-flush), keyed argo:outcomes:<date>. Rides the same cadence, so no new timers.
+async function saveOutcomesToRedis(isEOD = false) {
+  if (!REDIS_URL || !REDIS_TOKEN) return;
+  const rows = state._outcomeBuffer || [];
+  if (rows.length === 0) return;
+  try {
+    const dateStr = getETDateStr();
+    const key     = `argo:outcomes:${dateStr}`;
+    let existing = [];
+    try {
+      const gr = await fetch(`${REDIS_URL}/get/${key}`, { headers: { Authorization: `Bearer ${REDIS_TOKEN}` } });
+      const gd = await gr.json();
+      if (gd && gd.result) { const p = parseRedisBlob(gd.result); if (p && Array.isArray(p.rows)) existing = p.rows; }
+    } catch(_) { /* read failure: write the buffer rather than lose this save */ }
+    const seen = new Set();
+    let merged = [];
+    for (const r of existing.concat(rows)) { if (seen.has(r)) continue; seen.add(r); merged.push(r); }
+    if (merged.length > 4000) merged = merged.slice(-4000);
+    const payload = JSON.stringify({ date: dateStr, header: OUTCOME_HEADER, rows: merged });
+    const res = await fetch(`${REDIS_URL}/pipeline`, {
+      method:  "POST",
+      headers: { Authorization: `Bearer ${REDIS_TOKEN}`, "Content-Type": "application/json" },
+      body:    JSON.stringify([["set", key, payload, "EX", 7776000]]),
+    });
+    if (res.ok) {
+      logEvent("scan", `[OUTCOMES] Saved ${merged.length} trade rows → ${key} (buffer ${rows.length} + existing ${existing.length})`);
+      if (isEOD) { state._outcomeBuffer = []; markDirty(); }
+    } else {
+      console.error("[OUTCOMES] Redis save failed:", res.status);
+    }
+  } catch(e) {
+    console.error("[OUTCOMES] save error:", e.message);
   }
 }
 
@@ -700,6 +739,19 @@ async function restoreBuffersFromRedis() {
       }
     }
   } catch(e) { console.error("[BOOT] telemetry restore failed:", e.message); }
+  try {
+    if (!state._outcomeBuffer || state._outcomeBuffer.length === 0) {
+      const gr = await fetch(`${REDIS_URL}/get/argo:outcomes:${dateStr}`, { headers: { Authorization: `Bearer ${REDIS_TOKEN}` } });
+      const gd = await gr.json();
+      if (gd && gd.result) {
+        const p = parseRedisBlob(gd.result);
+        if (p && Array.isArray(p.rows) && p.rows.length) {
+          state._outcomeBuffer = p.rows.slice(-4000);
+          console.log(`[BOOT] Restored ${state._outcomeBuffer.length} outcome rows from Redis (${dateStr})`);
+        }
+      }
+    }
+  } catch(e) { console.error("[BOOT] outcome restore failed:", e.message); }
 }
 
 // 6/30 (Harrison): runtime resolver for the data-gather A/B switch. Returns the live state override
@@ -758,7 +810,7 @@ function auditFreshness() {
 
 module.exports = { state, markDirty, saveStateNow, flushStateIfDirty, logEvent, dataGatherActive,
                    markFresh, auditFreshness,
-                   redisSave, redisLoad, defaultState, saveDailyLogToRedis, saveTelemetryToRedis, getETDateStr,
+                   redisSave, redisLoad, defaultState, saveDailyLogToRedis, saveTelemetryToRedis, saveOutcomesToRedis, getETDateStr,
                    restoreBuffersFromRedis, parseRedisBlob,
                    writeJournalEntry, updateJournalExit, loadJournalDay, saveJournalDay, getJournalRange,
                    closeOrphanJournalOpens, paperDataActive };
