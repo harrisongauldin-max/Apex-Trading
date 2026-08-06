@@ -346,7 +346,7 @@ async function _doClosePosition(ticker, reason, exitPremium = null, contractSym 
   const tradeOutcome = {
     ticker, tradeType: pos.isCreditSpread ? "credit_spread" : (pos.isSpread || hasSpreadStructure) ? "debit_spread" : "naked",
     optionType: pos.optionType,
-    pnl, pct, reason, date: new Date().toLocaleDateString(), closeTime: Date.now(),
+    pnl, pct, reason, exitPremium: ep, date: new Date().toLocaleDateString(), closeTime: Date.now(),
     won: pnl > 0,
     entryScore:    pos.score || 0,
     entryRSI:      pos.entryRSI || 0,
