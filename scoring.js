@@ -23,6 +23,8 @@ const { MIN_SCORE, MIN_SCORE_CREDIT ,
   MR_INTRADAY_OVERSOLD = false,
   OVERSOLD_CALL_NEEDS_CORROBORATION = false, CORROBORATION_MAX_BREADTH = 45,
   MACD_CURL_SCORING = true,   // V3.2 (6/19) Phase-1 curl: default ON; add MACD_CURL_SCORING:false to constants.js to disable
+  CALL_BREAKOUT_MODE = false, // 8/05: call-side momentum-continuation mirror; default OFF here so a missing import reverts to legacy dip-scoring rather than silently half-enabling
+  CALL_MOMO_SLOPE_MIN = 0.0005, CALL_MOMO_BREADTH_MIN = 10,   // shared breakout confirmation thresholds (mirror the put side's -0.0005 / -10)
   DEFAULT_VIX
 }     = require('./constants');
 const { calcADX, getETTime } = require('./signals');
@@ -1010,7 +1012,8 @@ function scoreIndexSetup(stock, optionType, spyRSI, spyMACD, spyMomentum, breadt
         const _px = stock.lastPrice || stock.price || 0;
         const _belowVWAP = (stock.intradayVWAP || 0) > 0 && _px < stock.intradayVWAP;
         const _mrCorrob = !OVERSOLD_CALL_NEEDS_CORROBORATION || (_belowVWAP && breadth <= CORROBORATION_MAX_BREADTH);
-        if (_mrCorrob) { score += 21; reasons.push("Mean reversion call - SPY oversold on neutral macro (+21)"); }
+        if (CALL_BREAKOUT_MODE && !mrCapitulationActive) { reasons.push("Oversold on neutral macro — MR call suppressed under breakout mode, not capitulation (+0)"); }
+        else if (_mrCorrob) { score += 21; reasons.push("Mean reversion call - SPY oversold on neutral macro (+21)"); }
         else { reasons.push(`Oversold but uncorroborated (breadth ${breadth}% ${_belowVWAP ? "below" : "above"} VWAP) - no MR credit (+0)`); }
       }
     // 6/29 (Harrison): restore the +20 on a genuine INTRADAY flush even when daily RSI > 35.
@@ -1030,9 +1033,11 @@ function scoreIndexSetup(stock, optionType, spyRSI, spyMACD, spyMomentum, breadt
                                  && _intraRSInow <= 40                       // still oversold-ish now (not a recovered spike)
                                  && _intraLift   >= MR_INTRA_LIFTOFF_PTS
                                  && _intraLowAgeMin <= MR_SESSLOW_RECENCY_MIN;
-        if (_intraEarlyTurn) {
+        if (_intraEarlyTurn && (!CALL_BREAKOUT_MODE || mrCapitulationActive)) {
           score += 21;
           reasons.push(`Mean reversion call - intraday flush oversold on neutral macro (+21) [iRSI ${_intraRSInow.toFixed(0)} sessLow ${_intraSessLow.toFixed(0)} lift ${_intraLift.toFixed(0)} age ${_intraLowAgeMin.toFixed(0)}m]`);
+        } else if (_intraEarlyTurn) {
+          score += 0;  reasons.push("Intraday flush oversold — MR call suppressed under breakout mode, not capitulation (+0)");
         } else {
           score += 0;  reasons.push("Agent neutral (+0)");
         }
@@ -1045,6 +1050,33 @@ function scoreIndexSetup(stock, optionType, spyRSI, spyMACD, spyMomentum, breadt
     else if (["mild bearish","bearish","strongly bearish"].includes(signal)) {
       reasons.push(`Agent signal: ${signal} — scoring impact removed, threshold-only`);
     }
+
+    // ── CALL BREAKOUT SIGNALS (8/05) — the MIRROR of the put breakdown signals (~L739-777) ──
+    // Same construction, flipped to the upside. depth = how far price is ABOVE its own VWAP; the
+    // zero-lag trigger is a break of the opening-range HIGH; the rate confirmations are VWAP slope
+    // turning UP or breadth momentum rolling UP; and freshness/progression come from _buEpisode
+    // (built in scanner.js next to _bdEpisode). ADX carries magnitude because VWAP-distance trails
+    // a move — identical reasoning to the put side. All gated by CALL_BREAKOUT_MODE.
+    const _buVwap  = stock.intradayVWAP || 0;
+    const _buPx    = stock.lastPrice || stock.price || 0;
+    const _buAdx   = Number.isFinite(stock.adx) ? stock.adx : 0;
+    const _buDepth = (_buVwap > 0 && _buPx > 0) ? (_buPx - _buVwap) / _buVwap : 0;   // ABOVE VWAP
+    const BU_EPISODE_MAX_MIN  = 30;
+    const BU_PROGRESS_MAX_MIN = 20;
+    const _buEp     = state._buEpisode && state._buEpisode[stock.ticker];
+    const _buEpAge  = (_buEp && _buEp.active) ? (Date.now() - _buEp.startedAt) / 60000 : 0;
+    const _buExtAge = (_buEp && _buEp.active && _buEp.extremeAt) ? (Date.now() - _buEp.extremeAt) / 60000 : null;
+    const _buProgressing = _buExtAge != null && _buExtAge <= BU_PROGRESS_MAX_MIN;
+    const _buFresh  = !_buEp || !_buEp.active || _buEpAge <= BU_EPISODE_MAX_MIN || _buProgressing;
+    const _buOr        = state._openRange && state._openRange[stock.ticker];
+    const _buOrBreak   = !!(_buOr && _buOr.locked && _buPx > 0 && _buPx > _buOr.high);
+    const _buVwapUp    = ((state._vwapSlope && state._vwapSlope[stock.ticker]) ?? 0) >= CALL_MOMO_SLOPE_MIN;
+    const _buBreadthUp = (state._breadthMomentum ?? 0) >= CALL_MOMO_BREADTH_MIN;
+    const _buEarly     = CALL_BREAKOUT_MODE && _buFresh && _buOrBreak && (_buVwapUp || _buBreadthUp);
+    const _buDeep      = CALL_BREAKOUT_MODE && _buFresh && _buDepth >= 0.005 && _buAdx >= 30;
+    const _buConfirmed = CALL_BREAKOUT_MODE && _buFresh && _buDepth >= 0.003 && _buAdx >= 20;
+    const _buPct       = (_buDepth * 100).toFixed(1);
+    const _buStructure = _buEarly || _buDeep || _buConfirmed;   // any confirmed breakout tier
 
     if (["trending_bull","recovery"].includes(regime)) {
       const _breadthNow  = state._breadth || 50;
@@ -1076,6 +1108,14 @@ function scoreIndexSetup(stock, optionType, spyRSI, spyMACD, spyMomentum, breadt
       }
     }
 
+    // v3 MIRROR: primary breakout-momentum channel — the call-side twin of the put breakdown
+    // channel (~L805). This is what the call path never had: a positive score for "this is breaking
+    // OUT intraday" that scales with quality. Highest applicable tier wins (max, not sum), exactly
+    // as the put side. Silent (+0) unless CALL_BREAKOUT_MODE gated the tiers true above.
+    if (_buDeep)           { score += 21; reasons.push(`Breakout call - riding confirmed intraday uptrend, ${_buPct}% above own VWAP on ADX ${_buAdx.toFixed(0)}${_buEarly ? " (also broke the opening-range high)" : ""} (+21)`); }
+    else if (_buEarly)     { score += 18; reasons.push(`Breakout call - EARLY structural break above opening-range high${_buVwapUp ? ", VWAP turning up" : ""}${_buBreadthUp ? ", breadth rolling up" : ""} (+18)`); }
+    else if (_buConfirmed) { score += 12; reasons.push(`Breakout call - intraday uptrend confirmed, ${_buPct}% above own VWAP (+12)`); }
+
     const intradayOversoldScans = state._intradayOversoldScans?.[stock.ticker] || 0;
     const sessionLowRSI         = state._sessionLowRSI?.[stock.ticker] ?? 100;
     // (6/17) Bounce confirmation is now relative + price-aware. The old absolute (spyRSI>=38)
@@ -1104,22 +1144,35 @@ function scoreIndexSetup(stock, optionType, spyRSI, spyMACD, spyMomentum, breadt
       }
       try { logEvent("filter", `${stock.ticker} CURL bull_curl tier:${mrStabilized?"stabilized":"bouncing"} rawPts:${_curlPts} flag:${MACD_CURL_SCORING?"ON":"OFF"}`); } catch(e) {}
     }
-    if (spyRSI <= 25) {
+    // 8/05: under CALL_BREAKOUT_MODE the oversold-BOUNCE bonuses below are mean reversion (buy the
+    // dip) — the coin-flip we are removing from the call path. They now fire ONLY on disciplined
+    // capitulation (session-low RSI<=22 & RSI<=28), the call analog of the put's strict overbought
+    // fade. Momentum-continuation calls score via the breakout channel above, not here. Flag off =
+    // legacy behavior, byte-for-byte.
+    const _mrBounceAllowed = !CALL_BREAKOUT_MODE || mrCapitulationActive;
+    if (_mrBounceAllowed && spyRSI <= 25) {
       if (mrStabilized) { score += 26; reasons.push(`${stock.ticker} RSI bounced from session low ${sessionLowRSI.toFixed(0)} to ${spyRSI} - mean reversion confirmed (+26)`); }
       else if (mrBouncing) { score += 13; reasons.push(`${stock.ticker} RSI bouncing from session low ${sessionLowRSI.toFixed(0)} - not yet confirmed (+13)`); }
       else { score += 3; reasons.push(`${stock.ticker} RSI ${spyRSI} extreme oversold - no bounce yet, waiting for recovery (+3)`); }
     }
-    else if (spyRSI <= 35) {
+    else if (_mrBounceAllowed && spyRSI <= 35) {
       if (mrStabilized) { score += 19; reasons.push(`${stock.ticker} RSI bounced from session low ${sessionLowRSI.toFixed(0)} to ${spyRSI} - mean reversion (+19)`); }
       else if (mrBouncing) { score += 9; reasons.push(`${stock.ticker} RSI bouncing from session low ${sessionLowRSI.toFixed(0)} - partial credit (+9)`); }
       else { score += 3; reasons.push(`${stock.ticker} RSI ${spyRSI} deeply oversold - no bounce yet (+3)`); }
     }
-    else if (spyRSI <= 42)                                                        { score += 11; reasons.push(`${stock.ticker} RSI ${spyRSI} oversold (+11)`); }
+    else if (_mrBounceAllowed && spyRSI <= 42)                                    { score += 11; reasons.push(`${stock.ticker} RSI ${spyRSI} oversold (+11)`); }
     else if (spyRSI >= 45 && spyRSI <= 58 && ["trending_bull","recovery"].includes(regime)) {
       // V3.00: "healthy dip" bonus removed — MR system requires RSI < 45
     }
     else if (spyRSI >= 70) {
-      score -= 15; reasons.push(`${stock.ticker} RSI ${spyRSI} overbought — wrong entry for naked calls (-15)`);
+      // 8/05 MIRROR: the put side WAIVES its oversold penalty during a confirmed breakdown ("trend
+      // intact"). Symmetrically, a confirmed intraday BREAKOUT runs at high RSI — that is momentum,
+      // not a bad entry — so waive the overbought penalty when breakout structure is present.
+      if (CALL_BREAKOUT_MODE && _buStructure) {
+        reasons.push(`${stock.ticker} RSI ${spyRSI} high BUT confirmed intraday breakout - uptrend intact, penalty waived (breakout mode)`);
+      } else {
+        score -= 15; reasons.push(`${stock.ticker} RSI ${spyRSI} overbought — wrong entry for naked calls (-15)`);
+      }
     }
 
     const rsiHistoryCallRaw = state._rsiHistory?.[stock.ticker] || [];
@@ -1149,7 +1202,9 @@ function scoreIndexSetup(stock, optionType, spyRSI, spyMACD, spyMomentum, breadt
       : 50;
     if (bNorm >= 75 && breadth >= 60)      { score += 11; reasons.push(`Breadth ${breadth}% (${bNorm.toFixed(0)}th pctile) - strong relative to recent (+11)`); }
     else if (bNorm >= 60)                  { score += 7;  reasons.push(`Breadth ${breadth}% (${bNorm.toFixed(0)}th pctile) - recovering (+7)`); }
-    else if (bNorm <= 30 && ["trending_bull","recovery"].includes(regime) && (!DIP_REQUIRES_MULTIDAY_ANCHOR || ((agentMacro||{}).spyDayChange ?? 0) <= DIP_MAX_DAYCHANGE)) {
+    else if (!CALL_BREAKOUT_MODE && bNorm <= 30 && ["trending_bull","recovery"].includes(regime) && (!DIP_REQUIRES_MULTIDAY_ANCHOR || ((agentMacro||{}).spyDayChange ?? 0) <= DIP_MAX_DAYCHANGE)) {
+      // 8/05: this "low breadth = ideal dip" reward is anti-momentum — suppressed under
+      // CALL_BREAKOUT_MODE (a breakout call wants breadth EXPANDING, credited above, not low).
       score += 13; reasons.push(`Breadth ${breadth}% (${bNorm.toFixed(0)}th pctile) - low relative to recent in bull regime - ideal dip entry (+13)`);
     }
     else if (bNorm <= 20 && !mrCapitulationActive) { score -= 8; reasons.push(`Breadth ${breadth}% (${bNorm.toFixed(0)}th pctile) - very weak relative to recent (-8)`); }
@@ -1173,8 +1228,15 @@ function scoreIndexSetup(stock, optionType, spyRSI, spyMACD, spyMomentum, breadt
     const callPrice = stock.price || 0;
     if (callVWAP > 0 && callPrice > 0) {
       const vwapDiff = (callPrice - callVWAP) / callVWAP;
-      if (vwapDiff < -0.005)      { score += 9; reasons.push(`Below VWAP ${(vwapDiff*100).toFixed(1)}% - dip entry (+9)`); }
-      else if (vwapDiff > 0.015)  { score -= 5; reasons.push(`Extended above VWAP ${(vwapDiff*100).toFixed(1)}% - chasing (+-5)`); }
+      if (CALL_BREAKOUT_MODE) {
+        // Momentum thesis: price below VWAP is the WRONG side for a breakout call, not a dip to buy —
+        // no reward. Being extended above VWAP is the thesis (the breakout channel already scores it),
+        // so the old "chasing" penalty is dropped too. Above-VWAP quality is handled above.
+        if (vwapDiff < -0.002) reasons.push(`Below VWAP ${(vwapDiff*100).toFixed(1)}% - wrong side for a breakout call (+0)`);
+      } else {
+        if (vwapDiff < -0.005)      { score += 9; reasons.push(`Below VWAP ${(vwapDiff*100).toFixed(1)}% - dip entry (+9)`); }
+        else if (vwapDiff > 0.015)  { score -= 5; reasons.push(`Extended above VWAP ${(vwapDiff*100).toFixed(1)}% - chasing (+-5)`); }
+      }
     }
 
     const ivpCall = stock.ivPercentile || 50;

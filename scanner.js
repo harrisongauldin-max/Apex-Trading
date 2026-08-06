@@ -93,6 +93,7 @@ const {
   CALL_MOMENTUM_MIN, CALL_MOMENTUM_ENFORCE, CALL_MOMO_STRICT,
   CALL_MOMO_SLOPE_MIN, CALL_MOMO_VOLPACE_MIN, CALL_MOMO_BREADTH_MIN,
   MOMO_SHADOW_MINS, MOMO_SHADOW_MAX,
+  CALL_BREAKOUT_MODE = false,   // 8/05: when true, scoring enforces call momentum → the standalone gate below stands down
 } = require('./constants');
 
 let scanRunning  = false;
@@ -1625,6 +1626,7 @@ async function runScan() {
       if (!state._vwapSlope) state._vwapSlope = {};
       if (!state._vwapHist)  state._vwapHist  = {};
       if (!state._bdEpisode) state._bdEpisode = {};
+      if (!state._buEpisode) state._buEpisode = {};   // 8/05: breakout (up) episode — call-side mirror of _bdEpisode
       {
         const _tk   = stock.ticker;
         const _sm   = state._sessionMinsNow ?? 0;
@@ -1693,6 +1695,31 @@ async function runScan() {
         if (_epLive && _epLive.active && _pxN > 0) {
           if (!(_epLive.extreme > 0) || _pxN < _epLive.extreme) {
             _epLive.extreme = _pxN; _epLive.extremeAt = Date.now();
+          }
+        }
+
+        // ── (4) BREAKOUT EPISODE AGE — the call-side MIRROR of the breakdown episode above ──
+        // Same rationale, flipped: the edge is in the FIRST break ABOVE value, not its persistence.
+        // Tracks price >=0.3% ABOVE its own VWAP with ADX>=20 (up-trend strength); extreme = new
+        // HIGHS; and (hysteresis, matching _bdEpisode) the episode ends ONLY when price LOSES its
+        // VWAP — a brief tick back below the 0.3% line does not fragment it. scoring reads this to
+        // gate the call breakout channel on freshness + progression, exactly as the put side does.
+        const _buOn  = _vwN > 0 && _pxN > 0
+          && ((_pxN - _vwN) / _vwN) >= 0.003
+          && (signals.adx ?? 0) >= 20;
+        const _buOff = _vwN > 0 && _pxN > 0 && _pxN < _vwN;     // lost VWAP => episode over
+        let _buNow = state._buEpisode[_tk];
+        if (_buNow && _buNow.day !== _today) { _buNow = null; delete state._buEpisode[_tk]; }
+        if (_buOn && (!_buNow || !_buNow.active)) {
+          state._buEpisode[_tk] = { active: true, startedAt: Date.now(), day: _today, extreme: _pxN, extremeAt: Date.now() };
+        } else if (_buNow && _buNow.active && _buOff) {
+          _buNow.active = false;
+          _buNow.endedAt = Date.now();
+        }
+        const _buLive = state._buEpisode[_tk];
+        if (_buLive && _buLive.active && _pxN > 0) {
+          if (!(_buLive.extreme > 0) || _pxN > _buLive.extreme) {   // new HIGH => still progressing
+            _buLive.extreme = _pxN; _buLive.extremeAt = Date.now();
           }
         }
       }
@@ -2551,17 +2578,18 @@ async function runScan() {
     if (state._staggerCooling) { logEvent("filter", `${stock.ticker} entry blocked — stagger cooldown`); continue; }
 
     // ── 8/05: CALL MOMENTUM GATE ────────────────────────────────────────────────────────
-    // The put path requires a CONJUNCTION of measured movement before it may enter
-    // (scoring.js:780-786: break the opening-range low AND vwap turning down OR breadth rolling,
-    // AND the episode is fresh). Over 7/06-8/05 that discipline produced 25 puts, +$664, and
-    // ZERO never-green trades. The call path requires nothing and produced 193 calls, -$2,348,
-    // and 12% never-green. No scoring input predicts a call reaching the +12.5% rung — every
-    // bucket of breadth, score, IVP and entry-RSI sits between 7% and 26% against a 19% base.
-    // The score is not missing an input; it pools ~26 points of momentum with ~60+ of context,
-    // and context alone clears the floor. 8/05's score-86 and score-61 entries contained not one
-    // momentum term. This asks for the same evidence the put side uses, mirrored upward.
-    // 8/05: report any BLOCKED calls for this ticker that have now matured. Runs before the gate
-    // so it fires on every scan of the ticker, not only when a new candidate appears.
+    // SUPERSEDED by CALL_BREAKOUT_MODE (constants.js). When breakout mode is ON, momentum is now
+    // enforced inside scoring.js (the breakout channel + the suppression of the dip bonuses), so a
+    // context-only or dip call no longer clears the floor and this standalone gate is redundant —
+    // exactly how the PUT side works, where the score IS the gate (there is no separate put gate).
+    // The `!CALL_BREAKOUT_MODE` guard on the gate below stands it down; flip the flag false to
+    // re-arm it and restore the legacy dip-scoring path in one move. The shadow-report loop that
+    // follows becomes a no-op because nothing populates state._momoShadow while the gate is off.
+    //
+    // Rationale kept for history: over 7/06-8/05 the put conjunction produced 25 puts, +$664, ZERO
+    // never-green; the ungated call path produced 193 calls, -$2,348, 12% never-green. The score
+    // was not missing an input — it pooled ~26 momentum pts with ~60+ of context and let context
+    // alone clear the floor. Breakout mode fixes that in the score itself, not with a bolt-on gate.
     try {
       const _spxNow = stock.lastPrice || stock.price || 0;
       if (_spxNow > 0 && Array.isArray(state._momoShadow) && state._momoShadow.length) {
@@ -2580,7 +2608,7 @@ async function runScan() {
       }
     } catch (_shErr) { /* observation only */ }
 
-    if (optionType === "call") {
+    if (!CALL_BREAKOUT_MODE && optionType === "call") {
       const _or        = state._openRange?.[stock.ticker];
       const _px        = stock.lastPrice || stock.price || 0;
       const _vw        = stock.intradayVWAP || 0;

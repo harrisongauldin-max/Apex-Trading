@@ -411,6 +411,19 @@ const CALL_MOMO_SLOPE_MIN   = 0.0005;   // VWAP slope up, mirrors the put side's
 const CALL_MOMO_VOLPACE_MIN = 1.8;      // volume expansion, mirrors scoring.js:602
 const CALL_MOMO_BREADTH_MIN = 10;       // breadth momentum rising, mirrors the put -10
 
+// 8/05: CALL BREAKOUT MODE — the call-side mirror of PUT_BREAKDOWN_MODE (scoring.js). The put path
+// wins because every layer expresses one thesis: ride a FRESH, still-progressing intraday breakdown.
+// The call path historically did the opposite — it SCORED dips (mean reversion: below-VWAP +9, low-
+// breadth +13, oversold bounces) and then, since 8/05, GATED on breakouts, so score and gate fought
+// and calls felt like a coin flip. When true, the call side becomes momentum-continuation to match
+// the puts: a breakout scoring channel (structural break above the opening-range HIGH + VWAP/breadth
+// confirmation, gated on a fresh/progressing _buEpisode) REPLACES the loose dip bonuses, and the
+// standalone call-momentum gate in scanner.js stands down because scoring now enforces the same
+// requirement. The disciplined capitulation-bounce path is preserved as the call analog of the put's
+// overbought fade. Set false to revert instantly: dip bonuses return, the channel goes silent, the
+// standalone gate re-arms. The _buEpisode tracker in scanner.js runs regardless (observation is free).
+const CALL_BREAKOUT_MODE = true;
+
 // C1-C threshold
 const HIGH_RISK_MIN_SCORE       =  85;   // minScore on HIGH RISK day plan days
 
@@ -494,6 +507,7 @@ module.exports = {
   CALL_MOMENTUM_MIN, CALL_MOMENTUM_ENFORCE, CALL_MOMO_STRICT,
   MOMO_SHADOW_MINS, MOMO_SHADOW_MAX, AGENT_ENABLED,
   CALL_MOMO_SLOPE_MIN, CALL_MOMO_VOLPACE_MIN, CALL_MOMO_BREADTH_MIN,
+  CALL_BREAKOUT_MODE,
   HIGH_RISK_MIN_SCORE,
   WEEKLY_LOSS_LIMIT, MONTHLY_LOSS_LIMIT,
 };
