@@ -392,6 +392,13 @@ const LEG_STOP_PCT = { sameweek: 0.075, biweekly: 0.10 };
 // deliberately omitted rather than faked — strict mode is still slightly looser than the put gate.
 // 8/05: with the gate ENFORCING, a blocked call never opens and its outcome is unrecorded.
 // The shadow book restores the counterfactual by tracking the UNDERLYING after each block.
+// 8/05 (Harrison): THE MACRO AGENT IS OFF. It has been dead 11 days on API credit, contributes
+// "Agent neutral (+0)" to every score, and generated 747 calls with 35 timeouts for nothing.
+// This gates callClaudeAgent — the ONE function that makes the request — so all 9 call sites
+// short-circuit before any network I/O. agent.js is NOT deleted: four modules import from it and
+// updateRegimeState lives there and runs every scan. Set true to bring the agent back.
+const AGENT_ENABLED         = false;
+
 const MOMO_SHADOW_MINS      = 30;    // how long to wait before reporting the forward move
 const MOMO_SHADOW_MAX       = 200;   // hard cap on tracked entries
 
@@ -485,7 +492,7 @@ module.exports = {
   NON_COUNTING_EXIT_REASONS,
   LEG_STOP_PCT,
   CALL_MOMENTUM_MIN, CALL_MOMENTUM_ENFORCE, CALL_MOMO_STRICT,
-  MOMO_SHADOW_MINS, MOMO_SHADOW_MAX,
+  MOMO_SHADOW_MINS, MOMO_SHADOW_MAX, AGENT_ENABLED,
   CALL_MOMO_SLOPE_MIN, CALL_MOMO_VOLPACE_MIN, CALL_MOMO_BREADTH_MIN,
   HIGH_RISK_MIN_SCORE,
   WEEKLY_LOSS_LIMIT, MONTHLY_LOSS_LIMIT,
