@@ -34,7 +34,7 @@ const OUTCOME_HEADER = [
   // ── outcome (y) ──
   "exitReason","exitPrem","pnl","pnlPct","won","uEntry","uExit",
   // ── appended 8/09 (schema grows at the TAIL so older rows stay column-aligned) ──
-  "eRangePct",
+  "eRangePct","entryStrategy",
 ].join(",");
 
 function _csv(s) {
@@ -88,7 +88,7 @@ function buildOutcomeRow(pos, o) {
     (o && o.reason) || "", _n(o && o.exitPremium, 2), _n(o && o.pnl, 2),
     _n(o && (o.pct != null ? parseFloat(o.pct) : (o && o.pnlPct)), 1),
     (o && o.won) ? 1 : 0, _n(x.underlying, 2), _n(pos.price, 2),
-    _n(x.rangePct, 3),   // appended 8/09 — keep last, matching OUTCOME_HEADER's tail
+    _n(x.rangePct, 3), pos.entryStrategy || "",   // appended 8/09 — keep last, matching OUTCOME_HEADER's tail
   ].map(_csv).join(",");
 
   return row;
