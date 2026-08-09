@@ -44,7 +44,10 @@ const {
   ANTHROPIC_API_KEY,
   EARNINGS_SKIP_DAYS,
   GIVEBACK_EXIT_ENABLED = false, GIVEBACK_PEAK_MIN = 0.01, GIVEBACK_FLOOR = 0, GIVEBACK_MIN_HOLD_MIN = 10,
-  LIVE_WIDE_SPREAD_PCT, LEG_STOP_PCT } = require('./constants');
+  LIVE_WIDE_SPREAD_PCT, LEG_STOP_PCT,
+  MR_SCALP_FASTCUT_MIN = 5, MR_SCALP_FASTCUT_PEAK = 0.03, MR_SCALP_GIVEBACK_PEAK = 0.08, MR_SCALP_GIVEBACK_FRAC = 0.5,
+  MR_SCALP_TRAIL_ARM = 0.10, MR_SCALP_TRAIL_GIVE = 0.04, MR_SCALP_TP = 0.20,
+} = require('./constants');
 
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -271,6 +274,36 @@ async function checkExits(positions, posSnapshots, posQuotes, posNewsCache, ctx)
       pos._peakTime   = Date.now();
     }
     if (!pos._peakTime) pos._peakTime = new Date(pos.openDate || Date.now()).getTime();
+
+    // ── 8/09: MR-SCALP FAST EXIT REGIME ──────────────────────────────────────────
+    // These positions target a fast capitulation snap (winners peak ~11-14min), so the slow-book
+    // trail/time-cut/progress-check (guarded off below with !pos._mrScalp) are wrong. Override with:
+    // (1) 5-min fast-cut if it hasn't earned +3% — the CORE edge, kills grinders before they bleed;
+    // (2) a 50%-of-peak give-back guard once up >=8%; (3) a tight peak-4pt trail once >=+10%; (4) a
+    // hard take-profit. The hard stop, delta-compression, IV-collapse and 3:15 flatten still apply.
+    if (pos._mrScalp) {
+      const _msHeld    = (Date.now() - new Date(pos.openDate || pos.entryTime || Date.now()).getTime()) / 60000;
+      const _msPeakChg = pos.premium > 0 ? ((pos.peakPremium || pos.premium) - pos.premium) / pos.premium : 0;
+      let _msReason = null;
+      if (_msHeld >= MR_SCALP_FASTCUT_MIN && _msPeakChg < MR_SCALP_FASTCUT_PEAK) {
+        _msReason = `mr-fastcut`;
+        logEvent("scan", `[MR-SCALP] ${pos.ticker} fast-cut — ${_msHeld.toFixed(0)}min, peak +${(_msPeakChg*100).toFixed(1)}% < ${(MR_SCALP_FASTCUT_PEAK*100).toFixed(0)}% — not snapping`);
+      } else if (_msPeakChg >= MR_SCALP_GIVEBACK_PEAK && chg <= _msPeakChg * MR_SCALP_GIVEBACK_FRAC) {
+        _msReason = `mr-giveback`;
+        logEvent("scan", `[MR-SCALP] ${pos.ticker} give-back — peaked +${(_msPeakChg*100).toFixed(1)}%, now +${(chg*100).toFixed(1)}% — banking the snap`);
+      } else if (_msPeakChg >= MR_SCALP_TRAIL_ARM && chg <= (_msPeakChg - MR_SCALP_TRAIL_GIVE)) {
+        _msReason = `mr-trail`;
+        logEvent("scan", `[MR-SCALP] ${pos.ticker} trail — peak +${(_msPeakChg*100).toFixed(1)}%, now +${(chg*100).toFixed(1)}% (peak-${(MR_SCALP_TRAIL_GIVE*100).toFixed(0)}pt)`);
+      } else if (chg >= MR_SCALP_TP) {
+        _msReason = `mr-tp`;
+        logEvent("scan", `[MR-SCALP] ${pos.ticker} take-profit +${(chg*100).toFixed(1)}%`);
+      }
+      if (_msReason && !_closedThisCycle.has(pi)) {
+        _closedThisCycle.add(pi);
+        decisions.push({ pi, ticker: pos.ticker, action: 'close', reason: _msReason, exitPremium: null, contractSym: pos.contractSymbol || null });
+        continue;
+      }
+    }
 
     // ── 7/30: TROUGH RATCHET, mirroring the peak above. ───────────────────────
     // pos.troughPremium feeds mae_pct in the close record (closeEngine:448). It was
@@ -577,7 +610,7 @@ async function checkExits(positions, posSnapshots, posQuotes, posNewsCache, ctx)
     }
 
     // ── Progress check ────────────────────────────────────────────────────────
-    if (!pos._progressCheckFired) {
+    if (!pos._progressCheckFired && !pos._mrScalp) {   // 8/09: MR-scalp uses its own 5-min fast-cut, not the 90-min progress check
       const _entryTime   = new Date(pos.openDate || pos.entryTime || Date.now()).getTime();
       const _minsOpen    = (Date.now() - _entryTime) / 60000;
       const peakChgForPC = pos.premium > 0 ? (pos.peakPremium - pos.premium) / pos.premium : 0;
@@ -686,7 +719,7 @@ async function checkExits(positions, posSnapshots, posQuotes, posNewsCache, ctx)
       }
     } catch (_ngErr) { /* observation only — never disturb the scan */ }
 
-    if (!pos._timeCutFired) {
+    if (!pos._timeCutFired && !pos._mrScalp) {   // 8/09: MR-scalp exits are handled by its own fast regime above
       const _tcEntry = new Date(pos.openDate || pos.entryTime || Date.now()).getTime();
       const _tcMins  = (Date.now() - _tcEntry) / 60000;
 
