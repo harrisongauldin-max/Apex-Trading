@@ -94,6 +94,7 @@ const {
   CALL_MOMO_SLOPE_MIN, CALL_MOMO_VOLPACE_MIN, CALL_MOMO_BREADTH_MIN,
   MOMO_SHADOW_MINS, MOMO_SHADOW_MAX,
   CALL_BREAKOUT_MODE = false,   // 8/05: when true, scoring enforces call momentum → the standalone gate below stands down
+  RANGE_GOVERNOR_ENABLED = false, RANGE_GOVERNOR_ENFORCE = false, RANGE_GOVERNOR_FLOOR_PCT = 1.0, RANGE_GOVERNOR_MIN_SESSION_MIN = 60,
 } = require('./constants');
 
 let scanRunning  = false;
@@ -1555,9 +1556,27 @@ async function runScan() {
     const newsSentiment = analyzeNews(newsArticles);
     const liveBeta  = stock._liveBeta || stock.beta || 1.0;
 
+    // 8/09 RANGE GOVERNOR input: intraday realized range SO FAR today, as % of session open —
+    // "is there enough movement for a call to reach the +12.5% rung." Filtered to today's session
+    // (getIntradayBars can serve a multi-session window). Best-effort; never breaks a scan.
+    let _intraRangePct = null;
+    try {
+      const _todayET_r = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+      const _todayBars = Array.isArray(intradayBars)
+        ? intradayBars.filter(b => String(b.t || b.timestamp || "").startsWith(_todayET_r))
+        : [];
+      if (_todayBars.length >= 3) {
+        const _hi = Math.max(..._todayBars.map(b => (b.h ?? b.c)));
+        const _lo = Math.min(..._todayBars.map(b => (b.l ?? b.c)));
+        const _op = _todayBars[0].o || _todayBars[0].c;
+        if (_op > 0 && _hi >= _lo) _intraRangePct = parseFloat(((_hi - _lo) / _op * 100).toFixed(3));
+      }
+    } catch (_rgErr) { /* range is best-effort */ }
+
     const liveStock = {
       ...stock,
       price,
+      _intraRangePct,
       rsi:           signals.rsi,
       dailyRsi:      (signals && signals.dailyRsi != null) ? parseFloat(signals.dailyRsi) : parseFloat(signals?.rsi || 50),
       macd:          signals.macd,
@@ -2636,6 +2655,24 @@ async function runScan() {
         logEvent("filter", `[CALL-MOMO] ${stock.ticker} would BLOCK — ${CALL_MOMO_STRICT ? "strict: needs OR-high + 1 confirm" : `needs ${CALL_MOMENTUM_MIN}`}, have ${_mWhich} | score ${score} | SHADOW ONLY`);
       } else {
         logEvent("scan", `[CALL-MOMO] ${stock.ticker} pass — ${_mCount} evidence (${_mWhich})`);
+      }
+    }
+
+    // ── 8/09: RANGE GOVERNOR (call-only, shadow-first) ──────────────────────────────────
+    // Five days of telemetry: the -$1000 days had ~0.5% intraday range and APEX fired MOST trades
+    // on them; the green days had 1.6-3.6%. A call needs a real up-move to reach +12.5%, and a
+    // <1% tape has none. This throttles calls when the range-so-far is compressed, but only after
+    // the range has had time to develop. SHADOW until RANGE_GOVERNOR_ENFORCE — it records eRangePct
+    // on every outcome row so the floor is validated from data before it blocks anything.
+    if (optionType === "call" && RANGE_GOVERNOR_ENABLED) {
+      const _rng     = stock._intraRangePct;
+      const _sessMin = state._sessionMinsNow ?? 0;
+      if (_rng != null && _sessMin >= RANGE_GOVERNOR_MIN_SESSION_MIN && _rng < RANGE_GOVERNOR_FLOOR_PCT) {
+        if (RANGE_GOVERNOR_ENFORCE) {
+          logEvent("filter", `[RANGE-GOVERNOR] ${stock.ticker} call BLOCKED — intraday range ${_rng}% < ${RANGE_GOVERNOR_FLOOR_PCT}% floor (${_sessMin.toFixed(0)}min in) — dead tape, no move to catch | score ${score}`);
+          continue;
+        }
+        logEvent("filter", `[RANGE-GOVERNOR] ${stock.ticker} call would BLOCK — intraday range ${_rng}% < ${RANGE_GOVERNOR_FLOOR_PCT}% (${_sessMin.toFixed(0)}min) | score ${score} | SHADOW ONLY`);
       }
     }
 
