@@ -611,7 +611,7 @@ async function executeTrade(stock, price, score, scoreReasons, vix, optionType =
     entryMacro:      (state._agentMacro || {}).signal || "neutral",
     entryRegime:     state._regimeClass || "A",
     entryRelStr:     stock._relStrength || 1.0,
-    entryADX:        stock._adx || 0,
+    entryADX:        stock._adx ?? stock.adx ?? 0,   // 8/09 FIX: was `stock._adx || 0` but liveStock carries `.adx` (from signals.adx, scanner:1565), no underscore — so entryADX (and the outcome table's eADX) was 0 on every trade. Mirrors the journal stamp at ~L775.
     entryThesisScore: 100,
     thesisHistory:   [],
     agentHistory:    [],
@@ -668,6 +668,7 @@ async function executeTrade(stock, price, score, scoreReasons, vix, optionType =
     buActive:   !!(state._buEpisode && state._buEpisode[stock.ticker] && state._buEpisode[stock.ticker].active),
     gapState:   stock._gapState || null,
     underlying: (typeof price === "number") ? parseFloat(price.toFixed(2)) : null,   // entry underlying (pos.price drifts to latest during the hold)
+    rangePct:   (typeof stock._intraRangePct === "number") ? stock._intraRangePct : null,   // 8/09: intraday range-so-far — the range-governor signal
   };
 
   state.tradeJournal.unshift({
