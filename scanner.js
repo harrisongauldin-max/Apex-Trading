@@ -95,6 +95,9 @@ const {
   MOMO_SHADOW_MINS, MOMO_SHADOW_MAX,
   CALL_BREAKOUT_MODE = false,   // 8/05: when true, scoring enforces call momentum → the standalone gate below stands down
   RANGE_GOVERNOR_ENABLED = false, RANGE_GOVERNOR_ENFORCE = false, RANGE_GOVERNOR_FLOOR_PCT = 1.0, RANGE_GOVERNOR_MIN_SESSION_MIN = 60,
+  MR_SCALP_ENABLED = false, MR_SCALP_SESSLOW_RSI_MAX = 32, MR_SCALP_FLUSH_DD_MIN = 0.007, MR_SCALP_VWAP_EXT_MIN = 0.005,
+  MR_SCALP_LIFTOFF_PTS = 4, MR_SCALP_LOW_AGE_MIN_MIN = 3, MR_SCALP_LOW_AGE_MAX_MIN = 25, MR_SCALP_RANGE_MIN_PCT = 0.6,
+  MR_SCALP_VIX_MIN = 20, MR_SCALP_SESSION_MIN_MIN = 30, MR_SCALP_CUTOFF_ET = 14.5, MR_SCALP_MIN_SCORE = 78, MR_SCALP_SIZE_MOD = 0.5,
 } = require('./constants');
 
 let scanRunning  = false;
@@ -2214,6 +2217,65 @@ async function runScan() {
 
     if (effectiveDefensive && !callSetup._mrStrong) callScore = 0;   // D4: only strict/deep MR survives defensive
 
+    // ── 8/09: MR-SCALP DETECTOR — a disciplined capitulation-snap CALL that runs LIVE alongside
+    // breakout calls, tagged mr-scalp. Placed right before direction selection so it survives the
+    // context-call penalties (IVP/momentum/gap) it is DESIGNED to counter — but it still requires
+    // macro to permit calls (callsAllowed && !defensive above) and respects every downstream
+    // safety/cap/cooldown gate. The strict conditions ARE the edge (score is a weak ranker), so on a
+    // pass we floor the call score + label it; execution buys the low-vega 0-1DTE/0.42Δ leg at half
+    // size, exitEngine runs the fast scalp exits. All thresholds in constants.js (MR_SCALP_*).
+    if (MR_SCALP_ENABLED && (liveStock.isIndex || stock.isIndex) && callsAllowed && !effectiveDefensive) {
+      try {
+        const _msVwap  = liveStock.intradayVWAP || 0;
+        const _msRsi   = signals.rsi;
+        const _msSessLow   = state._sessionLowRSI?.[stock.ticker];
+        const _msSessLowAt = state._sessionLowRSIAt?.[stock.ticker] || 0;
+        const _msLowAge    = _msSessLowAt ? (Date.now() - _msSessLowAt) / 60000 : Infinity;
+        const _msTET   = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+        const _msTb    = Array.isArray(intradayBars) ? intradayBars.filter(b => String(b.t||b.timestamp||"").startsWith(_msTET)) : [];
+        const _msSessHigh = _msTb.length ? Math.max(..._msTb.map(b => (b.h ?? b.c ?? 0))) : 0;
+        const _msLastBar  = _msTb.length ? _msTb[_msTb.length-1] : null;
+        const _msBarGreen = !!(_msLastBar && (_msLastBar.c ?? 0) > (_msLastBar.o ?? 0));
+        const _msFlushDD  = (_msSessHigh > 0 && price > 0) ? (_msSessHigh - price) / _msSessHigh : 0;
+        const _msExtBelow = _msVwap > 0 && price > 0 && price <= _msVwap * (1 - MR_SCALP_VWAP_EXT_MIN);
+        const _msLiftoff  = (_msRsi != null && _msSessLow != null) ? (_msRsi - _msSessLow) : -1;
+        const _msCorrob   = (liveStock.macdCurl === "bull_curl") || _msBarGreen;
+        const _msAdx      = Number.isFinite(signals.adx) ? signals.adx : 0;
+        const _msOr       = state._openRange?.[stock.ticker];
+        const _msKnife    = _msAdx >= 20 && _msExtBelow && !!(_msOr && _msOr.locked && price < _msOr.low);   // structural breakdown = trend, not dip
+        const _msRange    = (typeof liveStock._intraRangePct === "number") ? liveStock._intraRangePct : 0;
+        const _msSessMin  = state._sessionMinsNow ?? 0;
+        const _msEtHour   = scanET.getHours() + scanET.getMinutes() / 60;
+        const _msSpyBelow200 = !!(state._spyMA200 && state._liveSPY && state._liveSPY < state._spyMA200);
+        const _msRegimeC  = (state._regimeClass || "A") === "C";
+
+        const _msPass =
+             (_msSessLow != null && _msSessLow <= MR_SCALP_SESSLOW_RSI_MAX)                          // capitulation printed
+          && (_msFlushDD >= MR_SCALP_FLUSH_DD_MIN)                                                    // real flush off session high
+          && _msExtBelow                                                                              // extended below own VWAP
+          && (_msLiftoff >= MR_SCALP_LIFTOFF_PTS)                                                     // turn has started
+          && (_msLowAge >= MR_SCALP_LOW_AGE_MIN_MIN && _msLowAge <= MR_SCALP_LOW_AGE_MAX_MIN)         // fresh, not a new low, not a dead cat
+          && _msCorrob                                                                                // curl or green bar
+          && !_msKnife                                                                                // not a structural breakdown
+          && (_msRange >= MR_SCALP_RANGE_MIN_PCT)                                                     // not a dead tape
+          && ((state.vix || 0) >= MR_SCALP_VIX_MIN)                                                   // enough vol
+          && (_msSessMin >= MR_SCALP_SESSION_MIN_MIN)                                                 // VWAP reliable
+          && (_msEtHour < MR_SCALP_CUTOFF_ET)                                                         // before 2:30pm ET
+          && !_msSpyBelow200 && !_msRegimeC;                                                          // macro not hostile
+
+        if (_msPass) {
+          liveStock._mrScalp     = true;
+          liveStock._mrEntryVWAP = parseFloat(_msVwap.toFixed(2));
+          callSetup.isMeanReversion = true;
+          callSetup.score = Math.max(callSetup.score, MR_SCALP_MIN_SCORE);
+          callScore       = Math.max(callScore, MR_SCALP_MIN_SCORE);
+          const _msReason = `MR-SCALP capitulation snap — sessLowRSI ${_msSessLow} flush ${(_msFlushDD*100).toFixed(1)}% belowVWAP ${((1 - price/_msVwap)*100).toFixed(2)}% liftoff ${_msLiftoff.toFixed(0)}pt age ${_msLowAge.toFixed(0)}m range ${_msRange.toFixed(2)}%`;
+          callSetup.reasons = [_msReason, ...((callSetup.reasons) || [])];
+          logEvent("filter", `[MR-SCALP] ${stock.ticker} ARMED — ${_msReason} | VIX ${(state.vix||0).toFixed(1)} @ ${_msEtHour.toFixed(2)}h`);
+        }
+      } catch (_msErr) { logEvent("warn", `[MR-SCALP] detector error ${stock.ticker}: ${_msErr.message}`); }
+    }
+
     const bestScore = Math.max(callScore, putScore);
     const optionType = putScore > callScore ? "put" : "call";
     // V3.2 (6/19) Consolidated SCAN VERDICT — one bottom-line per ticker per scan, so a no-entry
@@ -2726,7 +2788,12 @@ async function runScan() {
       }
       logEvent("filter", `${stock.ticker} execution: naked_${optionType} (MR:${isMeanReversion}) delta:${_contractDelta.toFixed(3)}`);
       const _sizeModNaked = sizeMod || 1.0;
-      if (dataGatherActive(DATA_GATHER_MODE)) {
+      if (stock._mrScalp) {
+        // 8/09: MR-SCALP is a SINGLE low-vega leg (NOT the A/B/C twin-entry), half size. executeTrade
+        // reads stock._mrScalp → forces 0-1 DTE + 0.42Δ and tags the position entryStrategy="mr-scalp".
+        logEvent("filter", `[MR-SCALP] ${stock.ticker} entering single 0-1DTE leg @ ${MR_SCALP_SIZE_MOD}x size`);
+        entered = await executeTrade(stock, price, score, reasons, state.vix, "call", true, MR_SCALP_SIZE_MOD, "sameweek");
+      } else if (dataGatherActive(DATA_GATHER_MODE)) {
         // 6/30 (Harrison): A/B twin-entry. One signal → two positions, one per DTE band, each sized
         // independently under the normal caps. Legs tagged (dteBand) for comparison. A leg failing to
         // fill (no contract in its band) does not block the other.
