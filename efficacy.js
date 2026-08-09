@@ -99,7 +99,7 @@ function _statLine(label, s, labelW = 22) {
 // ── the report ────────────────────────────────────────────────────────────────
 // Numeric entry features (X) to rank by predictive correlation with `won`.
 const FEATURES = [
-  ["score", "score"], ["eVwapDist", "vwap-dist%"], ["eADX", "ADX"], ["eBreadthMom", "breadth-mom"],
+  ["score", "score"], ["eRangePct", "intraday-range%"], ["eVwapDist", "vwap-dist%"], ["eADX", "ADX"], ["eBreadthMom", "breadth-mom"],
   ["eBreadth", "breadth"], ["eIVP", "IV-pct"], ["eRSI", "intraday-RSI"], ["eDRSI", "daily-RSI"],
   ["eVIX", "VIX"], ["eIV", "IV"], ["delta", "delta"], ["eRelStr", "rel-str"], ["ivr", "IVR"],
   ["eBuActive", "breakout-active"],
