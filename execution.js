@@ -23,6 +23,7 @@ const { CAPITAL_FLOOR, MIN_OPTION_PREMIUM, MIN_OI,
         TARGET_DELTA_MAX, MONTHLY_BUDGET, INDIVIDUAL_STOCKS_ENABLED,
         WATCHLIST, ALPACA_OPT_SNAP, ALPACA_OPTIONS, OPTION_FEED,
         MAX_HEAT, STOP_LOSS_PCT, TAKE_PROFIT_PCT, DATA_GATHER_MODE,
+        MR_SCALP_TARGET_DTE = 1, MR_SCALP_DELTA = 0.42,
 }                                          = require('./constants');
 const { confirmPendingOrder } = require('./closeEngine');
 const { writeJournalEntry } = require('./state');
@@ -278,7 +279,11 @@ async function executeTrade(stock, price, score, scoreReasons, vix, optionType =
     return false;
   }
 
-  const targetDelta = isMeanReversion ? 0.42 : 0.35;
+  // 8/09: MR-SCALP forces the lowest-vega structure — 0-1 DTE + 0.42Δ — to dodge the IV-collapse-on-
+  // bounce trap while keeping the gamma that captures the fast snap. Detected via stock._mrScalp
+  // (set in the scanner detector). Otherwise the normal MR/momentum profile applies.
+  const _mrScalp = stock && stock._mrScalp === true;
+  const targetDelta = _mrScalp ? MR_SCALP_DELTA : (isMeanReversion ? 0.42 : 0.35);
   // 6/30 (Harrison): DTE resolution.
   //   dteBand === "sameweek" → force 0-8 DTE leg.  dteBand === "standard" → force the 30-50 momentum band.
   //   dteBand === null (normal call) → DATA_GATHER_MODE forces same-week; otherwise per-profile default.
@@ -286,7 +291,8 @@ async function executeTrade(stock, price, score, scoreReasons, vix, optionType =
   const _dgm = dataGatherActive(DATA_GATHER_MODE);
   // 8/03: THIRD BAND. 13 sits mid-window of an empty 9-16 DTE gap between the two existing
   // legs — 20 sessions produced literally zero trades there, so its behaviour is unknown.
-  const targetDTE = dteBand === "sameweek" ? 3
+  const targetDTE = _mrScalp ? MR_SCALP_TARGET_DTE
+                  : dteBand === "sameweek" ? 3
                   : dteBand === "biweekly" ? 13
                   : dteBand === "standard" ? 40
                   : (_dgm ? 3 : (isMeanReversion ? 3 : 40));
@@ -582,6 +588,9 @@ async function executeTrade(stock, price, score, scoreReasons, vix, optionType =
     fastStopPct:    exitParams.fastStopPct,
     dteLabel:       exitParams.label,
     isMeanReversion: isMeanReversion,
+    entryStrategy:  _mrScalp ? "mr-scalp" : (stock._mrStrong ? "mr" : "breakout-or-context"),   // 8/09: A/B label — mr-scalp vs the rest
+    _mrScalp:       _mrScalp,                                              // 8/09: routes the fast scalp exits in exitEngine
+    _mrEntryVWAP:   _mrScalp ? (stock._mrEntryVWAP || price || null) : null,   // reversion target = reclaim of entry VWAP
     dteBand:        dteBand || (_sameWeekLeg ? "sameweek" : "standard"),   // 6/30: A/B leg tag for twin-entry comparison
     isTier3:        (contract.expDays || contract.dte || 0) > 45 && !isMeanReversion,
     entryVIX:       vix,
