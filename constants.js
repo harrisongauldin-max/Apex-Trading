@@ -445,6 +445,40 @@ const RANGE_GOVERNOR_ENFORCE          = false;  // false = shadow only (block no
 const RANGE_GOVERNOR_FLOOR_PCT        = 1.0;    // intraday range-so-far (% of session open) below which a call is "dead tape"
 const RANGE_GOVERNOR_MIN_SESSION_MIN  = 60;     // only judge after this many session minutes (range builds through the day)
 
+// 8/09: MR-SCALP CALL — a disciplined mean-reversion CALL scalp that runs LIVE alongside breakout
+// calls, tagged entryStrategy="mr-scalp". Thesis (options-MR expert spec): the ONLY fast up-move on
+// an index is the SNAP after a genuine capitulation flush, so require deep capitulation + a confirmed
+// turn, buy the LOWEST-vega structure (0-1 DTE, 0.42Δ) to dodge the IV-collapse-on-bounce trap, and
+// exit FAST (5-min fast-cut is the core edge) rather than riding the slow-book trail. Every number is
+// tunable and A/B-measured vs breakout via the outcome table's entryStrategy column.
+// DEFERRED from v1 (documented): the 50% scale-out at +10% (needs partialClose) and the VIX-downtick
+// entry gate (needs prev-scan VIX; flagged low-confidence, may over-suppress) — add once v1 proves out.
+const MR_SCALP_ENABLED          = true;
+// ── entry (all AND-ed; index only, Regime A/neutral) ──
+const MR_SCALP_SESSLOW_RSI_MAX  = 32;     // session must have printed intraday RSI <= this (genuine capitulation). tune 30-35
+const MR_SCALP_FLUSH_DD_MIN     = 0.007;  // >= 0.7% drawdown off the session HIGH (a real flush, not noise)
+const MR_SCALP_VWAP_EXT_MIN     = 0.005;  // price <= VWAP*(1-0.005): >=0.5% below own VWAP (extension, not a grind)
+const MR_SCALP_LIFTOFF_PTS      = 4;      // intraday RSI lifted >= this off session low (the turn has STARTED)
+const MR_SCALP_LOW_AGE_MIN_MIN  = 3;      // session low >= this many min old (not a NEW low right now — anti falling-knife)
+const MR_SCALP_LOW_AGE_MAX_MIN  = 25;     // and <= this (fresh flush; a stale low is a dead cat)
+const MR_SCALP_RANGE_MIN_PCT    = 0.6;    // intraday range-so-far >= this % (dead-day veto)
+const MR_SCALP_VIX_MIN          = 20;     // need volatility/range for an MR call to pay
+const MR_SCALP_SESSION_MIN_MIN  = 30;     // VWAP unreliable before this many session minutes
+const MR_SCALP_CUTOFF_ET        = 14.5;   // no NEW mr-scalp entry after 2:30pm ET (needs ~14min to work + exit before 3:15 flatten)
+const MR_SCALP_MIN_SCORE        = 78;     // floor the setup clears (also clears slot-2's 75); the CONDITIONS are the edge, not the score
+// ── instrument / size ──
+const MR_SCALP_TARGET_DTE       = 1;      // 0-1 DTE = lowest vega (dodges IV collapse) + highest gamma (captures the fast pop)
+const MR_SCALP_DELTA            = 0.42;   // high delta = more intrinsic, less vega share; avoid the 0.30 ATM max-crush strike
+const MR_SCALP_SIZE_MOD         = 0.5;    // half size until it proves out (base hit-rate ~19%, unproven)
+// ── exit (override the slow-book trail/time-cut for these positions) ──
+const MR_SCALP_FASTCUT_MIN      = 5;      // at this many min held...
+const MR_SCALP_FASTCUT_PEAK     = 0.03;   // ...if peak gain < +3%, exit — the highest-leverage rule (kills grinders early)
+const MR_SCALP_GIVEBACK_PEAK    = 0.08;   // if the position peaked >= +8%...
+const MR_SCALP_GIVEBACK_FRAC    = 0.5;    // ...and has given back below 50% of that peak gain, exit (protect the spike)
+const MR_SCALP_TRAIL_ARM        = 0.10;   // once confirmed peak >= +10%...
+const MR_SCALP_TRAIL_GIVE       = 0.04;   // ...trail at peak - 4pts (tighter than Schedule A)
+const MR_SCALP_TP               = 0.20;   // hard take-profit — bank a big pop outright
+
 // C1-C threshold
 const HIGH_RISK_MIN_SCORE       =  85;   // minScore on HIGH RISK day plan days
 
@@ -530,6 +564,12 @@ module.exports = {
   CALL_MOMO_SLOPE_MIN, CALL_MOMO_VOLPACE_MIN, CALL_MOMO_BREADTH_MIN,
   CALL_BREAKOUT_MODE, OUTCOME_TABLE_ENABLED,
   RANGE_GOVERNOR_ENABLED, RANGE_GOVERNOR_ENFORCE, RANGE_GOVERNOR_FLOOR_PCT, RANGE_GOVERNOR_MIN_SESSION_MIN,
+  MR_SCALP_ENABLED, MR_SCALP_SESSLOW_RSI_MAX, MR_SCALP_FLUSH_DD_MIN, MR_SCALP_VWAP_EXT_MIN,
+  MR_SCALP_LIFTOFF_PTS, MR_SCALP_LOW_AGE_MIN_MIN, MR_SCALP_LOW_AGE_MAX_MIN, MR_SCALP_RANGE_MIN_PCT,
+  MR_SCALP_VIX_MIN, MR_SCALP_SESSION_MIN_MIN, MR_SCALP_CUTOFF_ET, MR_SCALP_MIN_SCORE,
+  MR_SCALP_TARGET_DTE, MR_SCALP_DELTA, MR_SCALP_SIZE_MOD,
+  MR_SCALP_FASTCUT_MIN, MR_SCALP_FASTCUT_PEAK, MR_SCALP_GIVEBACK_PEAK, MR_SCALP_GIVEBACK_FRAC,
+  MR_SCALP_TRAIL_ARM, MR_SCALP_TRAIL_GIVE, MR_SCALP_TP,
   HIGH_RISK_MIN_SCORE,
   WEEKLY_LOSS_LIMIT, MONTHLY_LOSS_LIMIT,
 };
