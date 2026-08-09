@@ -431,6 +431,20 @@ const CALL_BREAKOUT_MODE = true;
 // Set false to stop recording (the close path then skips recordOutcome entirely).
 const OUTCOME_TABLE_ENABLED = true;
 
+// 8/09: RANGE GOVERNOR (call-only). Five days of telemetry showed the -$1000 loss days (8/05, 8/07)
+// had SPY intraday ranges of ~0.5% — no move for a call to reach the +12.5% rung that is the only
+// thing that pays — while the green days (8/03, 8/04) had 1.6-3.6%. And trade COUNT was inversely
+// coupled to range: APEX fired MOST on the deadest tapes, because calm maxes its call score. This
+// throttles CALL entries when the underlying's intraday realized range SO FAR is below a floor,
+// evaluated only after enough session has elapsed to judge (range is naturally small at the open).
+// SHADOW-FIRST by design (mirrors the momentum gate): ENFORCE=false logs what it would block and
+// blocks nothing; the range is recorded on every outcome row (eRangePct) so the floor is set from
+// data, not guessed. Flip ENFORCE=true once a few sessions of [RANGE-GOVERNOR] lines confirm it.
+const RANGE_GOVERNOR_ENABLED          = true;   // compute + record + shadow-log
+const RANGE_GOVERNOR_ENFORCE          = false;  // false = shadow only (block nothing yet)
+const RANGE_GOVERNOR_FLOOR_PCT        = 1.0;    // intraday range-so-far (% of session open) below which a call is "dead tape"
+const RANGE_GOVERNOR_MIN_SESSION_MIN  = 60;     // only judge after this many session minutes (range builds through the day)
+
 // C1-C threshold
 const HIGH_RISK_MIN_SCORE       =  85;   // minScore on HIGH RISK day plan days
 
@@ -515,6 +529,7 @@ module.exports = {
   MOMO_SHADOW_MINS, MOMO_SHADOW_MAX, AGENT_ENABLED,
   CALL_MOMO_SLOPE_MIN, CALL_MOMO_VOLPACE_MIN, CALL_MOMO_BREADTH_MIN,
   CALL_BREAKOUT_MODE, OUTCOME_TABLE_ENABLED,
+  RANGE_GOVERNOR_ENABLED, RANGE_GOVERNOR_ENFORCE, RANGE_GOVERNOR_FLOOR_PCT, RANGE_GOVERNOR_MIN_SESSION_MIN,
   HIGH_RISK_MIN_SCORE,
   WEEKLY_LOSS_LIMIT, MONTHLY_LOSS_LIMIT,
 };
