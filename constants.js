@@ -445,8 +445,13 @@ const RANGE_GOVERNOR_ENFORCE          = true;   // 8/10: LIVE. 8/05-8/10 every c
                                                 // APEX kept firing into it (8/10: 0.25% range, 6 calls, -$66;
                                                 // enforcing would have made it $0). Now BLOCKS calls on dead
                                                 // tape. Set false to return to shadow.
-const RANGE_GOVERNOR_FLOOR_PCT        = 1.0;    // intraday range-so-far (% of session open) below which a call is "dead tape"
+const RANGE_GOVERNOR_FLOOR_PCT        = 1.0;    // FULL-DAY intraday range target (% of session open) below which a day is "dead tape"
 const RANGE_GOVERNOR_MIN_SESSION_MIN  = 60;     // only judge after this many session minutes (range builds through the day)
+// 8/11: the FLOOR is a full-DAY number (0.5% dead vs 1.6-3.6% green were whole-session ranges), but it is
+// evaluated against range-SO-FAR mid-session. Comparing a 60-min-in range to a full-day floor over-blocks.
+// The governor now pro-rates the floor by sqrt(elapsed session fraction) — realized range scales ~√time —
+// so it asks "is today on PACE to be at least a FLOOR_PCT-range day?" One coherent rule across the session.
+const RANGE_GOVERNOR_FULL_SESSION_MIN = 390;    // regular cash session length (9:30-16:00 ET) — the √time denominator
 
 // 8/09: MR-SCALP CALL — a disciplined mean-reversion CALL scalp that runs LIVE alongside breakout
 // calls, tagged entryStrategy="mr-scalp". Thesis (options-MR expert spec): the ONLY fast up-move on
@@ -566,7 +571,7 @@ module.exports = {
   MOMO_SHADOW_MINS, MOMO_SHADOW_MAX, AGENT_ENABLED,
   CALL_MOMO_SLOPE_MIN, CALL_MOMO_VOLPACE_MIN, CALL_MOMO_BREADTH_MIN,
   CALL_BREAKOUT_MODE, OUTCOME_TABLE_ENABLED,
-  RANGE_GOVERNOR_ENABLED, RANGE_GOVERNOR_ENFORCE, RANGE_GOVERNOR_FLOOR_PCT, RANGE_GOVERNOR_MIN_SESSION_MIN,
+  RANGE_GOVERNOR_ENABLED, RANGE_GOVERNOR_ENFORCE, RANGE_GOVERNOR_FLOOR_PCT, RANGE_GOVERNOR_MIN_SESSION_MIN, RANGE_GOVERNOR_FULL_SESSION_MIN,
   MR_SCALP_ENABLED, MR_SCALP_SESSLOW_RSI_MAX, MR_SCALP_FLUSH_DD_MIN, MR_SCALP_VWAP_EXT_MIN,
   MR_SCALP_LIFTOFF_PTS, MR_SCALP_LOW_AGE_MIN_MIN, MR_SCALP_LOW_AGE_MAX_MIN, MR_SCALP_RANGE_MIN_PCT,
   MR_SCALP_VIX_MIN, MR_SCALP_SESSION_MIN_MIN, MR_SCALP_CUTOFF_ET, MR_SCALP_MIN_SCORE,
