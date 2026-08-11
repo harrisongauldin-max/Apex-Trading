@@ -94,7 +94,7 @@ const {
   CALL_MOMO_SLOPE_MIN, CALL_MOMO_VOLPACE_MIN, CALL_MOMO_BREADTH_MIN,
   MOMO_SHADOW_MINS, MOMO_SHADOW_MAX,
   CALL_BREAKOUT_MODE = false,   // 8/05: when true, scoring enforces call momentum → the standalone gate below stands down
-  RANGE_GOVERNOR_ENABLED = false, RANGE_GOVERNOR_ENFORCE = false, RANGE_GOVERNOR_FLOOR_PCT = 1.0, RANGE_GOVERNOR_MIN_SESSION_MIN = 60,
+  RANGE_GOVERNOR_ENABLED = false, RANGE_GOVERNOR_ENFORCE = false, RANGE_GOVERNOR_FLOOR_PCT = 1.0, RANGE_GOVERNOR_MIN_SESSION_MIN = 60, RANGE_GOVERNOR_FULL_SESSION_MIN = 390,
   MR_SCALP_ENABLED = false, MR_SCALP_SESSLOW_RSI_MAX = 32, MR_SCALP_FLUSH_DD_MIN = 0.007, MR_SCALP_VWAP_EXT_MIN = 0.005,
   MR_SCALP_LIFTOFF_PTS = 4, MR_SCALP_LOW_AGE_MIN_MIN = 3, MR_SCALP_LOW_AGE_MAX_MIN = 25, MR_SCALP_RANGE_MIN_PCT = 0.6,
   MR_SCALP_VIX_MIN = 20, MR_SCALP_SESSION_MIN_MIN = 30, MR_SCALP_CUTOFF_ET = 14.5, MR_SCALP_MIN_SCORE = 78, MR_SCALP_SIZE_MOD = 0.5,
@@ -851,7 +851,18 @@ async function runScan() {
   const _defAgentAge   = state._agentMacro?.timestamp
     ? (Date.now() - new Date(state._agentMacro.timestamp).getTime()) / 60000 : 999;
   const _defAgentFresh = _defAgentAge < 120;
-  const effectiveDefensive = (marketContext.macro || {}).mode === "defensive" && _defAgentFresh;
+  // 8/11 (fix #2): the macro-agent authority (macro.mode + its freshness stamp) is DEAD while
+  // AGENT_ENABLED=false — _defAgentFresh can never be true, so the old definition pinned
+  // effectiveDefensive to false forever, silently disabling the "defensive tape → suppress
+  // non-MR calls" rail (D4 below at ~2218/2315). Source it from the SINGLE live macro authority
+  // instead: when the agent is fresh, trust its mode; otherwise trust the regime class, which
+  // updateRegimeState computes every scan from SPY-vs-200MA + sustained VIX with no LLM. Regime
+  // B/C == defensive (the house convention: agentAlignsBear / inBearForVol both key off ["B","C"]).
+  // In regime A (the common tape, where breakout calls operate) this stays false, so nothing about
+  // normal-day call behavior changes — only genuinely bearish tapes now re-suppress weak calls.
+  const effectiveDefensive = _defAgentFresh
+    ? ((marketContext.macro || {}).mode === "defensive")
+    : ["B", "C"].includes(state._regimeClass || "A");
   const putsMacroAllowed  = ["bearish", "strongly bearish", "mild bearish", "neutral"].includes(agentMacroSignal);
   const agentHasRun       = !!state._agentMacro;
   const macroClearForPuts = !agentHasRun || putsMacroAllowed;
@@ -2224,7 +2235,11 @@ async function runScan() {
     // safety/cap/cooldown gate. The strict conditions ARE the edge (score is a weak ranker), so on a
     // pass we floor the call score + label it; execution buys the low-vega 0-1DTE/0.42Δ leg at half
     // size, exitEngine runs the fast scalp exits. All thresholds in constants.js (MR_SCALP_*).
-    if (MR_SCALP_ENABLED && (liveStock.isIndex || stock.isIndex) && callsAllowed && !effectiveDefensive) {
+    // 8/11 (fix #5): MR-scalp breathes ONE macro oxygen — the regime class — checked inside _msPass
+    // below (regime A). The old `!effectiveDefensive` outer gate is dropped: it was a second,
+    // agent-derived macro filter layered on top of the regime + 200MA checks, and (since the agent
+    // is off) it was inert anyway. Regime A already means "not defensive," so this is not a loosening.
+    if (MR_SCALP_ENABLED && (liveStock.isIndex || stock.isIndex) && callsAllowed) {
       try {
         const _msVwap  = liveStock.intradayVWAP || 0;
         const _msRsi   = signals.rsi;
@@ -2246,8 +2261,13 @@ async function runScan() {
         const _msRange    = (typeof liveStock._intraRangePct === "number") ? liveStock._intraRangePct : 0;
         const _msSessMin  = state._sessionMinsNow ?? 0;
         const _msEtHour   = scanET.getHours() + scanET.getMinutes() / 60;
-        const _msSpyBelow200 = !!(state._spyMA200 && state._liveSPY && state._liveSPY < state._spyMA200);
-        const _msRegimeC  = (state._regimeClass || "A") === "C";
+        // 8/11 (fix #5): ONE macro-backdrop signal. Regime A ≡ SPY above its 200MA AND 5-day-SUSTAINED
+        // VIX < 20 (see updateRegimeState). That subsumes the old separate `!spyBelow200` filter and is
+        // stricter than the old `!regimeC`, collapsing three overlapping macro tests into one coherent
+        // authority. Critically this is NOT a contradiction with MR_SCALP_VIX_MIN: that gate checks SPOT
+        // VIX, while regime A keys off the 5-DAY MEAN — so a sharp one-day flush that pops spot VIX ≥ 20
+        // inside an otherwise-calm uptrend (exactly the MR-scalp target) still reads as regime A.
+        const _msRegimeA  = (state._regimeClass || "A") === "A";
 
         const _msPass =
              (_msSessLow != null && _msSessLow <= MR_SCALP_SESSLOW_RSI_MAX)                          // capitulation printed
@@ -2261,7 +2281,7 @@ async function runScan() {
           && ((state.vix || 0) >= MR_SCALP_VIX_MIN)                                                   // enough vol
           && (_msSessMin >= MR_SCALP_SESSION_MIN_MIN)                                                 // VWAP reliable
           && (_msEtHour < MR_SCALP_CUTOFF_ET)                                                         // before 2:30pm ET
-          && !_msSpyBelow200 && !_msRegimeC;                                                          // macro not hostile
+          && _msRegimeA;                                                                              // intact macro backdrop (single authority)
 
         if (_msPass) {
           liveStock._mrScalp     = true;
@@ -2542,6 +2562,19 @@ async function runScan() {
     if (heatPct() >= effectiveHeatCap()) break;
     if (state.cash <= CAPITAL_FLOOR) break;
 
+    // 8/11 (fix #1): MR-scalp is a CALL-ONLY strategy. The detector floors callScore to ≥78 and
+    // arms stock._mrScalp, but final direction is still putScore-vs-callScore — so on a scan where
+    // the put side scored higher this candidate resolves to a PUT while still carrying the scalp
+    // flag. Left unchecked, the execution branch below (and execution.js's DTE/delta/tag routing)
+    // would buy a CALL on a scan the model chose a PUT — the losing side, on exactly the breakdown
+    // tapes where puts score high. Revoke the arming HERE, once, so `_mrScalp === true` means one
+    // unambiguous thing everywhere downstream: "this is a call MR-scalp."
+    if (stock._mrScalp && optionType !== "call") {
+      logEvent("filter", `[MR-SCALP] ${stock.ticker} armed but direction resolved to ${optionType} — MR-scalp is call-only, standing down (put side scored higher)`);
+      stock._mrScalp     = false;
+      stock._mrEntryVWAP = null;
+    }
+
     const { pass, reason } = await checkAllFilters(stock, price, null);
     if (!pass) {
       const putBypassReasons = ["sector ETF", "support", "VWAP", "breakdown"];
@@ -2726,15 +2759,25 @@ async function runScan() {
     // <1% tape has none. This throttles calls when the range-so-far is compressed, but only after
     // the range has had time to develop. SHADOW until RANGE_GOVERNOR_ENFORCE — it records eRangePct
     // on every outcome row so the floor is validated from data before it blocks anything.
-    if (optionType === "call" && RANGE_GOVERNOR_ENABLED) {
+    // 8/11 (fix #3): MR-scalp is EXEMPT — it carries its own range oxygen (MR_SCALP_RANGE_MIN_PCT)
+    // and only fires on a capitulation flush, which by definition has range. The governor exists to
+    // stop the OTHER call channels from machine-gunning a dead tape; letting it also veto the scalp
+    // meant two range floors (0.6% vs the governor's) fighting over the same trade. One floor per path.
+    if (optionType === "call" && RANGE_GOVERNOR_ENABLED && !stock._mrScalp) {
       const _rng     = stock._intraRangePct;
       const _sessMin = state._sessionMinsNow ?? 0;
-      if (_rng != null && _sessMin >= RANGE_GOVERNOR_MIN_SESSION_MIN && _rng < RANGE_GOVERNOR_FLOOR_PCT) {
+      // 8/11 (fix #4): FLOOR_PCT is a full-DAY target, but _rng is range-SO-FAR. Pro-rate the floor by
+      // √(elapsed session fraction) — realized range scales ~√time — so the test becomes "is today on
+      // PACE to be at least a FLOOR_PCT-range day?" instead of comparing a mid-session partial range
+      // against a whole-day number (which blocks normal mornings that would develop range by the close).
+      const _sessFrac  = Math.max(0, Math.min(1, _sessMin / RANGE_GOVERNOR_FULL_SESSION_MIN));
+      const _paceFloor = parseFloat((RANGE_GOVERNOR_FLOOR_PCT * Math.sqrt(_sessFrac)).toFixed(3));
+      if (_rng != null && _sessMin >= RANGE_GOVERNOR_MIN_SESSION_MIN && _rng < _paceFloor) {
         if (RANGE_GOVERNOR_ENFORCE) {
-          logEvent("filter", `[RANGE-GOVERNOR] ${stock.ticker} call BLOCKED — intraday range ${_rng}% < ${RANGE_GOVERNOR_FLOOR_PCT}% floor (${_sessMin.toFixed(0)}min in) — dead tape, no move to catch | score ${score}`);
+          logEvent("filter", `[RANGE-GOVERNOR] ${stock.ticker} call BLOCKED — range-so-far ${_rng}% < pace floor ${_paceFloor}% (${_sessMin.toFixed(0)}min in, full-day target ${RANGE_GOVERNOR_FLOOR_PCT}%) — off pace for a tradeable range | score ${score}`);
           continue;
         }
-        logEvent("filter", `[RANGE-GOVERNOR] ${stock.ticker} call would BLOCK — intraday range ${_rng}% < ${RANGE_GOVERNOR_FLOOR_PCT}% (${_sessMin.toFixed(0)}min) | score ${score} | SHADOW ONLY`);
+        logEvent("filter", `[RANGE-GOVERNOR] ${stock.ticker} call would BLOCK — range-so-far ${_rng}% < pace floor ${_paceFloor}% (${_sessMin.toFixed(0)}min, full-day target ${RANGE_GOVERNOR_FLOOR_PCT}%) | score ${score} | SHADOW ONLY`);
       }
     }
 
@@ -2788,7 +2831,7 @@ async function runScan() {
       }
       logEvent("filter", `${stock.ticker} execution: naked_${optionType} (MR:${isMeanReversion}) delta:${_contractDelta.toFixed(3)}`);
       const _sizeModNaked = sizeMod || 1.0;
-      if (stock._mrScalp) {
+      if (stock._mrScalp && optionType === "call") {   // 8/11 (fix #1): assert call-only at the order site (normalized above)
         // 8/09: MR-SCALP is a SINGLE low-vega leg (NOT the A/B/C twin-entry), half size. executeTrade
         // reads stock._mrScalp → forces 0-1 DTE + 0.42Δ and tags the position entryStrategy="mr-scalp".
         logEvent("filter", `[MR-SCALP] ${stock.ticker} entering single 0-1DTE leg @ ${MR_SCALP_SIZE_MOD}x size`);
