@@ -422,7 +422,17 @@ const CALL_MOMO_BREADTH_MIN = 10;       // breadth momentum rising, mirrors the 
 // requirement. The disciplined capitulation-bounce path is preserved as the call analog of the put's
 // overbought fade. Set false to revert instantly: dip bonuses return, the channel goes silent, the
 // standalone gate re-arms. The _buEpisode tracker in scanner.js runs regardless (observation is free).
-const CALL_BREAKOUT_MODE = true;
+const CALL_BREAKOUT_MODE = false;   // 8/11: REVERTED TO FALSE. Set true on 8/09; the Aug-5 diff shows this one flag
+                                    // inverted the entire call thesis at once: it (a) killed the RSI<=25/35/42 oversold
+                                    // rewards behind _mrBounceAllowed, (b) switched on the _buDeep/_buEarly/_buConfirmed
+                                    // breakout tiers (+21/+18/+12), (c) WAIVED the -15 overbought penalty whenever
+                                    // breakout structure was present, (d) zeroed the below-VWAP dip reward, (e) deleted
+                                    // the "extended above VWAP" chasing penalty, and (f) stood down the call momentum
+                                    // gate at scanner.js:2857. Live result on 8/11: calls bought SPY at RSI 80.2 and QQQ
+                                    // at RSI 77.8 — the +18 breakout reward and the waived -15 swung that SPY entry ~33
+                                    // points to a score of 86; under Aug-5 scoring it lands ~53, well under MIN_SCORE 70,
+                                    // and never fires. Buying extension is the wrong trade for a naked-long intraday book
+                                    // with a 3:15 flatten: index up-moves grind, down-moves are fast.
 
 // 8/05: OUTCOME-JOINED TABLE. Observation-only feedback-loop closure — on every FULL close, join
 // the entry decision-context (X) to the realized outcome (y: peak%/MAE%/rung-hits/minutes-held/
@@ -447,6 +457,20 @@ const RANGE_GOVERNOR_ENFORCE          = true;   // 8/10: LIVE. 8/05-8/10 every c
                                                 // tape. Set false to return to shadow.
 const RANGE_GOVERNOR_FLOOR_PCT        = 1.0;    // intraday range-so-far (% of session open) below which a call is "dead tape"
 const RANGE_GOVERNOR_MIN_SESSION_MIN  = 60;     // only judge after this many session minutes (range builds through the day)
+
+// ── 8/11: GENERALIZED FAST-CUT ──────────────────────────────────────────────────────
+// The 5-min/+3% fast-cut was built for MR-scalp and gated to it, so every other position fell
+// through to the 90-min progress check. Measured: winners reveal fast (peak ~+12% by ~15min),
+// losers stall under +3% within ~3min. On 8/11, 12 of 22 trades peaked at EXACTLY +0% and were
+// held ~20min to a time-cut. This is the one selector that sits on the right side of the
+// information boundary — it discriminates AFTER entry, where the 40-point win-rate spread lives.
+const FASTCUT_ENABLED        = true;
+const FASTCUT_MIN            = 6;      // minutes held before judging (scalp uses 5; slightly looser for the slow book)
+const FASTCUT_PEAK_SHORT     = 0.03;   // <=8 DTE: needs +3% peak, same bar as the scalp
+const FASTCUT_PEAK_MID       = 0.02;   // 9-21 DTE
+const FASTCUT_PEAK_LONG      = 0.012;  // >21 DTE: a 40-DTE leg CANNOT print +3% on a typical intraday move —
+                                       // a flat threshold would guillotine every standard leg at minute 6, so the
+                                       // bar is scaled to what that leg can physically reach.
 
 // ── 8/11: STRUCTURAL BREAK TRIGGER (entry mechanics v2) ──────────────────────────────
 // The entry score correlates -0.07..-0.19 with winning and 100+ pts of its range is frozen
@@ -487,7 +511,15 @@ const MR_SCALP_LIFTOFF_PTS      = 4;      // intraday RSI lifted >= this off ses
 const MR_SCALP_LOW_AGE_MIN_MIN  = 3;      // session low >= this many min old (not a NEW low right now — anti falling-knife)
 const MR_SCALP_LOW_AGE_MAX_MIN  = 25;     // and <= this (fresh flush; a stale low is a dead cat)
 const MR_SCALP_RANGE_MIN_PCT    = 0.6;    // intraday range-so-far >= this % (dead-day veto)
-const MR_SCALP_VIX_MIN          = 20;     // need volatility/range for an MR call to pay
+const MR_SCALP_VIX_MIN                = 17;    // 8/11: 20 -> 17. The scalp never armed: on 8/11 VIX ran 19.37-19.49 all
+                                               // session, so a 22-constant subsystem with its own fast-exit regime sat
+                                               // inert while the breakout path fired 22 trades. The scalp's edge lives in
+                                               // its ELEVEN other conditions (capitulation RSI, flush depth, VWAP
+                                               // extension, liftoff, low-age window, corroboration, no-knife, range,
+                                               // session-age, time cutoff, Regime A); the VIX floor was a coarse proxy for
+                                               // "enough vol to snap" that those conditions already establish directly.
+                                               // 17 keeps it out of genuinely dead-vol tape without blacking out the
+                                               // 17-20 band where this regime actually trades.
 const MR_SCALP_SESSION_MIN_MIN  = 30;     // VWAP unreliable before this many session minutes
 const MR_SCALP_CUTOFF_ET        = 14.5;   // no NEW mr-scalp entry after 2:30pm ET (needs ~14min to work + exit before 3:15 flatten)
 const MR_SCALP_MIN_SCORE        = 78;     // floor the setup clears (also clears slot-2's 75); the CONDITIONS are the edge, not the score
@@ -590,6 +622,7 @@ module.exports = {
   CALL_BREAKOUT_MODE, OUTCOME_TABLE_ENABLED,
   RANGE_GOVERNOR_ENABLED, RANGE_GOVERNOR_ENFORCE, RANGE_GOVERNOR_FLOOR_PCT, RANGE_GOVERNOR_MIN_SESSION_MIN,
   RANGE_GOVERNOR_FULL_SESSION_MIN,
+  FASTCUT_ENABLED, FASTCUT_MIN, FASTCUT_PEAK_SHORT, FASTCUT_PEAK_MID, FASTCUT_PEAK_LONG,
   BREAK_TRIGGER_ENABLED, BREAK_TRIGGER_ENFORCE, BREAK_TRIGGER_ALLOW_MRSCALP, BREAK_ENTRY_SCORE,
   BREAK_CONFIRM_BARS, BREAK_MAX_AGE_MIN, BREAK_VOL_LOOKBACK, BREAK_VOL_MULT_PUT, BREAK_VOL_MULT_CALL,
   BREAK_ADX_MIN_PUT, BREAK_ADX_MIN_CALL, BREAK_VWAP_SLOPE_MIN, BREAK_MAX_EXT_PCT,
