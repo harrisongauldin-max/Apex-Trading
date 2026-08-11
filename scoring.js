@@ -1149,6 +1149,14 @@ function scoreIndexSetup(stock, optionType, spyRSI, spyMACD, spyMomentum, breadt
     // capitulation (session-low RSI<=22 & RSI<=28), the call analog of the put's strict overbought
     // fade. Momentum-continuation calls score via the breakout channel above, not here. Flag off =
     // legacy behavior, byte-for-byte.
+    // 8/11: the multiday dip anchor, resolved ONCE. Both reader sites (the low-breadth dip bonus and
+    // _dipConfirmed) previously inlined `((agentMacro||{}).spyDayChange ?? 0) <= DIP_MAX_DAYCHANGE`,
+    // which coerced a MISSING value to 0 and passed the gate. null/undefined now means "unknown day
+    // change" and BLOCKS the dip bonus — a dip reward requires positively knowing SPY is flat or red.
+    const _dipDayChg    = (agentMacro || {}).spyDayChange;
+    const _dipAnchorOK  = !DIP_REQUIRES_MULTIDAY_ANCHOR
+      || (Number.isFinite(_dipDayChg) && _dipDayChg <= DIP_MAX_DAYCHANGE);
+
     const _mrBounceAllowed = !CALL_BREAKOUT_MODE || mrCapitulationActive;
     if (_mrBounceAllowed && spyRSI <= 25) {
       if (mrStabilized) { score += 26; reasons.push(`${stock.ticker} RSI bounced from session low ${sessionLowRSI.toFixed(0)} to ${spyRSI} - mean reversion confirmed (+26)`); }
@@ -1202,7 +1210,7 @@ function scoreIndexSetup(stock, optionType, spyRSI, spyMACD, spyMomentum, breadt
       : 50;
     if (bNorm >= 75 && breadth >= 60)      { score += 11; reasons.push(`Breadth ${breadth}% (${bNorm.toFixed(0)}th pctile) - strong relative to recent (+11)`); }
     else if (bNorm >= 60)                  { score += 7;  reasons.push(`Breadth ${breadth}% (${bNorm.toFixed(0)}th pctile) - recovering (+7)`); }
-    else if (!CALL_BREAKOUT_MODE && bNorm <= 30 && ["trending_bull","recovery"].includes(regime) && (!DIP_REQUIRES_MULTIDAY_ANCHOR || ((agentMacro||{}).spyDayChange ?? 0) <= DIP_MAX_DAYCHANGE)) {
+    else if (!CALL_BREAKOUT_MODE && bNorm <= 30 && ["trending_bull","recovery"].includes(regime) && _dipAnchorOK) {
       // 8/05: this "low breadth = ideal dip" reward is anti-momentum — suppressed under
       // CALL_BREAKOUT_MODE (a breakout call wants breadth EXPANDING, credited above, not low).
       score += 13; reasons.push(`Breadth ${breadth}% (${bNorm.toFixed(0)}th pctile) - low relative to recent in bull regime - ideal dip entry (+13)`);
@@ -1263,7 +1271,7 @@ function scoreIndexSetup(stock, optionType, spyRSI, spyMACD, spyMomentum, breadt
     const agentAlreadyBullish = ["strongly bullish","bullish","mild bullish"].includes(signal);
     if (entryBias === "calls_on_dips") {
       const _aboveVWAPNow = (stock.intradayVWAP || 0) > 0 && (stock.lastPrice || stock.price || 0) >= stock.intradayVWAP * 0.995;
-      const _dipConfirmed = _aboveVWAPNow && (spyMomentum === "recovering" || spyRSI <= 45) && (!DIP_REQUIRES_MULTIDAY_ANCHOR || ((agentMacro||{}).spyDayChange ?? 0) <= DIP_MAX_DAYCHANGE);
+      const _dipConfirmed = _aboveVWAPNow && (spyMomentum === "recovering" || spyRSI <= 45) && _dipAnchorOK;
       if (_dipConfirmed) {
         const biasBonus = agentAlreadyBullish ? 6 : 12;
         score += biasBonus; reasons.push(`Entry bias: calls on dips - dip confirmed near VWAP (+${biasBonus})`);
