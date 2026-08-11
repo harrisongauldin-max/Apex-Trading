@@ -47,6 +47,8 @@ const {
   LIVE_WIDE_SPREAD_PCT, LEG_STOP_PCT,
   MR_SCALP_FASTCUT_MIN = 5, MR_SCALP_FASTCUT_PEAK = 0.03, MR_SCALP_GIVEBACK_PEAK = 0.08, MR_SCALP_GIVEBACK_FRAC = 0.5,
   MR_SCALP_TRAIL_ARM = 0.10, MR_SCALP_TRAIL_GIVE = 0.04, MR_SCALP_TP = 0.20,
+  FASTCUT_ENABLED = false, FASTCUT_MIN = 6, FASTCUT_PEAK_SHORT = 0.03, FASTCUT_PEAK_MID = 0.02,
+  FASTCUT_PEAK_LONG = 0.012,
 } = require('./constants');
 
 
@@ -302,6 +304,32 @@ async function checkExits(positions, posSnapshots, posQuotes, posNewsCache, ctx)
         _closedThisCycle.add(pi);
         decisions.push({ pi, ticker: pos.ticker, action: 'close', reason: _msReason, exitPremium: null, contractSym: pos.contractSymbol || null });
         continue;
+      }
+    }
+
+    // ── 8/11: GENERALIZED FAST-CUT ───────────────────────────────────────────────
+    // Runs for every NON-scalp position. NOTE: the scalp block above only `continue`s when it
+    // actually fires an exit, so a live scalp DOES fall through to here — the !pos._mrScalp
+    // guard below is load-bearing, not belt-and-braces. Threshold scales with DTE
+    // because a 40-DTE leg cannot print +3% on the same underlying move that moves a 1-DTE leg
+    // 60%+ — judging both against one bar would just close every standard leg on schedule.
+    // Deliberately placed BEFORE the trail/progress-check/time-cut so it gets first say on the
+    // trades those rails would otherwise hold ~20 more minutes.
+    if (FASTCUT_ENABLED && !pos._mrScalp && !pos._fastCutFired) {
+      const _fcHeld = (Date.now() - new Date(pos.openDate || pos.entryTime || Date.now()).getTime()) / 60000;
+      if (_fcHeld >= FASTCUT_MIN) {
+        const _fcDTE  = pos.expiryDays ?? pos.expDays ?? 30;
+        const _fcBar  = _fcDTE <= 8 ? FASTCUT_PEAK_SHORT : _fcDTE <= 21 ? FASTCUT_PEAK_MID : FASTCUT_PEAK_LONG;
+        const _fcPeak = pos.premium > 0 ? ((pos.peakPremium || pos.premium) - pos.premium) / pos.premium : 0;
+        if (_fcPeak < _fcBar) {
+          pos._fastCutFired = true;
+          if (!_closedThisCycle.has(pi)) {
+            _closedThisCycle.add(pi);
+            logEvent("scan", `[FAST-CUT] ${pos.ticker} ${_fcHeld.toFixed(0)}min held, peak +${(_fcPeak*100).toFixed(1)}% < ${(_fcBar*100).toFixed(1)}% bar (${_fcDTE}DTE) — not moving, cutting before it bleeds`);
+            decisions.push({ pi, ticker: pos.ticker, action: 'close', reason: 'fast-cut', exitPremium: null, contractSym: pos.contractSymbol || null });
+            continue;
+          }
+        }
       }
     }
 
