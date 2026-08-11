@@ -441,7 +441,10 @@ const OUTCOME_TABLE_ENABLED = true;
 // blocks nothing; the range is recorded on every outcome row (eRangePct) so the floor is set from
 // data, not guessed. Flip ENFORCE=true once a few sessions of [RANGE-GOVERNOR] lines confirm it.
 const RANGE_GOVERNOR_ENABLED          = true;   // compute + record + shadow-log
-const RANGE_GOVERNOR_ENFORCE          = false;  // false = shadow only (block nothing yet)
+const RANGE_GOVERNOR_ENFORCE          = true;   // 8/10: LIVE. 8/05-8/10 every compressed-range tape lost and
+                                                // APEX kept firing into it (8/10: 0.25% range, 6 calls, -$66;
+                                                // enforcing would have made it $0). Now BLOCKS calls on dead
+                                                // tape. Set false to return to shadow.
 const RANGE_GOVERNOR_FLOOR_PCT        = 1.0;    // intraday range-so-far (% of session open) below which a call is "dead tape"
 const RANGE_GOVERNOR_MIN_SESSION_MIN  = 60;     // only judge after this many session minutes (range builds through the day)
 
