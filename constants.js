@@ -445,13 +445,30 @@ const RANGE_GOVERNOR_ENFORCE          = true;   // 8/10: LIVE. 8/05-8/10 every c
                                                 // APEX kept firing into it (8/10: 0.25% range, 6 calls, -$66;
                                                 // enforcing would have made it $0). Now BLOCKS calls on dead
                                                 // tape. Set false to return to shadow.
-const RANGE_GOVERNOR_FLOOR_PCT        = 1.0;    // FULL-DAY intraday range target (% of session open) below which a day is "dead tape"
+const RANGE_GOVERNOR_FLOOR_PCT        = 1.0;    // intraday range-so-far (% of session open) below which a call is "dead tape"
 const RANGE_GOVERNOR_MIN_SESSION_MIN  = 60;     // only judge after this many session minutes (range builds through the day)
-// 8/11: the FLOOR is a full-DAY number (0.5% dead vs 1.6-3.6% green were whole-session ranges), but it is
-// evaluated against range-SO-FAR mid-session. Comparing a 60-min-in range to a full-day floor over-blocks.
-// The governor now pro-rates the floor by sqrt(elapsed session fraction) — realized range scales ~√time —
-// so it asks "is today on PACE to be at least a FLOOR_PCT-range day?" One coherent rule across the session.
-const RANGE_GOVERNOR_FULL_SESSION_MIN = 390;    // regular cash session length (9:30-16:00 ET) — the √time denominator
+
+// ── 8/11: STRUCTURAL BREAK TRIGGER (entry mechanics v2) ──────────────────────────────
+// The entry score correlates -0.07..-0.19 with winning and 100+ pts of its range is frozen
+// daily weather, so it cannot separate trade from trade. The trigger replaces the "which side"
+// and "is there a trade" decisions with an OBSERVED EVENT rather than a prediction.
+const BREAK_TRIGGER_ENABLED       = true;    // compute + log the signal every scan
+const BREAK_TRIGGER_ENFORCE       = false;   // when true the trigger SETS the side and GATES entry
+const BREAK_TRIGGER_ALLOW_MRSCALP = true;    // MR-scalp is its own scoreless channel — let it arm under enforce
+const BREAK_ENTRY_SCORE           = 80;      // fixed stamp a break entry carries; clears MIN_SCORE(70)+slot2(75), NOT slot3(85). NOT a quality measure.
+const BREAK_CONFIRM_BARS          = 1;       // bars after the break bar that must not reclaim the level
+const BREAK_MAX_AGE_MIN           = 10;      // signal is stale after this many minutes
+const BREAK_VOL_LOOKBACK          = 10;      // bars in the trailing volume average
+const BREAK_VOL_MULT_PUT          = 1.8;     // break-bar volume vs trailing average
+const BREAK_VOL_MULT_CALL         = 2.2;     // calls stricter — up-moves grind, they need more force
+const BREAK_ADX_MIN_PUT           = 18;
+const BREAK_ADX_MIN_CALL          = 22;
+const BREAK_VWAP_SLOPE_MIN        = 0.0002;  // |VWAP slope| required in the break direction
+const BREAK_MAX_EXT_PCT           = 0.006;   // do not chase: max distance past the level at signal time
+const BREAK_CALL_CUTOFF_ET        = 12.0;    // breakout calls are morning-only
+const BREAK_MIN_SESSION_MIN       = 16;      // _openRange locks at 15 session minutes
+
+const RANGE_GOVERNOR_FULL_SESSION_MIN = 390;    // 8/11: full RTH session length in minutes (9:30-4:00 ET) — denominator for the sqrt(elapsed) pro-rating of the floor
 
 // 8/09: MR-SCALP CALL — a disciplined mean-reversion CALL scalp that runs LIVE alongside breakout
 // calls, tagged entryStrategy="mr-scalp". Thesis (options-MR expert spec): the ONLY fast up-move on
@@ -571,7 +588,12 @@ module.exports = {
   MOMO_SHADOW_MINS, MOMO_SHADOW_MAX, AGENT_ENABLED,
   CALL_MOMO_SLOPE_MIN, CALL_MOMO_VOLPACE_MIN, CALL_MOMO_BREADTH_MIN,
   CALL_BREAKOUT_MODE, OUTCOME_TABLE_ENABLED,
-  RANGE_GOVERNOR_ENABLED, RANGE_GOVERNOR_ENFORCE, RANGE_GOVERNOR_FLOOR_PCT, RANGE_GOVERNOR_MIN_SESSION_MIN, RANGE_GOVERNOR_FULL_SESSION_MIN,
+  RANGE_GOVERNOR_ENABLED, RANGE_GOVERNOR_ENFORCE, RANGE_GOVERNOR_FLOOR_PCT, RANGE_GOVERNOR_MIN_SESSION_MIN,
+  RANGE_GOVERNOR_FULL_SESSION_MIN,
+  BREAK_TRIGGER_ENABLED, BREAK_TRIGGER_ENFORCE, BREAK_TRIGGER_ALLOW_MRSCALP, BREAK_ENTRY_SCORE,
+  BREAK_CONFIRM_BARS, BREAK_MAX_AGE_MIN, BREAK_VOL_LOOKBACK, BREAK_VOL_MULT_PUT, BREAK_VOL_MULT_CALL,
+  BREAK_ADX_MIN_PUT, BREAK_ADX_MIN_CALL, BREAK_VWAP_SLOPE_MIN, BREAK_MAX_EXT_PCT,
+  BREAK_CALL_CUTOFF_ET, BREAK_MIN_SESSION_MIN,
   MR_SCALP_ENABLED, MR_SCALP_SESSLOW_RSI_MAX, MR_SCALP_FLUSH_DD_MIN, MR_SCALP_VWAP_EXT_MIN,
   MR_SCALP_LIFTOFF_PTS, MR_SCALP_LOW_AGE_MIN_MIN, MR_SCALP_LOW_AGE_MAX_MIN, MR_SCALP_RANGE_MIN_PCT,
   MR_SCALP_VIX_MIN, MR_SCALP_SESSION_MIN_MIN, MR_SCALP_CUTOFF_ET, MR_SCALP_MIN_SCORE,
