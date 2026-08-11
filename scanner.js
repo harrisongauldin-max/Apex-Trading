@@ -94,7 +94,13 @@ const {
   CALL_MOMO_SLOPE_MIN, CALL_MOMO_VOLPACE_MIN, CALL_MOMO_BREADTH_MIN,
   MOMO_SHADOW_MINS, MOMO_SHADOW_MAX,
   CALL_BREAKOUT_MODE = false,   // 8/05: when true, scoring enforces call momentum → the standalone gate below stands down
-  RANGE_GOVERNOR_ENABLED = false, RANGE_GOVERNOR_ENFORCE = false, RANGE_GOVERNOR_FLOOR_PCT = 1.0, RANGE_GOVERNOR_MIN_SESSION_MIN = 60, RANGE_GOVERNOR_FULL_SESSION_MIN = 390,
+  RANGE_GOVERNOR_ENABLED = false, RANGE_GOVERNOR_ENFORCE = false, RANGE_GOVERNOR_FLOOR_PCT = 1.0, RANGE_GOVERNOR_MIN_SESSION_MIN = 60,
+  RANGE_GOVERNOR_FULL_SESSION_MIN = 390,
+  BREAK_TRIGGER_ENABLED = false, BREAK_TRIGGER_ENFORCE = false, BREAK_TRIGGER_ALLOW_MRSCALP = true,
+  BREAK_ENTRY_SCORE = 80, BREAK_CONFIRM_BARS = 1, BREAK_MAX_AGE_MIN = 10, BREAK_VOL_LOOKBACK = 10,
+  BREAK_VOL_MULT_PUT = 1.8, BREAK_VOL_MULT_CALL = 2.2, BREAK_ADX_MIN_PUT = 18, BREAK_ADX_MIN_CALL = 22,
+  BREAK_VWAP_SLOPE_MIN = 0.0002, BREAK_MAX_EXT_PCT = 0.006, BREAK_CALL_CUTOFF_ET = 12.0,
+  BREAK_MIN_SESSION_MIN = 16,
   MR_SCALP_ENABLED = false, MR_SCALP_SESSLOW_RSI_MAX = 32, MR_SCALP_FLUSH_DD_MIN = 0.007, MR_SCALP_VWAP_EXT_MIN = 0.005,
   MR_SCALP_LIFTOFF_PTS = 4, MR_SCALP_LOW_AGE_MIN_MIN = 3, MR_SCALP_LOW_AGE_MAX_MIN = 25, MR_SCALP_RANGE_MIN_PCT = 0.6,
   MR_SCALP_VIX_MIN = 20, MR_SCALP_SESSION_MIN_MIN = 30, MR_SCALP_CUTOFF_ET = 14.5, MR_SCALP_MIN_SCORE = 78, MR_SCALP_SIZE_MOD = 0.5,
@@ -132,6 +138,90 @@ let marketContext = {
   globalMarket:      { signal: "neutral", modifier: 0, qqqChg: 0, iwmChg: 0, eemChg: 0 },
   streaks:           { currentStreak: 0, currentType: null, maxWinStreak: 0, maxLossStreak: 0 },
 };
+
+
+// ── 8/11: STRUCTURAL BREAK DETECTOR ─────────────────────────────────────────────────
+// Entry mechanics v2. Answers "did something actually happen" instead of "is this a good
+// setup". Every term is an OBSERVED event, nothing here forecasts. A break counts only if a
+// 1-min bar CLOSED through the opening-range level (not touched it), on expanded break-bar
+// volume, with VWAP agreeing, enough trend strength, price not already chased, and the next
+// bar did not reclaim the level. Breakdown -> put. Breakout -> call, stricter and morning-only,
+// because index up-moves grind while down-moves are fast.
+// Fails CLOSED on every bad input: a null/short/foreign-day bar array, a missing or unlocked
+// opening range, NaN adx/slope, or a zero price all return {side:null} with a stated reason.
+function detectStructuralBreak(ctx) {
+  const out = { side: null, level: null, ageMin: null, volMult: null, extPct: null, blocked: null, why: null };
+  try {
+    const { intradayBars, or, vwapSlope, adx, price, etHour, sessionMin, todayStr, nowMs } = ctx || {};
+    const _now = nowMs || Date.now();
+
+    if (!or || !or.locked)                      { out.blocked = "OR not locked"; return out; }
+    if (!(sessionMin >= BREAK_MIN_SESSION_MIN)) { out.blocked = `session ${Math.round(sessionMin || 0)}m < ${BREAK_MIN_SESSION_MIN}m`; return out; }
+    if (!(price > 0))                           { out.blocked = "no price"; return out; }
+    if (!(or.low > 0) || !(or.high > 0))        { out.blocked = "OR levels invalid"; return out; }
+
+    const bars = Array.isArray(intradayBars)
+      ? intradayBars.filter(b => String(b.t || b.timestamp || "").startsWith(todayStr))
+      : [];
+    const need = BREAK_VOL_LOOKBACK + BREAK_CONFIRM_BARS + 2;
+    if (bars.length < need) { out.blocked = `${bars.length} bars < ${need} needed`; return out; }
+
+    // most recent bar that CLOSED through a level, leaving room for the confirm bar(s) behind it
+    const last = bars.length - 1;
+    let bi = -1, side = null, level = null;
+    for (let i = last - BREAK_CONFIRM_BARS; i >= BREAK_VOL_LOOKBACK; i--) {
+      const c = bars[i].c, pc = bars[i - 1].c;
+      if (!(c > 0) || !(pc > 0)) continue;
+      if (c < or.low  && pc >= or.low)  { bi = i; side = "put";  level = or.low;  break; }
+      if (c > or.high && pc <= or.high) { bi = i; side = "call"; level = or.high; break; }
+    }
+    if (bi < 0) { out.blocked = "no fresh level break"; return out; }
+
+    const bBar = bars[bi];
+    const bT = new Date(bBar.t || bBar.timestamp || _now).getTime();
+    const ageMin = Number.isFinite(bT) ? (_now - bT) / 60000 : 999;
+    if (!(ageMin <= BREAK_MAX_AGE_MIN)) { out.blocked = `break ${ageMin.toFixed(0)}m old > ${BREAK_MAX_AGE_MIN}m`; return out; }
+
+    for (let j = bi + 1; j <= Math.min(last, bi + BREAK_CONFIRM_BARS); j++) {
+      const cj = bars[j].c;
+      if (!(cj > 0)) continue;
+      if (side === "put"  && cj >= level) { out.blocked = "level reclaimed on confirm bar"; return out; }
+      if (side === "call" && cj <= level) { out.blocked = "level reclaimed on confirm bar"; return out; }
+    }
+
+    // break-bar force. NOTE: signals.volPaceRatio is SESSION-CUMULATIVE and cannot express a
+    // single-bar expansion, so this is computed from the bars directly.
+    let vs = 0, vn = 0;
+    for (let k = bi - BREAK_VOL_LOOKBACK; k < bi; k++) {
+      const v = bars[k].v;
+      if (v > 0) { vs += v; vn++; }
+    }
+    const avgV   = vn > 0 ? vs / vn : 0;
+    const volMult = avgV > 0 ? (bBar.v || 0) / avgV : 0;
+    const needVol = side === "put" ? BREAK_VOL_MULT_PUT : BREAK_VOL_MULT_CALL;
+    if (!(volMult >= needVol)) { out.blocked = `break-bar vol ${volMult.toFixed(2)}x < ${needVol}x`; return out; }
+
+    const sl = Number.isFinite(vwapSlope) ? vwapSlope : 0;
+    if (side === "put"  && !(sl <= -BREAK_VWAP_SLOPE_MIN)) { out.blocked = `vwap slope ${sl.toFixed(5)} not falling`; return out; }
+    if (side === "call" && !(sl >=  BREAK_VWAP_SLOPE_MIN)) { out.blocked = `vwap slope ${sl.toFixed(5)} not rising`; return out; }
+
+    const a = Number.isFinite(adx) ? adx : 0;
+    const needAdx = side === "put" ? BREAK_ADX_MIN_PUT : BREAK_ADX_MIN_CALL;
+    if (!(a >= needAdx)) { out.blocked = `adx ${a.toFixed(0)} < ${needAdx}`; return out; }
+
+    const extPct = Math.abs(price - level) / level;
+    if (!(extPct <= BREAK_MAX_EXT_PCT)) { out.blocked = `extended ${(extPct * 100).toFixed(2)}% past level > ${(BREAK_MAX_EXT_PCT * 100).toFixed(2)}%`; return out; }
+
+    if (side === "call" && !(etHour < BREAK_CALL_CUTOFF_ET)) { out.blocked = `breakout call after ${BREAK_CALL_CUTOFF_ET}h ET`; return out; }
+
+    out.side = side; out.level = level; out.ageMin = ageMin; out.volMult = volMult; out.extPct = extPct;
+    out.why = `${side === "put" ? "breakdown" : "breakout"} ${level.toFixed(2)} | ${ageMin.toFixed(0)}m old | vol ${volMult.toFixed(2)}x | adx ${a.toFixed(0)} | ext ${(extPct * 100).toFixed(2)}%`;
+    return out;
+  } catch (e) {
+    out.blocked = `detector error: ${e.message}`;
+    return out;
+  }
+}
 
 
 async function runScan() {
@@ -851,18 +941,18 @@ async function runScan() {
   const _defAgentAge   = state._agentMacro?.timestamp
     ? (Date.now() - new Date(state._agentMacro.timestamp).getTime()) / 60000 : 999;
   const _defAgentFresh = _defAgentAge < 120;
-  // 8/11 (fix #2): the macro-agent authority (macro.mode + its freshness stamp) is DEAD while
-  // AGENT_ENABLED=false — _defAgentFresh can never be true, so the old definition pinned
-  // effectiveDefensive to false forever, silently disabling the "defensive tape → suppress
-  // non-MR calls" rail (D4 below at ~2218/2315). Source it from the SINGLE live macro authority
-  // instead: when the agent is fresh, trust its mode; otherwise trust the regime class, which
-  // updateRegimeState computes every scan from SPY-vs-200MA + sustained VIX with no LLM. Regime
-  // B/C == defensive (the house convention: agentAlignsBear / inBearForVol both key off ["B","C"]).
-  // In regime A (the common tape, where breakout calls operate) this stays false, so nothing about
-  // normal-day call behavior changes — only genuinely bearish tapes now re-suppress weak calls.
+  // 8/11 FIX 2: effectiveDefensive REVIVED FROM LIVE REGIME. This was `mode === "defensive" && _defAgentFresh`.
+  // With AGENT_ENABLED=false the agent never stamps state._agentMacro, so _defAgentAge stayed 999 and
+  // _defAgentFresh was permanently FALSE — which silently disabled the entire "defensive tape → suppress
+  // weak calls" rail (the D4 callScore=0 at ~2218 and the two gates at ~2315/2319 could never fire).
+  // Now: trust the agent's mode WHEN it is fresh, else fall back to the live regime class (B/C = defensive).
+  // updateRegimeState() is called every scan from runScan and is NOT gated by AGENT_ENABLED, so
+  // _regimeClass is always current. Regime A (the common tape) resolves to false exactly as before —
+  // this only restores the rail on genuinely hostile tapes.
+  const _defRegimeClass    = state._regimeClass || "A";
   const effectiveDefensive = _defAgentFresh
-    ? ((marketContext.macro || {}).mode === "defensive")
-    : ["B", "C"].includes(state._regimeClass || "A");
+    ? (marketContext.macro || {}).mode === "defensive"
+    : (_defRegimeClass === "B" || _defRegimeClass === "C");
   const putsMacroAllowed  = ["bearish", "strongly bearish", "mild bearish", "neutral"].includes(agentMacroSignal);
   const agentHasRun       = !!state._agentMacro;
   const macroClearForPuts = !agentHasRun || putsMacroAllowed;
@@ -2228,6 +2318,55 @@ async function runScan() {
 
     if (effectiveDefensive && !callSetup._mrStrong) callScore = 0;   // D4: only strict/deep MR survives defensive
 
+    // ── 8/11: STRUCTURAL BREAK TRIGGER ───────────────────────────────────────────────
+    // Runs BEFORE the MR-scalp detector so the scalp (its own scoreless channel) can still
+    // override under enforce. SHADOW until BREAK_TRIGGER_ENFORCE: computes, logs, and tags
+    // liveStock every scan so the signal is validated against real outcomes before it gates
+    // a single dollar.
+    let _brk = { side: null, ageMin: null, volMult: null, blocked: "trigger disabled", why: null };
+    if (BREAK_TRIGGER_ENABLED) {
+      _brk = detectStructuralBreak({
+        intradayBars,
+        or:         state._openRange ? state._openRange[stock.ticker] : null,
+        vwapSlope:  state._vwapSlope ? state._vwapSlope[stock.ticker] : 0,
+        adx:        signals.adx,
+        price,
+        etHour:     scanET.getHours() + scanET.getMinutes() / 60,
+        sessionMin: state._sessionMinsNow ?? 0,
+        todayStr:   new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' }),
+        nowMs:      Date.now(),
+      });
+      liveStock._breakSide    = _brk.side;
+      liveStock._breakAgeMin  = _brk.ageMin;
+      liveStock._breakVolMult = _brk.volMult;
+      liveStock._breakBlocked = _brk.blocked;
+      if (_brk.side) {
+        logEvent("filter", `[BREAK] ${stock.ticker} ${_brk.side.toUpperCase()} — ${_brk.why}${BREAK_TRIGGER_ENFORCE ? "" : " | SHADOW ONLY"}`);
+      } else {
+        // No-signal is the COMMON case — it fires for every ticker on every scan (~6/min each).
+        // Logging it unconditionally buries the shadow evidence under ~700 identical lines/hour,
+        // so speak only when the blocking reason CHANGES. That turns the log into a transition
+        // trace ("no fresh level break" -> "break-bar vol 1.2x < 1.8x") which is what is
+        // actually diagnostic when tuning the thresholds.
+        if (!state._breakLastBlocked) state._breakLastBlocked = {};
+        if (state._breakLastBlocked[stock.ticker] !== _brk.blocked) {
+          state._breakLastBlocked[stock.ticker] = _brk.blocked;
+          logEvent("scan", `[BREAK] ${stock.ticker} no signal — ${_brk.blocked}`);
+        }
+      }
+    }
+
+    if (BREAK_TRIGGER_ENFORCE) {
+      // The trigger is authoritative: it picks the side AND decides whether a trade exists.
+      // Driven through the two scores rather than rewiring every downstream score reader — the
+      // score becomes a CARRIER, not a decider. BREAK_ENTRY_SCORE is a fixed stamp, not a quality
+      // measure. Excising the score from sizing (convictionMult) and the slot gates is a separate
+      // pass; until then a break entry is sized by a constant, which is the intended flat sizing.
+      if (_brk.side === "put")       { callScore = 0; putScore  = Math.max(putScore,  BREAK_ENTRY_SCORE); }
+      else if (_brk.side === "call") { putScore  = 0; callScore = Math.max(callScore, BREAK_ENTRY_SCORE); }
+      else                           { putScore  = 0; callScore = 0; }
+    }
+
     // ── 8/09: MR-SCALP DETECTOR — a disciplined capitulation-snap CALL that runs LIVE alongside
     // breakout calls, tagged mr-scalp. Placed right before direction selection so it survives the
     // context-call penalties (IVP/momentum/gap) it is DESIGNED to counter — but it still requires
@@ -2235,11 +2374,11 @@ async function runScan() {
     // safety/cap/cooldown gate. The strict conditions ARE the edge (score is a weak ranker), so on a
     // pass we floor the call score + label it; execution buys the low-vega 0-1DTE/0.42Δ leg at half
     // size, exitEngine runs the fast scalp exits. All thresholds in constants.js (MR_SCALP_*).
-    // 8/11 (fix #5): MR-scalp breathes ONE macro oxygen — the regime class — checked inside _msPass
-    // below (regime A). The old `!effectiveDefensive` outer gate is dropped: it was a second,
-    // agent-derived macro filter layered on top of the regime + 200MA checks, and (since the agent
-    // is off) it was inert anyway. Regime A already means "not defensive," so this is not a loosening.
-    if (MR_SCALP_ENABLED && (liveStock.isIndex || stock.isIndex) && callsAllowed) {
+    // 8/11 FIX 5: macro backdrop collapsed to ONE signal (Regime A, tested inside _msPass). The old
+    // arming gate stacked !effectiveDefensive here on top of !_msSpyBelow200 && !_msRegimeC below —
+    // three overlapping proxies for the same "is the tape hostile" question, one of which was dead.
+    if (MR_SCALP_ENABLED && (liveStock.isIndex || stock.isIndex) && callsAllowed
+        && (!BREAK_TRIGGER_ENFORCE || BREAK_TRIGGER_ALLOW_MRSCALP)) {
       try {
         const _msVwap  = liveStock.intradayVWAP || 0;
         const _msRsi   = signals.rsi;
@@ -2261,13 +2400,7 @@ async function runScan() {
         const _msRange    = (typeof liveStock._intraRangePct === "number") ? liveStock._intraRangePct : 0;
         const _msSessMin  = state._sessionMinsNow ?? 0;
         const _msEtHour   = scanET.getHours() + scanET.getMinutes() / 60;
-        // 8/11 (fix #5): ONE macro-backdrop signal. Regime A ≡ SPY above its 200MA AND 5-day-SUSTAINED
-        // VIX < 20 (see updateRegimeState). That subsumes the old separate `!spyBelow200` filter and is
-        // stricter than the old `!regimeC`, collapsing three overlapping macro tests into one coherent
-        // authority. Critically this is NOT a contradiction with MR_SCALP_VIX_MIN: that gate checks SPOT
-        // VIX, while regime A keys off the 5-DAY MEAN — so a sharp one-day flush that pops spot VIX ≥ 20
-        // inside an otherwise-calm uptrend (exactly the MR-scalp target) still reads as regime A.
-        const _msRegimeA  = (state._regimeClass || "A") === "A";
+        const _msRegimeA  = (state._regimeClass || "A") === "A";   // 8/11 FIX 5: the single macro backdrop signal
 
         const _msPass =
              (_msSessLow != null && _msSessLow <= MR_SCALP_SESSLOW_RSI_MAX)                          // capitulation printed
@@ -2281,7 +2414,7 @@ async function runScan() {
           && ((state.vix || 0) >= MR_SCALP_VIX_MIN)                                                   // enough vol
           && (_msSessMin >= MR_SCALP_SESSION_MIN_MIN)                                                 // VWAP reliable
           && (_msEtHour < MR_SCALP_CUTOFF_ET)                                                         // before 2:30pm ET
-          && _msRegimeA;                                                                              // intact macro backdrop (single authority)
+          && _msRegimeA;                                                                              // 8/11 FIX 5: macro not hostile — ONE signal. Regime A uses 5-day SUSTAINED VIX, so it stays true through a spot VIX>=20 flush, which is exactly the window this scalp targets.
 
         if (_msPass) {
           liveStock._mrScalp     = true;
@@ -2562,17 +2695,16 @@ async function runScan() {
     if (heatPct() >= effectiveHeatCap()) break;
     if (state.cash <= CAPITAL_FLOOR) break;
 
-    // 8/11 (fix #1): MR-scalp is a CALL-ONLY strategy. The detector floors callScore to ≥78 and
-    // arms stock._mrScalp, but final direction is still putScore-vs-callScore — so on a scan where
-    // the put side scored higher this candidate resolves to a PUT while still carrying the scalp
-    // flag. Left unchecked, the execution branch below (and execution.js's DTE/delta/tag routing)
-    // would buy a CALL on a scan the model chose a PUT — the losing side, on exactly the breakdown
-    // tapes where puts score high. Revoke the arming HERE, once, so `_mrScalp === true` means one
-    // unambiguous thing everywhere downstream: "this is a call MR-scalp."
+    // 8/11 FIX 1: MR-SCALP IS CALL-ONLY — revoked ONCE, here, before anything downstream reads the flag.
+    // The detector arms liveStock._mrScalp during SCORING, i.e. before direction is resolved (and before
+    // entryEngine gets its say and can flip the side). If the candidate came back as a put, the stale flag
+    // still routed execution down the scalp path at ~2791: a single 0-1 DTE / 0.42-delta / half-size leg
+    // tagged entryStrategy="mr-scalp" — a call setup's contract spec and exit schedule applied to a PUT,
+    // which then gets managed by the scalp exits in exitEngine. Revoking here means `_mrScalp === true`
+    // means exactly one thing everywhere downstream: a live CALL scalp.
     if (stock._mrScalp && optionType !== "call") {
-      logEvent("filter", `[MR-SCALP] ${stock.ticker} armed but direction resolved to ${optionType} — MR-scalp is call-only, standing down (put side scored higher)`);
-      stock._mrScalp     = false;
-      stock._mrEntryVWAP = null;
+      stock._mrScalp = false;
+      logEvent("filter", `[MR-SCALP] ${stock.ticker} scalp flag REVOKED — candidate resolved to ${optionType}; the scalp is call-only`);
     }
 
     const { pass, reason } = await checkAllFilters(stock, price, null);
@@ -2759,25 +2891,29 @@ async function runScan() {
     // <1% tape has none. This throttles calls when the range-so-far is compressed, but only after
     // the range has had time to develop. SHADOW until RANGE_GOVERNOR_ENFORCE — it records eRangePct
     // on every outcome row so the floor is validated from data before it blocks anything.
-    // 8/11 (fix #3): MR-scalp is EXEMPT — it carries its own range oxygen (MR_SCALP_RANGE_MIN_PCT)
-    // and only fires on a capitulation flush, which by definition has range. The governor exists to
-    // stop the OTHER call channels from machine-gunning a dead tape; letting it also veto the scalp
-    // meant two range floors (0.6% vs the governor's) fighting over the same trade. One floor per path.
+    // 8/11 FIX 3: MR-SCALP IS EXEMPT. The scalp carries its own range gate (MR_SCALP_RANGE_MIN_PCT = 0.6%)
+    // and the two rails were fighting: the governor's flat 1.0% floor blocked scalps that the scalp's own
+    // gate had already cleared, so the one disciplined call channel could never fire on a 0.6-1.0% tape.
+    // Safe because FIX 1 above revoked _mrScalp on every non-call candidate — reaching here with the flag
+    // set means a genuine call scalp that already passed a stricter, purpose-built range test.
+    // 8/11 FIX 4: THE FLOOR IS NOW SESSION-SCALED. 1.0% is a FULL-DAY target but was compared against
+    // range-SO-FAR, so at 10:30am it demanded a whole day's range from one hour of tape and over-blocked
+    // perfectly normal mornings. Now pro-rated by sqrt(elapsed session fraction) — sqrt, not linear,
+    // because realized range grows ~with the square root of time. ~0.39% at 60min, ~0.62% at 2.5h, 1.0%
+    // at the close. The 8/10 0.25% dead tape still fails at every hour of the day; a normal 0.5%-by-11am
+    // morning now passes instead of being blocked on a target it could not yet have met.
     if (optionType === "call" && RANGE_GOVERNOR_ENABLED && !stock._mrScalp) {
       const _rng     = stock._intraRangePct;
       const _sessMin = state._sessionMinsNow ?? 0;
-      // 8/11 (fix #4): FLOOR_PCT is a full-DAY target, but _rng is range-SO-FAR. Pro-rate the floor by
-      // √(elapsed session fraction) — realized range scales ~√time — so the test becomes "is today on
-      // PACE to be at least a FLOOR_PCT-range day?" instead of comparing a mid-session partial range
-      // against a whole-day number (which blocks normal mornings that would develop range by the close).
-      const _sessFrac  = Math.max(0, Math.min(1, _sessMin / RANGE_GOVERNOR_FULL_SESSION_MIN));
-      const _paceFloor = parseFloat((RANGE_GOVERNOR_FLOOR_PCT * Math.sqrt(_sessFrac)).toFixed(3));
-      if (_rng != null && _sessMin >= RANGE_GOVERNOR_MIN_SESSION_MIN && _rng < _paceFloor) {
+      const _rgFullMin   = RANGE_GOVERNOR_FULL_SESSION_MIN > 0 ? RANGE_GOVERNOR_FULL_SESSION_MIN : 390;
+      const _rgSessFrac  = Math.min(1, Math.max(0, _sessMin / _rgFullMin));
+      const _rgFloor     = RANGE_GOVERNOR_FLOOR_PCT * Math.sqrt(_rgSessFrac);
+      if (_rng != null && _sessMin >= RANGE_GOVERNOR_MIN_SESSION_MIN && _rng < _rgFloor) {
         if (RANGE_GOVERNOR_ENFORCE) {
-          logEvent("filter", `[RANGE-GOVERNOR] ${stock.ticker} call BLOCKED — range-so-far ${_rng}% < pace floor ${_paceFloor}% (${_sessMin.toFixed(0)}min in, full-day target ${RANGE_GOVERNOR_FLOOR_PCT}%) — off pace for a tradeable range | score ${score}`);
+          logEvent("filter", `[RANGE-GOVERNOR] ${stock.ticker} call BLOCKED — intraday range ${_rng}% < ${_rgFloor.toFixed(2)}% scaled floor (${_sessMin.toFixed(0)}min in; ${RANGE_GOVERNOR_FLOOR_PCT}% full-day target) — dead tape, no move to catch | score ${score}`);
           continue;
         }
-        logEvent("filter", `[RANGE-GOVERNOR] ${stock.ticker} call would BLOCK — range-so-far ${_rng}% < pace floor ${_paceFloor}% (${_sessMin.toFixed(0)}min, full-day target ${RANGE_GOVERNOR_FLOOR_PCT}%) | score ${score} | SHADOW ONLY`);
+        logEvent("filter", `[RANGE-GOVERNOR] ${stock.ticker} call would BLOCK — intraday range ${_rng}% < ${_rgFloor.toFixed(2)}% scaled floor (${_sessMin.toFixed(0)}min) | score ${score} | SHADOW ONLY`);
       }
     }
 
@@ -2831,7 +2967,7 @@ async function runScan() {
       }
       logEvent("filter", `${stock.ticker} execution: naked_${optionType} (MR:${isMeanReversion}) delta:${_contractDelta.toFixed(3)}`);
       const _sizeModNaked = sizeMod || 1.0;
-      if (stock._mrScalp && optionType === "call") {   // 8/11 (fix #1): assert call-only at the order site (normalized above)
+      if (stock._mrScalp) {
         // 8/09: MR-SCALP is a SINGLE low-vega leg (NOT the A/B/C twin-entry), half size. executeTrade
         // reads stock._mrScalp → forces 0-1 DTE + 0.42Δ and tags the position entryStrategy="mr-scalp".
         logEvent("filter", `[MR-SCALP] ${stock.ticker} entering single 0-1DTE leg @ ${MR_SCALP_SIZE_MOD}x size`);
