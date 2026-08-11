@@ -877,7 +877,9 @@ async function runScan() {
       if (prevClose) state._spyPrevClose = prevClose;
       const curSPY     = spyBars[spyBars.length-1].c;
       const gapPct     = (curSPY - prevClose) / prevClose;
-      state._spyDayChangePct = gapPct;
+      state._spyDayChangeFrac = gapPct;   // 8/11: renamed from _spyDayChangePct. gapPct is a FRACTION
+                                          // ((cur-prev)/prev), NOT a percentage — the old "Pct" suffix invited a
+                                          // x100 bug against DIP_MAX_DAYCHANGE (0.003), which is also a fraction.
       const etMinSince = (scanET.getHours() - 9) * 60 + scanET.getMinutes() - 30;
       if (!(gapPct > 0.015 && etMinSince >= 0)) return false;
       const spyVWAP = spyIntraday.length >= 5 ? calcVWAP(spyIntraday) : 0;
@@ -1908,7 +1910,14 @@ async function runScan() {
       const breadthVal  = typeof marketContext?.breadth === "number"
         ? marketContext.breadth * 100
         : marketContext?.breadth?.breadthPct ?? 50;
-      const scoringMacro  = { ...(agentMacro || {}), regime: authRegimeName, spyGapUp: !!spyGapUp, spyDayChange: state._spyDayChangePct };
+      // 8/11 FAIL-CLOSED: _spyDayChangeFrac is ONLY written at ~880, inside the spyGapUp IIFE, behind
+      // `if (spyBars.length >= 2)`. On a cold start, the first scan after a restart, or any bar-data
+      // hiccup it is never set. Scoring reads it as `?? 0`, and 0 <= DIP_MAX_DAYCHANGE(0.003) is TRUE,
+      // so the "only reward dips when SPY is flat/red on the day" anchor silently PASSED exactly when
+      // the data was degraded. Pass an explicit null instead: scoring now treats null as "unknown ->
+      // block the dip bonus" rather than coercing it to a neutral-looking zero.
+      const _spyDayChg    = Number.isFinite(state._spyDayChangeFrac) ? state._spyDayChangeFrac : null;
+      const scoringMacro  = { ...(agentMacro || {}), regime: authRegimeName, spyGapUp: !!spyGapUp, spyDayChange: _spyDayChg };
       const putResult  = scoreIndexSetup(liveStock, "put",  spyRSIPut,  spyMACD, spyMomentum, breadthVal, state.vix, scoringMacro, liveStock.rsi);
       const callResult = scoreIndexSetup(liveStock, "call", spyRSICall, spyMACD, spyMomentum, breadthVal, state.vix, scoringMacro, liveStock.rsi);
 
