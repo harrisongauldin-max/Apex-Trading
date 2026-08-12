@@ -512,7 +512,7 @@ async function saveDailyLogToRedis(isEOD = false) {
     // 8/12: the CALL-MOMO ledger is consumed by the EOD section + CSV, which are built BEFORE
     // this runs (and from a snapshot taken in sendEmail's synchronous window). Reset daily or
     // tomorrow's gate report carries today's blocks.
-    state._momoBlocks = []; state._momoShadow = [];
+    state._momoBlocks = []; state._momoShadow = []; state._momoLastMin = {};
     markDirty();
   }
 }
