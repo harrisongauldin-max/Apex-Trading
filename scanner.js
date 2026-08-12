@@ -3032,13 +3032,24 @@ async function runScan() {
             const _mId = `${stock.ticker}-${Date.now()}-${Math.round(_px * 100)}`;
             if (_px > 0) state._momoShadow.push({ id: _mId, t: stock.ticker, at: Date.now(), px: _px, score, ev: _mWhich });
             while (state._momoShadow.length > MOMO_SHADOW_MAX) state._momoShadow.shift();
+            // 8/12 FIX: DEDUPE TO ONE ROW PER TICKER PER MINUTE. The first live file recorded 600
+            // rows in 82 minutes — one every 8.2s, i.e. one per SCAN, not one per event. Only 124
+            // were distinct (ticker, evidence, minute): 4.8x duplication. Worse, the cap evicts
+            // OLDEST first, so a full session at that rate (~2,850 rows) would retain only the last
+            // 82 minutes and DROP the entire morning — which is exactly where intraday range lives
+            // and where the DTE question gets answered. One row per ticker per minute keeps a whole
+            // session inside the cap and makes each row an event rather than a sample.
             if (!Array.isArray(state._momoBlocks)) state._momoBlocks = [];
-            if (_px > 0) state._momoBlocks.push({
+            if (!state._momoLastMin) state._momoLastMin = {};
+            const _mMinKey = `${stock.ticker}-${new Date().toLocaleTimeString("en-US", { timeZone: "America/New_York", hour12: false }).slice(0, 5)}`;
+            const _mDupe   = state._momoLastMin[stock.ticker] === _mMinKey;
+            state._momoLastMin[stock.ticker] = _mMinKey;
+            if (_px > 0 && !_mDupe) state._momoBlocks.push({
               id: _mId, ticker: stock.ticker, at: Date.now(), px: _px, score,
               evidence: _mWhich, orHigh: _mOrUp, slope: _mSlope, volPace: _mVol, breadth: _mBreadth,
               fwdPct: null, fwdMins: null,
             });
-            while (state._momoBlocks.length > 600) state._momoBlocks.shift();
+            while (state._momoBlocks.length > 2000) state._momoBlocks.shift();
           } catch (_shErr2) { /* observation only */ }
           continue;
         }
