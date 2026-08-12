@@ -19,7 +19,18 @@ const { withTimeout ,
 const { state, logEvent, saveStateNow, markDirty, fetchRecentOutcomeRows } = require('./state');
 const { telemetryCSV } = require('./telemetry');
 const { outcomesCSV, OUTCOME_HEADER }  = require('./outcomes');
-const VOL = require('./vol.js');   // 8/11: surface stats for the EOD vol doc
+// 8/12: DEFENSIVE REQUIRE. vol.js is OPTIONAL instrumentation — realized vol, IV-RV, surface,
+// feasibility. It gates nothing and executes no trades. A hard top-level require made a missing
+// file fatal: server.js -> scanner.js -> vol.js, so one absent module killed the whole process and
+// Railway crash-looped it. That is not a degraded mode, it is a DEAD BOT — no stops, no fast-cut,
+// no 3:15 flatten, open positions unmanaged. Optional instrumentation must never be able to do
+// that. If vol.js is absent the measurement layer goes dark and everything else runs normally.
+let VOL = null;
+try {
+  VOL = require('./vol.js');
+} catch (_volReqErr) {
+  console.error('[VOL] vol.js not found — vol instrumentation DISABLED, trading and exits unaffected. Add vol.js to the repo root to enable it.');
+}
 const { buildEfficacyReport, parseRows: parseOutcomeRows } = require('./efficacy');
 const { realizedPnL, openRisk, openCostBasis,
         getETTime, isMarketHours ,
@@ -103,6 +114,7 @@ async function sendEmail(type) {
     const _eodSnap = {
       chainSnaps:    (state._chainSnaps    || []).slice(),
       outcomeBuffer: (state._outcomeBuffer || []).slice(),
+      momoBlocks:    (state._momoBlocks    || []).slice(),
     };
 
     let attachments = [];
@@ -152,6 +164,30 @@ async function sendEmail(type) {
                              content: Buffer.from(lines.join("\n"), "utf8").toString("base64") });
         }
       } catch (_volErr) { /* vol-surface attachment is best-effort — never block the email */ }
+
+      // ── 8/12: CALL-MOMO BLOCK LEDGER ──────────────────────────────────────
+      // On a session where the gate blocks every call, no position opens, so the outcome table is
+      // empty and the day produces no structured record at all. These rows are that record: one
+      // per blocked call, with the evidence that was missing and where the underlying went next.
+      try {
+        const mb = _eodSnap.momoBlocks;
+        if (mb.length) {
+          const dateStr = new Date().toLocaleDateString("en-CA", { timeZone: "America/New_York" });
+          const head = ["blockET","ticker","score","evidence","orHigh","vwapUp","volPace","breadthUp","pxAtBlock","fwdPct","fwdMins"].join(",");
+          const lines = [head];
+          for (const r of mb) {
+            lines.push([
+              new Date(r.at).toLocaleTimeString("en-US", { timeZone: "America/New_York", hour12: false }),
+              r.ticker, r.score, r.evidence,
+              r.orHigh ? 1 : 0, r.slope ? 1 : 0, r.volPace ? 1 : 0, r.breadth ? 1 : 0,
+              (r.px != null ? r.px.toFixed(2) : ""),
+              (r.fwdPct != null ? r.fwdPct : ""), (r.fwdMins != null ? r.fwdMins : ""),
+            ].join(","));
+          }
+          attachments.push({ filename: `argo-momoblocks-${dateStr}.csv`,
+                             content: Buffer.from(lines.join("\n"), "utf8").toString("base64") });
+        }
+      } catch (_mbErr) { /* momo-block attachment is best-effort — never block the email */ }
     }
     // 8/05: append the efficacy report (trailing 20 sessions) inline to the EOD email — the
     // daily "which inputs predicted" readout. Best-effort: any failure falls back to the plain
@@ -166,6 +202,8 @@ async function sendEmail(type) {
       // 8/11: vol-infra readout, appended after efficacy. Self-guarding — returns "" on failure.
       try { bodyHtml += buildVolInfraSection(_eodSnap); }
       catch (_viErr) { logEvent("warn", `[VOL-INFRA] EOD section skipped: ${_viErr.message}`); }
+      try { bodyHtml += buildMomoSection(_eodSnap); }
+      catch (_mbErr2) { logEvent("warn", `[CALL-MOMO] EOD section skipped: ${_mbErr2.message}`); }
     }
     await sendResendEmail(subject, bodyHtml, attachments);
     logEvent("email", `${type} email sent to ${GMAIL_USER}${attachments.length ? " (+telemetry.csv)" : ""}`);
@@ -177,6 +215,52 @@ async function sendEmail(type) {
 // options were rich or cheap against realized, and how many entries were structurally capable
 // of reaching their target. Everything here is measured, not forecast. Returns "" on any
 // failure so a reporting bug can never cost the email.
+// ── 8/12: CALL-MOMO EOD SECTION ─────────────────────────────────────────
+// Scores the gate against itself. Every blocked call is stamped 30 minutes later with where the
+// underlying actually went, so "was the block right" becomes a number instead of a hunch. A block
+// followed by a DOWN move was correct; a block followed by a move large enough to have paid the
+// rung was a miss. Returns "" on any failure so a reporting bug never costs the email.
+function buildMomoSection(snap) {
+  try {
+    const rows = (snap && snap.momoBlocks) || state._momoBlocks || [];
+    if (!rows.length) return "";
+    const scored = rows.filter(r => typeof r.fwdPct === "number");
+
+    // A call needs roughly +0.2% in the underlying over the holding window to clear the rung at
+    // typical delta/DTE (see the required-vs-available move work). Below that a block costs nothing.
+    const PAID = 0.20;
+    const missed = scored.filter(r => r.fwdPct >= PAID).length;
+    const saved  = scored.filter(r => r.fwdPct <= -PAID).length;
+    const flat   = scored.length - missed - saved;
+    const avgFwd = scored.length ? scored.reduce((a, r) => a + r.fwdPct, 0) / scored.length : null;
+
+    let h = `<h3 style="font-family:system-ui,sans-serif;margin:18px 0 6px">CALL-MOMO Gate — ${new Date().toLocaleDateString("en-CA",{timeZone:"America/New_York"})}</h3>`;
+    h += `<table style="font-family:system-ui,sans-serif;font-size:13px;border-collapse:collapse">`;
+    const row = (k, v, note) => `<tr><td style="padding:3px 12px 3px 0;color:#555">${k}</td><td style="padding:3px 12px 3px 0"><b>${v}</b></td><td style="padding:3px 0;color:#888">${note || ""}</td></tr>`;
+    h += row("Calls blocked", rows.length, `${scored.length} have a 30-min follow-up`);
+    if (scored.length) {
+      h += row("Block was RIGHT", `${saved} (${(100*saved/scored.length).toFixed(0)}%)`, `underlying fell ≥${PAID}% after`);
+      h += row("Block was a MISS", `${missed} (${(100*missed/scored.length).toFixed(0)}%)`, `underlying rose ≥${PAID}% after`);
+      h += row("No material move", `${flat} (${(100*flat/scored.length).toFixed(0)}%)`, "block cost nothing either way");
+      h += row("Avg forward move", `${avgFwd >= 0 ? "+" : ""}${avgFwd.toFixed(3)}%`, "30 min after each block");
+    }
+
+    // which piece of evidence was missing — tells you WHICH threshold to tune, not just that it blocked
+    const tally = {};
+    for (const r of rows) tally[r.evidence || "none"] = (tally[r.evidence || "none"] || 0) + 1;
+    const ev = Object.entries(tally).sort((a, b) => b[1] - a[1])
+      .map(([k, v]) => `${k} ×${v}`).join(" · ");
+    h += row("Evidence present", ev, "strict mode needs OR-high + 1 confirm");
+
+    const byTk = {};
+    for (const r of rows) byTk[r.ticker] = (byTk[r.ticker] || 0) + 1;
+    h += row("By ticker", Object.entries(byTk).map(([k, v]) => `${k} ×${v}`).join(" · "), "");
+    h += `</table>`;
+    h += `<div style="font-family:system-ui,sans-serif;font-size:11px;color:#888;margin-top:6px">A high MISS rate means the gate is over-blocking and the thresholds need loosening; a high RIGHT rate means it is earning its keep. Full per-block detail in the attached momoblocks CSV.</div>`;
+    return h;
+  } catch (_e) { return ""; }
+}
+
 function buildVolInfraSection(snap) {
   try {
     // Reads the caller's synchronous snapshot when given one. Falls back to live state only for
@@ -187,6 +271,7 @@ function buildVolInfraSection(snap) {
 
     const allRows = [];
     for (const s of snaps) for (const r of (s.rows || [])) allRows.push(r);
+    if (!VOL) return "";   // no vol.js — section simply does not render
     const surf = VOL.surfaceStats(allRows);
     const cov  = allRows.length ? (100 * allRows.filter(r => r.iv != null).length / allRows.length) : 0;
 
