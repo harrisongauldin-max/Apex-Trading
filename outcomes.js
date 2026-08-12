@@ -35,6 +35,14 @@ const OUTCOME_HEADER = [
   "exitReason","exitPrem","pnl","pnlPct","won","uEntry","uExit",
   // ── appended 8/09 (schema grows at the TAIL so older rows stay column-aligned) ──
   "eRangePct","entryStrategy",
+  // ── appended 8/11: vol infrastructure. Schema grows at the TAIL so every older row stays
+  // column-aligned and prior CSVs remain readable by the same parser.
+  "rv","rvMethod","rvSparse","vrp","ivrvRatio","volRegime",
+  "atmIV","skew","termSlope","chainN","medSpread","spreadPct","spreadCostShare",
+  "reqMovePct","availMovePct","feasRatio",
+  // appended 8/11 (items 1/3): paperSlipPct is PAPER-SIMULATED — Alpaca paper fills do not
+  // model real queue position, so treat it as a FLOOR on live slippage, never a prediction.
+  "midAtDecision","paperSlipPct",
 ].join(",");
 
 function _csv(s) {
@@ -88,7 +96,14 @@ function buildOutcomeRow(pos, o) {
     (o && o.reason) || "", _n(o && o.exitPremium, 2), _n(o && o.pnl, 2),
     _n(o && (o.pct != null ? parseFloat(o.pct) : (o && o.pnlPct)), 1),
     (o && o.won) ? 1 : 0, _n(x.underlying, 2), _n(pos.price, 2),
-    _n(x.rangePct, 3), pos.entryStrategy || "",   // appended 8/09 — keep last, matching OUTCOME_HEADER's tail
+    _n(x.rangePct, 3), pos.entryStrategy || "",   // appended 8/09
+    // appended 8/11 — keep last, matching OUTCOME_HEADER's tail
+    _n(x.rv, 4), x.rvMethod || "", (x.rvSparse != null ? x.rvSparse : ""),
+    _n(x.vrp, 4), _n(x.ivrvRatio, 3), x.volRegime || "",
+    _n(x.atmIV, 4), _n(x.skew, 4), (x.termSlope != null ? x.termSlope : ""),
+    (x.chainN != null ? x.chainN : ""), _n(x.medSpread, 4), _n(x.spreadPct, 4), _n(x.spreadCostShare, 1),
+    _n(x.reqMovePct, 4), _n(x.availMovePct, 4), _n(x.feasRatio, 3),
+    _n(x.midAtDecision, 2), _n(x.slipPct, 3),
   ].map(_csv).join(",");
 
   return row;
