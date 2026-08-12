@@ -12,6 +12,7 @@ const VIX_REDUCE50 = 35;
 const VIX_REDUCE25 = 28;
 
 const { alpacaGet, alpacaPost, alpacaDelete, getStockBars } = require('./broker');
+const VOL = require('./vol.js');   // 8/11: realized vol, IV-RV, surface, feasibility
 const { state, logEvent, markDirty, saveStateNow, dataGatherActive }          = require('./state');
 const { calcGreeks, getETTime,
         openRisk, heatPct, getDeployableCash, effectiveHeatCap,
@@ -24,6 +25,10 @@ const { CAPITAL_FLOOR, MIN_OPTION_PREMIUM, MIN_OI,
         WATCHLIST, ALPACA_OPT_SNAP, ALPACA_OPTIONS, OPTION_FEED,
         MAX_HEAT, STOP_LOSS_PCT, TAKE_PROFIT_PCT, DATA_GATHER_MODE,
         MR_SCALP_TARGET_DTE = 1, MR_SCALP_DELTA = 0.42,
+        VOL_INFRA_ENABLED = false, CHAIN_RETAIN_ENABLED = false, CHAIN_RETAIN_MAX = 60,
+        SLIPPAGE_LOG_ENABLED = false, DECISION_SPLIT_LOG = false,
+        SPREAD_COST_LOG = false, FEASIBILITY_ENABLED = false, FEASIBILITY_ENFORCE = false,
+        FEASIBILITY_MAX_RATIO = 1.0, FEASIBILITY_HOLD_MIN = 20, FLAT_SIZING_ENABLED = false,
 }                                          = require('./constants');
 const { confirmPendingOrder } = require('./closeEngine');
 const { writeJournalEntry } = require('./state');
@@ -134,6 +139,10 @@ async function findContract(ticker, optionType, targetDelta, targetDTE, vix, sto
     const deltaMax = Math.min(0.65, targetDelta + 0.12);
 
     let _best = null, _bestDist = Infinity, _bestRawIV = 0;   // BUG-1 fix: closest-to-target delta
+    // 8/11 ITEM 1: RETAIN THE CHAIN. Every contract below is already priced, greeked and quoted;
+    // the loop kept ONE and dropped the rest. Collecting them costs nothing extra on the wire and
+    // yields the IV surface — skew across strikes, term structure across expiries.
+    const _chainRows = [];
     let _ivWin = { withIV: 0, total: 0 };   // Q3.1: measure indicative-feed IV coverage across the evaluated window
     for (const c of allC.slice(0, 50)) {
       const snap = snaps[c.symbol];
@@ -160,6 +169,19 @@ async function findContract(ticker, optionType, targetDelta, targetDTE, vix, sto
       }
       const _rawIV = parseFloat(snap.impliedVolatility || 0);   // Q3.1: raw feed IV (pre sigma-fallback)
       _ivWin.total++; if (_rawIV > 0) _ivWin.withIV++;
+
+      // 8/11 ITEM 1: capture EVERY evaluated contract. Raw IV only — never the sigma fallback,
+      // or the surface fills with a VIX-derived constant posing as a per-strike measurement.
+      if (CHAIN_RETAIN_ENABLED && _chainRows.length < CHAIN_RETAIN_MAX) {
+        _chainRows.push({
+          symbol: c.symbol, strike, dte: expDTE,
+          delta: parseFloat(g.delta || 0), iv: _rawIV > 0 ? _rawIV : null,
+          bid, ask, mid: parseFloat(mid.toFixed(2)),
+          spreadPct: ask > 0 ? (ask - bid) / ask : null,
+          oi: parseInt(snap.openInterest || 0),
+          theta: parseFloat(g.theta || 0), gamma: parseFloat(g.gamma || 0), vega: parseFloat(g.vega || 0),
+        });
+      }
       const _dist = Math.abs(delta - targetDelta);
       if (_dist < _bestDist) {
         _bestDist = _dist;
@@ -183,6 +205,19 @@ async function findContract(ticker, optionType, targetDelta, targetDTE, vix, sto
     }
 
     if (_best) {
+      // 8/11 ITEM 1+3: collapse the retained chain into surface stats and stash on the chosen
+      // contract. Wrapped — a surface failure must never block an otherwise valid trade.
+      if (CHAIN_RETAIN_ENABLED && _chainRows.length) {
+        try {
+          _best._surface = VOL.surfaceStats(_chainRows);
+          _best._chainN  = _chainRows.length;
+          if (!state._chainSnaps) state._chainSnaps = [];
+          state._chainSnaps.push({ ts: Date.now(), ticker, side: optionType, targetDTE, rows: _chainRows });
+          if (state._chainSnaps.length > 400) state._chainSnaps.shift();
+        } catch (_sErr) {
+          logEvent("scan", `[SURFACE] ${ticker} surface failed — ${_sErr.message} (trade unaffected)`);
+        }
+      }
       // Q3.1: track whether the indicative feed returned real IV for the contract we would actually use.
       if (!state._ivCoverage) state._ivCoverage = { withIV: 0, total: 0 };
       state._ivCoverage.total++; if (_bestRawIV > 0) state._ivCoverage.withIV++;
@@ -239,7 +274,15 @@ function calcPositionSize(premium, score, vix) {
   }
 
   const preCalibCap = preCalibration ? 3 : 99;
-  const convictionMult = score >= 85 ? 1.25 : score >= 75 ? 1.0 : score >= 70 ? 0.80 : 0.60;
+  // 8/11 ITEM 5: FLAT SIZING. convictionMult scaled the bet by the entry score (1.25x at >=85
+  // down to 0.60x below 70). The score correlates -0.07..-0.19 with winning, so weighting size by
+  // it adds variance with no expected return — flat strictly dominates. It compounded a second
+  // error: puts skew high on this scorer, so the side holding the most points was sized UP by a
+  // multiplier carrying no information. Kelly is negative at 37%/1.36x regardless — size to
+  // gather signal, not to bet. Flag-gated so the old behaviour is one edit away.
+  const convictionMult = FLAT_SIZING_ENABLED
+    ? 1.0
+    : (score >= 85 ? 1.25 : score >= 75 ? 1.0 : score >= 70 ? 0.80 : 0.60);
 
   const etNow  = getETTime();
   const minsSinceOpen = (etNow.getHours() - 9) * 60 + etNow.getMinutes() - 30;
@@ -511,6 +554,19 @@ async function executeTrade(stock, price, score, scoreReasons, vix, optionType =
           markDirty();
           alpacaOrderId = null;
       } else if (fillPrice) {
+          // ── 8/11 ITEM 3: CAPTURE THE MID BEFORE IT IS DESTROYED ───────────────────
+          // contract.premium holds the decision-time MID until the line below replaces it with
+          // the actual fill. The cost basis, stop and target that follow are all computed from
+          // the fill, which is correct — but once overwritten the mid is gone and implementation
+          // shortfall can never be reconstructed. NOTE: Alpaca PAPER fills are simulated and do
+          // not model real queue position, so this number is a FLOOR on live slippage, not a
+          // prediction of it. The outcome column is named accordingly.
+          contract._midAtDecision = contract.premium;
+          if (SLIPPAGE_LOG_ENABLED && contract._midAtDecision > 0) {
+            const _slip = (fillPrice - contract._midAtDecision) / contract._midAtDecision;
+            contract._slipPct = parseFloat((_slip * 100).toFixed(3));
+            logEvent("trade", `[SLIPPAGE] ${stock.ticker} mid $${contract._midAtDecision.toFixed(2)} → fill $${fillPrice.toFixed(2)} = ${_slip >= 0 ? "+" : ""}${(_slip*100).toFixed(2)}% (paper-simulated)`);
+          }
           contract.premium = fillPrice;
           state._pendingOrder = null;
           markDirty();
@@ -667,6 +723,52 @@ async function executeTrade(stock, price, score, scoreReasons, vix, optionType =
   // 8/05: entry-feature snapshot for the outcome-joined table (outcomes.js) — the handful of
   // decision inputs NOT already on the position, captured at DECISION time because state drifts
   // by the close. Observation only; stamped on the live position (merged or freshly pushed).
+  // ── 8/11 ITEM 3: FEASIBILITY ──────────────────────────────────────────
+  // The desk question: does THIS contract need a bigger move than the tape actually delivers
+  // in the holding window? ratio > 1 means no. Measured on 8/11 data, every 40-DTE leg sat
+  // above 1.0 at every range regime APEX has traded — which is the structural reason that leg
+  // drags, derived from first principles rather than from corrupted journal P&L.
+  // LOGGED ONLY until FEASIBILITY_ENFORCE.
+  // ── 8/11 ITEM 5: DECISION SPLIT (LOG-ONLY) ─────────────────────────────────
+  // Emit the three decisions a desk keeps separate — what the view is, which contract expresses
+  // it, and how much — as independent records. The score still gates everything exactly as
+  // before; this changes nothing at runtime. The point is ATTRIBUTION: when a day goes badly,
+  // these three tell you whether alpha picked the wrong side, the instrument could not reach
+  // the rung, or sizing was wrong. Today all three failures produce an identical symptom.
+  if (DECISION_SPLIT_LOG) {
+    try {
+      const _alpha = { side: optionType,
+                       source: stock._mrScalp ? "mr-scalp"
+                             : stock._breakSide ? "break-" + stock._breakSide
+                             : "score",
+                       score, isMR: !!isMeanReversion,
+                       horizonMin: stock._mrScalp ? 15 : null };
+      const _instr = { dte: contract.expDays, delta: parseFloat(contract.greeks && contract.greeks.delta) || null,
+                       strike: contract.strike, premium: contract.premium,
+                       spreadPct: contract.spread != null ? parseFloat(contract.spread.toFixed(4)) : null };
+      const _size  = { contracts, cost: parseFloat((contract.premium * 100 * contracts).toFixed(2)),
+                       flat: !!FLAT_SIZING_ENABLED };
+      logEvent("trade", `[DECISION] ${stock.ticker} alpha=${_alpha.side}/${_alpha.source}(${_alpha.score}) | instrument=${_instr.dte}DTE d${_instr.delta} $${_instr.premium} sprd${_instr.spreadPct != null ? (_instr.spreadPct*100).toFixed(1)+"%" : "?"} | size=${_size.contracts}x $${_size.cost}${_size.flat ? " flat" : ""}`);
+    } catch (_dsErr) { /* attribution logging must never affect a trade */ }
+  }
+
+  let _feas = null;
+  if (FEASIBILITY_ENABLED) {
+    try {
+      // stock._intraRangePct is range SO FAR, so the observation window is the elapsed session,
+      // not 390. Passing it is what makes the ratio honest in the morning.
+      const _feasElapsed = (typeof state._sessionMinsNow === "number" && state._sessionMinsNow > 0)
+        ? state._sessionMinsNow : 390;
+      _feas = VOL.moveFeasibility(
+        contract.premium, parseFloat(contract.greeks && contract.greeks.delta) || 0,
+        price, stock._intraRangePct, FEASIBILITY_HOLD_MIN, _feasElapsed
+      );
+      if (_feas && _feas.ratio != null) {
+        logEvent("filter", `[FEASIBILITY] ${stock.ticker} ${contract.expDays}DTE needs ${(_feas.requiredPct*100).toFixed(3)}% vs ${(_feas.availablePct*100).toFixed(3)}% available — ratio ${_feas.ratio.toFixed(2)} ${_feas.feasible ? "OK" : "NEEDS OUTSIZED MOVE"}${FEASIBILITY_ENFORCE ? "" : " | SHADOW"}`);
+      }
+    } catch (_fErr) { /* feasibility is observational — never block a trade on it */ }
+  }
+
   (_openSame || position)._entryX = {
     breadth:    (typeof state._breadth === "number") ? state._breadth : null,
     breadthMom: (typeof state._breadthMomentum === "number") ? state._breadthMomentum : null,
@@ -677,7 +779,29 @@ async function executeTrade(stock, price, score, scoreReasons, vix, optionType =
     buActive:   !!(state._buEpisode && state._buEpisode[stock.ticker] && state._buEpisode[stock.ticker].active),
     gapState:   stock._gapState || null,
     underlying: (typeof price === "number") ? parseFloat(price.toFixed(2)) : null,   // entry underlying (pos.price drifts to latest during the hold)
-    rangePct:   (typeof stock._intraRangePct === "number") ? stock._intraRangePct : null,   // 8/09: intraday range-so-far — the range-governor signal
+    rangePct:   (typeof stock._intraRangePct === "number") ? stock._intraRangePct : null,
+    // ── 8/11: VOL INFRA (X-side). Measurements, not forecasts — every one of these was
+    // observable at entry and none of them existed in the table before today.
+    rv:         (typeof stock._rv === "number") ? parseFloat(stock._rv.toFixed(4)) : null,
+    rvMethod:   stock._rvMethod || null,
+    rvSparse:   stock._rvSparse === true ? 1 : (stock._rvSparse === false ? 0 : null),
+    vrp:        (typeof stock._vrp === "number") ? parseFloat(stock._vrp.toFixed(4)) : null,
+    ivrvRatio:  (typeof stock._ivrvRatio === "number") ? parseFloat(stock._ivrvRatio.toFixed(3)) : null,
+    volRegime:  stock._volRegime || null,
+    atmIV:      (contract._surface && contract._surface.atmIV != null) ? parseFloat(contract._surface.atmIV.toFixed(4)) : null,
+    skew:       (contract._surface && contract._surface.skew != null) ? parseFloat(contract._surface.skew.toFixed(4)) : null,
+    termSlope:  (contract._surface && contract._surface.termSlope != null) ? parseFloat(contract._surface.termSlope.toExponential(3)) : null,
+    chainN:     (contract._chainN != null) ? contract._chainN : null,
+    medSpread:  (contract._surface && contract._surface.medSpreadPct != null) ? parseFloat(contract._surface.medSpreadPct.toFixed(4)) : null,
+    spreadPct:  (typeof contract.spread === "number") ? parseFloat(contract.spread.toFixed(4)) : null,
+    // spread as a share of the +12.5% target — the same 5% ceiling is ~43% of the prize on a
+    // $1.86 1DTE contract and ~10% on an $8.26 40DTE one. Flat ceilings hide that.
+    spreadCostShare: (typeof contract.spread === "number") ? parseFloat(((contract.spread / 0.125) * 100).toFixed(1)) : null,
+    midAtDecision: (typeof contract._midAtDecision === "number") ? contract._midAtDecision : null,
+    slipPct:    (typeof contract._slipPct === "number") ? contract._slipPct : null,
+    reqMovePct: _feas && _feas.requiredPct  != null ? parseFloat((_feas.requiredPct  * 100).toFixed(4)) : null,
+    availMovePct: _feas && _feas.availablePct != null ? parseFloat((_feas.availablePct * 100).toFixed(4)) : null,
+    feasRatio:  _feas && _feas.ratio != null ? parseFloat(_feas.ratio.toFixed(3)) : null,   // 8/09: intraday range-so-far — the range-governor signal
   };
 
   state.tradeJournal.unshift({
