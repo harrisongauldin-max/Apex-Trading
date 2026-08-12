@@ -10,7 +10,18 @@ const {
 
 const { state, logEvent, markDirty, saveStateNow, flushStateIfDirty, paperDataActive, dataGatherActive , markFresh, auditFreshness } = require('./state');
 const { recordTelemetry } = require('./telemetry');
-const VOL = require('./vol.js');   // 8/11: realized vol, IV-RV, surface, feasibility
+// 8/12: DEFENSIVE REQUIRE. vol.js is OPTIONAL instrumentation — realized vol, IV-RV, surface,
+// feasibility. It gates nothing and executes no trades. A hard top-level require made a missing
+// file fatal: server.js -> scanner.js -> vol.js, so one absent module killed the whole process and
+// Railway crash-looped it. That is not a degraded mode, it is a DEAD BOT — no stops, no fast-cut,
+// no 3:15 flatten, open positions unmanaged. Optional instrumentation must never be able to do
+// that. If vol.js is absent the measurement layer goes dark and everything else runs normally.
+let VOL = null;
+try {
+  VOL = require('./vol.js');
+} catch (_volReqErr) {
+  console.error('[VOL] vol.js not found — vol instrumentation DISABLED, trading and exits unaffected. Add vol.js to the repo root to enable it.');
+}
 
 const {
   calcRSI, calcEMA, calcMACD, calcMomentum, calcATR, calcADX,
@@ -1727,20 +1738,33 @@ async function runScan() {
     // delivering? Parkinson on the 1-min bars already in hand, annualized to match feed IV.
     // SHADOW: logged and carried on liveStock, gating nothing.
     let _rvOut = null, _vrpOut = null;
-    if (VOL_INFRA_ENABLED) {
+    if (VOL_INFRA_ENABLED && VOL) {
       try {
         const _todayET_v = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
         const _vBars = Array.isArray(intradayBars)
           ? intradayBars.filter(b => String(b.t || b.timestamp || "").startsWith(_todayET_v))
           : [];
         _rvOut = VOL.realizedVol(_vBars);
-        // stock._realIV is the last per-contract feed IV seen for this ticker (scanner.js:2695).
-        // Prefer it over VIX/100, which is a 30-day INDEX-WIDE number standing in for a
-        // per-ticker, per-tenor measurement — the substitution that made the old sigma fallback
-        // misleading. Fall back only when no feed IV has been observed.
+        // 8/12 FIX: NO VIX SUBSTITUTION. This previously fell back to state.vix/100 when no feed IV
+        // had been observed, and that fallback fired constantly: _realIV is only written inside the
+        // options prefetch at ~2801, which is gated on `scored.length > 0`. On a morning where nothing
+        // clears the score floor the prefetch never runs, _realIV stays empty, and every VRP reading
+        // silently became "30-day index-wide VIX vs this ticker's realized intraday vol".
+        // Observed 8/12: SPY logged "IV 19.1% ... ratio 1.78 iv-rich" while the chosen contract's
+        // actual feed IV was 0.117 — the honest ratio was ~1.09, "fair". A fabricated number is worse
+        // than no number, because it looks like evidence. Feed IV or nothing.
         const _ivForVrp = (stock._realIV > 0) ? stock._realIV
-                        : (state.vix > 0 ? state.vix / 100 : null);
+                        : (stock._cachedContract && stock._cachedContract.iv > 0) ? stock._cachedContract.iv
+                        : null;
         _vrpOut = VOL.ivrvSpread(_ivForVrp, _rvOut && _rvOut.rv);
+        if (_ivForVrp == null) {
+          if (!state._ivMissingLogged) state._ivMissingLogged = {};
+          const _ivDay = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+          if (state._ivMissingLogged[stock.ticker] !== _ivDay) {
+            state._ivMissingLogged[stock.ticker] = _ivDay;
+            logEvent("scan", `[VOL] ${stock.ticker} no per-contract feed IV observed yet — VRP suppressed (RV ${_rvOut && _rvOut.rv ? (_rvOut.rv*100).toFixed(1)+"%" : "n/a"} still logged). Populates once a contract is fetched for this ticker.`);
+          }
+        }
         // THROTTLE: sparse-bar is a DATA-QUALITY condition, not a market one — it does not change
         // scan to scan. Once per ticker per session is the whole signal.
         if (_rvOut && _rvOut.sparse) {
@@ -2453,8 +2477,14 @@ async function runScan() {
         // trace ("no fresh level break" -> "break-bar vol 1.2x < 1.8x") which is what is
         // actually diagnostic when tuning the thresholds.
         if (!state._breakLastBlocked) state._breakLastBlocked = {};
-        if (state._breakLastBlocked[stock.ticker] !== _brk.blocked) {
-          state._breakLastBlocked[stock.ticker] = _brk.blocked;
+        // 8/12: throttle on a DIGIT-STRIPPED key. The reason string embeds the break age
+        // ("break 11m old > 10m"), which increments every scan — so comparing raw strings made the
+        // reason "change" every minute and the throttle logged ~1 line/min for 26 straight minutes
+        // on 8/12. Stripping digits collapses those to one stable key, so only a genuine change of
+        // REASON speaks.
+        const _brkKey = String(_brk.blocked).replace(/[0-9.]+/g, "#");
+        if (state._breakLastBlocked[stock.ticker] !== _brkKey) {
+          state._breakLastBlocked[stock.ticker] = _brkKey;
           logEvent("scan", `[BREAK] ${stock.ticker} no signal — ${_brk.blocked}`);
         }
       }
