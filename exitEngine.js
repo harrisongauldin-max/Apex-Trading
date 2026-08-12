@@ -49,6 +49,8 @@ const {
   MR_SCALP_TRAIL_ARM = 0.10, MR_SCALP_TRAIL_GIVE = 0.04, MR_SCALP_TP = 0.20,
   FASTCUT_ENABLED = false, FASTCUT_MIN = 6, FASTCUT_PEAK_SHORT = 0.03, FASTCUT_PEAK_MID = 0.02,
   FASTCUT_PEAK_LONG = 0.012,
+  USTOP_ENABLED = false, USTOP_ENFORCE = false, USTOP_MOVE_PCT = 0.0035,
+  USTOP_MIN_OPT_PCT = 0.05, USTOP_MAX_OPT_PCT = 0.30,
 } = require('./constants');
 
 
@@ -590,7 +592,29 @@ async function checkExits(positions, posSnapshots, posQuotes, posNewsCache, ctx)
     const _legBand = pos.dteBand
       || (Number.isFinite(dte) ? (dte <= 8 ? "sameweek" : (dte <= 16 ? "biweekly" : "standard")) : "standard");
     const _legStop = (LEG_STOP_PCT && LEG_STOP_PCT[_legBand] != null) ? LEG_STOP_PCT[_legBand] : STOP_LOSS_PCT;
-    const _activeHardStop   = _isOvernightCarry && chg <= -0.10 ? 0.28 : _legStop;
+    // ── 8/11 ITEM 1: UNDERLYING-REFERENCED STOP ───────────────────────────────
+    // Converts "stop on a 0.35% adverse move in SPY/QQQ" into the option-percent this leg would
+    // show for that move:  dP/P = delta * (move * underlying) / premium.
+    // Uses CURRENT delta (pos.greeks is refreshed live at ~line 254), not entry delta — a 1DTE
+    // option can go 0.42 -> 0.15 in twenty minutes, and converting on the stale value would
+    // drift the stop exactly when it matters most. Clamped both ways so a delta collapse cannot
+    // translate into an unbounded stop. SHADOW until USTOP_ENFORCE.
+    let _uStopPct = null;
+    if (USTOP_ENABLED) {
+      const _uDelta = Math.abs(parseFloat(pos.greeks && pos.greeks.delta) || 0);
+      const _uUnder = pos.price || 0;
+      const _uPrem  = pos.premium || 0;
+      if (_uDelta > 0 && _uUnder > 0 && _uPrem > 0) {
+        const _raw = (_uDelta * (USTOP_MOVE_PCT * _uUnder)) / _uPrem;
+        _uStopPct  = Math.min(USTOP_MAX_OPT_PCT, Math.max(USTOP_MIN_OPT_PCT, _raw));
+        if (!pos._uStopLogged) {
+          pos._uStopLogged = true;
+          logEvent("scan", `[U-STOP] ${pos.ticker} ${dte}DTE d${_uDelta.toFixed(3)} — a ${(USTOP_MOVE_PCT*100).toFixed(2)}% underlying move = ${(_raw*100).toFixed(1)}% option move (clamped ${(_uStopPct*100).toFixed(1)}%) vs leg stop ${(_legStop*100).toFixed(1)}%${USTOP_ENFORCE ? "" : " | SHADOW"}`);
+        }
+      }
+    }
+    const _activeHardStop   = _isOvernightCarry && chg <= -0.10 ? 0.28
+                            : (USTOP_ENFORCE && _uStopPct != null ? _uStopPct : _legStop);
     if (!pos._legStopLogged && _legStop !== STOP_LOSS_PCT) {
       pos._legStopLogged = true;
       logEvent("scan", `[LEG-STOP] ${pos.ticker} ${_legBand} ${dte}DTE — hard stop ${(_legStop*100).toFixed(1)}% (default ${(STOP_LOSS_PCT*100).toFixed(1)}%)`);
