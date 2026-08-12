@@ -2983,6 +2983,11 @@ async function runScan() {
             `[CALL-MOMO-SHADOW] ${_sh.t} blocked ${_mins.toFixed(0)}min ago at ${_sh.px.toFixed(2)} ` +
             `(score ${_sh.score}, evidence ${_sh.ev}) — underlying now ${_spxNow.toFixed(2)}, ` +
             `moved ${_mv >= 0 ? "+" : ""}${_mv.toFixed(2)}%`);
+          // stamp the outcome onto the durable ledger row so the EOD report can score the gate
+          try {
+            const _row = (state._momoBlocks || []).find(r => r.id === _sh.id);
+            if (_row) { _row.fwdPct = parseFloat(_mv.toFixed(3)); _row.fwdMins = Math.round(_mins); }
+          } catch (_ldgErr) { /* ledger stamping is observational */ }
         }
         state._momoShadow = _keep;
       }
@@ -3008,8 +3013,22 @@ async function runScan() {
           logEvent("filter", `[CALL-MOMO] ${stock.ticker} BLOCKED — ${CALL_MOMO_STRICT ? "strict: needs OR-high + 1 confirm" : `needs ${CALL_MOMENTUM_MIN}`}, have ${_mWhich} | score ${score}`);
           try {
             if (!Array.isArray(state._momoShadow)) state._momoShadow = [];
-            if (_px > 0) state._momoShadow.push({ t: stock.ticker, at: Date.now(), px: _px, score, ev: _mWhich });
+            // 8/12: _momoShadow is DRAINED as each block is reported (the _keep filter above), so
+            // by the close it holds only the last 30 minutes. The gate blocks all day and that
+            // evidence was going nowhere but the server log — not the outcome table, not the EOD
+            // report, not efficacy. On a day where CALL-MOMO blocks everything, these ARE the only
+            // records the session produces. _momoBlocks is a parallel ledger that is never drained:
+            // one row per block, stamped with the forward move when the shadow fires.
+            const _mId = `${stock.ticker}-${Date.now()}-${Math.round(_px * 100)}`;
+            if (_px > 0) state._momoShadow.push({ id: _mId, t: stock.ticker, at: Date.now(), px: _px, score, ev: _mWhich });
             while (state._momoShadow.length > MOMO_SHADOW_MAX) state._momoShadow.shift();
+            if (!Array.isArray(state._momoBlocks)) state._momoBlocks = [];
+            if (_px > 0) state._momoBlocks.push({
+              id: _mId, ticker: stock.ticker, at: Date.now(), px: _px, score,
+              evidence: _mWhich, orHigh: _mOrUp, slope: _mSlope, volPace: _mVol, breadth: _mBreadth,
+              fwdPct: null, fwdMins: null,
+            });
+            while (state._momoBlocks.length > 600) state._momoBlocks.shift();
           } catch (_shErr2) { /* observation only */ }
           continue;
         }
