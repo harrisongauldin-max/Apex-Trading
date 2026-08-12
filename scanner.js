@@ -10,6 +10,7 @@ const {
 
 const { state, logEvent, markDirty, saveStateNow, flushStateIfDirty, paperDataActive, dataGatherActive , markFresh, auditFreshness } = require('./state');
 const { recordTelemetry } = require('./telemetry');
+const VOL = require('./vol.js');   // 8/11: realized vol, IV-RV, surface, feasibility
 
 const {
   calcRSI, calcEMA, calcMACD, calcMomentum, calcATR, calcADX,
@@ -96,6 +97,10 @@ const {
   CALL_BREAKOUT_MODE = false,   // 8/05: when true, scoring enforces call momentum → the standalone gate below stands down
   RANGE_GOVERNOR_ENABLED = false, RANGE_GOVERNOR_ENFORCE = false, RANGE_GOVERNOR_FLOOR_PCT = 1.0, RANGE_GOVERNOR_MIN_SESSION_MIN = 60,
   RANGE_GOVERNOR_FULL_SESSION_MIN = 390,
+  VOL_INFRA_ENABLED = false, FEASIBILITY_ENABLED = false, FEASIBILITY_ENFORCE = false,
+  GREEK_LIMITS_ENABLED = false, GREEK_LIMITS_ENFORCE = false,
+  MAX_DELTA_DOLLARS_POS = 15000, MAX_DELTA_DOLLARS_NEG = -15000,
+  FEASIBILITY_MAX_RATIO = 1.0, FEASIBILITY_HOLD_MIN = 20, SPREAD_COST_LOG = false,
   BREAK_TRIGGER_ENABLED = false, BREAK_TRIGGER_ENFORCE = false, BREAK_TRIGGER_ALLOW_MRSCALP = true,
   BREAK_ENTRY_SCORE = 80, BREAK_CONFIRM_BARS = 1, BREAK_MAX_AGE_MIN = 10, BREAK_VOL_LOOKBACK = 10,
   BREAK_VOL_MULT_PUT = 1.8, BREAK_VOL_MULT_CALL = 2.2, BREAK_ADX_MIN_PUT = 18, BREAK_ADX_MIN_CALL = 22,
@@ -1173,6 +1178,42 @@ async function runScan() {
   const pgr = marketContext.portfolioGreeks || { delta: 0, vega: 0 };
   const MAX_PORTFOLIO_DELTA = -500;
   const MAX_PORTFOLIO_VEGA  = state.vix >= 35 ? 500 : state.vix >= 25 ? 1000 : 2000;
+  // ── 8/11 ITEM 2: TWO-SIDED GREEK LIMITS IN DELTA-DOLLARS ────────────────────────
+  // Two defects here. (a) MAX_PORTFOLIO_DELTA is a FLOOR only (-500) — a book that is all calls
+  // could run unbounded LONG delta with nothing to stop it. (b) MAX_PORTFOLIO_VEGA is computed
+  // on the line above and read by NOTHING — a dead limit.
+  // Measured in DELTA-DOLLARS (delta x underlying x 100 x contracts) rather than raw delta,
+  // because a cheap 1DTE leg and an expensive 40DTE leg with the same delta represent very
+  // different money at risk and must not count equally against one budget. SHADOW until
+  // GREEK_LIMITS_ENFORCE — the existing -500 floor keeps behaving exactly as it does today.
+  if (GREEK_LIMITS_ENABLED) {
+    try {
+      let _dd = 0, _vg = 0;
+      for (const p of (state.positions || [])) {
+        const d = parseFloat(p.greeks && p.greeks.delta) || 0;
+        const u = p.price || 0;
+        const q = p.contracts || 0;
+        _dd += d * u * 100 * q;
+        _vg += (parseFloat(p.greeks && p.greeks.vega) || 0) * 100 * q;
+      }
+      state._deltaDollars = parseFloat(_dd.toFixed(0));
+      state._vegaDollars  = parseFloat(_vg.toFixed(0));
+      const _ddHigh = _dd > MAX_DELTA_DOLLARS_POS;
+      const _ddLow  = _dd < MAX_DELTA_DOLLARS_NEG;
+      const _vgHigh = Math.abs(_vg) > MAX_PORTFOLIO_VEGA;
+      state._greekBreached = !!(_ddHigh || _ddLow || _vgHigh);
+      // THROTTLE: a breach persists across scans, so an unguarded log repeats every scan for as
+      // long as the book stays over budget. Speak only on the TRANSITION into or out of breach.
+      const _gWas = state._greekBreachedPrev === true;
+      if (state._greekBreached && !_gWas) {
+        logEvent("filter", `[GREEK-LIMIT] BREACH — delta-$ ${_dd.toFixed(0)} (limits ${MAX_DELTA_DOLLARS_NEG}..${MAX_DELTA_DOLLARS_POS}) | vega-$ ${_vg.toFixed(0)} (limit ±${MAX_PORTFOLIO_VEGA}) — ${_ddHigh ? "LONG DELTA" : _ddLow ? "SHORT DELTA" : "VEGA"}${GREEK_LIMITS_ENFORCE ? "" : " | SHADOW"}`);
+      } else if (!state._greekBreached && _gWas) {
+        logEvent("filter", `[GREEK-LIMIT] cleared — delta-$ ${_dd.toFixed(0)} vega-$ ${_vg.toFixed(0)} back inside budget`);
+      }
+      state._greekBreachedPrev = state._greekBreached;
+    } catch (_gErr) { /* greek accounting is observational — never break the scan */ }
+  }
+
   const portfolioDeltaBreached = pgr.delta < MAX_PORTFOLIO_DELTA;
   if (portfolioDeltaBreached) {
     logEvent("filter", `[DELTA CAP] Portfolio delta ${pgr.delta.toFixed(0)} below -500 limit`);
@@ -1679,10 +1720,64 @@ async function runScan() {
       }
     } catch (_rgErr) { /* range is best-effort */ }
 
+    // ── 8/11 ITEM 2+3: REALIZED VOL + VARIANCE RISK PREMIUM ───────────────────────
+    // Nothing in APEX measured what the underlying is ACTUALLY doing — the only stdDev in the
+    // codebase was on trade returns, inside calcSharpeRatio. Without RV there is no way to ask
+    // the question a vol desk asks first: are options priced above or below what the tape is
+    // delivering? Parkinson on the 1-min bars already in hand, annualized to match feed IV.
+    // SHADOW: logged and carried on liveStock, gating nothing.
+    let _rvOut = null, _vrpOut = null;
+    if (VOL_INFRA_ENABLED) {
+      try {
+        const _todayET_v = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+        const _vBars = Array.isArray(intradayBars)
+          ? intradayBars.filter(b => String(b.t || b.timestamp || "").startsWith(_todayET_v))
+          : [];
+        _rvOut = VOL.realizedVol(_vBars);
+        // stock._realIV is the last per-contract feed IV seen for this ticker (scanner.js:2695).
+        // Prefer it over VIX/100, which is a 30-day INDEX-WIDE number standing in for a
+        // per-ticker, per-tenor measurement — the substitution that made the old sigma fallback
+        // misleading. Fall back only when no feed IV has been observed.
+        const _ivForVrp = (stock._realIV > 0) ? stock._realIV
+                        : (state.vix > 0 ? state.vix / 100 : null);
+        _vrpOut = VOL.ivrvSpread(_ivForVrp, _rvOut && _rvOut.rv);
+        // THROTTLE: sparse-bar is a DATA-QUALITY condition, not a market one — it does not change
+        // scan to scan. Once per ticker per session is the whole signal.
+        if (_rvOut && _rvOut.sparse) {
+          if (!state._sparseLogged) state._sparseLogged = {};
+          const _sparseDay = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+          if (state._sparseLogged[stock.ticker] !== _sparseDay) {
+            state._sparseLogged[stock.ticker] = _sparseDay;
+            logEvent("scan", `[VOL] ${stock.ticker} SPARSE BARS — parkinson/close-close ${_rvOut.pkRatio.toFixed(2)} < 0.80; likely an IEX fallback, RV would read low. Using close-to-close instead.`);
+          }
+        }
+        // THROTTLE: this fired unconditionally for every ticker on every scan — ~6 scans/min x 2
+        // tickers x 390 min ≈ 4,700 identical lines a day, burying everything else in the log.
+        // Same failure the [BREAK] no-signal line had. VRP moves slowly, so speak on a REGIME
+        // change or every 15 minutes, whichever comes first.
+        if (_vrpOut && _vrpOut.vrp != null) {
+          if (!state._volLogged) state._volLogged = {};
+          const _vlPrev = state._volLogged[stock.ticker];
+          const _vlDue  = !_vlPrev || _vlPrev.regime !== _vrpOut.regime
+                          || (Date.now() - _vlPrev.ts) > 15 * 60 * 1000;
+          if (_vlDue) {
+            state._volLogged[stock.ticker] = { regime: _vrpOut.regime, ts: Date.now() };
+            logEvent("scan", `[VOL] ${stock.ticker} IV ${(_vrpOut.iv*100).toFixed(1)}% RV ${(_vrpOut.rv*100).toFixed(1)}% | VRP ${(_vrpOut.vrp*100).toFixed(1)}pts ratio ${_vrpOut.ratio.toFixed(2)} — ${_vrpOut.regime} | via ${_rvOut.method}`);
+          }
+        }
+      } catch (_vErr) { logEvent("scan", `[VOL] ${stock.ticker} vol calc failed — ${_vErr.message}`); }
+    }
+
     const liveStock = {
       ...stock,
       price,
       _intraRangePct,
+      _rv:        _rvOut ? _rvOut.rv : null,
+      _rvMethod:  _rvOut ? _rvOut.method : null,
+      _rvSparse:  _rvOut ? _rvOut.sparse : null,
+      _vrp:       _vrpOut ? _vrpOut.vrp : null,
+      _ivrvRatio: _vrpOut ? _vrpOut.ratio : null,
+      _volRegime: _vrpOut ? _vrpOut.regime : null,
       rsi:           signals.rsi,
       dailyRsi:      (signals && signals.dailyRsi != null) ? parseFloat(signals.dailyRsi) : parseFloat(signals?.rsi || 50),
       macd:          signals.macd,
