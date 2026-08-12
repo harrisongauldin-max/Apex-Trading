@@ -503,6 +503,17 @@ const MAX_DELTA_DOLLARS_NEG = -150000;  // short-delta floor (provisional)
 // decisions separately gives attribution. LOG-ONLY — the score still gates exactly as before.
 const DECISION_SPLIT_LOG    = true;
 
+// 8/12: MACRO STALENESS KILL. AGENT_ENABLED=false already stops the Claude call in agent.js:78,
+// but getMacroNews() in market.js is a SEPARATE keyword scorer (Alpaca + Marketaux headlines,
+// trigger words) and is not gated by it. It kept running and swinging wildly — 8/12 logged
+// "strongly bullish +15 (truce, accord, war)" at 11:03 and "bearish -10 (earnings miss,
+// downgrade, easing)" at 12:23 — while NONE of those results were ever stamped into
+// state._agentMacro. What scoring actually consumed all session was a 22-DAY-OLD
+// "mild bearish (-5)". scanner.js labelled it "(32916min stale)" and then passed the modifier
+// through anyway. A signal that old is not information, it is a ghost. Beyond this age the
+// macro block resolves to neutral instead of carrying a stale tilt into every score.
+const MACRO_MAX_AGE_MIN     = 240;   // 4h — longer than a session; anything older is neutralised
+
 // ── 8/11: VOL / SURFACE INFRASTRUCTURE ──────────────────────────────────────
 // Turns chain data findContract ALREADY fetches (and used to discard) into the measurements a
 // vol desk trades on: realized vol, IV-RV, required-vs-available move. All SHADOW by default.
@@ -691,7 +702,7 @@ module.exports = {
   FLAT_SIZING_ENABLED, SLIPPAGE_LOG_ENABLED,
   USTOP_ENABLED, USTOP_ENFORCE, USTOP_MOVE_PCT, USTOP_MIN_OPT_PCT, USTOP_MAX_OPT_PCT,
   GREEK_LIMITS_ENABLED, GREEK_LIMITS_ENFORCE, MAX_DELTA_DOLLARS_POS, MAX_DELTA_DOLLARS_NEG,
-  DECISION_SPLIT_LOG,
+  DECISION_SPLIT_LOG, MACRO_MAX_AGE_MIN,
   BREAK_TRIGGER_ENABLED, BREAK_TRIGGER_ENFORCE, BREAK_TRIGGER_ALLOW_MRSCALP, BREAK_ENTRY_SCORE,
   BREAK_CONFIRM_BARS, BREAK_MAX_AGE_MIN, BREAK_VOL_LOOKBACK, BREAK_VOL_MULT_PUT, BREAK_VOL_MULT_CALL,
   BREAK_ADX_MIN_PUT, BREAK_ADX_MIN_CALL, BREAK_VWAP_SLOPE_MIN, BREAK_MAX_EXT_PCT,
