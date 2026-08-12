@@ -18,7 +18,8 @@ const { withTimeout ,
 } = require('./broker');
 const { state, logEvent, saveStateNow, markDirty, fetchRecentOutcomeRows } = require('./state');
 const { telemetryCSV } = require('./telemetry');
-const { outcomesCSV }  = require('./outcomes');
+const { outcomesCSV, OUTCOME_HEADER }  = require('./outcomes');
+const VOL = require('./vol.js');   // 8/11: surface stats for the EOD vol doc
 const { buildEfficacyReport, parseRows: parseOutcomeRows } = require('./efficacy');
 const { realizedPnL, openRisk, openCostBasis,
         getETTime, isMarketHours ,
@@ -92,6 +93,18 @@ async function sendEmail(type) {
     ? `APEX Morning Briefing - ${new Date().toLocaleDateString()}`
     : `APEX EOD Report - P&L ${(state.cash-state.dayStartCash)>=0?"+":""}$${(state.cash-state.dayStartCash).toFixed(2)}`;
   try {
+    // ── 8/11 RACE FIX ───────────────────────────────────────────────────
+    // server.js:651 calls sendEmail("eod") WITHOUT awaiting it, then line 652 runs
+    // saveDailyLogToRedis(true), which clears state._outcomeBuffer and state._chainSnaps.
+    // Everything below up to the first `await` is safe (it runs synchronously before the caller
+    // reaches 652), but buildVolInfraSection() is invoked AFTER an await and would read buffers
+    // that had already been emptied — rendering an empty or partial section with no error.
+    // Snapshot both here, while we are still in the synchronous window.
+    const _eodSnap = {
+      chainSnaps:    (state._chainSnaps    || []).slice(),
+      outcomeBuffer: (state._outcomeBuffer || []).slice(),
+    };
+
     let attachments = [];
     if (type !== "morning") {
       try {
@@ -112,6 +125,33 @@ async function sendEmail(type) {
           attachments.push({ filename: `argo-outcomes-${dateStr}.csv`, content: Buffer.from(oCsv, "utf8").toString("base64") });
         }
       } catch (_outErr) { /* outcomes attachment is best-effort — never block the email */ }
+
+      // ── 8/11: VOL SURFACE DOC ──────────────────────────────────────────
+      // Third attachment, same base64 pattern as the two above. Every contract findContract
+      // evaluated today — strike, DTE, delta, feed IV, quote, OI, greeks — rather than only the
+      // one it chose. This is the raw material for skew and term structure, and it is the
+      // dataset APEX has been throwing away on every scan since it was written.
+      // Best-effort: a failure here must not block the email or drop the other two attachments.
+      try {
+        const snaps = _eodSnap.chainSnaps;
+        if (snaps.length) {
+          const dateStr = new Date().toLocaleDateString("en-CA", { timeZone: "America/New_York" });
+          const head = ["snapET","ticker","side","targetDTE","symbol","strike","dte","delta","iv","bid","ask","mid","spreadPct","oi","theta","gamma","vega"].join(",");
+          const lines = [head];
+          for (const s of snaps) {
+            const et = new Date(s.ts).toLocaleTimeString("en-US", { timeZone: "America/New_York", hour12: false });
+            for (const r of (s.rows || [])) {
+              lines.push([et, s.ticker, s.side, s.targetDTE, r.symbol, r.strike, r.dte,
+                (r.delta != null ? r.delta.toFixed(3) : ""), (r.iv != null ? r.iv.toFixed(4) : ""),
+                r.bid, r.ask, r.mid, (r.spreadPct != null ? r.spreadPct.toFixed(4) : ""), r.oi,
+                (r.theta != null ? r.theta.toFixed(4) : ""), (r.gamma != null ? r.gamma.toFixed(5) : ""),
+                (r.vega != null ? r.vega.toFixed(4) : "")].join(","));
+            }
+          }
+          attachments.push({ filename: `argo-volsurface-${dateStr}.csv`,
+                             content: Buffer.from(lines.join("\n"), "utf8").toString("base64") });
+        }
+      } catch (_volErr) { /* vol-surface attachment is best-effort — never block the email */ }
     }
     // 8/05: append the efficacy report (trailing 20 sessions) inline to the EOD email — the
     // daily "which inputs predicted" readout. Best-effort: any failure falls back to the plain
@@ -123,10 +163,79 @@ async function sendEmail(type) {
         const report = buildEfficacyReport(parseOutcomeRows(header, rows), { days });
         bodyHtml += report.html;
       } catch (_effErr) { logEvent("warn", `[EFFICACY] report skipped: ${_effErr.message}`); }
+      // 8/11: vol-infra readout, appended after efficacy. Self-guarding — returns "" on failure.
+      try { bodyHtml += buildVolInfraSection(_eodSnap); }
+      catch (_viErr) { logEvent("warn", `[VOL-INFRA] EOD section skipped: ${_viErr.message}`); }
     }
     await sendResendEmail(subject, bodyHtml, attachments);
     logEvent("email", `${type} email sent to ${GMAIL_USER}${attachments.length ? " (+telemetry.csv)" : ""}`);
   } catch(e) { logEvent("error", `Email failed: ${e.message}`); }
+}
+
+// ── 8/11: VOL INFRA EOD SECTION ──────────────────────────────────────────────
+// The readable counterpart to the volsurface CSV: what the surface looked like today, whether
+// options were rich or cheap against realized, and how many entries were structurally capable
+// of reaching their target. Everything here is measured, not forecast. Returns "" on any
+// failure so a reporting bug can never cost the email.
+function buildVolInfraSection(snap) {
+  try {
+    // Reads the caller's synchronous snapshot when given one. Falls back to live state only for
+    // out-of-band callers (dashboard, manual invocation) where no EOD flush is racing.
+    const snaps = (snap && snap.chainSnaps)    || state._chainSnaps    || [];
+    const rows  = (snap && snap.outcomeBuffer) || state._outcomeBuffer || [];
+    if (!snaps.length && !rows.length) return "";
+
+    const allRows = [];
+    for (const s of snaps) for (const r of (s.rows || [])) allRows.push(r);
+    const surf = VOL.surfaceStats(allRows);
+    const cov  = allRows.length ? (100 * allRows.filter(r => r.iv != null).length / allRows.length) : 0;
+
+    const pct = (v, d = 1) => (v == null ? "—" : (v * 100).toFixed(d) + "%");
+    const num = (v, d = 2) => (v == null ? "—" : Number(v).toFixed(d));
+
+    let h = `<h3 style="font-family:system-ui,sans-serif;margin:18px 0 6px">Vol Infrastructure — ${new Date().toLocaleDateString("en-CA",{timeZone:"America/New_York"})}</h3>`;
+    h += `<table style="font-family:system-ui,sans-serif;font-size:13px;border-collapse:collapse">`;
+    const row = (k, v, note) => `<tr><td style="padding:3px 12px 3px 0;color:#555">${k}</td><td style="padding:3px 12px 3px 0"><b>${v}</b></td><td style="padding:3px 0;color:#888">${note || ""}</td></tr>`;
+    h += row("Contracts observed", allRows.length, `across ${snaps.length} chain snapshots`);
+    h += row("Feed IV coverage", cov.toFixed(0) + "%", cov < 50 ? "LOW — sigma falls back to VIX/100, surface unreliable" : "");
+    h += row("ATM IV", pct(surf.atmIV), "nearest 0.50 delta");
+    h += row("Skew (25d − ATM)", surf.skew == null ? "—" : (surf.skew * 100).toFixed(2) + " pts", "positive = OTM bid up");
+    h += row("Term slope", surf.termSlope == null ? "—" : surf.termSlope.toExponential(2), "IV per DTE; positive = contango");
+    h += row("Median spread", pct(surf.medSpreadPct, 2), "share of ask");
+
+    // per-ticker RV / VRP, taken from the entry rows recorded today
+    const _hdrCols = OUTCOME_HEADER.split(",");
+    const _ix = n => _hdrCols.indexOf(n);
+    const _ixRV = _ix("rv"), _ixVRP = _ix("vrp"), _ixFEAS = _ix("feasRatio"), _ixTK = _ix("ticker");
+    if (_ixRV < 0 || _ixVRP < 0 || _ixFEAS < 0 || _ixTK < 0) return h + `</table>`;
+
+    const byTk = {};
+    for (const r of rows) {
+      const c = String(r).split(",");
+      const tk = c[_ixTK];
+      if (!tk) continue;
+      if (!byTk[tk]) byTk[tk] = { rv: [], vrp: [], feas: [], n: 0 };
+      // Look columns up BY NAME from OUTCOME_HEADER. Negative offsets worked, but the schema
+      // convention is that it grows at the TAIL — so the next appended column would silently
+      // shift every offset and this section would start reporting the wrong field with no error.
+      const rv = parseFloat(c[_ixRV]), vrp = parseFloat(c[_ixVRP]), fe = parseFloat(c[_ixFEAS]);
+      if (Number.isFinite(rv))  byTk[tk].rv.push(rv);
+      if (Number.isFinite(vrp)) byTk[tk].vrp.push(vrp);
+      if (Number.isFinite(fe))  byTk[tk].feas.push(fe);
+      byTk[tk].n++;
+    }
+    const avg = a => (a.length ? a.reduce((x, y) => x + y, 0) / a.length : null);
+    for (const [tk, d] of Object.entries(byTk)) {
+      const f = avg(d.feas);
+      const infeasible = d.feas.filter(x => x > 1).length;
+      h += row(`${tk} (${d.n} entries)`,
+        `RV ${pct(avg(d.rv))} | VRP ${avg(d.vrp) == null ? "—" : (avg(d.vrp) * 100).toFixed(1) + "pts"} | feas ${num(f)}`,
+        infeasible ? `${infeasible}/${d.feas.length} entries needed an outsized move` : "");
+    }
+    h += `</table>`;
+    h += `<div style="font-family:system-ui,sans-serif;font-size:11px;color:#888;margin-top:6px">VRP &gt; 0 = implied above realized, i.e. the long book is paying the premium. feas &gt; 1 = the contract needed a bigger move than the tape delivered. All shadow — nothing here gated an entry.</div>`;
+    return h;
+  } catch (_e) { return ""; }
 }
 
 function buildEmailHTML(type) {
