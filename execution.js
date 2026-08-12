@@ -12,7 +12,18 @@ const VIX_REDUCE50 = 35;
 const VIX_REDUCE25 = 28;
 
 const { alpacaGet, alpacaPost, alpacaDelete, getStockBars } = require('./broker');
-const VOL = require('./vol.js');   // 8/11: realized vol, IV-RV, surface, feasibility
+// 8/12: DEFENSIVE REQUIRE. vol.js is OPTIONAL instrumentation — realized vol, IV-RV, surface,
+// feasibility. It gates nothing and executes no trades. A hard top-level require made a missing
+// file fatal: server.js -> scanner.js -> vol.js, so one absent module killed the whole process and
+// Railway crash-looped it. That is not a degraded mode, it is a DEAD BOT — no stops, no fast-cut,
+// no 3:15 flatten, open positions unmanaged. Optional instrumentation must never be able to do
+// that. If vol.js is absent the measurement layer goes dark and everything else runs normally.
+let VOL = null;
+try {
+  VOL = require('./vol.js');
+} catch (_volReqErr) {
+  console.error('[VOL] vol.js not found — vol instrumentation DISABLED, trading and exits unaffected. Add vol.js to the repo root to enable it.');
+}
 const { state, logEvent, markDirty, saveStateNow, dataGatherActive }          = require('./state');
 const { calcGreeks, getETTime,
         openRisk, heatPct, getDeployableCash, effectiveHeatCap,
@@ -207,7 +218,14 @@ async function findContract(ticker, optionType, targetDelta, targetDTE, vix, sto
     if (_best) {
       // 8/11 ITEM 1+3: collapse the retained chain into surface stats and stash on the chosen
       // contract. Wrapped — a surface failure must never block an otherwise valid trade.
-      if (CHAIN_RETAIN_ENABLED && _chainRows.length) {
+      // 8/12: WRITE _realIV AT THE SOURCE. It was only assigned at scanner.js:2820, inside the
+      // options prefetch gated on `scored.length > 0`. findContract has FOUR call sites and runs
+      // constantly regardless of whether anything clears the floor — so on a session where nothing
+      // scores, _realIV stayed empty all day and the VRP was suppressed even though [IV-COVERAGE]
+      // was reporting 100% real feed IV on every single scan. Setting it here covers every path.
+      if (stock && _bestRawIV > 0) stock._realIV = _bestRawIV;
+
+      if (CHAIN_RETAIN_ENABLED && VOL && _chainRows.length) {
         try {
           _best._surface = VOL.surfaceStats(_chainRows);
           _best._chainN  = _chainRows.length;
@@ -753,7 +771,7 @@ async function executeTrade(stock, price, score, scoreReasons, vix, optionType =
   }
 
   let _feas = null;
-  if (FEASIBILITY_ENABLED) {
+  if (FEASIBILITY_ENABLED && VOL) {
     try {
       // stock._intraRangePct is range SO FAR, so the observation window is the elapsed session,
       // not 390. Passing it is what makes the ratio honest in the morning.
