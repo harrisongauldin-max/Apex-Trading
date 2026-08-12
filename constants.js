@@ -458,6 +458,69 @@ const RANGE_GOVERNOR_ENFORCE          = true;   // 8/10: LIVE. 8/05-8/10 every c
 const RANGE_GOVERNOR_FLOOR_PCT        = 1.0;    // intraday range-so-far (% of session open) below which a call is "dead tape"
 const RANGE_GOVERNOR_MIN_SESSION_MIN  = 60;     // only judge after this many session minutes (range builds through the day)
 
+// ── 8/11: DESK-STRUCTURE ITEMS 1/2/3/5 ───────────────────────────────────
+// ITEM 3 — SLIPPAGE. contract.premium is overwritten with the Alpaca fill at execution.js:556,
+// so the cost basis is correct — but the pre-fill MID is destroyed by that overwrite and
+// implementation shortfall becomes unmeasurable. Capturing it is not recoverable after the fact:
+// every trade that fills without this is permanently unmeasurable.
+const SLIPPAGE_LOG_ENABLED  = true;
+
+// ITEM 1 — UNDERLYING-REFERENCED STOPS. The live leg stops are expressed in OPTION percent
+// (sameweek -7.5% / biweekly -10% / standard -12.5%), which map to wildly different market
+// events: a 1DTE leg at -7.5% fires on SPY -0.052%, a 40DTE leg at -12.5% needs SPY -0.610%.
+// That is a 12x difference in the risk actually being taken while the dashboard shows two
+// similar-looking numbers. Expressing the stop as an UNDERLYING move puts every leg on one
+// currency. SHADOW until USTOP_ENFORCE — this changes when every position exits.
+const USTOP_ENABLED         = true;
+const USTOP_ENFORCE         = false;
+const USTOP_MOVE_PCT        = 0.0035;  // 0.35% adverse underlying move = stop. Sits between the
+                                       // current 1DTE (0.052%) and 40DTE (0.610%) equivalents.
+const USTOP_MIN_OPT_PCT     = 0.05;    // floor: never tighter than -5% option move
+const USTOP_MAX_OPT_PCT     = 0.30;    // ceiling: never looser than -30% (a runaway delta collapse
+                                       // must not translate into an unbounded stop)
+
+// ITEM 2 — GREEK LIMITS. MAX_PORTFOLIO_DELTA was one-sided (a -500 floor, no positive ceiling),
+// so an all-call book could run unbounded long delta. MAX_PORTFOLIO_VEGA was computed at
+// scanner.js:1178 and never read by anything — a dead limit, same class as EARLY_SPREAD_PCT.
+// Limits are in DELTA-DOLLARS (delta x underlying x 100 x contracts) — MARKET EXPOSURE, i.e. how
+// much the book moves per unit move in the underlying. Note this deliberately does NOT depend on
+// premium: a 1DTE and a 40DTE leg at the same delta have the SAME directional exposure and should
+// count equally here. Capital-at-risk is a different budget and is already governed by the heat
+// cap; conflating the two is what made raw-delta limits hard to reason about.
+const GREEK_LIMITS_ENABLED  = true;
+const GREEK_LIMITS_ENFORCE  = false;   // shadow — log breaches before blocking on them
+// CALIBRATION WARNING: these are PROVISIONAL. One 0.42-delta SPY contract at 600 is already
+// 25,200 delta-$, so a limit of 15,000 would breach on every single position and flood the log.
+// With MAX_CONTRACTS=1 and 2-3 concurrent positions, realistic exposure is ~25k-100k. These are
+// set wide enough to be non-binding in normal operation and MUST be re-derived from the observed
+// distribution (see APEX_PROMOTION_CRITERIA.md, Instrument 4) before GREEK_LIMITS_ENFORCE.
+const MAX_DELTA_DOLLARS_POS = 150000;   // long-delta ceiling (provisional)
+const MAX_DELTA_DOLLARS_NEG = -150000;  // short-delta floor (provisional)
+
+// ITEM 5 — ALPHA / INSTRUMENT / SIZE SEPARATION. The score currently gates entry, picks side,
+// grants slot permission and (until flat sizing) scaled the bet. Four jobs, one number, so any
+// bad day produces an identical symptom regardless of which layer failed. Emitting the three
+// decisions separately gives attribution. LOG-ONLY — the score still gates exactly as before.
+const DECISION_SPLIT_LOG    = true;
+
+// ── 8/11: VOL / SURFACE INFRASTRUCTURE ──────────────────────────────────────
+// Turns chain data findContract ALREADY fetches (and used to discard) into the measurements a
+// vol desk trades on: realized vol, IV-RV, required-vs-available move. All SHADOW by default.
+const VOL_INFRA_ENABLED     = true;    // compute RV / surface / feasibility
+const CHAIN_RETAIN_ENABLED  = true;    // keep all evaluated contracts, not just the chosen one
+const CHAIN_RETAIN_MAX      = 60;      // cap on retained rows per selection (memory guard)
+// NOTE: a spread gate ALREADY EXISTS and is LIVE — execution.js:711 blocks on
+// contract.spread > MAX_SPREAD_PCT (0.05). Do NOT add a second one. What is missing is the
+// FRAMING: a flat 5% ceiling ignores that the same spend is a very different share of the prize
+// by tenor — on a +12.5% target, 5% is ~43% of the edge on a $1.86 1DTE contract and ~10% on an
+// $8.26 40DTE one. This logs that share so the flat ceiling can later become a real cost budget.
+const SPREAD_COST_LOG       = true;    // log spread as a share of target return (no gating)
+const FEASIBILITY_ENABLED   = true;    // required-move vs available-move ratio...
+const FEASIBILITY_ENFORCE   = false;   // ...logged only for now
+const FEASIBILITY_MAX_RATIO = 1.0;     // >1 = needs a bigger move than the tape delivers
+const FEASIBILITY_HOLD_MIN  = 20;      // holding window judged over (median hold ~20min)
+const FLAT_SIZING_ENABLED   = true;    // ITEM 5: kill convictionMult (score-scaled sizing)
+
 // ── 8/11: GENERALIZED FAST-CUT ──────────────────────────────────────────────────────
 // The 5-min/+3% fast-cut was built for MR-scalp and gated to it, so every other position fell
 // through to the 90-min progress check. Measured: winners reveal fast (peak ~+12% by ~15min),
@@ -623,6 +686,12 @@ module.exports = {
   RANGE_GOVERNOR_ENABLED, RANGE_GOVERNOR_ENFORCE, RANGE_GOVERNOR_FLOOR_PCT, RANGE_GOVERNOR_MIN_SESSION_MIN,
   RANGE_GOVERNOR_FULL_SESSION_MIN,
   FASTCUT_ENABLED, FASTCUT_MIN, FASTCUT_PEAK_SHORT, FASTCUT_PEAK_MID, FASTCUT_PEAK_LONG,
+  VOL_INFRA_ENABLED, CHAIN_RETAIN_ENABLED, CHAIN_RETAIN_MAX, SPREAD_COST_LOG,
+  FEASIBILITY_ENABLED, FEASIBILITY_ENFORCE, FEASIBILITY_MAX_RATIO, FEASIBILITY_HOLD_MIN,
+  FLAT_SIZING_ENABLED, SLIPPAGE_LOG_ENABLED,
+  USTOP_ENABLED, USTOP_ENFORCE, USTOP_MOVE_PCT, USTOP_MIN_OPT_PCT, USTOP_MAX_OPT_PCT,
+  GREEK_LIMITS_ENABLED, GREEK_LIMITS_ENFORCE, MAX_DELTA_DOLLARS_POS, MAX_DELTA_DOLLARS_NEG,
+  DECISION_SPLIT_LOG,
   BREAK_TRIGGER_ENABLED, BREAK_TRIGGER_ENFORCE, BREAK_TRIGGER_ALLOW_MRSCALP, BREAK_ENTRY_SCORE,
   BREAK_CONFIRM_BARS, BREAK_MAX_AGE_MIN, BREAK_VOL_LOOKBACK, BREAK_VOL_MULT_PUT, BREAK_VOL_MULT_CALL,
   BREAK_ADX_MIN_PUT, BREAK_ADX_MIN_CALL, BREAK_VWAP_SLOPE_MIN, BREAK_MAX_EXT_PCT,
