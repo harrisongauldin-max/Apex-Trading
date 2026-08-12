@@ -506,7 +506,15 @@ async function saveDailyLogToRedis(isEOD = false) {
   // 8/11: chain snapshots are in-memory only (stripped from the Redis payload above) and are
   // consumed by the EOD vol-surface CSV, which is built BEFORE this runs. Without a daily reset
   // they accumulate across sessions and tomorrow's surface CSV would carry today's rows.
-  if (isEOD) { state._chainSnaps = []; state._volLogged = {}; state._sparseLogged = {}; markDirty(); }
+  if (isEOD) {
+    state._chainSnaps = []; state._volLogged = {}; state._sparseLogged = {};
+    state._ivMissingLogged = {};
+    // 8/12: the CALL-MOMO ledger is consumed by the EOD section + CSV, which are built BEFORE
+    // this runs (and from a snapshot taken in sendEmail's synchronous window). Reset daily or
+    // tomorrow's gate report carries today's blocks.
+    state._momoBlocks = []; state._momoShadow = [];
+    markDirty();
+  }
 }
 
 // Compact score-telemetry persistence — mirrors saveDailyLogToRedis. Rides its cadence
