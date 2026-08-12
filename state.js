@@ -151,6 +151,11 @@ async function redisSave(data) {
   delete slim._telemetryBuffer;  // saved separately via saveTelemetryToRedis
   delete slim._outcomeBuffer;    // saved separately via saveOutcomesToRedis
   delete slim._telemetryLast;    // transient material-change tracker
+  // 8/11: chain snapshots are ~400 entries x up to 60 contract rows ≈ 5MB. The Redis payload
+  // warns at 8MB against a 10MB ceiling, so persisting these would push a healthy state blob
+  // toward the limit for data that is only needed within the session that produced it (the EOD
+  // CSV is built from memory before the reset). Strip it, same as the other in-memory buffers.
+  delete slim._chainSnaps;
 
   try { fs.writeFileSync(STATE_FILE, JSON.stringify(data, null, 2)); } catch(e) {}
 
@@ -498,6 +503,10 @@ async function saveDailyLogToRedis(isEOD = false) {
 
   await saveTelemetryToRedis(isEOD);
   await saveOutcomesToRedis(isEOD);
+  // 8/11: chain snapshots are in-memory only (stripped from the Redis payload above) and are
+  // consumed by the EOD vol-surface CSV, which is built BEFORE this runs. Without a daily reset
+  // they accumulate across sessions and tomorrow's surface CSV would carry today's rows.
+  if (isEOD) { state._chainSnaps = []; state._volLogged = {}; state._sparseLogged = {}; markDirty(); }
 }
 
 // Compact score-telemetry persistence — mirrors saveDailyLogToRedis. Rides its cadence
