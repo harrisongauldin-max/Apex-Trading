@@ -112,6 +112,7 @@ const {
   GREEK_LIMITS_ENABLED = false, GREEK_LIMITS_ENFORCE = false,
   MAX_DELTA_DOLLARS_POS = 15000, MAX_DELTA_DOLLARS_NEG = -15000,
   FEASIBILITY_MAX_RATIO = 1.0, FEASIBILITY_HOLD_MIN = 20, SPREAD_COST_LOG = false,
+  MACRO_MAX_AGE_MIN = 240,
   BREAK_TRIGGER_ENABLED = false, BREAK_TRIGGER_ENFORCE = false, BREAK_TRIGGER_ALLOW_MRSCALP = true,
   BREAK_ENTRY_SCORE = 80, BREAK_CONFIRM_BARS = 1, BREAK_MAX_AGE_MIN = 10, BREAK_VOL_LOOKBACK = 10,
   BREAK_VOL_MULT_PUT = 1.8, BREAK_VOL_MULT_CALL = 2.2, BREAK_ADX_MIN_PUT = 18, BREAK_ADX_MIN_CALL = 22,
@@ -565,12 +566,21 @@ async function runScan() {
     const agentAuthAge = agentMacroForAuth?.timestamp
       ? (Date.now() - new Date(agentMacroForAuth.timestamp).getTime()) / 60000 : 999;
 
+    // 8/12: NEUTRALISE A GHOST SIGNAL. Previously this labelled the age and used the modifier
+    // regardless — a 22-day-old "mild bearish (-5)" was tilting every score on 8/12. Past
+    // MACRO_MAX_AGE_MIN the block still reports its true age (so the staleness stays visible in
+    // the dashboard) but contributes ZERO: neutral signal, no modifier, normal mode.
+    const _macroGhost = agentAuthAge > MACRO_MAX_AGE_MIN;
+    if (_macroGhost && !state._macroGhostLogged) {
+      state._macroGhostLogged = true;
+      logEvent("scan", `[MACRO] signal is ${agentAuthAge.toFixed(0)}min old (> ${MACRO_MAX_AGE_MIN}min) — NEUTRALISED. Scores no longer carry it.`);
+    }
     if (agentMacroForAuth) {
-      const staleSuffix = agentAuthAge > 30 ? ` (${agentAuthAge.toFixed(0)}min stale)` : '';
+      const staleSuffix = agentAuthAge > 30 ? ` (${agentAuthAge.toFixed(0)}min stale${_macroGhost ? ", NEUTRALISED" : ""})` : '';
       marketContext.macro = {
-        signal:        agentMacroForAuth.signal || 'neutral',
-        scoreModifier: agentMacroForAuth.modifier || 0,
-        mode:          agentMacroForAuth.mode || 'normal',
+        signal:        _macroGhost ? 'neutral' : (agentMacroForAuth.signal || 'neutral'),
+        scoreModifier: _macroGhost ? 0 : (agentMacroForAuth.modifier || 0),
+        mode:          _macroGhost ? 'normal' : (agentMacroForAuth.mode || 'normal'),
         macroAuthority:'agent',
         confidence:    agentMacroForAuth.confidence || 'low',
         agentLastUpdated: agentMacroForAuth.timestamp,
