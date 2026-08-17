@@ -64,7 +64,12 @@ const MA50_BUFFER         = 0.01;
 const MACRO_REVERSAL_PCT  = 0.025;
 
 // ─── Entry filters ───────────────────────────────────────────────
-const MIN_SCORE           = 70;
+const MIN_SCORE = 70;   // 8/17: back to 70. It was moved to 50 to compensate a 20-point constant
+                        // strip in scoring.js that is now reverted — and it was the wrong lever
+                        // anyway: scanner.js:2475 uses `_debitCallActive ? 75 : MIN_SCORE`, so on
+                        // the live path the operative floor is a hardcoded 75 and MIN_SCORE never
+                        // applies. Verified against the 8/17 log: "scanner-floor 75".
+
 const MIN_SCORE_CREDIT    = 65;  // credit/directional minimum
 const MIN_SCORE_MR        = 65;  // FIX 11: MR call minimum raised from 60→65 (theta drag requires higher conviction)
 
@@ -468,7 +473,20 @@ const OUTCOME_TABLE_ENABLED = true;
 // blocks nothing; the range is recorded on every outcome row (eRangePct) so the floor is set from
 // data, not guessed. Flip ENFORCE=true once a few sessions of [RANGE-GOVERNOR] lines confirm it.
 const RANGE_GOVERNOR_ENABLED          = true;   // compute + record + shadow-log
-const RANGE_GOVERNOR_ENFORCE          = true;   // 8/10: LIVE. 8/05-8/10 every compressed-range tape lost and
+const RANGE_GOVERNOR_ENFORCE          = false;  // 8/17: OFF. Of everything added since the Aug 5
+                                       // backup, this is the ONLY gate that blocks entries — CALL-MOMO,
+                                       // MIN_SCORE 70, the 12.5% stop, STAGGER and the score floors are
+                                       // all byte-identical to that build. The fast-cut, u-stop, flat
+                                       // sizing and MR-scalp are exits, sizing, or extra channels; none
+                                       // of them can stop a trade. So turning this one flag off restores
+                                       // Aug-5 ENTRY behaviour exactly, while every measurement file
+                                       // (vol, outcomes, efficacy, chain retention, slippage, momo
+                                       // ledger) keeps running. That was the trade Harrison wanted: the
+                                       // data gathering is the part worth keeping.
+                                       // It stays ENABLED (shadow) below — it will still log what it
+                                       // WOULD have blocked, so the question "was the governor right?"
+                                       // becomes answerable from the outcome table instead of a guess.
+
                                                 // APEX kept firing into it (8/10: 0.25% range, 6 calls, -$66;
                                                 // enforcing would have made it $0). Now BLOCKS calls on dead
                                                 // tape. Set false to return to shadow.
@@ -552,6 +570,16 @@ const FEASIBILITY_ENABLED   = true;    // required-move vs available-move ratio.
 const FEASIBILITY_ENFORCE   = false;   // ...logged only for now
 const FEASIBILITY_MAX_RATIO = 1.0;     // >1 = needs a bigger move than the tape delivers
 const FEASIBILITY_HOLD_MIN  = 20;      // holding window judged over (median hold ~20min)
+// 8/17: EXIT-PATH CHECKPOINTS. Records the position return at fixed elapsed marks so every exit
+// rule becomes evaluable after the fact instead of only by live experiment. Pure measurement —
+// written in the exit loop, read by nothing that decides anything.
+const CHECKPOINTS_ENABLED   = true;
+// FROZEN: exitEngine iterates this every scan for every open position and outcomes.js derives its
+// column names from it. A module-level array export is a SHARED MUTABLE reference — one stray
+// push() anywhere would change the capture marks and the CSV schema simultaneously, mid-session.
+const CHECKPOINT_MINS       = Object.freeze([1, 3, 6, 10, 15, 20, 30]);   // minutes held; fast-cut fires at 6
+const CHECKPOINT_TOL_MIN    = 1;     // a mark observed later than this is left BLANK, not back-filled
+
 const FLAT_SIZING_ENABLED   = true;    // ITEM 5: kill convictionMult (score-scaled sizing)
 
 // ── 8/11: GENERALIZED FAST-CUT ──────────────────────────────────────────────────────
@@ -588,6 +616,15 @@ const BREAK_MAX_EXT_PCT           = 0.006;   // do not chase: max distance past 
 const BREAK_CALL_CUTOFF_ET        = 12.0;    // breakout calls are morning-only
 const BREAK_MIN_SESSION_MIN       = 16;      // _openRange locks at 15 session minutes
 
+// 8/17: the 1.0% floor was calibrated when APEX bought 40-DTE legs, where it was correct — a
+// 40DTE contract needs ~0.50% of underlying movement to reach the +12.5% rung, so a sub-1% day
+// genuinely cannot pay. At 3 DTE the required move drops to ~0.11% and the SAME tape becomes
+// tradeable. Observed 8/17: QQQ range 0.35% projecting to a 0.72% day — blocked by the governor,
+// yet feasRatio 0.70 at 3DTE (feasible) vs 3.08 at 44DTE (hopeless). The floor is a property of
+// the INSTRUMENT, not of the tape, so it is now derived from DTE rather than fixed. Required move
+// scales ~with premium, which scales ~sqrt(DTE): floor = FLOOR_PCT * sqrt(targetDTE / REF_DTE).
+// At 40 DTE that reproduces 1.00% exactly; at 3 DTE it gives 0.27%.
+const RANGE_GOVERNOR_REF_DTE          = 40;    // the tenor the 1.0% floor was calibrated against
 const RANGE_GOVERNOR_FULL_SESSION_MIN = 390;    // 8/11: full RTH session length in minutes (9:30-4:00 ET) — denominator for the sqrt(elapsed) pro-rating of the floor
 
 // 8/09: MR-SCALP CALL — a disciplined mean-reversion CALL scalp that runs LIVE alongside breakout
@@ -717,11 +754,11 @@ module.exports = {
   CALL_MOMO_SLOPE_MIN, CALL_MOMO_VOLPACE_MIN, CALL_MOMO_BREADTH_MIN,
   CALL_BREAKOUT_MODE, OUTCOME_TABLE_ENABLED,
   RANGE_GOVERNOR_ENABLED, RANGE_GOVERNOR_ENFORCE, RANGE_GOVERNOR_FLOOR_PCT, RANGE_GOVERNOR_MIN_SESSION_MIN,
-  RANGE_GOVERNOR_FULL_SESSION_MIN,
+  RANGE_GOVERNOR_FULL_SESSION_MIN, RANGE_GOVERNOR_REF_DTE,
   FASTCUT_ENABLED, FASTCUT_MIN, FASTCUT_PEAK_SHORT, FASTCUT_PEAK_MID, FASTCUT_PEAK_LONG,
   VOL_INFRA_ENABLED, CHAIN_RETAIN_ENABLED, CHAIN_RETAIN_MAX, SPREAD_COST_LOG,
   FEASIBILITY_ENABLED, FEASIBILITY_ENFORCE, FEASIBILITY_MAX_RATIO, FEASIBILITY_HOLD_MIN,
-  FLAT_SIZING_ENABLED, SLIPPAGE_LOG_ENABLED,
+  FLAT_SIZING_ENABLED, SLIPPAGE_LOG_ENABLED, CHECKPOINTS_ENABLED, CHECKPOINT_MINS, CHECKPOINT_TOL_MIN,
   USTOP_ENABLED, USTOP_ENFORCE, USTOP_MOVE_PCT, USTOP_MIN_OPT_PCT, USTOP_MAX_OPT_PCT,
   GREEK_LIMITS_ENABLED, GREEK_LIMITS_ENFORCE, MAX_DELTA_DOLLARS_POS, MAX_DELTA_DOLLARS_NEG,
   DECISION_SPLIT_LOG, MACRO_MAX_AGE_MIN,
