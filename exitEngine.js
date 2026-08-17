@@ -51,6 +51,7 @@ const {
   FASTCUT_PEAK_LONG = 0.012,
   USTOP_ENABLED = false, USTOP_ENFORCE = false, USTOP_MOVE_PCT = 0.0035,
   USTOP_MIN_OPT_PCT = 0.05, USTOP_MAX_OPT_PCT = 0.30,
+  CHECKPOINTS_ENABLED = false, CHECKPOINT_MINS = [1, 3, 6, 10, 15, 20, 30], CHECKPOINT_TOL_MIN = 1,
 } = require('./constants');
 
 
@@ -278,6 +279,36 @@ async function checkExits(positions, posSnapshots, posQuotes, posNewsCache, ctx)
       pos._peakTime   = Date.now();
     }
     if (!pos._peakTime) pos._peakTime = new Date(pos.openDate || Date.now()).getTime();
+
+    // ── 8/17: EXIT-PATH CHECKPOINTS ─────────────────────────────────────────
+    // The outcome row compresses the whole trajectory into five scalars (peakPct, maePct,
+    // minToPeak, rung5, rung125). That tells you a position reached +9.9% at minute 27 but nothing
+    // about where it stood at minute 6 — which is exactly when the fast-cut decides. Every exit
+    // rule (fast-cut at 6, trail arm, time-cut at 20) is therefore unfalsifiable without a live
+    // experiment. Recording the return at fixed elapsed marks makes all of them answerable from
+    // one dataset: "would a 10-minute cut have beaten 6?" becomes a query, not a deploy.
+    // Captured on FIRST crossing of each mark and never overwritten, so a scan gap cannot rewrite
+    // history. Wrapped: this file manages live positions and a throw here costs a stop.
+    if (CHECKPOINTS_ENABLED) {
+      try {
+        const _cpOpen = new Date(pos.openDate || pos.entryTime || Date.now()).getTime();
+        const _cpMin  = (Date.now() - _cpOpen) / 60000;
+        if (Number.isFinite(_cpMin) && _cpMin >= 0 && curP > 0 && pos.premium > 0) {
+          if (!pos._cp) pos._cp = {};
+          // TOLERANCE. Without it a scan gap back-fills every unset mark with one late price:
+          // a position first seen at minute 12 would stamp cp1, cp3, cp6 and cp10 all with the
+          // 12-minute return, silently claiming a level was reached six times earlier than it was.
+          // Scans run ~10s, so one minute is six scans of slack; past that the mark was genuinely
+          // not observed and a BLANK is the honest record. Blanks are informative anyway — a
+          // 6-minute fast-cut legitimately leaves cp10 onward empty.
+          for (const _m of CHECKPOINT_MINS) {
+            if (_cpMin >= _m && _cpMin <= _m + CHECKPOINT_TOL_MIN && pos._cp[_m] === undefined) {
+              pos._cp[_m] = parseFloat((((curP - pos.premium) / pos.premium) * 100).toFixed(2));
+            }
+          }
+        }
+      } catch (_cpErr) { /* observational — must never affect an exit decision */ }
+    }
 
     // ── 8/09: MR-SCALP FAST EXIT REGIME ──────────────────────────────────────────
     // These positions target a fast capitulation snap (winners peak ~11-14min), so the slow-book
