@@ -3008,9 +3008,14 @@ async function runScan() {
       const _px        = stock.lastPrice || stock.price || 0;
       const _vw        = stock.intradayVWAP || 0;
       const _mOrUp     = !!(_or && _or.locked && _px > 0 && _px > _or.high && (_vw <= 0 || _px > _vw));
-      const _mSlope    = ((state._vwapSlope || {})[stock.ticker] ?? 0) >= CALL_MOMO_SLOPE_MIN;
-      const _mVol      = (stock.volPaceRatio ?? 1) > CALL_MOMO_VOLPACE_MIN && _vw > 0 && _px >= _vw;
-      const _mBreadth  = (state._breadthMomentum ?? 0) >= CALL_MOMO_BREADTH_MIN;
+      // 8/14: capture the RAW inputs alongside the booleans so the ledger can record how far each
+      // confirmation missed by, not merely that it missed.
+      const _mSlopeV   = (state._vwapSlope || {})[stock.ticker] ?? 0;
+      const _mVolV     = stock.volPaceRatio ?? 1;
+      const _mBrV      = state._breadthMomentum ?? 0;
+      const _mSlope    = _mSlopeV >= CALL_MOMO_SLOPE_MIN;
+      const _mVol      = _mVolV > CALL_MOMO_VOLPACE_MIN && _vw > 0 && _px >= _vw;
+      const _mBreadth  = _mBrV >= CALL_MOMO_BREADTH_MIN;
       const _mCount    = [_mOrUp, _mSlope, _mVol, _mBreadth].filter(Boolean).length;
       const _mWhich    = [_mOrUp && "OR-high", _mSlope && "vwap-up", _mVol && "vol-pace", _mBreadth && "breadth-up"]
                            .filter(Boolean).join("+") || "none";
@@ -3030,7 +3035,18 @@ async function runScan() {
             // records the session produces. _momoBlocks is a parallel ledger that is never drained:
             // one row per block, stamped with the forward move when the shadow fires.
             const _mId = `${stock.ticker}-${Date.now()}-${Math.round(_px * 100)}`;
-            if (_px > 0) state._momoShadow.push({ id: _mId, t: stock.ticker, at: Date.now(), px: _px, score, ev: _mWhich });
+            // 8/14 FIX: DEDUPE THE SHADOW BUFFER TOO. The per-minute dedupe below was applied only to
+            // _momoBlocks; _momoShadow kept pushing on EVERY scan against MOMO_SHADOW_MAX=200. At ~8s
+            // scans x 2 tickers that is ~15 pushes/min, so the buffer held only ~13 minutes of history
+            // and shift() evicted each entry LONG before its 30-minute follow-up could fire. Live cost:
+            // 8/14 recorded 524 blocks and stamped only 4 forward moves. 8/13 survived purely because
+            // block volume was low enough (90) never to saturate. Gate both buffers on the same key:
+            // 2 pushes/min x 30 min = 60 entries needed, well inside the 200 cap.
+            if (!state._momoLastMin) state._momoLastMin = {};
+            const _mMinKey = `${stock.ticker}-${new Date().toLocaleTimeString("en-US", { timeZone: "America/New_York", hour12: false }).slice(0, 5)}`;
+            const _mDupe   = state._momoLastMin[stock.ticker] === _mMinKey;
+            state._momoLastMin[stock.ticker] = _mMinKey;
+            if (_px > 0 && !_mDupe) state._momoShadow.push({ id: _mId, t: stock.ticker, at: Date.now(), px: _px, score, ev: _mWhich });
             while (state._momoShadow.length > MOMO_SHADOW_MAX) state._momoShadow.shift();
             // 8/12 FIX: DEDUPE TO ONE ROW PER TICKER PER MINUTE. The first live file recorded 600
             // rows in 82 minutes — one every 8.2s, i.e. one per SCAN, not one per event. Only 124
@@ -3040,13 +3056,15 @@ async function runScan() {
             // and where the DTE question gets answered. One row per ticker per minute keeps a whole
             // session inside the cap and makes each row an event rather than a sample.
             if (!Array.isArray(state._momoBlocks)) state._momoBlocks = [];
-            if (!state._momoLastMin) state._momoLastMin = {};
-            const _mMinKey = `${stock.ticker}-${new Date().toLocaleTimeString("en-US", { timeZone: "America/New_York", hour12: false }).slice(0, 5)}`;
-            const _mDupe   = state._momoLastMin[stock.ticker] === _mMinKey;
-            state._momoLastMin[stock.ticker] = _mMinKey;
             if (_px > 0 && !_mDupe) state._momoBlocks.push({
               id: _mId, ticker: stock.ticker, at: Date.now(), px: _px, score,
               evidence: _mWhich, orHigh: _mOrUp, slope: _mSlope, volPace: _mVol, breadth: _mBreadth,
+              // 8/14: RAW VALUES, not just the booleans. Three sessions of blocks told us the
+              // confirmations never fire but not HOW FAR off they were, so the recalibration above
+              // had to be part guess. Recording the actuals means the next tune reads a distribution.
+              slopeVal:   (typeof _mSlopeV === 'number' && Number.isFinite(_mSlopeV)) ? parseFloat(_mSlopeV.toFixed(6)) : null,
+              volPaceVal: (typeof _mVolV   === 'number' && Number.isFinite(_mVolV))   ? parseFloat(_mVolV.toFixed(3))   : null,
+              breadthVal: (typeof _mBrV    === 'number' && Number.isFinite(_mBrV))    ? parseFloat(_mBrV.toFixed(2))    : null,
               fwdPct: null, fwdMins: null,
             });
             while (state._momoBlocks.length > 2000) state._momoBlocks.shift();
