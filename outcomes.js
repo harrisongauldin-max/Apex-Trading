@@ -22,6 +22,14 @@
 
 const MAX_ROWS = 4000;   // safety cap on the daily buffer (a busy day is ~dozens of closes)
 
+// 8/17: outcomes.js was dependency-free until now. It takes exactly one import — constants, which
+// itself imports nothing, so this adds a leaf edge and no cycle. The reason is worth stating:
+// the checkpoint marks were briefly hardcoded HERE as well as in constants, which is the same
+// duplicated-literal shape that let two DTE values disagree for three days. Deriving both the
+// column names and the values from CHECKPOINT_MINS means the schema cannot drift from what the
+// exit loop actually captures.
+const { CHECKPOINT_MINS } = require('./constants');
+
 // Column order is the schema. Keep it stable — downstream analysis keys off it.
 const OUTCOME_HEADER = [
   // ── identity / timing ──
@@ -43,6 +51,11 @@ const OUTCOME_HEADER = [
   // appended 8/11 (items 1/3): paperSlipPct is PAPER-SIMULATED — Alpaca paper fills do not
   // model real queue position, so treat it as a FLOOR on live slippage, never a prediction.
   "midAtDecision","paperSlipPct",
+  // appended 8/17: the range regime — the axis A/B/C does not measure
+  "rangeRegime","rangeProj","rangeRatio",
+  // appended 8/17: exit-path checkpoints — return at each elapsed mark, blank if the position
+  // closed before reaching it. cp6 is the fast-cut decision point.
+  ...CHECKPOINT_MINS.map(m => `cp${m}`),
 ].join(",");
 
 function _csv(s) {
@@ -117,6 +130,10 @@ function buildOutcomeRow(pos, o) {
     (x.chainN != null ? x.chainN : ""), _n(x.medSpread, 4), _n(x.spreadPct, 4), _n(x.spreadCostShare, 1),
     _n(x.reqMovePct, 4), _n(x.availMovePct, 4), _n(x.feasRatio, 3),
     _n(x.midAtDecision, 2), _n(x.slipPct, 3),
+    x.rangeRegime || "", _n(x.rangeProj, 3), _n(x.rangeRatio, 3),
+    // read off pos._cp, written by the exit loop. A blank means the position closed before that
+    // mark — which is itself information (a 6-minute fast-cut leaves cp10 onward empty).
+    ...CHECKPOINT_MINS.map(m => _n((pos._cp || {})[m], 2)),
   ].map(_csv).join(",");
 
   return row;
