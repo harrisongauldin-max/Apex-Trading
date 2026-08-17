@@ -156,7 +156,13 @@ function recordTelemetry(state, rec) {
       rec.put  == null ? "" : rec.put,
       rec.isMR ? "Y" : "N",
       rec.curl || "none",
-      rec.vwapPct == null ? "" : (rec.vwapPct >= 0 ? "+" : "") + Number(rec.vwapPct).toFixed(1),
+      // 8/14: PRECISION 1dp -> 3dp. The source at scanner.js:2604 is a full-precision float, but
+      // this rounded it to ONE decimal, collapsing 2,462 observations into ten distinct values.
+      // The 8/14 VWAP thresholds were then calibrated off that quantized proxy — and landed
+      // between the +0.10 and +0.20 buckets, which together hold 24% of all mass. A 0.05% shift
+      // in the threshold moves the firing rate several-fold and the rounded data cannot tell you
+      // which way. 3dp gives 0.001% resolution so the next calibration reads the real distribution.
+      rec.vwapPct == null ? "" : (rec.vwapPct >= 0 ? "+" : "") + Number(rec.vwapPct).toFixed(3),
       blocker,
       drivers,
       shadow,
