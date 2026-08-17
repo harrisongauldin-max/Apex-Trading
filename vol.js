@@ -240,7 +240,35 @@ function surfaceStats(chain) {
   return out;
 }
 
+// ── RANGE REGIME ─────────────────────────────────────────────────────────────
+// The regime that actually governs a naked-long intraday book. A/B/C (200MA + 5-day VIX) is a
+// CRISIS taxonomy: correct for sizing a multi-month equity book, irrelevant to whether the next
+// twenty minutes move. Measured 8/12-8/14 it read 'A' on 100% of observations while realized
+// range varied 6.6x and forward movement 30x, correlating at r=+0.906. The variable APEX
+// classified on was constant; the variable that decided whether a trade could pay was ignored.
+//
+// Thresholds are DERIVED, not chosen. A contract needs requiredMovePct to reach its target; the
+// tape supplies dayRange * sqrt(hold/session) over the holding window. Setting those equal gives
+// the minimum full-day range at which the tenor is viable at all. ACTIVE is 2x that — roughly
+// where a trail has room to engage rather than just clearing the rung once.
+//
+// Returns null thresholds (regime 'unknown') on bad input rather than guessing.
+function rangeRegime(rangePctSoFar, elapsedMin, requiredMovePct, holdMin = 20, sessionMin = 390) {
+  const out = { projRange: null, minRange: null, ratio: null, regime: 'unknown' };
+  if (!(rangePctSoFar > 0) || !(elapsedMin > 0) || !(requiredMovePct > 0)) return out;
+  // project range-so-far to a full session: range grows ~with sqrt(time)
+  const proj = rangePctSoFar * Math.sqrt(Math.max(1, sessionMin) / Math.min(elapsedMin, sessionMin));
+  // full-day range at which available == required over the holding window
+  const minRange = (requiredMovePct * 100) / Math.sqrt(holdMin / sessionMin);
+  if (!(minRange > 0)) return out;
+  const ratio = proj / minRange;
+  out.projRange = proj; out.minRange = minRange; out.ratio = ratio;
+  out.regime = ratio < 1 ? 'dead' : ratio < 2 ? 'normal' : 'active';
+  return out;
+}
+
 module.exports = {
+  rangeRegime,
   realizedVol, parkinsonVol, garmanKlassVol, closeToCloseVol,
   ivrvSpread, requiredMovePct, availableMovePct, moveFeasibility, surfaceStats,
   BARS_PER_YEAR_1MIN,
