@@ -107,7 +107,8 @@ const {
   MOMO_SHADOW_MINS, MOMO_SHADOW_MAX,
   CALL_BREAKOUT_MODE = false,   // 8/05: when true, scoring enforces call momentum → the standalone gate below stands down
   RANGE_GOVERNOR_ENABLED = false, RANGE_GOVERNOR_ENFORCE = false, RANGE_GOVERNOR_FLOOR_PCT = 1.0, RANGE_GOVERNOR_MIN_SESSION_MIN = 60,
-  RANGE_GOVERNOR_FULL_SESSION_MIN = 390,
+  RANGE_GOVERNOR_FULL_SESSION_MIN = 390, RANGE_GOVERNOR_REF_DTE = 40,
+  MR_SCALP_TARGET_DTE = 1,
   VOL_INFRA_ENABLED = false, FEASIBILITY_ENABLED = false, FEASIBILITY_ENFORCE = false,
   GREEK_LIMITS_ENABLED = false, GREEK_LIMITS_ENFORCE = false,
   MAX_DELTA_DOLLARS_POS = 15000, MAX_DELTA_DOLLARS_NEG = -15000,
@@ -1802,6 +1803,33 @@ async function runScan() {
       } catch (_vErr) { logEvent("scan", `[VOL] ${stock.ticker} vol calc failed — ${_vErr.message}`); }
     }
 
+    // ── 8/17: RANGE REGIME ───────────────────────────────────────────────
+    // A/B/C classifies on SPY-vs-200MA and 5-day VIX — a crisis taxonomy for a book that holds
+    // for months. APEX flattens at 3:15. Over 8/12-8/14 that label read "A" on 100% of scans
+    // while realized range moved 6.6x and forward movement 30x (r=+0.906). This is the axis the
+    // book actually lives on. LOG-ONLY: it gates nothing, it rides on the outcome row so the
+    // question "does range regime predict?" becomes answerable instead of argued.
+    let _rrOut = null;
+    if (VOL_INFRA_ENABLED && VOL) {
+      try {
+        // required move for the tenor actually being bought — mirrors execution.js targetDTE
+        // and the range-governor scale. Premium is approximated from the cached contract when
+        // available; without one there is nothing to size against and the regime stays unknown.
+        const _rrC   = stock._cachedContract;
+        const _rrReq = (_rrC && _rrC.premium > 0 && _rrC.greeks)
+          ? VOL.requiredMovePct(_rrC.premium, parseFloat(_rrC.greeks.delta) || 0, price)
+          : null;
+        if (_rrReq != null) {
+          _rrOut = VOL.rangeRegime(stock._intraRangePct, state._sessionMinsNow ?? 0, _rrReq);
+          if (!state._rrLast) state._rrLast = {};
+          if (_rrOut.regime !== "unknown" && state._rrLast[stock.ticker] !== _rrOut.regime) {
+            state._rrLast[stock.ticker] = _rrOut.regime;
+            logEvent("scan", `[RANGE-REGIME] ${stock.ticker} ${_rrOut.regime.toUpperCase()} — range ${stock._intraRangePct}% projects to ${_rrOut.projRange.toFixed(2)}% vs ${_rrOut.minRange.toFixed(2)}% needed (ratio ${_rrOut.ratio.toFixed(2)})`);
+          }
+        }
+      } catch (_rrErr) { /* observational — never break the scan */ }
+    }
+
     const liveStock = {
       ...stock,
       price,
@@ -1812,6 +1840,9 @@ async function runScan() {
       _vrp:       _vrpOut ? _vrpOut.vrp : null,
       _ivrvRatio: _vrpOut ? _vrpOut.ratio : null,
       _volRegime: _vrpOut ? _vrpOut.regime : null,
+      _rangeRegime:     _rrOut ? _rrOut.regime    : null,
+      _rangeProj:       _rrOut ? _rrOut.projRange : null,
+      _rangeRatio:      _rrOut ? _rrOut.ratio     : null,
       rsi:           signals.rsi,
       dailyRsi:      (signals && signals.dailyRsi != null) ? parseFloat(signals.dailyRsi) : parseFloat(signals?.rsi || 50),
       macd:          signals.macd,
@@ -2823,8 +2854,15 @@ async function runScan() {
       const batch = scored.slice(i, i + BATCH_SIZE);
       await Promise.all(batch.map(async ({ stock, price, optionType, score }) => {
         try {
-          const isMR = optionType === "call" && (stock._mrStrong || false);   // D3: aggressive 0.42Δ/14DTE profile only on STRICT tier
-          const contract = await findContract(stock.ticker, optionType, isMR ? 0.42 : 0.35, isMR ? 14 : 38, state.vix, stock);
+          const isMR = optionType === "call" && (stock._mrStrong || false);   // D3: aggressive 0.42Δ profile only on STRICT tier
+          // 8/17: DTE 38 -> 3. This prefetch was the REAL source of the tenor, not
+          // execution.js:361. It writes stock._cachedContract, and executeTrade does
+          // `contract = stock._cachedContract || await findContract(...)` — so the cached contract
+          // WINS and the targetDTE computed in executeTrade is never reached. The 8/14 default
+          // change (40 -> 3) shipped live and did nothing: 8/17 still logged SPY 44DTE / QQQ 46DTE
+          // all session. Two hardcoded tenors, one of which silently overrode the other.
+          // MR keeps a slightly longer leg (its own gate is stricter); everything else is 3.
+          const contract = await findContract(stock.ticker, optionType, isMR ? 0.42 : 0.35, isMR ? 3 : 3, state.vix, stock);
           if (contract) {
             stock._cachedContract = contract;
             if (contract.iv && contract.iv > 0) stock._realIV = contract.iv;
@@ -3099,10 +3137,16 @@ async function runScan() {
       const _sessMin = state._sessionMinsNow ?? 0;
       const _rgFullMin   = RANGE_GOVERNOR_FULL_SESSION_MIN > 0 ? RANGE_GOVERNOR_FULL_SESSION_MIN : 390;
       const _rgSessFrac  = Math.min(1, Math.max(0, _sessMin / _rgFullMin));
-      const _rgFloor     = RANGE_GOVERNOR_FLOOR_PCT * Math.sqrt(_rgSessFrac);
+      // 8/17: SCALE THE FLOOR BY THE TENOR BEING BOUGHT. Mirrors the targetDTE resolution in
+      // execution.js:~294 — these two MUST stay in sync; if the DTE default changes there, this
+      // reads the wrong tenor and the governor silently mis-gates. Required move scales ~with
+      // premium, which scales ~sqrt(DTE), so the floor does too. 40DTE -> 1.00%, 3DTE -> 0.27%.
+      const _rgDTE       = stock._mrScalp ? MR_SCALP_TARGET_DTE : 3;
+      const _rgDteScale  = Math.sqrt(Math.max(1, _rgDTE) / Math.max(1, RANGE_GOVERNOR_REF_DTE));
+      const _rgFloor     = RANGE_GOVERNOR_FLOOR_PCT * Math.sqrt(_rgSessFrac) * _rgDteScale;
       if (_rng != null && _sessMin >= RANGE_GOVERNOR_MIN_SESSION_MIN && _rng < _rgFloor) {
         if (RANGE_GOVERNOR_ENFORCE) {
-          logEvent("filter", `[RANGE-GOVERNOR] ${stock.ticker} call BLOCKED — intraday range ${_rng}% < ${_rgFloor.toFixed(2)}% scaled floor (${_sessMin.toFixed(0)}min in; ${RANGE_GOVERNOR_FLOOR_PCT}% full-day target) — dead tape, no move to catch | score ${score}`);
+          logEvent("filter", `[RANGE-GOVERNOR] ${stock.ticker} call BLOCKED — intraday range ${_rng}% < ${_rgFloor.toFixed(2)}% scaled floor (${_sessMin.toFixed(0)}min in; ${RANGE_GOVERNOR_FLOOR_PCT}% full-day target, ${_rgDTE}DTE scale ${_rgDteScale.toFixed(2)}) — dead tape, no move to catch | score ${score}`);
           continue;
         }
         logEvent("filter", `[RANGE-GOVERNOR] ${stock.ticker} call would BLOCK — intraday range ${_rng}% < ${_rgFloor.toFixed(2)}% scaled floor (${_sessMin.toFixed(0)}min) | score ${score} | SHADOW ONLY`);
