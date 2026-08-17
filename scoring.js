@@ -1179,7 +1179,20 @@ function scoreIndexSetup(stock, optionType, spyRSI, spyMACD, spyMomentum, breadt
       if (CALL_BREAKOUT_MODE && _buStructure) {
         reasons.push(`${stock.ticker} RSI ${spyRSI} high BUT confirmed intraday breakout - uptrend intact, penalty waived (breakout mode)`);
       } else {
-        score -= 15; reasons.push(`${stock.ticker} RSI ${spyRSI} overbought — wrong entry for naked calls (-15)`);
+        // 8/14: WEIGHT MOVED OFF DAILY RSI. spyRSI here is DAILY RSI (scanner.js:1907 prefers
+        // dailyRsi), and a 14-DAY oscillator has close to nothing to say about the next 20 minutes
+        // on a book that flattens at 3:15. Three failures at once: (a) horizon mismatch; (b) it is
+        // frozen intraday — SPY read 75.1 then 75.4 across a whole session, so it is another slab of
+        // daily weather in a score already dominated by them; (c) it locks out a SIDE FOR WEEKS — SPY
+        // sat >=75 for days, scoring calls 22-37 against a floor of 50, which is a seasonal ban, not
+        // a filter. Measured over n=143: daily-RSI r=-0.10 vs vwap-dist r=-0.21. Extension is real,
+        // but vwap distance measures it at the horizon actually traded. Keep a small tail guard for
+        // genuine extremes only; the working penalty now lives on the VWAP term below.
+        if (spyRSI >= 80) {
+          score -= 8; reasons.push(`${stock.ticker} daily RSI ${spyRSI} extreme — tail guard (-8)`);
+        }
+        // deliberately silent between 70 and 80: this branch is true on most scans while the index
+        // sits elevated, and a reason line there would pad every [NEAR-MISS] trail with a non-event.
       }
     }
 
@@ -1242,8 +1255,18 @@ function scoreIndexSetup(stock, optionType, spyRSI, spyMACD, spyMomentum, breadt
         // so the old "chasing" penalty is dropped too. Above-VWAP quality is handled above.
         if (vwapDiff < -0.002) reasons.push(`Below VWAP ${(vwapDiff*100).toFixed(1)}% - wrong side for a breakout call (+0)`);
       } else {
-        if (vwapDiff < -0.005)      { score += 9; reasons.push(`Below VWAP ${(vwapDiff*100).toFixed(1)}% - dip entry (+9)`); }
-        else if (vwapDiff > 0.015)  { score -= 5; reasons.push(`Extended above VWAP ${(vwapDiff*100).toFixed(1)}% - chasing (+-5)`); }
+        // 8/14 RECALIBRATED TO THE OBSERVED TAPE. Measured across 2,462 telemetry rows / 3 sessions,
+        // vwap-dist ran min -0.50% to max +0.40% (p10 -0.20, med 0.00, p95 +0.20). The old thresholds
+        // were -0.5% and +1.5%: the chasing penalty fired 0 times in 2,462 observations and could not
+        // fire, and the dip bonus caught only the single most extreme reading. Both were dead code
+        // wearing the appearance of risk control. New levels sit at roughly p15 and p95, so each term
+        // actually fires on a minority of scans instead of never. The chasing penalty inherits the
+        // weight taken off daily RSI, because vwap-dist is the stronger measure of the same thing
+        // (r=-0.21 vs -0.10, n=143) and it varies within the session rather than across weeks.
+        // CAVEAT: r=-0.21 clears uncorrected significance at n=143 but NOT multiple-comparison
+        // correction across 14 features. This is a swap to a better-measured input, not a proven edge.
+        if (vwapDiff < -0.0015)      { score += 9; reasons.push(`Below VWAP ${(vwapDiff*100).toFixed(2)}% - dip entry (+9)`); }
+        else if (vwapDiff > 0.0020)  { score -= 12; reasons.push(`Extended above VWAP ${(vwapDiff*100).toFixed(2)}% - chasing (-12)`); }
       }
     }
 
