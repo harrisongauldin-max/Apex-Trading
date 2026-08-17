@@ -99,7 +99,20 @@ function buildOutcomeRow(pos, o) {
     _n(x.rangePct, 3), pos.entryStrategy || "",   // appended 8/09
     // appended 8/11 — keep last, matching OUTCOME_HEADER's tail
     _n(x.rv, 4), x.rvMethod || "", (x.rvSparse != null ? x.rvSparse : ""),
-    _n(x.vrp, 4), _n(x.ivrvRatio, 3), x.volRegime || "",
+    // 8/14: VRP COMPUTED HERE, NOT AT SCAN TIME. The scan-time path depends on stock._realIV,
+    // which still was not populating — 8/13 wrote vrp="" and volRegime="unknown" on BOTH rows
+    // even though atmIV (0.1895) and rv (0.1702) were sitting in the same record. Both inputs are
+    // right here at write time, from the retained chain, so derive it here and stop depending on
+    // a value that has to survive a scan-order race. Falls back to the scan-time value if present.
+    ...(() => {
+      const _iv = (typeof x.vrpIV === "number" && x.vrpIV > 0) ? x.vrpIV
+                : (typeof x.atmIV === "number" && x.atmIV > 0) ? x.atmIV : null;
+      const _rv = (typeof x.rv === "number" && x.rv > 0) ? x.rv : null;
+      if (_iv == null || _rv == null) return [_n(x.vrp, 4), _n(x.ivrvRatio, 3), x.volRegime || ""];
+      const _ratio = _iv / _rv;
+      const _reg = _ratio >= 1.15 ? "iv-rich" : _ratio <= 0.90 ? "iv-cheap" : "fair";
+      return [_n(_iv - _rv, 4), _n(_ratio, 3), _reg];
+    })(),
     _n(x.atmIV, 4), _n(x.skew, 4), (x.termSlope != null ? x.termSlope : ""),
     (x.chainN != null ? x.chainN : ""), _n(x.medSpread, 4), _n(x.spreadPct, 4), _n(x.spreadCostShare, 1),
     _n(x.reqMovePct, 4), _n(x.availMovePct, 4), _n(x.feasRatio, 3),
