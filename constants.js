@@ -402,14 +402,31 @@ const AGENT_ENABLED         = false;
 const MOMO_SHADOW_MINS      = 30;    // how long to wait before reporting the forward move
 const MOMO_SHADOW_MAX       = 200;   // hard cap on tracked entries
 
-const CALL_MOMO_STRICT      = true;
+const CALL_MOMO_STRICT      = false;   // 8/14: FLIPPED. Strict mode requires OR-high AND >=1 confirm.
+                                       // Measured over 1,214 blocks / 3 sessions, those two conditions
+                                       // co-occurred ZERO times — they are structurally near-exclusive
+                                       // (OR-high = extended above VWAP; breadth-up = broadening off a
+                                       // low). 8/12-8/13 fired OR-high 549x with no confirm; 8/14 fired
+                                       // breadth-up 93x with almost no OR-high. The conjunction is not a
+                                       // high bar, it is an unreachable one, and an unreachable gate is
+                                       // not risk control — it is a system that cannot generate evidence.
+                                       // Any 1 of 4 (CALL_MOMENTUM_MIN=1) restores the 8/05 behaviour that
+                                       // actually traded, and the block ledger now measures whether that
+                                       // was right instead of assuming it.
 const CALL_MOMENTUM_MIN     = 1;
 const CALL_MOMENTUM_ENFORCE = true;    // 8/05 (Harrison): LIVE. Paper money — he chose enforcement
                                        // over one session of shadow counterfactual. Set false to
                                        // return to observe-only without touching any other logic.
-const CALL_MOMO_SLOPE_MIN   = 0.0005;   // VWAP slope up, mirrors the put side's -0.0005
-const CALL_MOMO_VOLPACE_MIN = 1.8;      // volume expansion, mirrors scoring.js:602
-const CALL_MOMO_BREADTH_MIN = 10;       // breadth momentum rising, mirrors the put -10
+// 8/14 RECALIBRATION. Measured over 3 sessions: 552 OR-high blocks, ZERO with any confirmation.
+// That is not a filter, it is an off switch — the thresholds were mirrored off the put side without
+// checking whether this tape ever reaches them. Observed: breadth momentum logged 0/+2.7/+5.3/+8
+// against a +10 bar; VWAP slope flat on a grind. Loosened to values the tape actually produces.
+// NOTE: the session-cumulative volPace distribution is NOT known — telemetry does not carry it, so
+// 1.2 is a judgement, not a measurement. The ledger now records the RAW values on every block so
+// the next tune is empirical rather than another guess.
+const CALL_MOMO_SLOPE_MIN   = 0.0002;   // was 0.0005
+const CALL_MOMO_VOLPACE_MIN = 1.2;      // was 1.8 — provisional, pending the logged distribution
+const CALL_MOMO_BREADTH_MIN = 5;        // was 10 — observed max across 3 sessions was +8
 
 // 8/05: CALL BREAKOUT MODE — the call-side mirror of PUT_BREAKDOWN_MODE (scoring.js). The put path
 // wins because every layer expresses one thesis: ride a FRESH, still-progressing intraday breakdown.
@@ -472,7 +489,12 @@ const SLIPPAGE_LOG_ENABLED  = true;
 // similar-looking numbers. Expressing the stop as an UNDERLYING move puts every leg on one
 // currency. SHADOW until USTOP_ENFORCE — this changes when every position exits.
 const USTOP_ENABLED         = true;
-const USTOP_ENFORCE         = false;
+const USTOP_ENFORCE         = true;    // 8/14: PROMOTED. Ships WITH the DTE change, deliberately
+                                       // breaking the one-flag-per-deploy rule — see
+                                       // APEX_PROMOTION_CRITERIA.md. Short DTE on option-percent
+                                       // stops is the configuration already known to produce noise
+                                       // stop-outs (1DTE at -7.5% fires on SPY -0.052%), so shipping
+                                       // them apart means spending a session in a known-bad state.
 const USTOP_MOVE_PCT        = 0.0035;  // 0.35% adverse underlying move = stop. Sits between the
                                        // current 1DTE (0.052%) and 40DTE (0.610%) equivalents.
 const USTOP_MIN_OPT_PCT     = 0.05;    // floor: never tighter than -5% option move
