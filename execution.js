@@ -108,8 +108,14 @@ async function findContract(ticker, optionType, targetDelta, targetDTE, vix, sto
       // 8/03: biweekly gets an EXPLICIT 9-16 window. The generic targetDTE±10 would give 3-23,
       // which overlaps the same-week band and would let the two legs resolve to the same contract.
       const _isBiweekly = targetDTE > 10 && targetDTE <= 20;
-      const minDays = _isBiweekly ? 9 : (targetDTE <= 10 ? 0 : Math.max(0, targetDTE - 10));
-      const maxDays = _isBiweekly ? 16 : (targetDTE <= 10 ? 8 : Math.min(120, targetDTE + 10));
+      // 8/14: TIGHTEN THE SHORT WINDOW. targetDTE<=10 used to open a 0-8 day window, and because the
+      // contract sort ranks by STRIKE distance first (DTE only breaks ties within a cent), a "3 DTE"
+      // request could fill anywhere from 0 to 8 days — a 5x spread in rung-reachability masquerading
+      // as one treatment. +/-2 pins it. The floor of 1 deliberately excludes 0DTE: at 2:30pm a 0DTE
+      // contract loses ~3.4% to theta in the fast-cut's first six minutes, so it would trip the +3%
+      // bar on decay alone with no adverse price move at all.
+      const minDays = _isBiweekly ? 9 : (targetDTE <= 10 ? Math.max(1, targetDTE - 2) : Math.max(0, targetDTE - 10));
+      const maxDays = _isBiweekly ? 16 : (targetDTE <= 10 ? targetDTE + 2 : Math.min(120, targetDTE + 10));
       fetchMin = new Date(today.getTime() + minDays * 86400000).toISOString().split("T")[0];
       fetchMax = new Date(today.getTime() + maxDays * 86400000).toISOString().split("T")[0];
     }
@@ -356,7 +362,13 @@ async function executeTrade(stock, price, score, scoreReasons, vix, optionType =
                   : dteBand === "sameweek" ? 3
                   : dteBand === "biweekly" ? 13
                   : dteBand === "standard" ? 40
-                  : (_dgm ? 3 : (isMeanReversion ? 3 : 40));
+                  // 8/14: DEFAULT SHORTENED 40 -> 3. Across 247 forward-move windows on 3 sessions,
+                // ZERO reached the move a 29- or 43-DTE leg needs to hit the +12.5% rung (0.419%
+                // / 0.513%); 25% reached 1DTE's 0.078% and 16% reached 3DTE's 0.115%. The old
+                // default was structurally incapable of paying, and because targetDTE=40 drove a
+                // 30-50 fetch window, APEX had never even LOOKED at a short contract — 30,782
+                // surface rows across two sessions contained nothing under 27 DTE.
+                : (_dgm ? 3 : 3);
   const _sameWeekLeg = (dteBand === "sameweek") || (dteBand === null && _dgm);
   // Twin-entry: the prefetch caches ONE contract. Only the same-week leg may use it; the standard leg
   // must select its own (else it would inherit the same-week cache). Validate the cache against the band.
