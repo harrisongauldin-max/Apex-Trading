@@ -1082,6 +1082,12 @@ function scoreIndexSetup(stock, optionType, spyRSI, spyMACD, spyMomentum, breadt
       const _breadthNow  = state._breadth || 50;
       const _aboveVWAP   = (stock.intradayVWAP || 0) > 0 && (stock.lastPrice || stock.price || 0) >= stock.intradayVWAP * 0.995;
       if (_aboveVWAP && _breadthNow >= 40) {
+        // 8/17 REVERTED with the VIX term above — same reason: eleven thresholds are calibrated to
+        // this scale. The FINDING stands and is worth acting on later: Regime took exactly two
+        // values across 112 windows, 11 (x17) and 21 (x94), i.e. a constant +11 with a variable +10
+        // for intraday alignment, and only the variable half can discriminate. The right way to act
+        // on that is to move every threshold in lockstep in one deliberate pass, not to subtract
+        // points here and hope the rest follow.
         score += 21; reasons.push(`Regime: ${regime} (+21) — intraday aligned (above VWAP, breadth ${_breadthNow}%)`);
       } else if (_aboveVWAP || _breadthNow >= 30) {
         score += 11; reasons.push(`Regime: ${regime} (+11) — partial intraday alignment`);
@@ -1238,6 +1244,16 @@ function scoreIndexSetup(stock, optionType, spyRSI, spyMACD, spyMomentum, breadt
       else if (vixOutlook === "mean_reverting") { score += 6; reasons.push("VIX mean reverting - MR improving (+6)"); }
     } else {
       if (vix <= 18)            { score += 13; reasons.push(`VIX ${vix} - calls historically cheap, low premium (+13)`); }
+      // 8/17 REVERTED (same day). Removing this was correct in isolation — the term is +9 on all 58
+      // windows where it fires, and a constant cannot rank. But it is NOT a clean constant shift:
+      // it fires only when vix <= 22 (58 of 112 windows), so its PRESENCE encodes the VIX band even
+      // though its VALUE does not. Old-vs-new scores correlated 0.965, not 1.000, for that reason.
+      // And ELEVEN hardcoded thresholds across scanner/entryEngine/execution are calibrated to this
+      // scale (scanner:2475 _debitCallActive?75, SLOT2 75, SLOT3 85, entryEngine 75/85/90, STAGGER
+      // bypass 85, aggressive sizing 85). Dropping 20 points without moving all eleven took the
+      // share of windows clearing the operative floor from 15% to 1%. Subtracting a constant from a
+      // score that eleven thresholds are keyed to is a refactor, not a tweak — and it buys nothing,
+      // because ranking is what matters and ranking barely moved.
       else if (vix <= 22)       { score += 9;  reasons.push(`VIX ${vix} - moderate, calls reasonably priced (+9)`); }
       else if (vix >= 35)       { score -= 10; reasons.push(`VIX ${vix} - calls expensive in fear environment (-10)`); }
       if (vixOutlook === "falling")      { score += 13; reasons.push("VIX compressing - call premium expanding (+13)"); }
