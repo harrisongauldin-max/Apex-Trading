@@ -173,13 +173,15 @@ async function sendEmail(type) {
         const mb = _eodSnap.momoBlocks;
         if (mb.length) {
           const dateStr = new Date().toLocaleDateString("en-CA", { timeZone: "America/New_York" });
-          const head = ["blockET","ticker","score","evidence","orHigh","vwapUp","volPace","breadthUp","pxAtBlock","fwdPct","fwdMins"].join(",");
+          const head = ["blockET","ticker","score","evidence","orHigh","vwapUp","volPace","breadthUp","slopeVal","volPaceVal","breadthVal","pxAtBlock","fwdPct","fwdMins"].join(",");
           const lines = [head];
           for (const r of mb) {
             lines.push([
               new Date(r.at).toLocaleTimeString("en-US", { timeZone: "America/New_York", hour12: false }),
               r.ticker, r.score, r.evidence,
               r.orHigh ? 1 : 0, r.slope ? 1 : 0, r.volPace ? 1 : 0, r.breadth ? 1 : 0,
+              (r.slopeVal != null ? r.slopeVal : ''), (r.volPaceVal != null ? r.volPaceVal : ''),
+              (r.breadthVal != null ? r.breadthVal : ''),
               (r.px != null ? r.px.toFixed(2) : ""),
               (r.fwdPct != null ? r.fwdPct : ""), (r.fwdMins != null ? r.fwdMins : ""),
             ].join(","));
