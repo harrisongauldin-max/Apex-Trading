@@ -377,11 +377,20 @@ async function executeTrade(stock, price, score, scoreReasons, vix, optionType =
     contract = await findContract(stock.ticker, optionType, targetDelta, targetDTE, vix, stock);
   } else {
     contract = stock._cachedContract || await findContract(stock.ticker, optionType, targetDelta, targetDTE, vix, stock);
-    if (contract && _sameWeekLeg) {
+    // 8/17: VALIDATE THE CACHE AGAINST targetDTE, ALWAYS. This guard previously ran only when
+    // _sameWeekLeg was true — and _sameWeekLeg is (dteBand === "sameweek") || (dteBand === null &&
+    // _dgm). With data-gather off the scanner calls executeTrade with NO dteBand argument, so it is
+    // `undefined` (not null), both clauses are false, and the cache was never checked. The prefetch
+    // at scanner.js:2835 was seeding a 38-DTE contract and it won every time, silently overriding
+    // the targetDTE computed above. The 40->3 default shipped and changed nothing for three days.
+    // Now: any cached contract more than TOL days from target is rejected and re-selected,
+    // whatever the leg. TOL mirrors the fetch window (+/-2 short, +/-10 long).
+    if (contract && stock._cachedContract === contract) {
       const _cDTE = contract.expDays || contract.dte ||
         (contract.expiration_date ? Math.round((new Date(contract.expiration_date) - new Date()) / 86400000) : 0);
-      if (_cDTE > 8) {
-        logEvent("filter", `${stock.ticker} - cached ${_cDTE}DTE contract rejected (same-week leg) — re-selecting`);
+      const _tol  = targetDTE <= 10 ? 2 : 10;
+      if (Number.isFinite(_cDTE) && Math.abs(_cDTE - targetDTE) > _tol) {
+        logEvent("filter", `${stock.ticker} - cached ${_cDTE}DTE contract rejected (target ${targetDTE}DTE, tol ±${_tol}) — re-selecting`);
         contract = await findContract(stock.ticker, optionType, targetDelta, targetDTE, vix, stock);
       }
     }
@@ -818,6 +827,9 @@ async function executeTrade(stock, price, score, scoreReasons, vix, optionType =
     vrp:        (typeof stock._vrp === "number") ? parseFloat(stock._vrp.toFixed(4)) : null,
     ivrvRatio:  (typeof stock._ivrvRatio === "number") ? parseFloat(stock._ivrvRatio.toFixed(3)) : null,
     volRegime:  stock._volRegime || null,
+    rangeRegime: stock._rangeRegime || null,
+    rangeProj:  (typeof stock._rangeProj  === "number") ? parseFloat(stock._rangeProj.toFixed(3))  : null,
+    rangeRatio: (typeof stock._rangeRatio === "number") ? parseFloat(stock._rangeRatio.toFixed(3)) : null,
     atmIV:      (contract._surface && contract._surface.atmIV != null) ? parseFloat(contract._surface.atmIV.toFixed(4)) : null,
     skew:       (contract._surface && contract._surface.skew != null) ? parseFloat(contract._surface.skew.toFixed(4)) : null,
     termSlope:  (contract._surface && contract._surface.termSlope != null) ? parseFloat(contract._surface.termSlope.toExponential(3)) : null,
