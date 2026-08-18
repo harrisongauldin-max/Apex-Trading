@@ -64,6 +64,19 @@ async function getAlpacaTruth() {
       todayPct:      parseFloat(p.unrealized_intraday_plpc || 0) * 100,
     })) : [];
 
+    // ── 8/17: STAMP BROKER UNREALISED ONTO EACH OPEN POSITION ───────────────────────
+    // NOTE: this is UNREALIZED P&L on an open position — it is NOT what the outcome row uses.
+    // The outcome row derives broker truth from the actual entry and exit FILL prices, because
+    // unrealized-at-last-fetch and realized-at-close are different quantities and comparing them
+    // would show a delta on every trade. This stamp exists for live monitoring: an open position
+    // whose broker unrealized diverges from the journal mark is drifting NOW, not at close.
+    try {
+      for (const _op of openPositions) {
+        const _pos = (state.positions || []).find(p => p.contractSymbol === _op.symbol);
+        if (_pos && Number.isFinite(_op.unrealizedPnL)) _pos._alpacaPnl = _op.unrealizedPnL;
+      }
+    } catch (_atErr) { /* observational — never break the truth fetch */ }
+
     logEvent("scan",
       `[ALPACA TRUTH] realized:$${realizedPnL.toFixed(0)} ` +
       `unrealized:$${unrealizedPnL.toFixed(0)} ` +
