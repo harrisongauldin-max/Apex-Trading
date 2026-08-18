@@ -156,6 +156,7 @@ async function redisSave(data) {
   // toward the limit for data that is only needed within the session that produced it (the EOD
   // CSV is built from memory before the reset). Strip it, same as the other in-memory buffers.
   delete slim._chainSnaps;
+  delete slim._nearMiss;      // 8/17: same reason — in-memory ledger, consumed by the EOD CSV
 
   try { fs.writeFileSync(STATE_FILE, JSON.stringify(data, null, 2)); } catch(e) {}
 
@@ -513,6 +514,7 @@ async function saveDailyLogToRedis(isEOD = false) {
     // this runs (and from a snapshot taken in sendEmail's synchronous window). Reset daily or
     // tomorrow's gate report carries today's blocks.
     state._momoBlocks = []; state._momoShadow = []; state._momoLastMin = {};
+    state._nearMiss = []; state._nmLastMin = {};
     markDirty();
   }
 }
