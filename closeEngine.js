@@ -178,15 +178,22 @@ async function _doClosePosition(ticker, reason, exitPremium = null, contractSym 
   const mult = pos.partialClosed ? 0.5 : 1.0;
 
   let ep;
+  // 8/17: TAG THE PROVENANCE OF ep. It resolves through four tiers — caller-supplied, live quote,
+  // cached price, and finally a SYNTHETIC estimate (pos.premium * (1 + stopPct)). The outcome row
+  // derives brokerPnl from ep, so without this tag a tier-4 estimate would produce a "broker truth"
+  // figure computed from the same fabricated price the journal uses — pnlDelta would read 0 and the
+  // reconciliation would look clean on a trade where BOTH numbers are invented. Overwritten to
+  // "fill" below if the sell order actually fills.
+  let _epSrc = "unknown";
   if (exitPremium !== null) {
-    ep = exitPremium;
+    ep = exitPremium; _epSrc = "caller";
   } else {
     if (pos.contractSymbol) {
       const realP = await _getOptionsPrice(pos.contractSymbol);
-      if (realP) ep = realP;
+      if (realP) { ep = realP; _epSrc = "quote"; }
     }
     if (!ep && pos.currentPrice && pos.currentPrice > 0) {
-      ep = pos.currentPrice;
+      ep = pos.currentPrice; _epSrc = "cached";
     }
     if (!ep) {
       const g = reason === "stop"        ? -STOP_LOSS_PCT
@@ -196,7 +203,7 @@ async function _doClosePosition(ticker, reason, exitPremium = null, contractSym 
               : reason === "expiry-roll" ? 0.15
               : reason === "fast-profit" ? FAST_PROFIT_PCT
               : 0;
-      ep = parseFloat((pos.premium * (1 + g)).toFixed(2));
+      ep = parseFloat((pos.premium * (1 + g)).toFixed(2)); _epSrc = "ESTIMATED";
       logEvent("warn", `${pos.ticker} using estimated exit price (no real data available) | reason:${reason} | ep:$${ep}`);
     }
   }
@@ -273,7 +280,7 @@ async function _doClosePosition(ticker, reason, exitPremium = null, contractSym 
           let _closeFilled = false;
           if (closeResp.status === "filled" && parseFloat(closeResp.filled_avg_price || 0) > 0) {
             _closeFilled = true;
-            ep = parseFloat(parseFloat(closeResp.filled_avg_price).toFixed(2));
+            ep = parseFloat(parseFloat(closeResp.filled_avg_price).toFixed(2)); _epSrc = "fill";
             logEvent("trade", `Close order ${closeResp.id} filled immediately @ $${ep}`);
           } else {
             const _cStart = Date.now();
@@ -283,7 +290,7 @@ async function _doClosePosition(ticker, reason, exitPremium = null, contractSym 
                 const _poll = await alpacaGet(`/orders/${closeResp.id}`);
                 if (_poll && _poll.status === "filled" && parseFloat(_poll.filled_avg_price || 0) > 0) {
                   _closeFilled = true;
-                  ep = parseFloat(parseFloat(_poll.filled_avg_price).toFixed(2));
+                  ep = parseFloat(parseFloat(_poll.filled_avg_price).toFixed(2)); _epSrc = "fill";
                   logEvent("trade", `Close order ${closeResp.id} fill confirmed @ $${ep} (${((Date.now()-_cStart)/1000).toFixed(1)}s)`);
                 } else if (_poll && ["canceled","expired","rejected"].includes(_poll.status)) {
                   logEvent("warn", `Close order ${closeResp.id} ${_poll.status} — position preserved`);
@@ -346,7 +353,11 @@ async function _doClosePosition(ticker, reason, exitPremium = null, contractSym 
   const tradeOutcome = {
     ticker, tradeType: pos.isCreditSpread ? "credit_spread" : (pos.isSpread || hasSpreadStructure) ? "debit_spread" : "naked",
     optionType: pos.optionType,
-    pnl, pct, reason, exitPremium: ep, date: new Date().toLocaleDateString(), closeTime: Date.now(),
+    // 8/17: carry the QUANTITY ACTUALLY SOLD. mult is 0.5 when pos.partialClosed, so this close
+    // may cover only part of the position — pnl above is computed on contractsToSell, and any
+    // consumer that reaches for pos.contracts instead would be reconciling against the wrong size.
+    pnl, pct, reason, exitPremium: ep, epSource: _epSrc, closedQty: contractsToSell,
+    date: new Date().toLocaleDateString(), closeTime: Date.now(),
     won: pnl > 0,
     entryScore:    pos.score || 0,
     entryRSI:      pos.entryRSI || 0,
