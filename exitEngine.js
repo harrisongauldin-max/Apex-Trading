@@ -304,6 +304,18 @@ async function checkExits(positions, posSnapshots, posQuotes, posNewsCache, ctx)
           for (const _m of CHECKPOINT_MINS) {
             if (_cpMin >= _m && _cpMin <= _m + CHECKPOINT_TOL_MIN && pos._cp[_m] === undefined) {
               pos._cp[_m] = parseFloat((((curP - pos.premium) / pos.premium) * 100).toFixed(2));
+              // 8/17: GREEKS + IV AT THE SAME MARK. pos.greeks and pos.iv are refreshed live at
+              // ~line 258, so this is free. Without them a checkpoint says the trade was down 8%
+              // but not WHY — and for a long-premium book "wrong on direction" and "IV crushed"
+              // are different problems with different fixes. Delta + IV at entry and at each mark
+              // lets a loss be decomposed into delta / theta / vega instead of guessed at.
+              if (!pos._cpG) pos._cpG = {};
+              pos._cpG[_m] = {
+                d:  parseFloat(pos.greeks && pos.greeks.delta) || null,
+                th: parseFloat(pos.greeks && pos.greeks.theta) || null,
+                v:  parseFloat(pos.greeks && pos.greeks.vega)  || null,
+                iv: (typeof pos.iv === "number" && pos.iv > 0) ? parseFloat(pos.iv.toFixed(4)) : null,
+              };
             }
           }
         }
