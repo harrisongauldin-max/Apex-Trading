@@ -59,6 +59,19 @@ const OUTCOME_HEADER = [
   // appended 8/17: clustering. signalId groups legs from ONE decision — cluster on it before
   // computing any N, correlation or win rate, or the A/B/C fan-out inflates the sample 3x.
   "signalId","minSincePrior",
+  // appended 8/17: greeks + IV at each checkpoint, and the Alpaca cross-check.
+  // dNN/ivNN let a loss be decomposed into delta vs vega vs theta rather than guessed at.
+  ...CHECKPOINT_MINS.map(m => `d${m}`),
+  ...CHECKPOINT_MINS.map(m => `iv${m}`),
+  // alpacaPnl is BROKER TRUTH. pnl is the journal figure, which the partial-close rounding bug
+  // can corrupt — pnlDelta makes that corruption self-flagging per trade instead of discovered
+  // weeks later. Any non-trivial pnlDelta means the journal number is not admissible.
+  // brokerPnl is (exitFill - entryFill) x 100 x qty — both legs are Alpaca fill prices, so this is
+  // broker truth. pnl is the journal figure. A non-zero pnlDelta means they disagree.
+  // addonMerged flags a position that took a second buy: its cost basis was recomputed mid-life,
+  // so checkpoints are blank-by-design and _entryX carries the SECOND signal's context. Exclude
+  // these rows from checkpoint and entry-feature analysis.
+  "brokerPnl","pnlDelta","epSource","addonMerged",
 ].join(",");
 
 function _csv(s) {
@@ -138,6 +151,38 @@ function buildOutcomeRow(pos, o) {
     // mark — which is itself information (a 6-minute fast-cut leaves cp10 onward empty).
     ...CHECKPOINT_MINS.map(m => _n((pos._cp || {})[m], 2)),
     x.signalId || "", _n(x.minSincePrior, 1),
+    ...CHECKPOINT_MINS.map(m => _n(((pos._cpG || {})[m] || {}).d,  3)),
+    ...CHECKPOINT_MINS.map(m => _n(((pos._cpG || {})[m] || {}).iv, 4)),
+    // broker truth, stamped at close from state._alpacaTruth when the ticker matches
+    // 8/17 CORRECTED: derive broker truth from the ACTUAL FILL PRICES, not from the last
+    // unrealized reading. pos._alpacaPnl is `unrealized_pl` on an OPEN position — measured before
+    // the exit fill and as stale as the last truth fetch — so comparing it to realized P&L would
+    // have shown a delta on EVERY trade and flagged nothing. Entry fill lives in pos.premium
+    // (execution.js:556 overwrites the mid with filled_avg_price) and exit fill in o.exitPremium
+    // (closeEngine resolves it from the sell order's filled_avg_price). Both are broker numbers,
+    // so (exit - entry) x 100 x qty is broker-truth realized P&L with no extra API call. Any
+    // non-trivial pnlDelta means the journal figure was computed on a different basis — which is
+    // exactly what the partial-close rounding bug and the addon path both do.
+    ...(() => {
+      const _ef = (o && typeof o.exitPremium === "number" && o.exitPremium > 0) ? o.exitPremium : null;
+      const _en = (typeof pos.premium === "number" && pos.premium > 0) ? pos.premium : null;
+      // 8/17 FIX: use the quantity ACTUALLY SOLD, not pos.contracts. _doClosePosition sets
+      // mult = pos.partialClosed ? 0.5 : 1.0 and computes journal pnl on contractsToSell, so on
+      // any second-half close pos.contracts is the FULL size and brokerPnl would have been
+      // inflated ~2x — a false reconciliation flag on exactly the trades the addon bug touches.
+      const _q  = (o && typeof o.closedQty === "number" && o.closedQty > 0) ? o.closedQty
+                : (typeof pos.contracts === "number" && pos.contracts > 0) ? pos.contracts : null;
+      const _jp = (o && typeof o.pnl === "number" && Number.isFinite(o.pnl)) ? o.pnl : null;
+      const _src = (o && o.epSource) || "unknown";
+      // ONLY a real broker fill counts as broker truth. On the "ESTIMATED" tier ep is
+      // pos.premium * (1 + stopPct) — the same synthetic number the journal uses — so brokerPnl
+      // would match pnl exactly, pnlDelta would read 0, and the reconciliation would certify a
+      // trade whose P&L was invented. Blank is the honest answer there; epSource says why.
+      if (_src !== "fill" || _ef == null || _en == null || _q == null) return ["", "", _src];
+      const _bp = (_ef - _en) * 100 * _q;
+      return [_n(_bp, 2), _jp == null ? "" : _n(_bp - _jp, 2), _src];
+    })(),
+    pos._addonMerged ? 1 : 0,
   ].map(_csv).join(",");
 
   return row;
