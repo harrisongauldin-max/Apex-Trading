@@ -209,8 +209,12 @@ async function _doClosePosition(ticker, reason, exitPremium = null, contractSym 
   }
   ep = parseFloat(ep.toFixed(2));
   const contractsToSell = pos.contracts === 1 ? 1 : Math.max(1, Math.floor(pos.contracts * mult));
-  const ev   = parseFloat((ep * 100 * contractsToSell).toFixed(2));
-  const costBasis = parseFloat((pos.premium * 100 * contractsToSell).toFixed(2));
+  // 8/18: these are PROVISIONAL — computed on the pre-fill exit estimate so the dry-run branch and
+  // the order-sizing below have numbers to work with. They are recomputed from the ACTUAL FILL
+  // once the sell confirms (see the recompute block after the close-order handling). Declared
+  // `let` for that reason.
+  let ev   = parseFloat((ep * 100 * contractsToSell).toFixed(2));
+  let costBasis = parseFloat((pos.premium * 100 * contractsToSell).toFixed(2));
   const NAKED_ONLY = true;
   if (NAKED_ONLY) { pos.isCreditSpread = false; pos.isSpread = false; }   // APEX is naked-only — neutralize any phantom spread flag so P&L/cash/tradeType all use the naked path (the credit formula inverts the sign)
   let pnl;
@@ -219,11 +223,11 @@ async function _doClosePosition(ticker, reason, exitPremium = null, contractSym 
   } else {
     pnl = parseFloat((ev - costBasis).toFixed(2));
   }
-  const pct  = pos.isCreditSpread
+  let pct    = pos.isCreditSpread
     ? ((pnl / (pos.maxProfit || (pos.premium * 100 * pos.contracts))) * 100).toFixed(1)
     : ((pnl / (pos.cost * mult)) * 100).toFixed(1);
-  const nr   = state.totalRevenue + (pnl > 0 ? pnl : 0);
-  const bonus= state.totalRevenue < REVENUE_THRESHOLD && nr >= REVENUE_THRESHOLD;
+  let nr     = state.totalRevenue + (pnl > 0 ? pnl : 0);
+  let bonus  = state.totalRevenue < REVENUE_THRESHOLD && nr >= REVENUE_THRESHOLD;
 
   if (_dryRunMode) {
     logEvent("dryrun", `WOULD CLOSE ${ticker} | reason:${reason} | exit:$${ep} | P&L:${pnl>=0?"+":""}$${pnl.toFixed(2)} (${pct}%)`);
@@ -336,6 +340,37 @@ async function _doClosePosition(ticker, reason, exitPremium = null, contractSym 
     delete pos._closingSubmitted;
     return;
   }
+  // ── 8/18: RECOMPUTE P&L FROM THE ACTUAL FILL ──────────────────────────────────
+  // pnl/pct/ev were computed at ~line 216 from the PRE-FILL exit estimate, and `ep` is only
+  // overwritten with filled_avg_price at ~283/293 — afterwards. So the journal figure was always
+  // the estimate and the fill never reached it, while the outcome row recorded the real fill.
+  // Caught by the brokerPnl reconciliation on its first live day: 12 of 68 rows disagreed, worst
+  // case SPY 1DTE x7 where the journal said -$140 (implying a $1.15 exit) against an actual fill
+  // of $1.18 = -$119. $21 of pure accounting error on one trade, and every historical P&L figure
+  // carries the same defect — including the -$1,827 the strategy has been judged on.
+  // Everything downstream (cash, monthlyProfit, _recentLosses, the outcome row) reads these, so
+  // the recompute has to land before the first consumer.
+  if (_epSrc === "fill") {
+    const _pnlPre = pnl;
+    ev        = parseFloat((ep * 100 * contractsToSell).toFixed(2));
+    costBasis = parseFloat((pos.premium * 100 * contractsToSell).toFixed(2));
+    pnl       = pos.isCreditSpread
+      ? parseFloat(((pos.premium - ep) * 100 * contractsToSell).toFixed(2))
+      : parseFloat((ev - costBasis).toFixed(2));
+    // pct denominator now uses contractsToSell too. It previously divided by (pos.cost * mult),
+    // where mult is unrounded while contractsToSell is FLOORED — so any partial close whose
+    // qty x mult was not an integer understated the percentage. pnlPct feeds _recentLosses and
+    // the re-entry cooldown, so an understated loss made trades look less bad than they were.
+    pct       = pos.isCreditSpread
+      ? ((pnl / (pos.maxProfit || (pos.premium * 100 * pos.contracts))) * 100).toFixed(1)
+      : ((pnl / (pos.premium * 100 * contractsToSell)) * 100).toFixed(1);
+    nr        = state.totalRevenue + (pnl > 0 ? pnl : 0);
+    bonus     = state.totalRevenue < REVENUE_THRESHOLD && nr >= REVENUE_THRESHOLD;
+    if (Math.abs(pnl - _pnlPre) > 0.5) {
+      logEvent("trade", `[P&L-FILL] ${ticker} recomputed on fill $${ep} — was $${_pnlPre.toFixed(2)} (estimate), now $${pnl.toFixed(2)} | delta ${(pnl-_pnlPre>=0?"+":"")}$${(pnl-_pnlPre).toFixed(2)}`);
+    }
+  }
+
   const _cashDelta = pos.isCreditSpread ? pnl : ev;
   state.cash       = parseFloat((state.cash + _cashDelta + (bonus?BONUS_AMOUNT:0)).toFixed(2));
   state.extraBudget  += bonus ? BONUS_AMOUNT : 0;
