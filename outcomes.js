@@ -56,6 +56,9 @@ const OUTCOME_HEADER = [
   // appended 8/17: exit-path checkpoints — return at each elapsed mark, blank if the position
   // closed before reaching it. cp6 is the fast-cut decision point.
   ...CHECKPOINT_MINS.map(m => `cp${m}`),
+  // appended 8/17: clustering. signalId groups legs from ONE decision — cluster on it before
+  // computing any N, correlation or win rate, or the A/B/C fan-out inflates the sample 3x.
+  "signalId","minSincePrior",
 ].join(",");
 
 function _csv(s) {
@@ -134,6 +137,7 @@ function buildOutcomeRow(pos, o) {
     // read off pos._cp, written by the exit loop. A blank means the position closed before that
     // mark — which is itself information (a 6-minute fast-cut leaves cp10 onward empty).
     ...CHECKPOINT_MINS.map(m => _n((pos._cp || {})[m], 2)),
+    x.signalId || "", _n(x.minSincePrior, 1),
   ].map(_csv).join(",");
 
   return row;
