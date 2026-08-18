@@ -115,6 +115,7 @@ async function sendEmail(type) {
       chainSnaps:    (state._chainSnaps    || []).slice(),
       outcomeBuffer: (state._outcomeBuffer || []).slice(),
       momoBlocks:    (state._momoBlocks    || []).slice(),
+      nearMiss:      (state._nearMiss      || []).slice(),
     };
 
     let attachments = [];
@@ -190,6 +191,30 @@ async function sendEmail(type) {
                              content: Buffer.from(lines.join("\n"), "utf8").toString("base64") });
         }
       } catch (_mbErr) { /* momo-block attachment is best-effort — never block the email */ }
+
+      // ── 8/17: NEAR-MISS LEDGER CSV ────────────────────────────────────────
+      // The trades APEX did NOT take, with what happened next. Pair this with the outcome table
+      // and the entry floor becomes testable for the first time.
+      try {
+        const nm = _eodSnap.nearMiss;
+        if (nm.length) {
+          const dateStr = new Date().toLocaleDateString("en-CA", { timeZone: "America/New_York" });
+          const head = ["missET","ticker","side","score","reason","pxAtMiss","rsi","dRsi","adx","rangePct","rangeRegime","rv","fwdPct","fwdMins"].join(",");
+          const lines = [head];
+          for (const r of nm) {
+            lines.push([
+              new Date(r.at).toLocaleTimeString("en-US", { timeZone: "America/New_York", hour12: false }),
+              r.ticker, r.side, r.score, `"${String(r.reason || "").replace(/"/g, "'")}"`,
+              (r.px != null ? r.px.toFixed(2) : ""), (r.rsi ?? ""), (r.dRsi ?? ""), (r.adx ?? ""),
+              (r.rangePct ?? ""), (r.rangeRegime || ""),
+              (r.rv != null ? r.rv.toFixed(4) : ""),
+              (r.fwdPct != null ? r.fwdPct : ""), (r.fwdMins != null ? r.fwdMins : ""),
+            ].join(","));
+          }
+          attachments.push({ filename: `argo-nearmiss-${dateStr}.csv`,
+                             content: Buffer.from(lines.join("\n"), "utf8").toString("base64") });
+        }
+      } catch (_nmErr) { /* near-miss attachment is best-effort — never block the email */ }
     }
     // 8/05: append the efficacy report (trailing 20 sessions) inline to the EOD email — the
     // daily "which inputs predicted" readout. Best-effort: any failure falls back to the plain
