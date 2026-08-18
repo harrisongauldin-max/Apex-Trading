@@ -339,7 +339,7 @@ function calcPositionSize(premium, score, vix) {
   return contracts;
 }
 
-async function executeTrade(stock, price, score, scoreReasons, vix, optionType = "call", isMeanReversion = false, sizeMod = 1.0, dteBand = null, targetCost = null) {
+async function executeTrade(stock, price, score, scoreReasons, vix, optionType = "call", isMeanReversion = false, sizeMod = 1.0, dteBand = null, targetCost = null, signalId = null) {
   const estimatedMinCost = price * 0.03 * 100;
   if (state.cash - estimatedMinCost < CAPITAL_FLOOR) {
     logEvent("skip", `${stock.ticker} - insufficient cash pre-check (est. min cost ${fmt(estimatedMinCost)})`);
@@ -388,7 +388,12 @@ async function executeTrade(stock, price, score, scoreReasons, vix, optionType =
     if (contract && stock._cachedContract === contract) {
       const _cDTE = contract.expDays || contract.dte ||
         (contract.expiration_date ? Math.round((new Date(contract.expiration_date) - new Date()) / 86400000) : 0);
-      const _tol  = targetDTE <= 10 ? 2 : 10;
+      // 8/17 FIX: was `targetDTE <= 10 ? 2 : 10`. The prefetch now caches a 3-DTE contract, and the
+      // biweekly leg targets 13 — |3-13| = 10, which is NOT > 10, so it silently accepted the 3-DTE
+      // cache. Two of the three A/B/C legs would have been the same contract and the DTE experiment
+      // would have collapsed into a duplicate. Proportional tolerance instead: a leg may deviate by
+      // 2 days or 25% of its target, whichever is larger. 3->2, 13->3.25, 40->10.
+      const _tol  = Math.max(2, targetDTE * 0.25);
       if (Number.isFinite(_cDTE) && Math.abs(_cDTE - targetDTE) > _tol) {
         logEvent("filter", `${stock.ticker} - cached ${_cDTE}DTE contract rejected (target ${targetDTE}DTE, tol ±${_tol}) — re-selecting`);
         contract = await findContract(stock.ticker, optionType, targetDelta, targetDTE, vix, stock);
@@ -828,6 +833,23 @@ async function executeTrade(stock, price, score, scoreReasons, vix, optionType =
     ivrvRatio:  (typeof stock._ivrvRatio === "number") ? parseFloat(stock._ivrvRatio.toFixed(3)) : null,
     volRegime:  stock._volRegime || null,
     rangeRegime: stock._rangeRegime || null,
+    // ── 8/17: SIGNAL CLUSTERING ────────────────────────────────────────────
+    // In data-gather the A/B/C fan-out turns ONE decision into THREE rows. Without a shared id
+    // they are indistinguishable from three independent trades, and every N computed on the
+    // outcome table inflates ~3x — the same error that made 2,320 telemetry rows look like a
+    // sample until they collapsed to 112 independent windows. 8/11 read as "22 trades"; it was 7
+    // decisions. Cluster on signalId before computing anything.
+    signalId:   signalId || null,
+    // minutes since the last close in the SAME ticker and direction. Data-gather removes the
+    // post-close and post-stop cooldowns, so a re-entry 30s after a stop is path-dependent on the
+    // trade before it, not a fresh observation. Blank means no prior close today.
+    minSincePrior: (() => {
+      try {
+        const _rl = (state._recentLosses || {})[stock.ticker];
+        if (!_rl || _rl.side !== optionType || !_rl.closedAt) return null;
+        return parseFloat(((Date.now() - _rl.closedAt) / 60000).toFixed(1));
+      } catch (_e) { return null; }
+    })(),
     rangeProj:  (typeof stock._rangeProj  === "number") ? parseFloat(stock._rangeProj.toFixed(3))  : null,
     rangeRatio: (typeof stock._rangeRatio === "number") ? parseFloat(stock._rangeRatio.toFixed(3)) : null,
     atmIV:      (contract._surface && contract._surface.atmIV != null) ? parseFloat(contract._surface.atmIV.toFixed(4)) : null,
