@@ -19,6 +19,7 @@ const { withTimeout ,
 const { state, logEvent, saveStateNow, markDirty, fetchRecentOutcomeRows } = require('./state');
 const { telemetryCSV } = require('./telemetry');
 const { outcomesCSV, OUTCOME_HEADER }  = require('./outcomes');
+const { LOG_ATTACH_MAX_BYTES } = require('./constants');
 // 8/12: DEFENSIVE REQUIRE. vol.js is OPTIONAL instrumentation — realized vol, IV-RV, surface,
 // feasibility. It gates nothing and executes no trades. A hard top-level require made a missing
 // file fatal: server.js -> scanner.js -> vol.js, so one absent module killed the whole process and
@@ -116,6 +117,7 @@ async function sendEmail(type) {
       outcomeBuffer: (state._outcomeBuffer || []).slice(),
       momoBlocks:    (state._momoBlocks    || []).slice(),
       nearMiss:      (state._nearMiss      || []).slice(),
+      dailyLog:      (state._dailyLogBuffer || []).slice(),
     };
 
     let attachments = [];
@@ -215,6 +217,37 @@ async function sendEmail(type) {
                              content: Buffer.from(lines.join("\n"), "utf8").toString("base64") });
         }
       } catch (_nmErr) { /* near-miss attachment is best-effort — never block the email */ }
+
+      // ── 8/17: FULL SESSION LOG, GZIPPED ─────────────────────────────────────
+      // Every [BREAK] rejection, [RANGE-REGIME] transition, [FEASIBILITY] ratio, [U-STOP]
+      // conversion and [CALL-MOMO] verdict of the session — the reasoning trail, not just the
+      // outcomes. The dashboard already serves this, but only while the process is alive and only
+      // for today; a restart or a next-day question loses it. state._dailyLogBuffer already holds
+      // up to 30,000 entries and is already excluded from the Redis payload, so this costs nothing
+      // to produce.
+      // GZIP because the raw text runs several MB on an active session and base64 inflates it a
+      // further 33%; log text compresses ~10x, which keeps the attachment well inside mail limits.
+      // zlib is a Node built-in — no dependency added.
+      try {
+        const _lg = _eodSnap.dailyLog;
+        if (_lg.length) {
+          const zlib = require('zlib');
+          const dateStr = new Date().toLocaleDateString("en-CA", { timeZone: "America/New_York" });
+          const _txt = _lg.map(e => {
+            const t = new Date(e.time).toLocaleTimeString("en-US", { timeZone: "America/New_York", hour12: false });
+            return `${t} [${e.type}] ${e.message}`;
+          }).join("\n");
+          const _gz = zlib.gzipSync(Buffer.from(_txt, "utf8"), { level: 9 });
+          // Hard ceiling: skip rather than bounce the whole email on an oversized attachment.
+          if (_gz.length <= LOG_ATTACH_MAX_BYTES) {
+            attachments.push({ filename: `argo-session-${dateStr}.log.gz`,
+                               content: _gz.toString("base64") });
+            logEvent("scan", `[EOD] session log attached — ${_lg.length} entries, ${(_txt.length/1024).toFixed(0)}KB raw → ${(_gz.length/1024).toFixed(0)}KB gzipped`);
+          } else {
+            logEvent("warn", `[EOD] session log SKIPPED — ${(_gz.length/1024/1024).toFixed(1)}MB gzipped exceeds the ${(LOG_ATTACH_MAX_BYTES/1024/1024).toFixed(0)}MB attachment ceiling`);
+          }
+        }
+      } catch (_lgErr) { /* log attachment is best-effort — never block the email */ }
     }
     // 8/05: append the efficacy report (trailing 20 sessions) inline to the EOD email — the
     // daily "which inputs predicted" readout. Best-effort: any failure falls back to the plain
