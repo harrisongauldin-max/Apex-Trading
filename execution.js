@@ -743,6 +743,15 @@ async function executeTrade(stock, price, score, scoreReasons, vix, optionType =
       _openSame.contracts = _newQty;
       _openSame.cost      = parseFloat(((_openSame.cost || 0) + (position.cost || 0)).toFixed(2));
       _openSame.partialClosed = false;
+      // 8/17: THE COST BASIS JUST MOVED. Every checkpoint is (curP - pos.premium) / pos.premium,
+      // so marks recorded before this merge are relative to the OLD premium and marks after are
+      // relative to the weighted average. Keeping both in one series produces a P&L attribution
+      // curve that mixes two denominators and looks like a price move that never happened.
+      // Clear them and flag the position: an addon has no single clean entry, so the honest
+      // record is blank checkpoints plus a marker that says why. Same reason _entryX below is
+      // already known to carry the SECOND signal's context rather than the original entry's.
+      _openSame._cp = {}; _openSame._cpG = {};
+      _openSame._addonMerged = true;
       logEvent("scan", `[ADDON MERGE] ${position.contractSymbol}: +${_addQty}@$${position.premium} → ${_newQty}@avg $${_openSame.premium} (was ${_oldQty}@$${_oldPrem})`);
     }
   } else {
@@ -845,8 +854,15 @@ async function executeTrade(stock, price, score, scoreReasons, vix, optionType =
     // trade before it, not a fresh observation. Blank means no prior close today.
     minSincePrior: (() => {
       try {
+        // 8/17 FIX: the field is `optionType`, not `side` (closeEngine.js:501). Reading _rl.side
+        // gave `undefined !== "call"` — always true — so this returned null on EVERY row and the
+        // column would have been silently empty forever. The reconciler variant (reconciler.js:196)
+        // omits the field entirely, so treat a missing optionType as "same ticker, side unknown"
+        // and still report the gap rather than discarding it — a reconcile-removed position is
+        // exactly the kind of prior close worth knowing about.
         const _rl = (state._recentLosses || {})[stock.ticker];
-        if (!_rl || _rl.side !== optionType || !_rl.closedAt) return null;
+        if (!_rl || !_rl.closedAt) return null;
+        if (_rl.optionType && _rl.optionType !== optionType) return null;
         return parseFloat(((Date.now() - _rl.closedAt) / 60000).toFixed(1));
       } catch (_e) { return null; }
     })(),
