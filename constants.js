@@ -549,6 +549,11 @@ const DECISION_SPLIT_LOG    = true;
 // Zero capital at risk; roughly doubles the usable dataset.
 const NEARMISS_LEDGER_ENABLED = true;
 
+// 8/17: gzipped session log on the EOD email. Ceiling is deliberately well under the ~25MB most
+// providers allow, because base64 inflates by 33% and the other four attachments share the budget.
+// Oversized means SKIP the log, never bounce the email.
+const LOG_ATTACH_MAX_BYTES  = 8 * 1024 * 1024;
+
 // 8/12: MACRO STALENESS KILL. AGENT_ENABLED=false already stops the Claude call in agent.js:78,
 // but getMacroNews() in market.js is a SEPARATE keyword scorer (Alpaca + Marketaux headlines,
 // trigger words) and is not gated by it. It kept running and swinging wildly — 8/12 logged
@@ -767,7 +772,7 @@ module.exports = {
   FLAT_SIZING_ENABLED, SLIPPAGE_LOG_ENABLED, CHECKPOINTS_ENABLED, CHECKPOINT_MINS, CHECKPOINT_TOL_MIN,
   USTOP_ENABLED, USTOP_ENFORCE, USTOP_MOVE_PCT, USTOP_MIN_OPT_PCT, USTOP_MAX_OPT_PCT,
   GREEK_LIMITS_ENABLED, GREEK_LIMITS_ENFORCE, MAX_DELTA_DOLLARS_POS, MAX_DELTA_DOLLARS_NEG,
-  DECISION_SPLIT_LOG, MACRO_MAX_AGE_MIN, NEARMISS_LEDGER_ENABLED,
+  DECISION_SPLIT_LOG, MACRO_MAX_AGE_MIN, NEARMISS_LEDGER_ENABLED, LOG_ATTACH_MAX_BYTES,
   BREAK_TRIGGER_ENABLED, BREAK_TRIGGER_ENFORCE, BREAK_TRIGGER_ALLOW_MRSCALP, BREAK_ENTRY_SCORE,
   BREAK_CONFIRM_BARS, BREAK_MAX_AGE_MIN, BREAK_VOL_LOOKBACK, BREAK_VOL_MULT_PUT, BREAK_VOL_MULT_CALL,
   BREAK_ADX_MIN_PUT, BREAK_ADX_MIN_CALL, BREAK_VWAP_SLOPE_MIN, BREAK_MAX_EXT_PCT,
