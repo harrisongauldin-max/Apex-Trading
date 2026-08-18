@@ -113,7 +113,7 @@ const {
   GREEK_LIMITS_ENABLED = false, GREEK_LIMITS_ENFORCE = false,
   MAX_DELTA_DOLLARS_POS = 15000, MAX_DELTA_DOLLARS_NEG = -15000,
   FEASIBILITY_MAX_RATIO = 1.0, FEASIBILITY_HOLD_MIN = 20, SPREAD_COST_LOG = false,
-  MACRO_MAX_AGE_MIN = 240,
+  MACRO_MAX_AGE_MIN = 240, NEARMISS_LEDGER_ENABLED = false,
   BREAK_TRIGGER_ENABLED = false, BREAK_TRIGGER_ENFORCE = false, BREAK_TRIGGER_ALLOW_MRSCALP = true,
   BREAK_ENTRY_SCORE = 80, BREAK_CONFIRM_BARS = 1, BREAK_MAX_AGE_MIN = 10, BREAK_VOL_LOOKBACK = 10,
   BREAK_VOL_MULT_PUT = 1.8, BREAK_VOL_MULT_CALL = 2.2, BREAK_ADX_MIN_PUT = 18, BREAK_ADX_MIN_CALL = 22,
@@ -2979,6 +2979,34 @@ async function runScan() {
           : "";
         logEvent("filter", `[NEAR-MISS] ${stock.ticker} ${optionType.toUpperCase()} final:${score} | ${eeResult.reason} | trail: ${_nmTrail.join(" \u00b7 ") || "none"}${_trStr}`);
       } catch (_nmErr) { /* instrumentation must never halt the scan */ }
+
+      // ── 8/17: NEAR-MISS LEDGER ────────────────────────────────────────────
+      // APEX only ever learns about trades it TOOK. Candidates rejected at the floor vanish into a
+      // log line, so the floor itself has never been testable: you cannot ask "would the rejects
+      // have won?" without the rejects. This records them with the same features the outcome row
+      // carries, stamped 30 minutes later with where the underlying actually went — the momo-block
+      // pattern applied to the score gate. Zero capital, roughly doubles the usable dataset, and it
+      // is the only way to find out whether a floor of 75 discriminates or just reduces count.
+      // Deduped per ticker+side+minute, same as the momo ledger, so it records EVENTS not scans.
+      if (NEARMISS_LEDGER_ENABLED && !dryRunMode) {
+        try {
+          if (!state._nmLastMin) state._nmLastMin = {};
+          const _nmKey = `${stock.ticker}-${optionType}`;
+          const _nmMin = `${_nmKey}-${new Date().toLocaleTimeString("en-US", { timeZone: "America/New_York", hour12: false }).slice(0, 5)}`;
+          if (state._nmLastMin[_nmKey] !== _nmMin && price > 0) {
+            state._nmLastMin[_nmKey] = _nmMin;
+            if (!Array.isArray(state._nearMiss)) state._nearMiss = [];
+            state._nearMiss.push({
+              id: `${_nmKey}-${Date.now()}`, at: Date.now(), ticker: stock.ticker, side: optionType,
+              score, reason: String(eeResult.reason || "").slice(0, 60), px: price,
+              rsi: stock.rsi ?? null, dRsi: stock.dailyRsi ?? null, adx: signals.adx ?? null,
+              rangePct: stock._intraRangePct ?? null, rangeRegime: stock._rangeRegime || null,
+              rv: stock._rv ?? null, fwdPct: null, fwdMins: null,
+            });
+            while (state._nearMiss.length > 2000) state._nearMiss.shift();
+          }
+        } catch (_nmlErr) { /* observational */ }
+      }
       if (!dryRunMode) recordGateBlock(stock.ticker, eeResult.reason, rb.regimeName, score);
       continue;
     }
@@ -3031,6 +3059,18 @@ async function runScan() {
             `[CALL-MOMO-SHADOW] ${_sh.t} blocked ${_mins.toFixed(0)}min ago at ${_sh.px.toFixed(2)} ` +
             `(score ${_sh.score}, evidence ${_sh.ev}) — underlying now ${_spxNow.toFixed(2)}, ` +
             `moved ${_mv >= 0 ? "+" : ""}${_mv.toFixed(2)}%`);
+          // 8/17: stamp near-miss rows on the same cadence — any row older than the shadow window
+          // gets its forward move from the current price of its own ticker.
+          try {
+            for (const _nm of (state._nearMiss || [])) {
+              if (_nm.fwdPct != null || _nm.ticker !== _sh.t) continue;
+              const _nmAge = (Date.now() - _nm.at) / 60000;
+              if (_nmAge >= MOMO_SHADOW_MINS && _nm.px > 0) {
+                _nm.fwdPct  = parseFloat((((_spxNow - _nm.px) / _nm.px) * 100).toFixed(3));
+                _nm.fwdMins = Math.round(_nmAge);
+              }
+            }
+          } catch (_nmsErr) { /* observational */ }
           // stamp the outcome onto the durable ledger row so the EOD report can score the gate
           try {
             const _row = (state._momoBlocks || []).find(r => r.id === _sh.id);
@@ -3203,11 +3243,15 @@ async function runScan() {
       }
       logEvent("filter", `${stock.ticker} execution: naked_${optionType} (MR:${isMeanReversion}) delta:${_contractDelta.toFixed(3)}`);
       const _sizeModNaked = sizeMod || 1.0;
+      // 8/17: ONE id per DECISION, shared by every leg it fans out to. Without it the A/B/C
+      // triple-leg writes three outcome rows that no downstream analysis can tell apart from
+      // three independent trades, and every N inflates 3x.
+      const _sigId = `${stock.ticker}-${optionType}-${Date.now()}`;
       if (stock._mrScalp) {
         // 8/09: MR-SCALP is a SINGLE low-vega leg (NOT the A/B/C twin-entry), half size. executeTrade
         // reads stock._mrScalp → forces 0-1 DTE + 0.42Δ and tags the position entryStrategy="mr-scalp".
         logEvent("filter", `[MR-SCALP] ${stock.ticker} entering single 0-1DTE leg @ ${MR_SCALP_SIZE_MOD}x size`);
-        entered = await executeTrade(stock, price, score, reasons, state.vix, "call", true, MR_SCALP_SIZE_MOD, "sameweek");
+        entered = await executeTrade(stock, price, score, reasons, state.vix, "call", true, MR_SCALP_SIZE_MOD, "sameweek", null, _sigId);
       } else if (dataGatherActive(DATA_GATHER_MODE)) {
         // 6/30 (Harrison): A/B twin-entry. One signal → two positions, one per DTE band, each sized
         // independently under the normal caps. Legs tagged (dteBand) for comparison. A leg failing to
@@ -3217,14 +3261,14 @@ async function runScan() {
         // to the standard leg like same-week, so the three are directly comparable on P&L.
         // NOTE this deploys ~50% more capital per signal — watch heat rejections.
         logEvent("filter", `[TWIN-ENTRY] ${stock.ticker} ${optionType.toUpperCase()} score ${score} — opening same-week + biweekly + standard legs`);
-        const _legStd = await executeTrade(stock, price, score, reasons, state.vix, optionType, isMeanReversion, _sizeModNaked, "standard");
+        const _legStd = await executeTrade(stock, price, score, reasons, state.vix, optionType, isMeanReversion, _sizeModNaked, "standard", null, _sigId);
         const _stdCost = (_legStd && _legStd.cost) ? _legStd.cost : null;   // 7/7 (Harrison): standard leg's actual cost → size the other legs to match it (equal capital A/B/C). null if standard didn't fill → they fall back to normal 1-contract sizing.
-        const _legSW  = await executeTrade(stock, price, score, reasons, state.vix, optionType, isMeanReversion, _sizeModNaked, "sameweek", _stdCost);
-        const _legBW  = await executeTrade(stock, price, score, reasons, state.vix, optionType, isMeanReversion, _sizeModNaked, "biweekly", _stdCost);
+        const _legSW  = await executeTrade(stock, price, score, reasons, state.vix, optionType, isMeanReversion, _sizeModNaked, "sameweek", _stdCost, _sigId);
+        const _legBW  = await executeTrade(stock, price, score, reasons, state.vix, optionType, isMeanReversion, _sizeModNaked, "biweekly", _stdCost, _sigId);
         entered = _legSW || _legBW || _legStd;
         logEvent("filter", `[TWIN-ENTRY] ${stock.ticker} result — sameweek:${_legSW ? "FILLED" : "no-fill"} biweekly:${_legBW ? "FILLED" : "no-fill"} standard:${_legStd ? "FILLED" : "no-fill"}`);
       } else {
-        entered = await executeTrade(stock, price, score, reasons, state.vix, optionType, isMeanReversion, _sizeModNaked);
+        entered = await executeTrade(stock, price, score, reasons, state.vix, optionType, isMeanReversion, _sizeModNaked, null, null, _sigId);
       }
     }
 
