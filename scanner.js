@@ -1803,6 +1803,26 @@ async function runScan() {
       } catch (_vErr) { logEvent("scan", `[VOL] ${stock.ticker} vol calc failed — ${_vErr.message}`); }
     }
 
+    // ── 8/17: NEAR-MISS FORWARD STAMP ──────────────────────────────────────
+    // This was originally nested inside the [CALL-MOMO-SHADOW] report, which only fires when a
+    // momo block matures. With CALL_MOMO_STRICT off there are far fewer blocks, so near-miss rows
+    // would have sat with fwdPct permanently blank — the exact failure the ledger exists to
+    // prevent, and the same shape as the 8/14 buffer eviction (524 blocks, 4 stamps). It belongs
+    // here: the per-ticker scan loop runs every scan for every ticker and always has a live price,
+    // so stamping is independent of any other subsystem.
+    if (NEARMISS_LEDGER_ENABLED && price > 0 && Array.isArray(state._nearMiss)) {
+      try {
+        for (const _nm of state._nearMiss) {
+          if (_nm.fwdPct != null || _nm.ticker !== stock.ticker || !(_nm.px > 0)) continue;
+          const _nmAge = (Date.now() - _nm.at) / 60000;
+          if (_nmAge >= MOMO_SHADOW_MINS) {
+            _nm.fwdPct  = parseFloat((((price - _nm.px) / _nm.px) * 100).toFixed(3));
+            _nm.fwdMins = Math.round(_nmAge);
+          }
+        }
+      } catch (_nmsErr) { /* observational */ }
+    }
+
     // ── 8/17: RANGE REGIME ───────────────────────────────────────────────
     // A/B/C classifies on SPY-vs-200MA and 5-day VIX — a crisis taxonomy for a book that holds
     // for months. APEX flattens at 3:15. Over 8/12-8/14 that label read "A" on 100% of scans
@@ -3059,18 +3079,6 @@ async function runScan() {
             `[CALL-MOMO-SHADOW] ${_sh.t} blocked ${_mins.toFixed(0)}min ago at ${_sh.px.toFixed(2)} ` +
             `(score ${_sh.score}, evidence ${_sh.ev}) — underlying now ${_spxNow.toFixed(2)}, ` +
             `moved ${_mv >= 0 ? "+" : ""}${_mv.toFixed(2)}%`);
-          // 8/17: stamp near-miss rows on the same cadence — any row older than the shadow window
-          // gets its forward move from the current price of its own ticker.
-          try {
-            for (const _nm of (state._nearMiss || [])) {
-              if (_nm.fwdPct != null || _nm.ticker !== _sh.t) continue;
-              const _nmAge = (Date.now() - _nm.at) / 60000;
-              if (_nmAge >= MOMO_SHADOW_MINS && _nm.px > 0) {
-                _nm.fwdPct  = parseFloat((((_spxNow - _nm.px) / _nm.px) * 100).toFixed(3));
-                _nm.fwdMins = Math.round(_nmAge);
-              }
-            }
-          } catch (_nmsErr) { /* observational */ }
           // stamp the outcome onto the durable ledger row so the EOD report can score the gate
           try {
             const _row = (state._momoBlocks || []).find(r => r.id === _sh.id);
@@ -3246,7 +3254,12 @@ async function runScan() {
       // 8/17: ONE id per DECISION, shared by every leg it fans out to. Without it the A/B/C
       // triple-leg writes three outcome rows that no downstream analysis can tell apart from
       // three independent trades, and every N inflates 3x.
-      const _sigId = `${stock.ticker}-${optionType}-${Date.now()}`;
+      // counter suffix: Date.now() has 1ms resolution, so two decisions for the same ticker+side
+      // inside one millisecond would share an id and be silently clustered as one. The exec loop
+      // makes that impossible today, but nothing enforces it and a collision is unrecoverable
+      // after the fact.
+      state._sigSeq = (state._sigSeq || 0) + 1;
+      const _sigId = `${stock.ticker}-${optionType}-${Date.now()}-${state._sigSeq}`;
       if (stock._mrScalp) {
         // 8/09: MR-SCALP is a SINGLE low-vega leg (NOT the A/B/C twin-entry), half size. executeTrade
         // reads stock._mrScalp → forces 0-1 DTE + 0.42Δ and tags the position entryStrategy="mr-scalp".
