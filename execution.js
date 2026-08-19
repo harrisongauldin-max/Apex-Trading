@@ -805,7 +805,7 @@ async function executeTrade(stock, price, score, scoreReasons, vix, optionType =
     } catch (_dsErr) { /* attribution logging must never affect a trade */ }
   }
 
-  let _feas = null;
+  let _feas = null, _rrOut = null;
   if (FEASIBILITY_ENABLED && VOL) {
     try {
       // stock._intraRangePct is range SO FAR, so the observation window is the elapsed session,
@@ -816,6 +816,20 @@ async function executeTrade(stock, price, score, scoreReasons, vix, optionType =
         contract.premium, parseFloat(contract.greeks && contract.greeks.delta) || 0,
         price, stock._intraRangePct, FEASIBILITY_HOLD_MIN, _feasElapsed
       );
+      // ── 8/18: RANGE REGIME COMPUTED HERE, NOT IN THE SCAN LOOP ───────────────────────
+      // It was computed at scanner.js:~1838 off `stock._cachedContract`, and produced BLANK on all
+      // 68 rows of 8/18. Three reasons, any one fatal: the cache is written onto `liveStock` (the
+      // ephemeral spread copy built fresh each scan at scanner.js:1853 and pushed at :2848), while
+      // the scan loop reads the PERSISTENT watchlist object destructured at :1449 — different
+      // objects; the prefetch that writes it is gated on `scored.length > 0` so it may never run;
+      // and execution.js:403 DELETES it after use, so it cannot survive to the next scan anyway.
+      // Feasibility populated correctly all day because it uses the REAL `contract` in hand here.
+      // Same inputs, same site — requiredMovePct is already computed inside moveFeasibility above.
+      if (_feas && _feas.requiredPct != null) {
+        try {
+          _rrOut = VOL.rangeRegime(stock._intraRangePct, _feasElapsed, _feas.requiredPct, FEASIBILITY_HOLD_MIN);
+        } catch (_rrErr) { /* observational */ }
+      }
       if (_feas && _feas.ratio != null) {
         logEvent("filter", `[FEASIBILITY] ${stock.ticker} ${contract.expDays}DTE needs ${(_feas.requiredPct*100).toFixed(3)}% vs ${(_feas.availablePct*100).toFixed(3)}% available — ratio ${_feas.ratio.toFixed(2)} ${_feas.feasible ? "OK" : "NEEDS OUTSIZED MOVE"}${FEASIBILITY_ENFORCE ? "" : " | SHADOW"}`);
       }
@@ -841,7 +855,8 @@ async function executeTrade(stock, price, score, scoreReasons, vix, optionType =
     vrp:        (typeof stock._vrp === "number") ? parseFloat(stock._vrp.toFixed(4)) : null,
     ivrvRatio:  (typeof stock._ivrvRatio === "number") ? parseFloat(stock._ivrvRatio.toFixed(3)) : null,
     volRegime:  stock._volRegime || null,
-    rangeRegime: stock._rangeRegime || null,
+    rangeRegime: (_rrOut && _rrOut.regime && _rrOut.regime !== "unknown") ? _rrOut.regime
+               : (stock._rangeRegime || null),
     // ── 8/17: SIGNAL CLUSTERING ────────────────────────────────────────────
     // In data-gather the A/B/C fan-out turns ONE decision into THREE rows. Without a shared id
     // they are indistinguishable from three independent trades, and every N computed on the
@@ -866,8 +881,10 @@ async function executeTrade(stock, price, score, scoreReasons, vix, optionType =
         return parseFloat(((Date.now() - _rl.closedAt) / 60000).toFixed(1));
       } catch (_e) { return null; }
     })(),
-    rangeProj:  (typeof stock._rangeProj  === "number") ? parseFloat(stock._rangeProj.toFixed(3))  : null,
-    rangeRatio: (typeof stock._rangeRatio === "number") ? parseFloat(stock._rangeRatio.toFixed(3)) : null,
+    rangeProj:  (_rrOut && _rrOut.projRange != null) ? parseFloat(_rrOut.projRange.toFixed(3))
+              : (typeof stock._rangeProj === "number") ? parseFloat(stock._rangeProj.toFixed(3)) : null,
+    rangeRatio: (_rrOut && _rrOut.ratio != null) ? parseFloat(_rrOut.ratio.toFixed(3))
+              : (typeof stock._rangeRatio === "number") ? parseFloat(stock._rangeRatio.toFixed(3)) : null,
     atmIV:      (contract._surface && contract._surface.atmIV != null) ? parseFloat(contract._surface.atmIV.toFixed(4)) : null,
     skew:       (contract._surface && contract._surface.skew != null) ? parseFloat(contract._surface.skew.toFixed(4)) : null,
     termSlope:  (contract._surface && contract._surface.termSlope != null) ? parseFloat(contract._surface.termSlope.toExponential(3)) : null,
