@@ -114,7 +114,7 @@ const {
   MAX_DELTA_DOLLARS_POS = 15000, MAX_DELTA_DOLLARS_NEG = -15000,
   FEASIBILITY_MAX_RATIO = 1.0, FEASIBILITY_HOLD_MIN = 20, SPREAD_COST_LOG = false,
   MACRO_MAX_AGE_MIN = 240, NEARMISS_LEDGER_ENABLED = false,
-  VOLPACE_ARM_ENABLED = false, VOLPACE_ARM_MIN = 1.5,
+  VOLPACE_ARM_ENABLED = false, VOLPACE_ARM_MIN = 0, VOLPACE_ARM_PCTILE = 50, VOLPACE_ARM_WINDOW = 300, VOLPACE_ARM_WARMUP = 20,
   BREAK_TRIGGER_ENABLED = false, BREAK_TRIGGER_ENFORCE = false, BREAK_TRIGGER_ALLOW_MRSCALP = true,
   BREAK_ENTRY_SCORE = 80, BREAK_CONFIRM_BARS = 1, BREAK_MAX_AGE_MIN = 10, BREAK_VOL_LOOKBACK = 10,
   BREAK_VOL_MULT_PUT = 1.8, BREAK_VOL_MULT_CALL = 2.2, BREAK_ADX_MIN_PUT = 18, BREAK_ADX_MIN_CALL = 22,
@@ -2686,6 +2686,7 @@ async function runScan() {
           blocker: _clears ? "" : _killer,
           callReasons: callSetup.reasons, putReasons: putSetup.reasons,
           direction: optionType,
+          volPace: signals.volPaceRatio, breadth: signals.breadth,   // 8/24: enrich the tape for backtesting
         });
       } catch (_telErr) { /* telemetry must never break the scan */ }
     }
@@ -3300,8 +3301,20 @@ async function runScan() {
       let _armH = 0; for (let _c = 0; _c < _sigId.length; _c++) _armH = ((_armH * 31) + _sigId.charCodeAt(_c)) | 0;
       const _arm = (Math.abs(_armH) % 2 === 0) ? "vf" : "ctl";
       stock._arm = _arm;
+      // 8/24: SELF-CALIBRATING vf gate. volPace runs on an unknown/drifting scale (day-1 median ~0.64,
+      // nowhere near the old 1.5 guess), so gate on a rolling PERCENTILE of recent signal volPace rather
+      // than a fixed number — the vf arm takes the top (100-PCTILE)% by pace regardless of scale. Buffer
+      // carries across days (persisted, not daily-reset) and warms after WARMUP obs; before that vf takes all.
+      const _vp = (typeof stock.volPaceRatio === "number") ? stock.volPaceRatio : null;
+      if (!Array.isArray(state._vpBuf)) state._vpBuf = [];
+      let _vpThresh = -Infinity;
+      if (state._vpBuf.length >= VOLPACE_ARM_WARMUP) {
+        const _vs = state._vpBuf.slice().sort((a, b) => a - b);
+        _vpThresh = _vs[Math.floor((VOLPACE_ARM_PCTILE / 100) * (_vs.length - 1))];
+      }
+      if (_vp != null) { state._vpBuf.push(_vp); if (state._vpBuf.length > VOLPACE_ARM_WINDOW) state._vpBuf.shift(); }
       if (VOLPACE_ARM_ENABLED && _arm === "vf" && !stock._mrScalp &&
-          !(typeof stock.volPaceRatio === "number" && stock.volPaceRatio >= VOLPACE_ARM_MIN)) {
+          !(_vp != null && _vp >= _vpThresh && _vp >= VOLPACE_ARM_MIN)) {
         // 8/24: VF-SKIP LEDGER — record what the vf arm PASSED ON, with a forward-move stamp, so
         // "did the filter avoid bad trades" is answerable (the skip counterfactual). Same shape as entryFwd.
         try {
@@ -3313,7 +3326,7 @@ async function runScan() {
           });
           while (state._vfSkip.length > 500) state._vfSkip.shift();
         } catch (_vfsErr) { /* observation only */ }
-        logEvent("filter", `[VF-ARM] ${stock.ticker} ${optionType} skip — volPace ${(stock.volPaceRatio ?? 0).toFixed(2)} < ${VOLPACE_ARM_MIN} (logged to vf-skip ledger)`);
+        logEvent("filter", `[VF-ARM] ${stock.ticker} ${optionType} skip — volPace ${(_vp ?? 0).toFixed(2)} < p${VOLPACE_ARM_PCTILE} ${(_vpThresh === -Infinity ? "warmup" : _vpThresh.toFixed(2))} (n=${state._vpBuf.length}; logged to vf-skip ledger)`);
         continue;
       }
       if (stock._mrScalp) {
