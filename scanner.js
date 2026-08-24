@@ -114,6 +114,7 @@ const {
   MAX_DELTA_DOLLARS_POS = 15000, MAX_DELTA_DOLLARS_NEG = -15000,
   FEASIBILITY_MAX_RATIO = 1.0, FEASIBILITY_HOLD_MIN = 20, SPREAD_COST_LOG = false,
   MACRO_MAX_AGE_MIN = 240, NEARMISS_LEDGER_ENABLED = false,
+  VOLPACE_ARM_ENABLED = false, VOLPACE_ARM_MIN = 1.5,
   BREAK_TRIGGER_ENABLED = false, BREAK_TRIGGER_ENFORCE = false, BREAK_TRIGGER_ALLOW_MRSCALP = true,
   BREAK_ENTRY_SCORE = 80, BREAK_CONFIRM_BARS = 1, BREAK_MAX_AGE_MIN = 10, BREAK_VOL_LOOKBACK = 10,
   BREAK_VOL_MULT_PUT = 1.8, BREAK_VOL_MULT_CALL = 2.2, BREAK_ADX_MIN_PUT = 18, BREAK_ADX_MIN_CALL = 22,
@@ -1823,6 +1824,21 @@ async function runScan() {
       } catch (_nmsErr) { /* observational */ }
     }
 
+    // 8/24: ENTRY forward-move stamp — same loop, for taken entries (state._entryFwd). Stamps
+    // where the underlying went MOMO_SHADOW_MINS after each entry, independent of when it exited.
+    if (price > 0 && Array.isArray(state._entryFwd)) {
+      try {
+        for (const _ef of state._entryFwd) {
+          if (_ef.fwdPct != null || _ef.ticker !== stock.ticker || !(_ef.px > 0)) continue;
+          const _efAge = (Date.now() - _ef.at) / 60000;
+          if (_efAge >= MOMO_SHADOW_MINS) {
+            _ef.fwdPct  = parseFloat((((price - _ef.px) / _ef.px) * 100).toFixed(3));
+            _ef.fwdMins = Math.round(_efAge);
+          }
+        }
+      } catch (_efsErr) { /* observational */ }
+    }
+
     // ── 8/17: RANGE REGIME ───────────────────────────────────────────────
     // A/B/C classifies on SPY-vs-200MA and 5-day VIX — a crisis taxonomy for a book that holds
     // for months. APEX flattens at 3:15. Over 8/12-8/14 that label read "A" on 100% of scans
@@ -3260,6 +3276,21 @@ async function runScan() {
       // after the fact.
       state._sigSeq = (state._sigSeq || 0) + 1;
       const _sigId = `${stock.ticker}-${optionType}-${Date.now()}-${state._sigSeq}`;
+      // 8/24: VOLPACE SPLIT-BOOK ARM. "vf" enters ONLY on elevated volume pace (the one pre-trade
+      // signal with a real within-day direction pulse); "ctl" is the unchanged control. Assignment is
+      // a HASH of the full signal id, NOT sequence parity — the entry loop is score-sorted and
+      // _sigSeq is a running counter, so raw parity pins the top-scored ticker to one arm every scan
+      // (SPY always odd -> ctl, QQQ always even -> vf), confounding the A/B with ticker. mr-scalp is
+      // exempt from the gate (its own channel; excluded in analysis via entryStrategy). feasRatio rides
+      // every row, so volPace x feasibility is evaluated in analysis, not as a live (post-fill) reject.
+      let _armH = 0; for (let _c = 0; _c < _sigId.length; _c++) _armH = ((_armH * 31) + _sigId.charCodeAt(_c)) | 0;
+      const _arm = (Math.abs(_armH) % 2 === 0) ? "vf" : "ctl";
+      stock._arm = _arm;
+      if (VOLPACE_ARM_ENABLED && _arm === "vf" && !stock._mrScalp &&
+          !(typeof stock.volPaceRatio === "number" && stock.volPaceRatio >= VOLPACE_ARM_MIN)) {
+        logEvent("filter", `[VF-ARM] ${stock.ticker} ${optionType} skip — volPace ${(stock.volPaceRatio ?? 0).toFixed(2)} < ${VOLPACE_ARM_MIN} (control arm would take it)`);
+        continue;
+      }
       if (stock._mrScalp) {
         // 8/09: MR-SCALP is a SINGLE low-vega leg (NOT the A/B/C twin-entry), half size. executeTrade
         // reads stock._mrScalp → forces 0-1 DTE + 0.42Δ and tags the position entryStrategy="mr-scalp".
