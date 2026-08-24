@@ -47,6 +47,7 @@ const {
   LIVE_WIDE_SPREAD_PCT, LEG_STOP_PCT,
   MR_SCALP_FASTCUT_MIN = 5, MR_SCALP_FASTCUT_PEAK = 0.03, MR_SCALP_GIVEBACK_PEAK = 0.08, MR_SCALP_GIVEBACK_FRAC = 0.5,
   MR_SCALP_TRAIL_ARM = 0.10, MR_SCALP_TRAIL_GIVE = 0.04, MR_SCALP_TP = 0.20,
+  CP1_CRASH_ENABLED = false, CP1_CRASH_PCT = -5,
   FASTCUT_ENABLED = false, FASTCUT_MIN = 6, FASTCUT_PEAK_SHORT = 0.03, FASTCUT_PEAK_MID = 0.02,
   FASTCUT_PEAK_LONG = 0.012,
   USTOP_ENABLED = false, USTOP_ENFORCE = false, USTOP_MOVE_PCT = 0.0035,
@@ -360,6 +361,21 @@ async function checkExits(positions, posSnapshots, posQuotes, posNewsCache, ctx)
     // 60%+ — judging both against one bar would just close every standard leg on schedule.
     // Deliberately placed BEFORE the trail/progress-check/time-cut so it gets first say on the
     // trades those rails would otherwise hold ~20 more minutes.
+    // 8/24: CP1 CRASH RAIL. The fast-cut is a DRIFT detector (6-min, peak<bar) and is blind to an
+    // INSTANT collapse — the -39.7% on 8/19 was closed before minute 6 ever looked. cp1 flagged all
+    // four worst losses. Validated on the deduped set: a cut at cp1 <= -5% killed ZERO eventual +5%
+    // recoverers (their cp1 never fell below -4.3%) while catching the fast crashes. Placed BEFORE the
+    // fast-cut so it gets first say. Narrow by design: catches collapse, not drift.
+    if (CP1_CRASH_ENABLED && !pos._mrScalp && !pos._cp1CrashFired && pos._cp && typeof pos._cp[1] === "number") {
+      if (pos._cp[1] <= CP1_CRASH_PCT && !_closedThisCycle.has(pi)) {
+        pos._cp1CrashFired = true;
+        _closedThisCycle.add(pi);
+        logEvent("scan", `[CP1-CRASH] ${pos.ticker} cp1 ${pos._cp[1].toFixed(1)}% <= ${CP1_CRASH_PCT}% — instant collapse, cutting before the fast-cut (min 6) can`);
+        decisions.push({ pi, ticker: pos.ticker, action: 'close', reason: 'cp1-crash', exitPremium: null, contractSym: pos.contractSymbol || null });
+        continue;
+      }
+    }
+
     if (FASTCUT_ENABLED && !pos._mrScalp && !pos._fastCutFired) {
       const _fcHeld = (Date.now() - new Date(pos.openDate || pos.entryTime || Date.now()).getTime()) / 60000;
       if (_fcHeld >= FASTCUT_MIN) {
