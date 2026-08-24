@@ -1839,6 +1839,20 @@ async function runScan() {
       } catch (_efsErr) { /* observational */ }
     }
 
+    // 8/24: VF-SKIP forward-move stamp — same loop, for signals the vf arm declined (state._vfSkip).
+    if (price > 0 && Array.isArray(state._vfSkip)) {
+      try {
+        for (const _vs of state._vfSkip) {
+          if (_vs.fwdPct != null || _vs.ticker !== stock.ticker || !(_vs.px > 0)) continue;
+          const _vsAge = (Date.now() - _vs.at) / 60000;
+          if (_vsAge >= MOMO_SHADOW_MINS) {
+            _vs.fwdPct  = parseFloat((((price - _vs.px) / _vs.px) * 100).toFixed(3));
+            _vs.fwdMins = Math.round(_vsAge);
+          }
+        }
+      } catch (_vssErr) { /* observational */ }
+    }
+
     // ── 8/17: RANGE REGIME ───────────────────────────────────────────────
     // A/B/C classifies on SPY-vs-200MA and 5-day VIX — a crisis taxonomy for a book that holds
     // for months. APEX flattens at 3:15. Over 8/12-8/14 that label read "A" on 100% of scans
@@ -3288,7 +3302,18 @@ async function runScan() {
       stock._arm = _arm;
       if (VOLPACE_ARM_ENABLED && _arm === "vf" && !stock._mrScalp &&
           !(typeof stock.volPaceRatio === "number" && stock.volPaceRatio >= VOLPACE_ARM_MIN)) {
-        logEvent("filter", `[VF-ARM] ${stock.ticker} ${optionType} skip — volPace ${(stock.volPaceRatio ?? 0).toFixed(2)} < ${VOLPACE_ARM_MIN} (control arm would take it)`);
+        // 8/24: VF-SKIP LEDGER — record what the vf arm PASSED ON, with a forward-move stamp, so
+        // "did the filter avoid bad trades" is answerable (the skip counterfactual). Same shape as entryFwd.
+        try {
+          if (!Array.isArray(state._vfSkip)) state._vfSkip = [];
+          state._vfSkip.push({
+            signalId: _sigId, ticker: stock.ticker, side: optionType, at: Date.now(), px: price, score,
+            volPace: (typeof stock.volPaceRatio === "number") ? parseFloat(stock.volPaceRatio.toFixed(3)) : null,
+            fwdPct: null, fwdMins: null,
+          });
+          while (state._vfSkip.length > 500) state._vfSkip.shift();
+        } catch (_vfsErr) { /* observation only */ }
+        logEvent("filter", `[VF-ARM] ${stock.ticker} ${optionType} skip — volPace ${(stock.volPaceRatio ?? 0).toFixed(2)} < ${VOLPACE_ARM_MIN} (logged to vf-skip ledger)`);
         continue;
       }
       if (stock._mrScalp) {
