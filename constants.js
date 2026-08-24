@@ -548,6 +548,8 @@ const DECISION_SPLIT_LOG    = true;
 // floor itself untestable — you cannot ask whether the rejects would have won without keeping them.
 // Zero capital at risk; roughly doubles the usable dataset.
 const NEARMISS_LEDGER_ENABLED = true;
+const VOLPACE_ARM_ENABLED    = true;   // 8/24: split-book. "vf" arm enters only on elevated volume pace.
+const VOLPACE_ARM_MIN        = 1.5;    // PROVISIONAL — volPace was never on takes, so recalibrate off eVolPace once it lands.
 
 // 8/17: gzipped session log on the EOD email. Ceiling is deliberately well under the ~25MB most
 // providers allow, because base64 inflates by 33% and the other four attachments share the budget.
@@ -599,6 +601,8 @@ const FLAT_SIZING_ENABLED   = true;    // ITEM 5: kill convictionMult (score-sca
 // losers stall under +3% within ~3min. On 8/11, 12 of 22 trades peaked at EXACTLY +0% and were
 // held ~20min to a time-cut. This is the one selector that sits on the right side of the
 // information boundary — it discriminates AFTER entry, where the 40-point win-rate spread lives.
+const CP1_CRASH_ENABLED      = true;   // 8/24: instant-collapse rail — cut on the 1-min checkpoint
+const CP1_CRASH_PCT          = -5;     // cp1 <= -5% => cut. Validated: killed 0/34 eventual +5% recoverers.
 const FASTCUT_ENABLED        = true;
 const FASTCUT_MIN            = 6;      // minutes held before judging (scalp uses 5; slightly looser for the slow book)
 const FASTCUT_PEAK_SHORT     = 0.03;   // <=8 DTE: needs +3% peak, same bar as the scalp
@@ -766,6 +770,7 @@ module.exports = {
   CALL_BREAKOUT_MODE, OUTCOME_TABLE_ENABLED,
   RANGE_GOVERNOR_ENABLED, RANGE_GOVERNOR_ENFORCE, RANGE_GOVERNOR_FLOOR_PCT, RANGE_GOVERNOR_MIN_SESSION_MIN,
   RANGE_GOVERNOR_FULL_SESSION_MIN, RANGE_GOVERNOR_REF_DTE,
+  CP1_CRASH_ENABLED, CP1_CRASH_PCT,
   FASTCUT_ENABLED, FASTCUT_MIN, FASTCUT_PEAK_SHORT, FASTCUT_PEAK_MID, FASTCUT_PEAK_LONG,
   VOL_INFRA_ENABLED, CHAIN_RETAIN_ENABLED, CHAIN_RETAIN_MAX, SPREAD_COST_LOG,
   FEASIBILITY_ENABLED, FEASIBILITY_ENFORCE, FEASIBILITY_MAX_RATIO, FEASIBILITY_HOLD_MIN,
@@ -773,6 +778,7 @@ module.exports = {
   USTOP_ENABLED, USTOP_ENFORCE, USTOP_MOVE_PCT, USTOP_MIN_OPT_PCT, USTOP_MAX_OPT_PCT,
   GREEK_LIMITS_ENABLED, GREEK_LIMITS_ENFORCE, MAX_DELTA_DOLLARS_POS, MAX_DELTA_DOLLARS_NEG,
   DECISION_SPLIT_LOG, MACRO_MAX_AGE_MIN, NEARMISS_LEDGER_ENABLED, LOG_ATTACH_MAX_BYTES,
+  VOLPACE_ARM_ENABLED, VOLPACE_ARM_MIN,
   BREAK_TRIGGER_ENABLED, BREAK_TRIGGER_ENFORCE, BREAK_TRIGGER_ALLOW_MRSCALP, BREAK_ENTRY_SCORE,
   BREAK_CONFIRM_BARS, BREAK_MAX_AGE_MIN, BREAK_VOL_LOOKBACK, BREAK_VOL_MULT_PUT, BREAK_VOL_MULT_CALL,
   BREAK_ADX_MIN_PUT, BREAK_ADX_MIN_CALL, BREAK_VWAP_SLOPE_MIN, BREAK_MAX_EXT_PCT,
