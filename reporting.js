@@ -41,8 +41,41 @@ const { RESEND_API_KEY, GMAIL_USER, MONTHLY_BUDGET,
         CAPITAL_FLOOR ,
   ALPACA_DATA, ANTHROPIC_API_KEY
 ,
-  MS_PER_DAY
+  MS_PER_DAY, REDIS_URL, REDIS_TOKEN
 }                            = require('./constants');
+
+// 8/24: DURABLE RETENTION for the exports that weren't being kept (volsurface + the ledgers;
+// telemetry/outcomes already persist via saveTelemetryToRedis/saveOutcomesToRedis). Mirrors that
+// pattern — dated key, 90-day TTL — but CHUNKED, because a full-day volsurface (~6MB once chainSnaps
+// captures the whole session) exceeds the Upstash REST request cap. Each chunk is its own request; a
+// manifest key `argo:<name>:<date>` lists the chunk count for the reader (the future backtest reads
+// manifest -> header + N, then chunks 0..N-1). Best-effort, fire-and-forget — never blocks the email.
+async function _retainToRedis(name, dateStr, csv) {
+  if (!REDIS_URL || !REDIS_TOKEN || !csv) return;
+  const _lines = String(csv).split("\n");
+  const header = _lines[0] || "";
+  const data = _lines.slice(1).filter(Boolean);
+  if (!data.length) return;
+  const CHUNK = 4000;                                   // ~400KB/chunk, well under any REST cap
+  const nChunks = Math.ceil(data.length / CHUNK);
+  const _set = async (key, val) => {
+    try {
+      const r = await fetch(`${REDIS_URL}/pipeline`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${REDIS_TOKEN}`, "Content-Type": "application/json" },
+        body: JSON.stringify([["set", key, val, "EX", 7776000]]),
+      });
+      return r.ok;
+    } catch (_) { return false; }
+  };
+  let ok = 0;
+  for (let i = 0; i < nChunks; i++) {
+    const payload = JSON.stringify({ date: dateStr, name, part: i, header, rows: data.slice(i * CHUNK, (i + 1) * CHUNK) });
+    if (await _set(`argo:${name}:${dateStr}:${i}`, payload)) ok++;
+  }
+  await _set(`argo:${name}:${dateStr}`, JSON.stringify({ date: dateStr, name, header, chunks: nChunks, rows: data.length }));
+  try { logEvent("scan", `[RETAIN] ${name} ${dateStr}: ${data.length} rows, ${ok}/${nChunks} chunk(s) -> Redis`); } catch (_) {}
+}
 const { countRecentDayTrades } = require('./risk');
 const { getNewsForTicker, getUpcomingMacroEvents, getMarketauxNews } = require('./market');
 
@@ -167,6 +200,7 @@ async function sendEmail(type) {
           }
           attachments.push({ filename: `argo-volsurface-${dateStr}.csv`,
                              content: Buffer.from(lines.join("\n"), "utf8").toString("base64") });
+          _retainToRedis("volsurface", dateStr, lines.join("\n")).catch(() => {});
         }
       } catch (_volErr) { /* vol-surface attachment is best-effort — never block the email */ }
 
@@ -193,6 +227,7 @@ async function sendEmail(type) {
           }
           attachments.push({ filename: `argo-momoblocks-${dateStr}.csv`,
                              content: Buffer.from(lines.join("\n"), "utf8").toString("base64") });
+          _retainToRedis("momoblocks", dateStr, lines.join("\n")).catch(() => {});
         }
       } catch (_mbErr) { /* momo-block attachment is best-effort */ }
 
@@ -218,6 +253,7 @@ async function sendEmail(type) {
           logEvent("scan", `[ENTRY-FWD] ${_stamped}/${ef.length} entries stamped (${ef.length ? Math.round(100*_stamped/ef.length) : 0}% forward-move coverage; late entries expire unstamped by design)`);
           attachments.push({ filename: `argo-entryfwd-${dateStr}.csv`,
                              content: Buffer.from(lines.join("\n"), "utf8").toString("base64") });
+          _retainToRedis("entryfwd", dateStr, lines.join("\n")).catch(() => {});
         }
       } catch (_efCsvErr) { /* entry-fwd attachment is best-effort — never block the email */ }
 
@@ -241,6 +277,7 @@ async function sendEmail(type) {
           }
           attachments.push({ filename: `argo-vfskip-${dateStr}.csv`,
                              content: Buffer.from(lines.join("\n"), "utf8").toString("base64") });
+          _retainToRedis("vfskip", dateStr, lines.join("\n")).catch(() => {});
         }
       } catch (_vfCsvErr) { /* vf-skip attachment is best-effort — never block the email */ }
 
@@ -265,6 +302,7 @@ async function sendEmail(type) {
           }
           attachments.push({ filename: `argo-nearmiss-${dateStr}.csv`,
                              content: Buffer.from(lines.join("\n"), "utf8").toString("base64") });
+          _retainToRedis("nearmiss", dateStr, lines.join("\n")).catch(() => {});
         }
       } catch (_nmErr) { /* near-miss attachment is best-effort — never block the email */ }
 
