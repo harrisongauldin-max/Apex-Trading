@@ -103,6 +103,9 @@ const FEATURES = [
   ["eBreadth", "breadth"], ["eIVP", "IV-pct"], ["eRSI", "intraday-RSI"], ["eDRSI", "daily-RSI"],
   ["eVIX", "VIX"], ["eIV", "IV"], ["delta", "delta"], ["eRelStr", "rel-str"], ["ivr", "IVR"],
   ["eBuActive", "breakout-active"],
+  // 8/24: the two signals that actually matter, finally in the ranking. feasRatio has been recorded
+  // all along (full history immediately); eVolPace is new (N grows from deploy forward — small at first).
+  ["eVolPace", "volPace"], ["feasRatio", "feasibility"],
 ];
 
 function buildEfficacyReport(records, opts = {}) {
