@@ -157,6 +157,8 @@ async function redisSave(data) {
   // CSV is built from memory before the reset). Strip it, same as the other in-memory buffers.
   delete slim._chainSnaps;
   delete slim._nearMiss;      // 8/17: same reason — in-memory ledger, consumed by the EOD CSV
+  // 8/24: _entryFwd is deliberately NOT deleted — it is small (one row per signal, ~dozens/day,
+  // capped at 2000) and persisting it lets pending forward stamps survive a mid-session restart.
 
   try { fs.writeFileSync(STATE_FILE, JSON.stringify(data, null, 2)); } catch(e) {}
 
@@ -515,6 +517,7 @@ async function saveDailyLogToRedis(isEOD = false) {
     // tomorrow's gate report carries today's blocks.
     state._momoBlocks = []; state._momoShadow = []; state._momoLastMin = {};
     state._nearMiss = []; state._nmLastMin = {};
+    state._entryFwd = [];
     markDirty();
   }
 }
