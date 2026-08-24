@@ -118,6 +118,7 @@ async function sendEmail(type) {
       momoBlocks:    (state._momoBlocks    || []).slice(),
       nearMiss:      (state._nearMiss      || []).slice(),
       entryFwd:      (state._entryFwd      || []).slice(),
+      vfSkip:        (state._vfSkip        || []).slice(),
       dailyLog:      (state._dailyLogBuffer || []).slice(),
     };
 
@@ -219,6 +220,29 @@ async function sendEmail(type) {
                              content: Buffer.from(lines.join("\n"), "utf8").toString("base64") });
         }
       } catch (_efCsvErr) { /* entry-fwd attachment is best-effort — never block the email */ }
+
+      // 8/24: VF-SKIP LEDGER CSV — the signals the vf arm PASSED ON (volPace below threshold), with
+      // where the underlying went next. If skips moved the call's way, the filter was wrong. The vf
+      // arm's own scorecard — half the point of a filter.
+      try {
+        const dateStr = new Date().toLocaleDateString("en-CA", { timeZone: "America/New_York" });
+        const vs = (_eodSnap.vfSkip || []).filter(r => new Date(r.at).toLocaleDateString("en-CA", { timeZone: "America/New_York" }) === dateStr);
+        if (vs.length) {
+          const head = ["skipET","signalId","ticker","side","score","pxSkip","volPace","fwdPct","fwdMins"].join(",");
+          const lines = [head];
+          for (const r of vs) {
+            lines.push([
+              new Date(r.at).toLocaleTimeString("en-US", { timeZone: "America/New_York", hour12: false }),
+              (r.signalId || ""), r.ticker, r.side, (r.score != null ? r.score : ""),
+              (r.px != null ? r.px.toFixed(2) : ""),
+              (r.volPace != null ? r.volPace : ""),
+              (r.fwdPct != null ? r.fwdPct : ""), (r.fwdMins != null ? r.fwdMins : ""),
+            ].join(","));
+          }
+          attachments.push({ filename: `argo-vfskip-${dateStr}.csv`,
+                             content: Buffer.from(lines.join("\n"), "utf8").toString("base64") });
+        }
+      } catch (_vfCsvErr) { /* vf-skip attachment is best-effort — never block the email */ }
 
       // ── 8/17: NEAR-MISS LEDGER CSV ────────────────────────────────────────
       // The trades APEX did NOT take, with what happened next. Pair this with the outcome table
