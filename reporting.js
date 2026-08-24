@@ -117,6 +117,7 @@ async function sendEmail(type) {
       outcomeBuffer: (state._outcomeBuffer || []).slice(),
       momoBlocks:    (state._momoBlocks    || []).slice(),
       nearMiss:      (state._nearMiss      || []).slice(),
+      entryFwd:      (state._entryFwd      || []).slice(),
       dailyLog:      (state._dailyLogBuffer || []).slice(),
     };
 
@@ -192,7 +193,32 @@ async function sendEmail(type) {
           attachments.push({ filename: `argo-momoblocks-${dateStr}.csv`,
                              content: Buffer.from(lines.join("\n"), "utf8").toString("base64") });
         }
-      } catch (_mbErr) { /* momo-block attachment is best-effort — never block the email */ }
+      } catch (_mbErr) { /* momo-block attachment is best-effort */ }
+
+      // 8/24: ENTRY FORWARD-MOVE LEDGER CSV — where the underlying went MOMO_SHADOW_MINS after each
+      // taken entry, with volPace at entry. Join to the outcome table on signalId to test whether
+      // volPace forecasts direction on the TAKEN population, not just the blocked one.
+      try {
+        const ef = _eodSnap.entryFwd;
+        if (ef.length) {
+          const dateStr = new Date().toLocaleDateString("en-CA", { timeZone: "America/New_York" });
+          const head = ["entryET","signalId","ticker","side","score","pxEntry","volPace","fwdPct","fwdMins"].join(",");
+          const lines = [head];
+          for (const r of ef) {
+            lines.push([
+              new Date(r.at).toLocaleTimeString("en-US", { timeZone: "America/New_York", hour12: false }),
+              (r.signalId || ""), r.ticker, r.side, (r.score != null ? r.score : ""),
+              (r.px != null ? r.px.toFixed(2) : ""),
+              (r.volPace != null ? r.volPace : ""),
+              (r.fwdPct != null ? r.fwdPct : ""), (r.fwdMins != null ? r.fwdMins : ""),
+            ].join(","));
+          }
+          const _stamped = ef.filter(r => r.fwdPct != null).length;
+          logEvent("scan", `[ENTRY-FWD] ${_stamped}/${ef.length} entries stamped (${ef.length ? Math.round(100*_stamped/ef.length) : 0}% forward-move coverage; late entries expire unstamped by design)`);
+          attachments.push({ filename: `argo-entryfwd-${dateStr}.csv`,
+                             content: Buffer.from(lines.join("\n"), "utf8").toString("base64") });
+        }
+      } catch (_efCsvErr) { /* entry-fwd attachment is best-effort — never block the email */ }
 
       // ── 8/17: NEAR-MISS LEDGER CSV ────────────────────────────────────────
       // The trades APEX did NOT take, with what happened next. Pair this with the outcome table
