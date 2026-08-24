@@ -899,7 +899,29 @@ async function executeTrade(stock, price, score, scoreReasons, vix, optionType =
     reqMovePct: _feas && _feas.requiredPct  != null ? parseFloat((_feas.requiredPct  * 100).toFixed(4)) : null,
     availMovePct: _feas && _feas.availablePct != null ? parseFloat((_feas.availablePct * 100).toFixed(4)) : null,
     feasRatio:  _feas && _feas.ratio != null ? parseFloat(_feas.ratio.toFixed(3)) : null,   // 8/09: intraday range-so-far — the range-governor signal
+    volPace:    (stock.hasIntraday && typeof stock.volPaceRatio === "number") ? parseFloat(stock.volPaceRatio.toFixed(3)) : null,   // 8/24: continuous volume pace at entry — the direction signal. null (not the ||1 default) when no intraday tape.
+    arm:        stock._arm || null,   // 8/24: volPace split-book arm tag (vf | ctl)
   };
+
+  // 8/24: ENTRY FORWARD-MOVE LEDGER — mirrors the near-miss/momo forward stamp. Records the
+  // underlying at entry so a later scan stamps where it went at MOMO_SHADOW_MINS, independent of
+  // when THIS position exits. Joined to outcomes on signalId. Observation only; wrapped so it can
+  // never disturb the trade path.
+  try {
+    if (!Array.isArray(state._entryFwd)) state._entryFwd = [];
+    // One row per SIGNAL. The A/B/C triple calls executeTrade 3x with a shared signalId; the
+    // forward move is a property of ticker+time (identical for all legs) and outcomes join on
+    // signalId, so dedupe here rather than write 3 near-identical rows.
+    if (!signalId || !state._entryFwd.some(e => e.signalId === signalId)) {
+      state._entryFwd.push({
+        signalId: signalId || null, ticker: stock.ticker, side: optionType,
+        at: Date.now(), px: price, score,
+        volPace: (stock.hasIntraday && typeof stock.volPaceRatio === "number") ? parseFloat(stock.volPaceRatio.toFixed(3)) : null,
+        fwdPct: null, fwdMins: null,
+      });
+      while (state._entryFwd.length > 500) state._entryFwd.shift();   // bounded: it now rides the Redis payload
+    }
+  } catch (_efErr) { /* observation only — never disturb an entry */ }
 
   state.tradeJournal.unshift({
     time:          new Date().toISOString(),
