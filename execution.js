@@ -236,8 +236,17 @@ async function findContract(ticker, optionType, targetDelta, targetDTE, vix, sto
           _best._surface = VOL.surfaceStats(_chainRows);
           _best._chainN  = _chainRows.length;
           if (!state._chainSnaps) state._chainSnaps = [];
-          state._chainSnaps.push({ ts: Date.now(), ticker, side: optionType, targetDTE, rows: _chainRows });
-          if (state._chainSnaps.length > 400) state._chainSnaps.shift();
+          // 8/24: throttle to ~1/min per (ticker,side,DTE) and hold a full session. The old 400-cap
+          // FIFO'd all but the last ~45min out before the EOD flush — the whole trading day was
+          // computed and discarded, leaving volsurface unusable for backtesting (only ~2:45-3:30pm
+          // survived). ~1/min x ~12 keys x 390min ~= 4.7k rows; cap 6000 keeps the day. In-memory only.
+          if (!state._chainSnapLast) state._chainSnapLast = {};
+          const _csKey = `${ticker}|${optionType}|${targetDTE}`;
+          if ((Date.now() - (state._chainSnapLast[_csKey] || 0)) >= 60000) {
+            state._chainSnapLast[_csKey] = Date.now();
+            state._chainSnaps.push({ ts: Date.now(), ticker, side: optionType, targetDTE, rows: _chainRows });
+            if (state._chainSnaps.length > 6000) state._chainSnaps.shift();
+          }
         } catch (_sErr) {
           logEvent("scan", `[SURFACE] ${ticker} surface failed — ${_sErr.message} (trade unaffected)`);
         }
