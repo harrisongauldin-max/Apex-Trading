@@ -72,6 +72,8 @@ const OUTCOME_HEADER = [
   // so checkpoints are blank-by-design and _entryX carries the SECOND signal's context. Exclude
   // these rows from checkpoint and entry-feature analysis.
   "brokerPnl","pnlDelta","epSource","addonMerged",
+  "eVolPace",   // 8/24: continuous volume pace at entry (the reject-side direction signal), now on takes
+  "arm",        // 8/24: volPace split-book arm (vf | ctl); blank pre-experiment
 ].join(",");
 
 function _csv(s) {
@@ -183,6 +185,8 @@ function buildOutcomeRow(pos, o) {
       return [_n(_bp, 2), _jp == null ? "" : _n(_bp - _jp, 2), _src];
     })(),
     pos._addonMerged ? 1 : 0,
+    _n(x.volPace, 2),
+    (x.arm || ""),
   ].map(_csv).join(",");
 
   return row;
@@ -203,5 +207,22 @@ function recordOutcome(state, pos, o) {
 function outcomesCSV(rows) {
   return [OUTCOME_HEADER].concat(Array.isArray(rows) ? rows : []).join("\n");
 }
+
+// 8/24: SCHEMA-DRIFT GUARD. OUTCOME_HEADER and buildOutcomeRow's row array are hand-maintained in
+// two places; a column added to one but not the other — or two tail-appends colliding — silently
+// misaligns every CSV, and downstream analysis reads the wrong field with no error. Fail LOUD at
+// module load instead. A width mismatch is fatal; a synthetic-row build error is not (defensive).
+(() => {
+  try {
+    const hdrN = OUTCOME_HEADER.split(",").length;
+    const rowN = buildOutcomeRow({}, {}).split(",").length;
+    if (hdrN !== rowN) {
+      throw new Error(`[OUTCOME-SCHEMA] MISALIGNED: header ${hdrN} cols vs row ${rowN}. Fix outcomes.js before trusting any outcome CSV.`);
+    }
+  } catch (e) {
+    if (/MISALIGNED/.test(e.message)) { console.error(e.message); throw e; }
+    console.error(`[OUTCOME-SCHEMA] self-check could not run (non-fatal): ${e.message}`);
+  }
+})();
 
 module.exports = { recordOutcome, buildOutcomeRow, outcomesCSV, OUTCOME_HEADER };
