@@ -134,10 +134,10 @@ async function sendEmail(type) {
       // 8/05: attach the outcome-joined (X,y) table alongside telemetry, same base64 pattern.
       // Best-effort: a failure here must never block the EOD email or drop the telemetry attachment.
       try {
-        const oRows = state._outcomeBuffer || [];
+        const dateStr = new Date().toLocaleDateString("en-CA", { timeZone: "America/New_York" });
+        const oRows = (state._outcomeBuffer || []).filter(r => r.startsWith(dateStr + ","));  // item-1: col0=_etDate(close) — one day per file even if the buffer carries stale/Redis-restored rows
         if (oRows.length) {
           const oCsv = outcomesCSV(oRows);
-          const dateStr = new Date().toLocaleDateString("en-CA", { timeZone: "America/New_York" });
           attachments.push({ filename: `argo-outcomes-${dateStr}.csv`, content: Buffer.from(oCsv, "utf8").toString("base64") });
         }
       } catch (_outErr) { /* outcomes attachment is best-effort — never block the email */ }
@@ -199,9 +199,9 @@ async function sendEmail(type) {
       // taken entry, with volPace at entry. Join to the outcome table on signalId to test whether
       // volPace forecasts direction on the TAKEN population, not just the blocked one.
       try {
-        const ef = _eodSnap.entryFwd;
+        const dateStr = new Date().toLocaleDateString("en-CA", { timeZone: "America/New_York" });
+        const ef = (_eodSnap.entryFwd || []).filter(r => new Date(r.at).toLocaleDateString("en-CA", { timeZone: "America/New_York" }) === dateStr);  // item-1: _entryFwd persists in Redis, so filter to today's rows only
         if (ef.length) {
-          const dateStr = new Date().toLocaleDateString("en-CA", { timeZone: "America/New_York" });
           const head = ["entryET","signalId","ticker","side","score","pxEntry","volPace","fwdPct","fwdMins"].join(",");
           const lines = [head];
           for (const r of ef) {
@@ -224,9 +224,9 @@ async function sendEmail(type) {
       // The trades APEX did NOT take, with what happened next. Pair this with the outcome table
       // and the entry floor becomes testable for the first time.
       try {
-        const nm = _eodSnap.nearMiss;
+        const dateStr = new Date().toLocaleDateString("en-CA", { timeZone: "America/New_York" });
+        const nm = (_eodSnap.nearMiss || []).filter(r => new Date(r.at).toLocaleDateString("en-CA", { timeZone: "America/New_York" }) === dateStr);  // item-1: one day per file
         if (nm.length) {
-          const dateStr = new Date().toLocaleDateString("en-CA", { timeZone: "America/New_York" });
           const head = ["missET","ticker","side","score","reason","pxAtMiss","rsi","dRsi","adx","rangePct","rangeRegime","rv","fwdPct","fwdMins"].join(",");
           const lines = [head];
           for (const r of nm) {
