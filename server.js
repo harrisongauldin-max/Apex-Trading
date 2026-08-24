@@ -1303,7 +1303,7 @@ app.get("/api/outcomes", async (req, res) => {
     if (!data.result) {
       const todayStr = getETDateStr();
       if (date === todayStr && state._outcomeBuffer && state._outcomeBuffer.length) {
-        rows = state._outcomeBuffer; source = "live_buffer";
+        rows = state._outcomeBuffer.filter(r => r.startsWith(date + ","));  source = "live_buffer";  // item-1: never serve a prior day out of a stale buffer
       } else {
         return res.status(404).json({ error: `No outcomes for ${date}` });
       }
