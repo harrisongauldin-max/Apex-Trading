@@ -1335,6 +1335,32 @@ app.get("/api/efficacy", async (req, res) => {
 
 app.post("/api/scan", async (req,res) => { res.json({ok:true}); runScan(); });
 
+// 8/24: FADE BACKFILL — pull deep Alpaca history, reconstruct the tape via APEX's own signal
+// functions, run the corrected fade-reversion test. Long-running -> fire in background, poll result.
+let _backfillJob = { running: false, result: null, startedAt: null, finishedAt: null };
+app.post("/api/backfill", requireSecret, async (req, res) => {
+  if (_backfillJob.running) return res.json({ ok: false, error: "backfill already running" });
+  const tickers = String(req.body?.tickers || "SPY,QQQ").split(",").map(s => s.trim()).filter(Boolean);
+  const start = req.body?.start || "2024-06-01";
+  const end   = req.body?.end   || "2024-12-31";
+  _backfillJob = { running: true, result: null, startedAt: Date.now(), finishedAt: null };
+  res.json({ ok: true, started: true, tickers, start, end });
+  (async () => {
+    try {
+      const BF = require("./backfill");
+      const text = await BF.runBackfill({ tickers, start, end });
+      _backfillJob = { running: false, result: text, startedAt: _backfillJob.startedAt, finishedAt: Date.now() };
+      logEvent("scan", "[BACKFILL] complete");
+    } catch (e) {
+      _backfillJob = { running: false, result: "backfill failed: " + e.message, startedAt: _backfillJob.startedAt, finishedAt: Date.now() };
+      logEvent("warn", "[BACKFILL] failed: " + e.message);
+    }
+  })();
+});
+app.get("/api/backfill/result", (req, res) => {
+  res.json(_backfillJob);
+});
+
 app.post("/api/test-scan", async (req, res) => {
   if (getScannerState().scanRunning) return res.json({ error: "Scan already running" });
   const wasDryRun = false;
