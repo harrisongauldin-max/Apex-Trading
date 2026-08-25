@@ -1486,6 +1486,22 @@ app.post("/api/data-gather", requireSecret, async (req, res) => {
   res.json({ ok: true, active, override: (typeof state._dataGatherMode === "boolean" ? state._dataGatherMode : null), default: !!DATA_GATHER_MODE });
 });
 
+app.post("/api/mr-fade", requireSecret, async (req, res) => {
+  const { MR_FADE_ENABLED } = require('./constants');
+  const { mrFadeActive } = require('./state');
+  const body = req.body || {};
+  if (body.on === null || typeof body.on === "undefined") { delete state._mrFadeOverride; }
+  else { state._mrFadeOverride = body.on === true || body.on === "true"; }
+  await saveStateNow();
+  const active = mrFadeActive(MR_FADE_ENABLED);
+  logEvent("scan", `[MR-FADE] live entry ${active ? "ON" : "OFF"} (override:${typeof state._mrFadeOverride === "boolean" ? state._mrFadeOverride : "none, using default"})`);
+  res.json({ ok: true, active, override: (typeof state._mrFadeOverride === "boolean" ? state._mrFadeOverride : null), default: !!MR_FADE_ENABLED });
+});
+app.get("/api/mr-fade", (req, res) => {
+  const { MR_FADE_ENABLED } = require('./constants');
+  const { mrFadeActive } = require('./state');
+  res.json({ active: mrFadeActive(MR_FADE_ENABLED), override: (typeof state._mrFadeOverride === "boolean" ? state._mrFadeOverride : null), default: !!MR_FADE_ENABLED });
+});
 app.get("/api/data-gather", (req, res) => {
   const { DATA_GATHER_MODE } = require('./constants');
   const { dataGatherActive } = require('./state');
