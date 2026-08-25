@@ -519,6 +519,7 @@ async function saveDailyLogToRedis(isEOD = false) {
     state._nearMiss = []; state._nmLastMin = {};
     state._entryFwd = [];
     state._vfSkip = [];
+    state._vetoBlocks = [];
     markDirty();
   }
 }
