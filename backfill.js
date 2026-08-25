@@ -89,39 +89,101 @@ function reconstructTape(minuteBarsByDay, dailyBars) {
 }
 
 // ---- forward returns (fixed horizon, same-day, no truncation) ----
-function stampForward(rows, H = 30) {
+function stampForward(rows, horizons = [5, 15, 30, 60], pathH = 30) {
   const byDay = {};
-  for (const r of rows) (byDay[r.date + r.ticker] ||= []).push(r);
+  for (const r of rows) (byDay[r.date + "|" + r.ticker] ||= []).push(r);
   for (const key of Object.keys(byDay)) {
     const g = byDay[key].sort((a, b) => a.tMin - b.tMin);
     for (let i = 0; i < g.length; i++) {
-      let j = i; while (j < g.length && g[j].tMin < g[i].tMin + H) j++;
-      g[i].fwd = (j < g.length && g[j].tMin - g[i].tMin <= H + 3) ? ((g[j].px - g[i].px) / g[i].px) * 100 : null;
+      const p0 = g[i].px;
+      g[i].fwd = {};                                   // forward return at each horizon
+      for (const H of horizons) {
+        let j = i; while (j < g.length && g[j].tMin < g[i].tMin + H) j++;
+        g[i].fwd[H] = (j < g.length && g[j].tMin - g[i].tMin <= H + 3) ? ((g[j].px - p0) / p0) * 100 : null;
+      }
+      let lo = p0, hi = p0, k = i;                     // MAE/MFE over the path window (exit design)
+      while (k < g.length && g[k].tMin <= g[i].tMin + pathH) { if (g[k].px < lo) lo = g[k].px; if (g[k].px > hi) hi = g[k].px; k++; }
+      g[i].loPct = ((lo - p0) / p0) * 100;
+      g[i].hiPct = ((hi - p0) / p0) * 100;
     }
   }
 }
 
-// ---- the decisive test: de-meaned fade edge, overall and split by regime ----
-function runFadeTest(rows, label = "ALL") {
-  const v = rows.filter(r => r.fwd != null && r.iRSI != null && r.adx != null && r.vwapPct != null);
+// ---- DETAILED fade breakdown (per Lopez de Prado / Aronson / Pardo discipline) ----
+function _stats(a) {
+  const n = a.length; if (!n) return { n: 0, mean: 0, sd: 0, se: 0, t: 0 };
+  const m = a.reduce((s, x) => s + x, 0) / n;
+  const varr = n > 1 ? a.reduce((s, x) => s + (x - m) * (x - m), 0) / (n - 1) : 0;
+  const sd = Math.sqrt(varr), se = n > 0 ? sd / Math.sqrt(n) : 0;
+  return { n, mean: m, sd, se, t: se > 0 ? m / se : 0 };
+}
+const _mean = (a) => a.length ? a.reduce((s, x) => s + x, 0) / a.length : 0;
+
+// rows = the FULL tape; extremes are drawn from adx<=adxMax; baseline = each ticker-day's drift over ALL rows.
+function runFadeTest(rows, label = "ALL", opts = {}) {
+  const adxMax = opts.adxMax != null ? opts.adxMax : 20;
+  const H0 = 30;                                                     // primary horizon
+  const v = rows.filter(r => r.fwd && r.fwd[H0] != null && r.iRSI != null && r.adx != null && r.vwapPct != null);
   if (!v.length) return `  ${label}: no data`;
-  const mean = a => a.reduce((s, x) => s + x, 0) / a.length;
-  // DAY BASELINE = mean forward return over ALL valid rows that day (the day's drift, from a random
-  // moment). The correct control: do EXTREMES forward-return more than baseline, in the reversion
-  // direction? (Subtracting the extremes' OWN day-mean, as before, wrongly removes a constant edge.)
-  // baseline keyed per TICKER-DAY (SPY and QQQ drift differently — each extreme vs its own instrument's day)
   const _bk = (r) => r.date + "|" + r.ticker;
-  const dayBase = {}; { const acc = {}, cnt = {};
-    for (const r of v) { const k = _bk(r); acc[k] = (acc[k] || 0) + r.fwd; cnt[k] = (cnt[k] || 0) + 1; }
-    for (const k of Object.keys(acc)) dayBase[k] = acc[k] / cnt[k]; }
-  const dn = v.filter(r => r.adx <= 20 && r.iRSI <= 30 && r.vwapPct <= -0.19);   // oversold+below VWAP in range -> fade UP
-  const up = v.filter(r => r.adx <= 20 && r.iRSI >= 70 && r.vwapPct >= 0.19);    // overbought+above VWAP in range -> fade DOWN
-  if (!dn.length && !up.length) return `  ${label}: no extreme events`;
-  const rawArr    = [...dn.map(r => r.fwd),                     ...up.map(r => -r.fwd)];
-  const excessArr = [...dn.map(r => r.fwd - dayBase[_bk(r)]),   ...up.map(r => -(r.fwd - dayBase[_bk(r)]))];  // excess over this instrument's day baseline
-  const raw = mean(rawArr), excess = mean(excessArr), n = excessArr.length;
-  const verdict = n < 40 ? "underpowered" : (excess > 0.03 ? "EDGE over baseline" : "no edge over baseline");
-  return `  ${label}: n=${n}  raw ${raw >= 0 ? "+" : ""}${raw.toFixed(3)}%  excess-over-baseline ${excess >= 0 ? "+" : ""}${excess.toFixed(3)}%  -> ${verdict}`;
+  const baseAt = (H) => { const acc = {}, cnt = {};
+    for (const r of v) { if (r.fwd[H] == null) continue; const k = _bk(r); acc[k] = (acc[k] || 0) + r.fwd[H]; cnt[k] = (cnt[k] || 0) + 1; }
+    const b = {}; for (const k of Object.keys(acc)) b[k] = acc[k] / cnt[k]; return b; };
+  const isDn = (r, irsi, vw) => r.adx <= adxMax && r.iRSI <= irsi && r.vwapPct <= -vw;
+  const isUp = (r, irsi, vw) => r.adx <= adxMax && r.iRSI >= (100 - irsi) && r.vwapPct >= vw;
+  const excessAt = (H, irsi = 30, vw = 0.19) => {
+    const base = baseAt(H);
+    const dn = v.filter(r => r.fwd[H] != null && isDn(r, irsi, vw));
+    const up = v.filter(r => r.fwd[H] != null && isUp(r, irsi, vw));
+    const arr = [...dn.map(r => r.fwd[H] - base[_bk(r)]), ...up.map(r => -(r.fwd[H] - base[_bk(r)]))];
+    return { arr, dn, up };
+  };
+
+  const P = excessAt(H0); const st = _stats(P.arr);
+  if (st.n < 20) return `  ${label} (n=${st.n}): underpowered — too few extreme events to test`;
+  const base30 = baseAt(H0);
+
+  // [1] SIGNIFICANCE — t-stat + Aronson Monte-Carlo permutation p (is the excess > random same-regime moments?)
+  const pool = v.filter(r => r.fwd[H0] != null && r.adx <= adxMax).map(r => r.fwd[H0] - base30[_bk(r)]);
+  let ge = 0; const NP = 2000;
+  for (let p = 0; p < NP; p++) { let s = 0; for (let q = 0; q < st.n; q++) s += pool[(Math.random() * pool.length) | 0]; if (s / st.n >= st.mean) ge++; }
+  const permP = ge / NP;
+
+  // [2] DISTRIBUTION — don't trust the mean
+  const hit = 100 * P.arr.filter(x => x > 0).length / P.arr.length;
+  const sorted = [...P.arr].sort((a, b) => a - b); const med = sorted[sorted.length >> 1];
+  const avgW = _mean(P.arr.filter(x => x > 0)), avgL = _mean(P.arr.filter(x => x <= 0));
+
+  // [3] HORIZON SENSITIVITY — real reversion is stable across marks, not one cherry-picked horizon
+  const horiz = [5, 15, 30, 60].map(H => { const m = _mean(excessAt(H).arr); return `+${H}m ${m >= 0 ? "+" : ""}${m.toFixed(3)}%`; }).join("  ");
+
+  // [4] SUB-PERIOD STABILITY — Pardo walk-forward: same sign in both halves?
+  const dates = [...new Set(v.map(r => r.date))].sort(); const mid = dates[dates.length >> 1];
+  const half = (first) => { const dn = P.dn.filter(r => first ? r.date < mid : r.date >= mid), up = P.up.filter(r => first ? r.date < mid : r.date >= mid);
+    const a = [...dn.map(r => r.fwd[H0] - base30[_bk(r)]), ...up.map(r => -(r.fwd[H0] - base30[_bk(r)]))]; return { m: _mean(a), n: a.length }; };
+  const H1 = half(true), H2 = half(false);
+
+  // [5] THRESHOLD ROBUSTNESS — Lopez de Prado: not overfit to one cutoff; edge should concentrate in true extremes
+  const thGrid = [25, 30, 35].map(irsi => { const a = excessAt(H0, irsi, 0.19).arr; return `<=${irsi}:${_mean(a) >= 0 ? "+" : ""}${_mean(a).toFixed(3)}%(n${a.length})`; }).join("  ");
+
+  // [6] PATH / EXIT DESIGN — MAE/MFE (the underwater-first problem for MR exits)
+  const mae = [...P.dn.map(r => r.loPct), ...P.up.map(r => -r.hiPct)].filter(x => x != null);
+  const mfe = [...P.dn.map(r => r.hiPct), ...P.up.map(r => -r.loPct)].filter(x => x != null);
+  const avgMAE = _mean(mae), avgMFE = _mean(mfe);
+
+  // [7] NET OF COST — Sinclair: is it tradeable after frictions? breakeven cost in bp
+  const beBp = st.mean * 100, net1 = st.mean - 0.01;
+
+  return [
+    `  ${label} — n=${st.n} extremes over ${dates.length} days`,
+    `   [1] significance : excess ${st.mean >= 0 ? "+" : ""}${st.mean.toFixed(3)}%/trade  SE ${st.se.toFixed(3)}%  t ${st.t.toFixed(2)}  perm-p ${permP.toFixed(3)} ${permP < 0.05 ? "(distinguishable from noise)" : "(NOT distinguishable from noise)"}`,
+    `   [2] distribution : hit ${hit.toFixed(0)}% reverted  median ${med >= 0 ? "+" : ""}${med.toFixed(3)}%  avgWin ${avgW >= 0 ? "+" : ""}${avgW.toFixed(3)}% / avgLoss ${avgL.toFixed(3)}%`,
+    `   [3] horizons     : ${horiz}`,
+    `   [4] stability    : H1 ${H1.m >= 0 ? "+" : ""}${H1.m.toFixed(3)}%(n${H1.n})  H2 ${H2.m >= 0 ? "+" : ""}${H2.m.toFixed(3)}%(n${H2.n})  ${Math.sign(H1.m) === Math.sign(H2.m) ? "[same sign — survives split]" : "[SIGN FLIPS — unstable]"}`,
+    `   [5] thresholds   : ${thGrid}  ${"(monotonic in extremity = real; noisy = overfit)"}`,
+    `   [6] path/exit    : MAE ${avgMAE.toFixed(3)}% (adverse before revert)  MFE +${avgMFE.toFixed(3)}%  -> a stop tighter than ${Math.abs(avgMAE).toFixed(2)}% exits winners at max adverse`,
+    `   [7] net of cost  : breakeven ${beBp.toFixed(1)}bp  @1bp ${net1 >= 0 ? "+" : ""}${net1.toFixed(3)}%  -> ${beBp > 3 ? "survives on the UNDERLYING at low cost" : "marginal even gross"}; short-DTE options (theta+spread) >> ${beBp.toFixed(1)}bp`,
+  ].join("\n");
 }
 
 // ---- orchestrate ----  returns the verdict TEXT (so server/UI can display it), not just console
@@ -141,9 +203,9 @@ async function runBackfill({ tickers = ["SPY", "QQQ"], start = "2024-06-01", end
   }
   stampForward(all, 30);
   log(`\nFADE-REVERSION TEST (+30min, excess over day baseline) on ${all.length} reconstructed rows:`);
-  log(runFadeTest(all, "ALL (adx<=20 range)"));
-  log(runFadeTest(all.filter(r => r.adx != null && r.adx <= 15), "LOW-ADX <=15 (MR-friendly)"));
-  log(runFadeTest(all.filter(r => r.adx != null && r.adx >= 25), "HIGH-ADX >=25 (trend)"));
+  log(runFadeTest(all, "ALL range (adx<=20)", { adxMax: 20 }));
+  log("");
+  log(runFadeTest(all, "LOW-ADX (adx<=15, MR-friendly)", { adxMax: 15 }));
   log(`\nNOTE: ADX is the regime proxy from bars alone. True gamma split needs OI (AlphaVantage) or the`);
   log(`live GEX capture. Low-ADX edge surviving here = first real signal MR works — confirm vs gamma regime.`);
   return L.join("\n");
