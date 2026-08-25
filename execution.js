@@ -247,6 +247,11 @@ async function findContract(ticker, optionType, targetDelta, targetDTE, vix, sto
             state._chainSnaps.push({ ts: Date.now(), ticker, side: optionType, targetDTE, rows: _chainRows });
             if (state._chainSnaps.length > 6000) state._chainSnaps.shift();
           }
+          // 8/24: stash the chain BY SIDE so GEX (dealer-gamma regime) can be computed from both
+          // sides at telemetry time. findContract runs per-side, so each pass fills one side.
+          if (!state._gexChain) state._gexChain = {};
+          if (!state._gexChain[ticker]) state._gexChain[ticker] = {};
+          state._gexChain[ticker][optionType] = { rows: _chainRows, spot: (stock && (stock.price || stock.lastPrice)) || 0, ts: Date.now() };
         } catch (_sErr) {
           logEvent("scan", `[SURFACE] ${ticker} surface failed — ${_sErr.message} (trade unaffected)`);
         }
