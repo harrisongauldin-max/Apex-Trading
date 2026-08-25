@@ -53,6 +53,7 @@ const {
 const {
   getRegimeRulebook, scoreCandidate: EE_scoreCandidate, evaluateEntry,
 } = require('./entryEngine');
+let GEX = null; try { GEX = require('./gex'); } catch (_gexReqErr) { /* gex module optional */ }
 const { INSTRUMENT_CONSTRAINTS } = require('./entryEngine');
 
 const {
@@ -1853,6 +1854,20 @@ async function runScan() {
       } catch (_vssErr) { /* observational */ }
     }
 
+    // 8/24: FALLING-KNIFE VETO forward stamp — same loop, for the oversold dips APEX refused.
+    if (price > 0 && Array.isArray(state._vetoBlocks)) {
+      try {
+        for (const _vk of state._vetoBlocks) {
+          if (_vk.fwdPct != null || _vk.ticker !== stock.ticker || !(_vk.px > 0)) continue;
+          const _vkAge = (Date.now() - _vk.at) / 60000;
+          if (_vkAge >= MOMO_SHADOW_MINS) {
+            _vk.fwdPct  = parseFloat((((price - _vk.px) / _vk.px) * 100).toFixed(3));
+            _vk.fwdMins = Math.round(_vkAge);
+          }
+        }
+      } catch (_vksErr) { /* observational */ }
+    }
+
     // ── 8/17: RANGE REGIME ───────────────────────────────────────────────
     // A/B/C classifies on SPY-vs-200MA and 5-day VIX — a crisis taxonomy for a book that holds
     // for months. APEX flattens at 3:15. Over 8/12-8/14 that label read "A" on 100% of scans
@@ -2676,7 +2691,12 @@ async function runScan() {
       // material-change/heartbeat CSV row. try/catch: instrumentation must never halt a scan.
       try {
         const _vwapPx = signals.intradayVWAP || 0;
-        recordTelemetry(state, {
+        const _gexRec = (() => { try {
+        const _gc = state._gexChain && state._gexChain[stock.ticker];
+        if (GEX && _gc && _gc.call && _gc.put && (Date.now() - Math.min(_gc.call.ts || 0, _gc.put.ts || 0) < 300000))
+          return GEX.computeGEX(_gc.call.rows, _gc.put.rows, price);
+      } catch (_gxe) {} return null; })();
+      recordTelemetry(state, {
           tkr: stock.ticker, px: price, adx: signals.adx,
           iRSI: signals.rsi, dRSI: signals.dailyRsi,
           call: callScore, put: putScore,
@@ -2687,6 +2707,9 @@ async function runScan() {
           callReasons: callSetup.reasons, putReasons: putSetup.reasons,
           direction: optionType,
           volPace: signals.volPaceRatio, breadth: signals.breadth,   // 8/24: enrich the tape for backtesting
+          gexRegime: _gexRec ? _gexRec.regime : null, netGexM: _gexRec ? _gexRec.netGexM : null,   // 8/24: dealer-gamma REGIME on the tape (pos=range/MR-friendly, neg=trend)
+          callWall: _gexRec ? _gexRec.callWall : null, putWall: _gexRec ? _gexRec.putWall : null,
+          distCW: _gexRec ? _gexRec.distCallWallPct : null, distPW: _gexRec ? _gexRec.distPutWallPct : null,
         });
       } catch (_telErr) { /* telemetry must never break the scan */ }
     }
@@ -3018,6 +3041,24 @@ async function runScan() {
     }
     if (!eeResult.pass) {
       logEvent("filter", `${stock.ticker} entry blocked - ${eeResult.reason}`);
+      // 8/24: FALLING-KNIFE VETO LEDGER — the oversold/bearish-MACD dips APEX REFUSES to buy, stamped
+      // with where the underlying went next. The direct mean-reversion test: if the vetoed dips bounced
+      // (fwdPct > 0), the MR side is the edge and the veto is backwards. Same forward-stamp mechanism as
+      // momoblocks/entryfwd. Observation only; wrapped so it can never disturb the scan.
+      if (optionType === "call" && /falling-knife veto/.test(String(eeResult.reason || ""))) {
+        try {
+          if (!Array.isArray(state._vetoBlocks)) state._vetoBlocks = [];
+          state._vetoBlocks.push({
+            ticker: stock.ticker, side: optionType, at: Date.now(), px: price, score,
+            rsi:      (typeof stock.rsi      === "number") ? parseFloat(stock.rsi.toFixed(1))      : null,
+            dailyRsi: (typeof stock.dailyRsi === "number") ? parseFloat(stock.dailyRsi.toFixed(1)) : null,
+            macd: stock.macd || "neutral",
+            adx:      (typeof stock.adx      === "number") ? parseFloat(stock.adx.toFixed(0))      : null,
+            fwdPct: null, fwdMins: null,
+          });
+          while (state._vetoBlocks.length > 500) state._vetoBlocks.shift();
+        } catch (_vkErr) { /* observation only */ }
+      }
       // INSTRUMENTATION (6/16): the real score-below-min / gate rejections short-circuit HERE at the
       // eeResult gate. This is the EXECUTION loop (line ~2065), a separate loop from the scoring loop
       // where bestReasons lives — so use `reasons`, which is destructured from the scored candidate at
