@@ -30,32 +30,40 @@ const isRTH  = (iso) => { const m = etMin(iso); return m >= 570 && m <= 960; }; 
 
 // ---- fetch ----
 async function fetchMinuteBars(ticker, startISO, endISO) {
-  const out = []; let pageToken = null;
-  for (let guard = 0; guard < 400; guard++) {                       // hard page cap
-    const pg = pageToken ? `&page_token=${encodeURIComponent(pageToken)}` : "";
-    const url = `/stocks/${ticker}/bars?timeframe=1Min&start=${startISO}&end=${endISO}&limit=10000&adjustment=raw&feed=sip${pg}`;
-    let data;
-    try { data = await alpacaGet(url, ALPACA_DATA); } catch (e) { break; }
-    if (!data || !Array.isArray(data.bars)) break;
-    for (const b of data.bars) out.push(b);
-    pageToken = data.next_page_token || null;
-    if (!pageToken) break;
-    await new Promise(r => setTimeout(r, 120));                      // gentle on the rate limit
+  // 8/24 (panel fix): cascade sip -> iex like broker.js. Hardcoding sip returned EMPTY on IEX-only
+  // (paper) accounts — the backfill would silently produce nothing.
+  for (const feed of ["sip", "iex"]) {
+    const out = []; let pageToken = null; let got = false;
+    for (let guard = 0; guard < 400; guard++) {                     // hard page cap
+      const pg = pageToken ? `&page_token=${encodeURIComponent(pageToken)}` : "";
+      const url = `/stocks/${ticker}/bars?timeframe=1Min&start=${startISO}&end=${endISO}&limit=10000&adjustment=raw&feed=${feed}${pg}`;
+      let data;
+      try { data = await alpacaGet(url, ALPACA_DATA); } catch (e) { break; }
+      if (!data || !Array.isArray(data.bars)) break;
+      for (const b of data.bars) out.push(b);
+      if (data.bars.length) got = true;
+      pageToken = data.next_page_token || null;
+      if (!pageToken) break;
+      await new Promise(r => setTimeout(r, 120));                    // gentle on the rate limit
+    }
+    if (got && out.length) return out;                              // this feed yielded data
   }
-  return out;
+  return [];
 }
 async function fetchDailyBars(ticker, startISO, endISO) {
-  try {
-    const data = await alpacaGet(`/stocks/${ticker}/bars?timeframe=1Day&start=${startISO}&end=${endISO}&limit=1000&feed=sip`, ALPACA_DATA);
-    return (data && data.bars) ? data.bars : [];
-  } catch (_) { return []; }
+  for (const feed of ["sip", "iex"]) {                              // panel fix: cascade, not hardcoded sip
+    try {
+      const data = await alpacaGet(`/stocks/${ticker}/bars?timeframe=1Day&start=${startISO}&end=${endISO}&limit=1000&feed=${feed}`, ALPACA_DATA);
+      if (data && data.bars && data.bars.length) return data.bars;
+    } catch (_) {}
+  }
+  return [];
 }
 
 // ---- reconstruct the tape using APEX's own signal functions ----
 // dailyBars: full daily series; minuteBarsByDay: {date: [bars]} (RTH only, chronological)
 function reconstructTape(minuteBarsByDay, dailyBars) {
   const rows = [];
-  const dailyByDate = new Map(dailyBars.map(b => [etDate(b.t), b]));
   const dailyDates = dailyBars.map(b => etDate(b.t));
   for (const date of Object.keys(minuteBarsByDay).sort()) {
     const day = minuteBarsByDay[date];
@@ -101,14 +109,16 @@ function runFadeTest(rows, label = "ALL") {
   // DAY BASELINE = mean forward return over ALL valid rows that day (the day's drift, from a random
   // moment). The correct control: do EXTREMES forward-return more than baseline, in the reversion
   // direction? (Subtracting the extremes' OWN day-mean, as before, wrongly removes a constant edge.)
+  // baseline keyed per TICKER-DAY (SPY and QQQ drift differently — each extreme vs its own instrument's day)
+  const _bk = (r) => r.date + "|" + r.ticker;
   const dayBase = {}; { const acc = {}, cnt = {};
-    for (const r of v) { acc[r.date] = (acc[r.date] || 0) + r.fwd; cnt[r.date] = (cnt[r.date] || 0) + 1; }
-    for (const d of Object.keys(acc)) dayBase[d] = acc[d] / cnt[d]; }
+    for (const r of v) { const k = _bk(r); acc[k] = (acc[k] || 0) + r.fwd; cnt[k] = (cnt[k] || 0) + 1; }
+    for (const k of Object.keys(acc)) dayBase[k] = acc[k] / cnt[k]; }
   const dn = v.filter(r => r.adx <= 20 && r.iRSI <= 30 && r.vwapPct <= -0.19);   // oversold+below VWAP in range -> fade UP
   const up = v.filter(r => r.adx <= 20 && r.iRSI >= 70 && r.vwapPct >= 0.19);    // overbought+above VWAP in range -> fade DOWN
   if (!dn.length && !up.length) return `  ${label}: no extreme events`;
-  const rawArr    = [...dn.map(r => r.fwd),                    ...up.map(r => -r.fwd)];
-  const excessArr = [...dn.map(r => r.fwd - dayBase[r.date]),  ...up.map(r => -(r.fwd - dayBase[r.date]))];  // excess over the day's baseline drift
+  const rawArr    = [...dn.map(r => r.fwd),                     ...up.map(r => -r.fwd)];
+  const excessArr = [...dn.map(r => r.fwd - dayBase[_bk(r)]),   ...up.map(r => -(r.fwd - dayBase[_bk(r)]))];  // excess over this instrument's day baseline
   const raw = mean(rawArr), excess = mean(excessArr), n = excessArr.length;
   const verdict = n < 40 ? "underpowered" : (excess > 0.03 ? "EDGE over baseline" : "no edge over baseline");
   return `  ${label}: n=${n}  raw ${raw >= 0 ? "+" : ""}${raw.toFixed(3)}%  excess-over-baseline ${excess >= 0 ? "+" : ""}${excess.toFixed(3)}%  -> ${verdict}`;
