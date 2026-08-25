@@ -1,4 +1,4 @@
-\<!DOCTYPE html>
+<!DOCTYPE html>
 
 <html lang="en">
 <head>
@@ -3735,8 +3735,10 @@ async function runFadeBacktest() {
     const r = await fetch('/api/backfill', { method:'POST', headers:{'Content-Type':'application/json','x-argo-secret':secret}, body: JSON.stringify({ tickers:'SPY,QQQ', start, end }) });
     const d = await r.json();
     if (!d.ok) { out.textContent = 'Error: ' + (d.error || 'failed to start (check ARGO secret)'); if (btn) btn.disabled = false; return; }
+    let _polls = 0;
     const poll = setInterval(async () => {
       try {
+        if (++_polls > 200) { clearInterval(poll); if (btn) btn.disabled = false; out.textContent = 'Timed out after ~10 min — check the server log (it may still be running).'; return; }
         const rr = await fetch('/api/backfill/result'); const dd = await rr.json();
         if (dd.running) { out.textContent = 'Running... pulling bars & reconstructing tape (' + Math.round((Date.now() - dd.startedAt)/1000) + 's elapsed)'; return; }
         clearInterval(poll); if (btn) btn.disabled = false;
