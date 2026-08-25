@@ -156,6 +156,8 @@ async function redisSave(data) {
   // toward the limit for data that is only needed within the session that produced it (the EOD
   // CSV is built from memory before the reset). Strip it, same as the other in-memory buffers.
   delete slim._chainSnaps;
+  delete slim._gexChain;        // 8/24 (panel): transient near-money chains for GEX — recomputed each scan, keep out of the durable blob (same reason as _chainSnaps)
+  delete slim._chainSnapLast;   // 8/24 (panel): the chainSnaps 1/min throttle timestamps — transient
   delete slim._nearMiss;      // 8/17: same reason — in-memory ledger, consumed by the EOD CSV
   // 8/24: _entryFwd is deliberately NOT deleted — it is small (one row per signal, ~dozens/day,
   // capped at 2000) and persisting it lets pending forward stamps survive a mid-session restart.
@@ -543,6 +545,12 @@ async function saveTelemetryToRedis(isEOD = false) {
       const gd = await gr.json();
       if (gd && gd.result) { const p = parseRedisBlob(gd.result); if (p && Array.isArray(p.rows)) existing = p.rows; }
     } catch(_) { /* read failure: fall through and write the buffer rather than lose this save */ }
+    // 8/24 (panel): drop retained rows whose width != the current header. On a schema-change deploy
+    // (we add telemetry columns often), same-day pre-deploy rows are narrower; merging them under the
+    // new header produced a RAGGED tape. Better to lose the pre-deploy hours of that one day than to
+    // emit misaligned rows. Self-heals next day (fresh key, all new-width).
+    const _telCols = TELEMETRY_HEADER.split(",").length;
+    existing = existing.filter(r => typeof r === "string" && r.split(",").length === _telCols);
     const seen = new Set();
     let merged = [];
     for (const r of existing.concat(rows)) { if (seen.has(r)) continue; seen.add(r); merged.push(r); }
@@ -579,6 +587,8 @@ async function saveOutcomesToRedis(isEOD = false) {
       const gd = await gr.json();
       if (gd && gd.result) { const p = parseRedisBlob(gd.result); if (p && Array.isArray(p.rows)) existing = p.rows; }
     } catch(_) { /* read failure: write the buffer rather than lose this save */ }
+    const _ocCols = OUTCOME_HEADER.split(",").length;   // 8/24 (panel): same ragged-merge guard as telemetry — drop old-schema-width rows
+    existing = existing.filter(r => typeof r === "string" && r.split(",").length === _ocCols);
     const seen = new Set();
     let merged = [];
     for (const r of existing.concat(rows)) { if (seen.has(r)) continue; seen.add(r); merged.push(r); }
