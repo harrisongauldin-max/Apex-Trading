@@ -152,6 +152,7 @@ async function sendEmail(type) {
       nearMiss:      (state._nearMiss      || []).slice(),
       entryFwd:      (state._entryFwd      || []).slice(),
       vfSkip:        (state._vfSkip        || []).slice(),
+      vetoBlocks:    (state._vetoBlocks    || []).slice(),
       dailyLog:      (state._dailyLogBuffer || []).slice(),
     };
 
@@ -280,6 +281,29 @@ async function sendEmail(type) {
           _retainToRedis("vfskip", dateStr, lines.join("\n")).catch(() => {});
         }
       } catch (_vfCsvErr) { /* vf-skip attachment is best-effort — never block the email */ }
+
+      // 8/24: FALLING-KNIFE VETO LEDGER CSV — the oversold dips APEX refused to buy, with where the
+      // underlying went next. fwdPct > 0 (bounced) = the mean-reversion side is the edge, veto backwards.
+      try {
+        const dateStr = new Date().toLocaleDateString("en-CA", { timeZone: "America/New_York" });
+        const vk = (_eodSnap.vetoBlocks || []).filter(r => new Date(r.at).toLocaleDateString("en-CA", { timeZone: "America/New_York" }) === dateStr);
+        if (vk.length) {
+          const head = ["vetoET","ticker","side","score","rsi","dailyRsi","macd","adx","pxVeto","fwdPct","fwdMins"].join(",");
+          const lines = [head];
+          for (const r of vk) {
+            lines.push([
+              new Date(r.at).toLocaleTimeString("en-US", { timeZone: "America/New_York", hour12: false }),
+              r.ticker, r.side, (r.score != null ? r.score : ""),
+              (r.rsi != null ? r.rsi : ""), (r.dailyRsi != null ? r.dailyRsi : ""), (r.macd || ""),
+              (r.adx != null ? r.adx : ""), (r.px != null ? r.px.toFixed(2) : ""),
+              (r.fwdPct != null ? r.fwdPct : ""), (r.fwdMins != null ? r.fwdMins : ""),
+            ].join(","));
+          }
+          attachments.push({ filename: `argo-vetoblocks-${dateStr}.csv`,
+                             content: Buffer.from(lines.join("\n"), "utf8").toString("base64") });
+          _retainToRedis("vetoblocks", dateStr, lines.join("\n")).catch(() => {});
+        }
+      } catch (_vkCsvErr) { /* veto attachment is best-effort — never block the email */ }
 
       // ── 8/17: NEAR-MISS LEDGER CSV ────────────────────────────────────────
       // The trades APEX did NOT take, with what happened next. Pair this with the outcome table
