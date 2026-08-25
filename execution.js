@@ -708,7 +708,7 @@ async function executeTrade(stock, price, score, scoreReasons, vix, optionType =
     fastStopPct:    exitParams.fastStopPct,
     dteLabel:       exitParams.label,
     isMeanReversion: isMeanReversion,
-    entryStrategy:  _mrScalp ? "mr-scalp" : (stock._mrStrong ? "mr" : "breakout-or-context"),   // 8/09: A/B label — mr-scalp vs the rest
+    entryStrategy:  stock._mrFade ? "mr-fade-lit" : (_mrScalp ? "mr-scalp" : (stock._mrStrong ? "mr" : "breakout-or-context")),   // 8/09: A/B label; 8/24: mr-fade-lit = literature MR strategy
     _mrScalp:       _mrScalp,                                              // 8/09: routes the fast scalp exits in exitEngine
     _mrEntryVWAP:   _mrScalp ? (stock._mrEntryVWAP || price || null) : null,   // reversion target = reclaim of entry VWAP
     dteBand:        dteBand || (_sameWeekLeg ? "sameweek" : "standard"),   // 6/30: A/B leg tag for twin-entry comparison
@@ -856,7 +856,14 @@ async function executeTrade(stock, price, score, scoreReasons, vix, optionType =
     } catch (_fErr) { /* feasibility is observational — never block a trade on it */ }
   }
 
+  // 8/24: MR-FADE invalidation — the level where the fade thesis is dead; the exit engine cuts here
+  // instead of fast-cutting (MR trades are underwater-first). Tag the position so the exit recognises it.
+  if (stock._mrFade) {
+    (_openSame || position)._isMrFade = true;
+    (_openSame || position)._mrInvalidation = (typeof stock._mrFade.invalidationPx === "number") ? stock._mrFade.invalidationPx : null;
+  }
   (_openSame || position)._entryX = {
+    mrInvalidation: (stock._mrFade && typeof stock._mrFade.invalidationPx === "number") ? parseFloat(stock._mrFade.invalidationPx.toFixed(2)) : null,
     breadth:    (typeof state._breadth === "number") ? state._breadth : null,
     breadthMom: (typeof state._breadthMomentum === "number") ? state._breadthMomentum : null,
     ivp:        (typeof stock.ivPercentile === "number") ? stock.ivPercentile
