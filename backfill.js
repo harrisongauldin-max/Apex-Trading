@@ -114,12 +114,10 @@ function runFadeTest(rows, label = "ALL") {
   return `  ${label}: n=${n}  raw ${raw >= 0 ? "+" : ""}${raw.toFixed(3)}%  excess-over-baseline ${excess >= 0 ? "+" : ""}${excess.toFixed(3)}%  -> ${verdict}`;
 }
 
-// ---- orchestrate ----
-async function main() {
-  const tickers = (process.argv[2] || "SPY,QQQ").split(",");
-  const start = process.argv[3] || "2024-06-01";
-  const end   = process.argv[4] || "2024-12-31";
-  console.log(`[BACKFILL] ${tickers.join(",")} ${start}..${end} — reconstructing tape via APEX's own signal functions\n`);
+// ---- orchestrate ----  returns the verdict TEXT (so server/UI can display it), not just console
+async function runBackfill({ tickers = ["SPY", "QQQ"], start = "2024-06-01", end = "2024-12-31" } = {}) {
+  const L = []; const log = (s) => L.push(s);
+  log(`[BACKFILL] ${tickers.join(",")} ${start}..${end} — tape reconstructed via APEX's own calcRSI/calcADX/calcVWAP`);
   let all = [];
   for (const ticker of tickers) {
     const daily = await fetchDailyBars(ticker, start, end);
@@ -128,16 +126,22 @@ async function main() {
     for (const b of minute) { if (!isRTH(b.t)) continue; b.__tkr = ticker; (byDay[etDate(b.t)] ||= []).push(b); }
     for (const d of Object.keys(byDay)) byDay[d].sort((a, b) => new Date(a.t) - new Date(b.t));
     const rows = reconstructTape(byDay, daily);
-    console.log(`[BACKFILL] ${ticker}: ${Object.keys(byDay).length} days, ${rows.length} tape rows reconstructed`);
+    log(`  ${ticker}: ${Object.keys(byDay).length} days, ${rows.length} tape rows`);
     all = all.concat(rows);
   }
   stampForward(all, 30);
-  console.log(`\n=== FADE-REVERSION TEST (+30min, de-meaned by day) on ${all.length} reconstructed rows ===`);
-  console.log(runFadeTest(all, "ALL regimes"));
-  console.log(runFadeTest(all.filter(r => r.adx != null && r.adx <= 15), "LOW-ADX (range/MR-friendly)"));
-  console.log(runFadeTest(all.filter(r => r.adx != null && r.adx >= 25), "HIGH-ADX (trend)"));
-  console.log(`\nNOTE: ADX is the regime proxy available from bars alone. True gamma-regime split needs OI\n(AlphaVantage) or the live GEX capture. If low-ADX shows a surviving de-meaned edge here, that's the\nfirst real signal mean-reversion works — validate it against the gamma regime before committing code.`);
+  log(`\nFADE-REVERSION TEST (+30min, excess over day baseline) on ${all.length} reconstructed rows:`);
+  log(runFadeTest(all, "ALL (adx<=20 range)"));
+  log(runFadeTest(all.filter(r => r.adx != null && r.adx <= 15), "LOW-ADX <=15 (MR-friendly)"));
+  log(runFadeTest(all.filter(r => r.adx != null && r.adx >= 25), "HIGH-ADX >=25 (trend)"));
+  log(`\nNOTE: ADX is the regime proxy from bars alone. True gamma split needs OI (AlphaVantage) or the`);
+  log(`live GEX capture. Low-ADX edge surviving here = first real signal MR works — confirm vs gamma regime.`);
+  return L.join("\n");
 }
 
+async function main() {
+  const tickers = (process.argv[2] || "SPY,QQQ").split(",");
+  console.log(await runBackfill({ tickers, start: process.argv[3], end: process.argv[4] }));
+}
 if (require.main === module) main().catch(e => { console.error("[BACKFILL] fatal:", e.message); process.exit(1); });
-module.exports = { fetchMinuteBars, fetchDailyBars, reconstructTape, stampForward, runFadeTest };
+module.exports = { runBackfill, fetchMinuteBars, fetchDailyBars, reconstructTape, stampForward, runFadeTest };
