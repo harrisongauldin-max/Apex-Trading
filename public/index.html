@@ -1,4 +1,4 @@
-<!DOCTYPE html>
+\<!DOCTYPE html>
 
 <html lang="en">
 <head>
@@ -974,7 +974,14 @@ input[type=text]:focus{border-color:var(--blue)}
     <button class="btn" style="background:#0a1f3a;border:1px solid #ffd700;color:#ffd700" onclick="runStressTest()" id="bt-stress-btn">⚡ STRESS TESTS</button>
     <button class="btn" style="background:#0a1f3a;border:1px solid #00c4ff;color:#00c4ff" onclick="runFullMatrix()" id="bt-matrix-btn">⚡ RUN FULL MATRIX (SPY/QQQ/TLT/GLD)</button>
     <button class="btn" style="background:#0a1f3a;border:1px solid #ffd700;color:#ffd700" onclick="runMacroMatrix()" id="bt-macro-btn">⚡ MACRO ETF MATRIX (XLE/KRE/XOP)</button>
+    <button class="btn" style="background:#052015;border:1px solid #00ff88;color:#00ff88" onclick="runFadeBacktest()" id="fade-run-btn" title="Pull deep Alpaca history (uses the date range above), reconstruct the tape via APEX's own signal functions, and run the corrected fade-reversion test split by ADX regime. The mean-reversion DIRECTION test on the underlying.">🔬 FADE BACKTEST (Alpaca, MR direction)</button>
   </div>
+  <!-- Fade backtest results -->
+  <div id="fade-results" style="display:none;margin-bottom:14px;background:#050d18;border:1px solid #0d3a20;border-radius:6px;padding:12px">
+    <div style="font-size:10px;color:#00ff88;letter-spacing:1px;margin-bottom:8px">FADE-REVERSION BACKTEST · mean-reversion direction test (underlying, no options)</div>
+    <pre id="fade-output" style="font-size:11px;color:#cce8ff;white-space:pre-wrap;margin:0;font-family:monospace;line-height:1.5">--</pre>
+  </div>
+
   <!-- Matrix results area -->
   <div id="bt-matrix-results" style="display:none;margin-bottom:14px">
     <div style="font-size:10px;color:#00c4ff;letter-spacing:1px;margin-bottom:8px">FULL MATRIX RESULTS</div>
@@ -3712,6 +3719,31 @@ function copyMatrixTemplate() {
     const btn = document.querySelector('#bt-matrix-results button');
     if (btn) { btn.textContent = '✅ COPIED'; setTimeout(function() { btn.textContent = '📋 COPY MATRIX TEMPLATE'; }, 2000); }
   });
+}
+
+async function runFadeBacktest() {
+  const start = (document.getElementById('bt-start')||{}).value || '2024-06-01';
+  const end   = (document.getElementById('bt-end')||{}).value   || '2024-12-31';
+  const btn = document.getElementById('fade-run-btn');
+  const panel = document.getElementById('fade-results');
+  const out = document.getElementById('fade-output');
+  const secret = sessionStorage.getItem('apexSecret') || '';
+  panel.style.display = 'block';
+  out.textContent = 'Starting backfill — pulling Alpaca minute bars & reconstructing the tape (this can take 1-3 min for a 6-12 month range)...';
+  if (btn) btn.disabled = true;
+  try {
+    const r = await fetch('/api/backfill', { method:'POST', headers:{'Content-Type':'application/json','x-argo-secret':secret}, body: JSON.stringify({ tickers:'SPY,QQQ', start, end }) });
+    const d = await r.json();
+    if (!d.ok) { out.textContent = 'Error: ' + (d.error || 'failed to start (check ARGO secret)'); if (btn) btn.disabled = false; return; }
+    const poll = setInterval(async () => {
+      try {
+        const rr = await fetch('/api/backfill/result'); const dd = await rr.json();
+        if (dd.running) { out.textContent = 'Running... pulling bars & reconstructing tape (' + Math.round((Date.now() - dd.startedAt)/1000) + 's elapsed)'; return; }
+        clearInterval(poll); if (btn) btn.disabled = false;
+        out.textContent = dd.result || '(no result returned)';
+      } catch (e) { clearInterval(poll); if (btn) btn.disabled = false; out.textContent = 'Poll error: ' + e.message; }
+    }, 3000);
+  } catch (e) { out.textContent = 'Error: ' + e.message; if (btn) btn.disabled = false; }
 }
 
 async function runBacktest() {
