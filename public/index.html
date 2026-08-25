@@ -570,6 +570,7 @@ input[type=text]:focus{border-color:var(--blue)}
     <button class="btn" style="background:#1a2a1a;border:1px solid #44aa44;color:#88dd88" onclick="resetDailyPnL()" title="Paper trading: reset today's loss counter and unblock daily circuit">📅 RESET DAY P&L</button>
     <button class="btn" style="background:#0a1a2a;border:1px solid #00c4ff;color:#44ccff" onclick="fetch('/api/reset-baseline',{method:'POST',headers:{'Content-Type':'application/json','x-argo-secret':sessionStorage.getItem('apexSecret')||''}}).then(r=>r.json()).then(d=>{ alert(d.ok ? '📍 Baseline reset to $'+d.newBaseline.toFixed(2)+' from Alpaca' : d.error||'Failed'); fetchState(); })" title="Reseed accountBaseline and peakCash from live Alpaca equity — clears stuck drawdown after Full Reset">📍 RESET BASELINE</button>
     <button class="btn" style="background:#0a2a1a;border:1px solid #00c4ff;color:#44ccff" onclick="fetch('/api/sync-cash',{method:'POST',headers:{'Content-Type':'application/json','x-argo-secret':sessionStorage.getItem('apexSecret')||''}}).then(r=>r.json()).then(d=>{ alert(d.ok ? '💵 Cash synced: $'+d.cash.toFixed(2)+' (Alpaca $'+((d.alpacaCash!=null?d.alpacaCash:0)).toFixed(2)+', applied '+(d.applied>=0?'+':'')+d.applied.toFixed(2)+')' : d.error||'Failed'); fetchState(); })" title="Force an immediate cash resync from Alpaca /account — bypasses the market-hours 5-min interval, works after hours">💵 SYNC CASH</button>
+    <button class="btn" id="mrfade-btn" style="background:#0a2a1a;border:1px solid #666;color:#888" onclick="toggleMrFade()" title="LITERATURE MEAN-REVERSION FADE — live kill switch. ON = APEX takes literature MR fade entries (positive-gamma, at a level, on confluence). OFF = stops instantly, no redeploy. Runtime override of MR_FADE_ENABLED.">🔀 MR-FADE: …</button>
     <button class="btn" style="background:#1a1a40;border:1px solid #ff9900;color:#ffbb44" onclick="clearBlockers()">🔓 CLEAR BLOCKERS</button>
     <button class="btn" style="background:#401010;border:1px solid #ff4444;color:#ff8888" onclick="fullReset()">🗑 FULL RESET</button>
     <button class="btn" style="background:#7b0000;border:1px solid #ff0000" onclick="emergencyClose()">⚠ EMERGENCY CLOSE ALL</button>
@@ -1125,6 +1126,7 @@ let charts = {};
 
 // ── Fetch & Render ─────────────────────────────────────────────────────────
 async function fetchState() {
+  try { refreshMrFade(); } catch(e){}
   try {
     const [stateRes, healthRes] = await Promise.all([fetch('/api/state'), fetch('/api/health')]);
     state  = await stateRes.json();
@@ -1382,6 +1384,25 @@ function updatePaperDataModeUI() {
   if (banner) banner.style.display = on ? 'block' : 'none';
 }
 
+function setMrFadeBtn(active) {
+  const b = document.getElementById('mrfade-btn'); if (!b) return;
+  b.textContent = '🔀 MR-FADE: ' + (active ? 'ON' : 'OFF');
+  b.style.borderColor = active ? '#00ff88' : '#ff5555';
+  b.style.color       = active ? '#00ff88' : '#ff5555';
+}
+function refreshMrFade() {
+  fetch('/api/mr-fade').then(r => r.json()).then(d => setMrFadeBtn(d.active === true)).catch(() => {});
+}
+function toggleMrFade() {
+  const h = secretHeaders(); if (!h) return;
+  fetch('/api/mr-fade').then(r => r.json()).then(cur => {
+    const next = !(cur.active === true);
+    fetch('/api/mr-fade', { method:'POST', headers:h, body: JSON.stringify({ on: next }) })
+      .then(r => r.json().then(d => ({ ok: r.ok, d })))
+      .then(({ ok, d }) => { if (!ok) { alert(d.error || 'Failed to toggle MR fade'); return; } setMrFadeBtn(d.active === true); })
+      .catch(e => alert('Error: ' + e.message));
+  }).catch(e => alert('Error: ' + e.message));
+}
 function toggleDataGather() {
   const next = !(state.dataGatherActive === true);
   const h = secretHeaders(); if (!h) return;
