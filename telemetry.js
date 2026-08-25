@@ -20,7 +20,7 @@ const SCORE_DELTA  = 3;               // |score| move that counts as material
 const MAX_ROWS     = 6000;            // safety cap on a runaway day
 const BLOCKER_MAX  = 60;              // truncate the headline blocker text
 
-const TELEMETRY_HEADER = "time,tkr,px,iRSI,dRSI,call,put,isMR,curl,vwap%,blocker,drivers,shadow,adx,gate,pgate,isC,isP,volPace,breadth";
+const TELEMETRY_HEADER = "time,tkr,px,iRSI,dRSI,call,put,isMR,curl,vwap%,blocker,drivers,shadow,adx,gate,pgate,isC,isP,volPace,breadth,gexRegime,netGexM,callWall,putWall,distCW,distPW";
 
 // intraday-RSI tier — a crossing is "material" so dips/spikes always log a row
 function _rsiTier(r) {
@@ -173,6 +173,12 @@ function recordTelemetry(state, rec) {
       _is.put  ? _is.put.score  : "",
       rec.volPace == null ? "" : Number(rec.volPace).toFixed(3),   // 8/24: the direction signal, now on the tape
       rec.breadth == null ? "" : Number(rec.breadth).toFixed(0),
+      rec.gexRegime || "",                                          // 8/24: dealer-gamma regime — the literature's key missing input
+      rec.netGexM  == null ? "" : rec.netGexM,
+      rec.callWall == null ? "" : rec.callWall,
+      rec.putWall  == null ? "" : rec.putWall,
+      rec.distCW   == null ? "" : rec.distCW,
+      rec.distPW   == null ? "" : rec.distPW,
     ].map(_csv).join(",");
 
     state._telemetryBuffer.push(row);
