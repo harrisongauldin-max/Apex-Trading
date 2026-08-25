@@ -549,6 +549,9 @@ const DECISION_SPLIT_LOG    = true;
 // Zero capital at risk; roughly doubles the usable dataset.
 const NEARMISS_LEDGER_ENABLED = true;
 const VOLPACE_ARM_ENABLED    = true;   // 8/24: split-book. "vf" arm enters only on elevated volume pace.
+const MR_FADE_ENABLED        = true;   // 8/24: LITERATURE MR FADE live entry path (mrStrategy.js). KILL SWITCH — set false to instantly stop APEX taking literature MR fades.
+const MR_FADE_TP             = 0.30;   // MR-fade take-profit (premium gain) — the reversion to the mean
+const MR_FADE_MAX_HOLD_MIN   = 45;     // MR-fade max hold — long enough for reversion (vs 6-min fast-cut); hard stop + 3:15 still bound it
 const VOLPACE_ARM_MIN        = 0;      // absolute floor (0 = off); the percentile below does the gating.
 const VOLPACE_ARM_PCTILE     = 50;     // 8/24: vf arm takes signals with volPace >= this ROLLING percentile (50=median). Self-calibrating: adapts to whatever scale volPace runs on (day-1 median was ~0.64, not the old 1.5 guess). Raise toward 75 for a sharper top-quartile test once volume builds.
 const VOLPACE_ARM_WINDOW     = 300;    // rolling volPace observations the percentile spans (carries across days)
@@ -781,7 +784,7 @@ module.exports = {
   USTOP_ENABLED, USTOP_ENFORCE, USTOP_MOVE_PCT, USTOP_MIN_OPT_PCT, USTOP_MAX_OPT_PCT,
   GREEK_LIMITS_ENABLED, GREEK_LIMITS_ENFORCE, MAX_DELTA_DOLLARS_POS, MAX_DELTA_DOLLARS_NEG,
   DECISION_SPLIT_LOG, MACRO_MAX_AGE_MIN, NEARMISS_LEDGER_ENABLED, LOG_ATTACH_MAX_BYTES,
-  VOLPACE_ARM_ENABLED, VOLPACE_ARM_MIN, VOLPACE_ARM_PCTILE, VOLPACE_ARM_WINDOW, VOLPACE_ARM_WARMUP,
+  VOLPACE_ARM_ENABLED, VOLPACE_ARM_MIN, VOLPACE_ARM_PCTILE, VOLPACE_ARM_WINDOW, VOLPACE_ARM_WARMUP, MR_FADE_ENABLED, MR_FADE_TP, MR_FADE_MAX_HOLD_MIN,
   BREAK_TRIGGER_ENABLED, BREAK_TRIGGER_ENFORCE, BREAK_TRIGGER_ALLOW_MRSCALP, BREAK_ENTRY_SCORE,
   BREAK_CONFIRM_BARS, BREAK_MAX_AGE_MIN, BREAK_VOL_LOOKBACK, BREAK_VOL_MULT_PUT, BREAK_VOL_MULT_CALL,
   BREAK_ADX_MIN_PUT, BREAK_ADX_MIN_CALL, BREAK_VWAP_SLOPE_MIN, BREAK_MAX_EXT_PCT,
