@@ -507,6 +507,7 @@ async function saveDailyLogToRedis(isEOD = false) {
   }
 
   await saveTelemetryToRedis(isEOD);
+  await saveChainSnapsToRedis(isEOD);   // 8/25: persist chain snaps so a restart doesn't gut the vol surface
   await saveOutcomesToRedis(isEOD);
   // 8/11: chain snapshots are in-memory only (stripped from the Redis payload above) and are
   // consumed by the EOD vol-surface CSV, which is built BEFORE this runs. Without a daily reset
@@ -528,6 +529,39 @@ async function saveDailyLogToRedis(isEOD = false) {
 
 // Compact score-telemetry persistence — mirrors saveDailyLogToRedis. Rides its cadence
 // (hourly checkpoint + EOD), so no new timers. Buffer flushed only at EOD.
+// 8/25: chain snapshots were IN-MEMORY ONLY, so an intraday process restart (Railway cycling the
+// container, OOM, redeploy) wiped the whole morning and the EOD vol-surface CSV kept only the post-
+// restart tail (the "late-day volsurface" bug — telemetry survived only because IT is persisted).
+// Fix: persist chainSnaps to Redis (throttled, chunked; they are large) and restore on boot, exactly
+// like telemetry. Overwrite is safe because boot-restore makes the in-memory buffer authoritative.
+async function saveChainSnapsToRedis(isEOD = false) {
+  if (!REDIS_URL || !REDIS_TOKEN) return;
+  const snaps = state._chainSnaps || [];
+  if (snaps.length === 0) return;
+  const now = Date.now();
+  if (!isEOD && state._chainSnapsSaveLast && (now - state._chainSnapsSaveLast) < 180000) return;  // ~3min throttle
+  state._chainSnapsSaveLast = now;
+  try {
+    const dateStr = getETDateStr();
+    const base = `argo:chainsnaps:${dateStr}`;
+    const CH = 500;                                    // snaps/chunk (~7k rows, under the REST cap)
+    const nChunks = Math.ceil(snaps.length / CH);
+    const _set = async (key, val) => {
+      try {
+        const r = await fetch(`${REDIS_URL}/pipeline`, {
+          method: "POST",
+          headers: { Authorization: `Bearer ${REDIS_TOKEN}`, "Content-Type": "application/json" },
+          body: JSON.stringify([["set", key, val, "EX", 7776000]]),
+        });
+        return r.ok;
+      } catch (_) { return false; }
+    };
+    for (let i = 0; i < nChunks; i++) await _set(`${base}:${i}`, JSON.stringify(snaps.slice(i * CH, (i + 1) * CH)));
+    await _set(base, JSON.stringify({ date: dateStr, chunks: nChunks, count: snaps.length }));
+    logEvent("scan", `[CHAINSNAPS] persisted ${snaps.length} snaps in ${nChunks} chunk(s) → ${base}`);
+  } catch (e) { console.error("[CHAINSNAPS] save error:", e.message); }
+}
+
 async function saveTelemetryToRedis(isEOD = false) {
   if (!REDIS_URL || !REDIS_TOKEN) return;
   const rows = state._telemetryBuffer || [];
@@ -799,6 +833,26 @@ async function restoreBuffersFromRedis() {
       }
     }
   } catch(e) { console.error("[BOOT] telemetry restore failed:", e.message); }
+  try {
+    // 8/25: restore chain snapshots (in-memory only otherwise) so a restart keeps the whole session's
+    // surface, not just the post-restart tail.
+    if (!state._chainSnaps || state._chainSnaps.length === 0) {
+      const base = `argo:chainsnaps:${dateStr}`;
+      const mr = await fetch(`${REDIS_URL}/get/${base}`, { headers: { Authorization: `Bearer ${REDIS_TOKEN}` } });
+      const md = await mr.json();
+      const man = (md && md.result) ? parseRedisBlob(md.result) : null;
+      if (man && man.chunks > 0) {
+        const restored = [];
+        for (let i = 0; i < man.chunks; i++) {
+          const cr = await fetch(`${REDIS_URL}/get/${base}:${i}`, { headers: { Authorization: `Bearer ${REDIS_TOKEN}` } });
+          const cd = await cr.json();
+          const chunk = (cd && cd.result) ? parseRedisBlob(cd.result) : null;
+          if (Array.isArray(chunk)) restored.push(...chunk);
+        }
+        if (restored.length) { state._chainSnaps = restored; console.log(`[BOOT] Restored ${restored.length} chain snapshots from Redis (${dateStr})`); }
+      }
+    }
+  } catch(e) { console.error("[BOOT] chainsnaps restore failed:", e.message); }
   try {
     if (!state._outcomeBuffer || state._outcomeBuffer.length === 0) {
       const gr = await fetch(`${REDIS_URL}/get/argo:outcomes:${dateStr}`, { headers: { Authorization: `Bearer ${REDIS_TOKEN}` } });
