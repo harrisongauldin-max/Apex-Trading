@@ -818,6 +818,11 @@ async function restoreBuffersFromRedis() {
 // if it has been set via /api/data-gather, otherwise the DATA_GATHER_MODE constant default. Persists
 // in state (Redis-backed) so a toggle survives restarts/redeploys. Every read-site calls this instead
 // of the raw constant so the switch is flippable without a code change.
+function mrFadeActive(defaultVal) {   // 8/24: runtime kill switch for the literature MR fade (dashboard toggle overrides the constant)
+  return (state._mrFadeOverride === true || state._mrFadeOverride === false)
+    ? state._mrFadeOverride
+    : !!defaultVal;
+}
 function dataGatherActive(defaultVal) {
   return (state._dataGatherMode === true || state._dataGatherMode === false)
     ? state._dataGatherMode
@@ -868,7 +873,7 @@ function auditFreshness() {
   } catch (_) {}
 }
 
-module.exports = { state, markDirty, saveStateNow, flushStateIfDirty, logEvent, dataGatherActive,
+module.exports = { state, markDirty, saveStateNow, flushStateIfDirty, logEvent, dataGatherActive, mrFadeActive,
                    markFresh, auditFreshness,
                    redisSave, redisLoad, defaultState, saveDailyLogToRedis, saveTelemetryToRedis, saveOutcomesToRedis, fetchRecentOutcomeRows, getETDateStr,
                    restoreBuffersFromRedis, parseRedisBlob,
