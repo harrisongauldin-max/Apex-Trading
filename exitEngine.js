@@ -48,6 +48,7 @@ const {
   MR_SCALP_FASTCUT_MIN = 5, MR_SCALP_FASTCUT_PEAK = 0.03, MR_SCALP_GIVEBACK_PEAK = 0.08, MR_SCALP_GIVEBACK_FRAC = 0.5,
   MR_SCALP_TRAIL_ARM = 0.10, MR_SCALP_TRAIL_GIVE = 0.04, MR_SCALP_TP = 0.20,
   CP1_CRASH_ENABLED = false, CP1_CRASH_PCT = -5,
+  MR_FADE_TP = 0.30, MR_FADE_MAX_HOLD_MIN = 45,
   FASTCUT_ENABLED = false, FASTCUT_MIN = 6, FASTCUT_PEAK_SHORT = 0.03, FASTCUT_PEAK_MID = 0.02,
   FASTCUT_PEAK_LONG = 0.012,
   USTOP_ENABLED = false, USTOP_ENFORCE = false, USTOP_MOVE_PCT = 0.0035,
@@ -353,6 +354,37 @@ async function checkExits(positions, posSnapshots, posQuotes, posNewsCache, ctx)
       }
     }
 
+    // ── 8/24: LITERATURE MR-FADE EXIT ────────────────────────────────────────────
+    // MR fades are underwater-first by design; the fast-cut / time-cut / progress-check / cp1-crash
+    // (all guarded off with !pos._isMrFade) would exit them at max adverse. Give the reversion room:
+    // hold until a take-profit OR a max-hold cap. The hard stop, delta/IV guards and the 3:15 flatten
+    // still apply as safety, so a fade can never be stranded. (The precise underlying-LEVEL invalidation
+    // is stored in pos._mrInvalidation for when the live underlying is plumbed into exitEngine; until
+    // then max-hold + hard stop bound the downside.)
+    if (pos._isMrFade) {
+      // 8/24 (panel fix): mr-fade is managed ENTIRELY in this block, then continues UNCONDITIONALLY so
+      // the position bypasses ALL ~15 momentum/thesis drift rails below (fast-cut, time-stop, give-back,
+      // thesis-collapsed/complete/no-follow, iv-collapse, dte-urgency, etc.) — those would cut the
+      // underwater-first reversion early and defeat the whole strategy. Only the hard stop (floor) + the
+      // take-profit + the max-hold cap apply here; the 3:15 hard-close cron still force-flattens externally.
+      const _mfHeld = (Date.now() - new Date(pos.openDate || pos.entryTime || Date.now()).getTime()) / 60000;
+      let _mfReason = null;
+      if (chg <= -STOP_LOSS_PCT)                _mfReason = "mr-fade-stop";      // hard floor — safety
+      else if (chg >= MR_FADE_TP)               _mfReason = "mr-fade-tp";        // reversion captured
+      else if (_mfHeld >= MR_FADE_MAX_HOLD_MIN) _mfReason = "mr-fade-maxhold";   // gave it room; time up
+      if (_mfReason && !_closedThisCycle.has(pi)) {
+        _closedThisCycle.add(pi);
+        logEvent("scan", `[MR-FADE] ${pos.ticker} exit — ${_mfReason} (held ${_mfHeld.toFixed(0)}min, chg ${(chg*100).toFixed(1)}%)`);
+        decisions.push({ pi, ticker: pos.ticker, action: 'close', reason: _mfReason, exitPremium: null, contractSym: pos.contractSymbol || null });
+      } else {
+        // HOLD: the end-of-loop HOLD bookkeeping is bypassed by the continue below, so persist the live
+        // price + mark dirty here (peak/trough/checkpoints already updated above line 364).
+        pos.currentPrice = curP; markDirty();
+        logEvent("scan", `[MR-FADE] ${pos.ticker} HOLD — ${_mfHeld.toFixed(0)}min, chg ${(chg*100).toFixed(1)}% (underwater-first room, stop ${(-STOP_LOSS_PCT*100).toFixed(0)}% / tp ${(MR_FADE_TP*100).toFixed(0)}% / max ${MR_FADE_MAX_HOLD_MIN}min)`);
+      }
+      continue;   // UNCONDITIONAL — hold or exit, mr-fade never falls through to the momentum/thesis rails
+    }
+
     // ── 8/11: GENERALIZED FAST-CUT ───────────────────────────────────────────────
     // Runs for every NON-scalp position. NOTE: the scalp block above only `continue`s when it
     // actually fires an exit, so a live scalp DOES fall through to here — the !pos._mrScalp
@@ -366,7 +398,7 @@ async function checkExits(positions, posSnapshots, posQuotes, posNewsCache, ctx)
     // four worst losses. Validated on the deduped set: a cut at cp1 <= -5% killed ZERO eventual +5%
     // recoverers (their cp1 never fell below -4.3%) while catching the fast crashes. Placed BEFORE the
     // fast-cut so it gets first say. Narrow by design: catches collapse, not drift.
-    if (CP1_CRASH_ENABLED && !pos._mrScalp && !pos._cp1CrashFired && pos._cp && typeof pos._cp[1] === "number") {
+    if (CP1_CRASH_ENABLED && !pos._mrScalp && !pos._isMrFade && !pos._cp1CrashFired && pos._cp && typeof pos._cp[1] === "number") {
       if (pos._cp[1] <= CP1_CRASH_PCT && !_closedThisCycle.has(pi)) {
         pos._cp1CrashFired = true;
         _closedThisCycle.add(pi);
@@ -376,7 +408,7 @@ async function checkExits(positions, posSnapshots, posQuotes, posNewsCache, ctx)
       }
     }
 
-    if (FASTCUT_ENABLED && !pos._mrScalp && !pos._fastCutFired) {
+    if (FASTCUT_ENABLED && !pos._mrScalp && !pos._isMrFade && !pos._fastCutFired) {
       const _fcHeld = (Date.now() - new Date(pos.openDate || pos.entryTime || Date.now()).getTime()) / 60000;
       if (_fcHeld >= FASTCUT_MIN) {
         const _fcDTE  = pos.expiryDays ?? pos.expDays ?? 30;
@@ -721,7 +753,7 @@ async function checkExits(positions, posSnapshots, posQuotes, posNewsCache, ctx)
     }
 
     // ── Progress check ────────────────────────────────────────────────────────
-    if (!pos._progressCheckFired && !pos._mrScalp) {   // 8/09: MR-scalp uses its own 5-min fast-cut, not the 90-min progress check
+    if (!pos._progressCheckFired && !pos._mrScalp && !pos._isMrFade) {   // 8/09: MR-scalp; 8/24: mr-fade holds for reversion
       const _entryTime   = new Date(pos.openDate || pos.entryTime || Date.now()).getTime();
       const _minsOpen    = (Date.now() - _entryTime) / 60000;
       const peakChgForPC = pos.premium > 0 ? (pos.peakPremium - pos.premium) / pos.premium : 0;
@@ -830,7 +862,7 @@ async function checkExits(positions, posSnapshots, posQuotes, posNewsCache, ctx)
       }
     } catch (_ngErr) { /* observation only — never disturb the scan */ }
 
-    if (!pos._timeCutFired && !pos._mrScalp) {   // 8/09: MR-scalp exits are handled by its own fast regime above
+    if (!pos._timeCutFired && !pos._mrScalp && !pos._isMrFade) {   // 8/09: MR-scalp; 8/24: mr-fade holds for reversion (own exit below)
       const _tcEntry = new Date(pos.openDate || pos.entryTime || Date.now()).getTime();
       const _tcMins  = (Date.now() - _tcEntry) / 60000;
 
