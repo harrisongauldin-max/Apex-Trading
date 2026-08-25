@@ -8,7 +8,7 @@ const {
   getStockBars, getIntradayBars, getStockQuote, getCircuitState,
 } = require('./broker');
 
-const { state, logEvent, markDirty, saveStateNow, flushStateIfDirty, paperDataActive, dataGatherActive , markFresh, auditFreshness } = require('./state');
+const { state, logEvent, markDirty, saveStateNow, flushStateIfDirty, paperDataActive, dataGatherActive, mrFadeActive , markFresh, auditFreshness } = require('./state');
 const { recordTelemetry } = require('./telemetry');
 // 8/12: DEFENSIVE REQUIRE. vol.js is OPTIONAL instrumentation — realized vol, IV-RV, surface,
 // feasibility. It gates nothing and executes no trades. A hard top-level require made a missing
@@ -54,6 +54,7 @@ const {
   getRegimeRulebook, scoreCandidate: EE_scoreCandidate, evaluateEntry,
 } = require('./entryEngine');
 let GEX = null; try { GEX = require('./gex'); } catch (_gexReqErr) { /* gex module optional */ }
+let MRSTRAT = null; try { MRSTRAT = require('./mrStrategy'); } catch (_mrReqErr) { /* mr strategy optional */ }
 const { INSTRUMENT_CONSTRAINTS } = require('./entryEngine');
 
 const {
@@ -116,6 +117,7 @@ const {
   FEASIBILITY_MAX_RATIO = 1.0, FEASIBILITY_HOLD_MIN = 20, SPREAD_COST_LOG = false,
   MACRO_MAX_AGE_MIN = 240, NEARMISS_LEDGER_ENABLED = false,
   VOLPACE_ARM_ENABLED = false, VOLPACE_ARM_MIN = 0, VOLPACE_ARM_PCTILE = 50, VOLPACE_ARM_WINDOW = 300, VOLPACE_ARM_WARMUP = 20,
+  MR_FADE_ENABLED = false,
   BREAK_TRIGGER_ENABLED = false, BREAK_TRIGGER_ENFORCE = false, BREAK_TRIGGER_ALLOW_MRSCALP = true,
   BREAK_ENTRY_SCORE = 80, BREAK_CONFIRM_BARS = 1, BREAK_MAX_AGE_MIN = 10, BREAK_VOL_LOOKBACK = 10,
   BREAK_VOL_MULT_PUT = 1.8, BREAK_VOL_MULT_CALL = 2.2, BREAK_ADX_MIN_PUT = 18, BREAK_ADX_MIN_CALL = 22,
@@ -2697,6 +2699,7 @@ async function runScan() {
             (Date.now() - Math.min(_gc.call.ts || 0, _gc.put.ts || 0) < 300000))
           return GEX.computeGEX(_gc.call.rows, _gc.put.rows, price);   // same near expiry only
       } catch (_gxe) {} return null; })();
+      if (_gexRec) { if (!state._gexNow) state._gexNow = {}; state._gexNow[stock.ticker] = _gexRec; }   // 8/24: expose regime to the MR fade
       recordTelemetry(state, {
           tkr: stock.ticker, px: price, adx: signals.adx,
           iRSI: signals.rsi, dRSI: signals.dailyRsi,
@@ -2962,6 +2965,33 @@ async function runScan() {
     if (stock._mrScalp && optionType !== "call") {
       stock._mrScalp = false;
       logEvent("filter", `[MR-SCALP] ${stock.ticker} scalp flag REVOKED — candidate resolved to ${optionType}; the scalp is call-only`);
+    }
+
+    // ═══ LITERATURE MR FADE (mrStrategy.js) ═══ a coherent mean-reversion entry, gated on
+    // regime(gamma) + level(gamma wall / VWAP band) + confluence. Fires its OWN fade side when the
+    // full confluence aligns, reusing executeTrade. Bypasses the momentum-era gates by design — it is
+    // a DIFFERENT strategy — but respects the position guard below. Kill switch: MR_FADE_ENABLED.
+    // Wrapped so a fault can never disturb the scan.
+    if (mrFadeActive(MR_FADE_ENABLED) && MRSTRAT && stock) {   // runtime kill switch (dashboard toggle)
+      try {
+        const _mrVwap = (stock.intradayVWAP > 0 && price > 0) ? ((price - stock.intradayVWAP) / stock.intradayVWAP) * 100 : null;
+        const _mrDec  = MRSTRAT.evaluateMRFade({ rsi: stock.rsi, vwapPct: _mrVwap, adx: stock.adx },
+                                               (state._gexNow && state._gexNow[stock.ticker]) || null, price);
+        if (_mrDec.fire) {
+          const _hasPos = (state.positions || []).some(p => p.ticker === stock.ticker && p.optionType === _mrDec.side && !p.closed);
+          if (_hasPos) {
+            logEvent("filter", `[MR-FADE] ${stock.ticker} ${_mrDec.side} setup, but a ${_mrDec.side} position is already open — standing down`);
+          } else {
+            logEvent("filter", `[MR-FADE] ${stock.ticker} FIRE — ${_mrDec.reason}`);
+            stock._mrFade = _mrDec;                     // tags entryStrategy + carries invalidation into _entryX
+            const _mrSigId = `${stock.ticker}-${_mrDec.side}-mrfade-${Date.now()}`;   // own signalId (the momentum _sigId is defined later — TDZ)
+            const _mrScore = (typeof score === "number") ? score : 0;
+            const _mrOK = await executeTrade(stock, price, _mrScore, [_mrDec.reason], state.vix, _mrDec.side, true, 1.0, null, null, _mrSigId);
+            stock._mrFade = null;
+            if (_mrOK) continue;                         // handled by the MR path this scan; skip the momentum entry
+          }
+        }
+      } catch (_mrErr) { stock._mrFade = null; logEvent("filter", `[MR-FADE] ${stock.ticker} error: ${_mrErr && _mrErr.message}`); }
     }
 
     const { pass, reason } = await checkAllFilters(stock, price, null);
