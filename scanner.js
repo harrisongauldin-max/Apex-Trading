@@ -2693,8 +2693,9 @@ async function runScan() {
         const _vwapPx = signals.intradayVWAP || 0;
         const _gexRec = (() => { try {
         const _gc = state._gexChain && state._gexChain[stock.ticker];
-        if (GEX && _gc && _gc.call && _gc.put && (Date.now() - Math.min(_gc.call.ts || 0, _gc.put.ts || 0) < 300000))
-          return GEX.computeGEX(_gc.call.rows, _gc.put.rows, price);
+        if (GEX && _gc && _gc.call && _gc.put && _gc.call.dte === _gc.put.dte &&
+            (Date.now() - Math.min(_gc.call.ts || 0, _gc.put.ts || 0) < 300000))
+          return GEX.computeGEX(_gc.call.rows, _gc.put.rows, price);   // same near expiry only
       } catch (_gxe) {} return null; })();
       recordTelemetry(state, {
           tkr: stock.ticker, px: price, adx: signals.adx,
