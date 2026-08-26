@@ -376,10 +376,43 @@ async function sendEmail(type) {
       catch (_viErr) { logEvent("warn", `[VOL-INFRA] EOD section skipped: ${_viErr.message}`); }
       try { bodyHtml += buildMomoSection(_eodSnap); }
       catch (_mbErr2) { logEvent("warn", `[CALL-MOMO] EOD section skipped: ${_mbErr2.message}`); }
+      try { bodyHtml += buildStandDownSection(); }
+      catch (_sdErr) { logEvent("warn", `[STAND-DOWN] EOD section skipped: ${_sdErr.message}`); }
     }
     await sendResendEmail(subject, bodyHtml, attachments);
     logEvent("email", `${type} email sent to ${GMAIL_USER}${attachments.length ? " (+telemetry.csv)" : ""}`);
   } catch(e) { logEvent("error", `Email failed: ${e.message}`); }
+}
+
+// ── 8/25: STAND-DOWN TALLY SECTION ───────────────────────────────────────────
+// Turns a quiet day into a diagnosis: for breaks and MR fades, how many times each ALMOST fired and
+// which gate stopped it. Regime-dominated declines = tape wasn't tradeable (accept). Gate-dominated
+// declines on real setups (not-at-a-level, ADX-too-low, not-extreme) = a knob may be too tight (tune).
+function buildStandDownSection() {
+  try {
+    const t = (state && state._standDownTally) ? state._standDownTally : null;
+    if (!t) return "";
+    const fmt = (book, title) => {
+      const entries = Object.entries(book || {}).sort((a, b) => b[1] - a[1]);
+      const total = entries.reduce((s, [, n]) => s + n, 0);
+      if (total === 0) return `<b>${title}</b>: no evaluations today<br>`;
+      const fired = book["FIRED"] || 0;
+      let h = `<b>${title}</b> — ${total} evaluations, <b>${fired}</b> fired:<br>`;
+      for (const [k, n] of entries) {
+        const pct = ((n / total) * 100).toFixed(0);
+        h += `&nbsp;&nbsp;${k === "FIRED" ? "<b>✓ FIRED</b>" : k} … ${n} (${pct}%)<br>`;
+      }
+      return h;
+    };
+    let html = `<hr><h3>STAND-DOWN TALLY — why entries did / didn't fire</h3>`;
+    html += fmt(t.brk, "BREAK detector");
+    html += `<br>`;
+    html += fmt(t.mrf, "MR FADE");
+    html += `<br><i>Read: "regime" / "no break" dominating &rarr; the tape wasn't tradeable (accept, nothing to fix).
+             "not at a level" / "ADX too low" / "no extreme+stretch" piling up on real setups &rarr; a gate may be
+             too tight (candidate to tune). "positive-gamma standdown" = breaks correctly deferring to the fade.</i><br>`;
+    return html;
+  } catch (_) { return ""; }
 }
 
 // ── 8/11: VOL INFRA EOD SECTION ──────────────────────────────────────────────
