@@ -59,7 +59,7 @@ const { INSTRUMENT_CONSTRAINTS } = require('./entryEngine');
 
 const {
   executeTrade,
-  findContract, calcPositionSize,
+  findContract, calcPositionSize, fetchGexChain,
 } = require('./execution');
 
 const {
@@ -119,6 +119,7 @@ const {
   VOLPACE_ARM_ENABLED = false, VOLPACE_ARM_MIN = 0, VOLPACE_ARM_PCTILE = 50, VOLPACE_ARM_WINDOW = 300, VOLPACE_ARM_WARMUP = 20,
   MR_FADE_ENABLED = false,
   BREAK_TRIGGER_ENABLED = false, BREAK_TRIGGER_ENFORCE = false, BREAK_TRIGGER_ALLOW_MRSCALP = true,
+  GEX_FETCH_ENABLED = true, GEX_FETCH_THROTTLE_MS = 120000,
   BREAK_ENTRY_SCORE = 80, BREAK_CONFIRM_BARS = 1, BREAK_MAX_AGE_MIN = 10, BREAK_VOL_LOOKBACK = 10,
   BREAK_VOL_MULT_PUT = 1.8, BREAK_VOL_MULT_CALL = 2.2, BREAK_ADX_MIN_PUT = 18, BREAK_ADX_MIN_CALL = 22,
   BREAK_VWAP_SLOPE_MIN = 0.0002, BREAK_MAX_EXT_PCT = 0.006, BREAK_CALL_CUTOFF_ET = 12.0,
@@ -1451,6 +1452,18 @@ async function runScan() {
   logEvent("scan", `Prefetch complete in ${((Date.now()-prefetchStart)/1000).toFixed(1)}s`);
 
   for (const { stock, price, bars, intradayBars, sectorResult, preMarket, newsArticles, analystData, eqScore } of stockData) {
+    // 8/26: DEDICATED GEX CHAIN FETCH — throttled per ticker. Populates _gexChain[ticker] with BOTH
+    // sides at the same near expiry so the regime gate (enforce + MR-fade) can actually resolve, instead
+    // of running blind on the incidental one-side findContract stash. Kill switch: GEX_FETCH_ENABLED.
+    if (GEX_FETCH_ENABLED && fetchGexChain && stock && price > 0) {
+      try {
+        if (!state._gexFetchLast) state._gexFetchLast = {};
+        if ((Date.now() - (state._gexFetchLast[stock.ticker] || 0)) >= GEX_FETCH_THROTTLE_MS) {
+          state._gexFetchLast[stock.ticker] = Date.now();
+          await fetchGexChain(stock.ticker, price);
+        }
+      } catch (_gfe) { /* GEX fetch must never disturb the scan */ }
+    }
     let entryBlocked = false;
     const maxPerTicker = stock.isIndex ? 3 : 2;
     const existingForTicker = state.positions.filter(p => p.ticker === stock.ticker);
