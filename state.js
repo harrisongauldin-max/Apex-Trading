@@ -521,6 +521,7 @@ async function saveDailyLogToRedis(isEOD = false) {
     state._momoBlocks = []; state._momoShadow = []; state._momoLastMin = {};
     state._nearMiss = []; state._nmLastMin = {};
     state._entryFwd = [];
+    state._standDownTally = { brk: {}, mrf: {} };   // 8/25: reset the stand-down tally each day
     state._vfSkip = [];
     state._vetoBlocks = [];
     markDirty();
@@ -872,6 +873,14 @@ async function restoreBuffersFromRedis() {
 // if it has been set via /api/data-gather, otherwise the DATA_GATHER_MODE constant default. Persists
 // in state (Redis-backed) so a toggle survives restarts/redeploys. Every read-site calls this instead
 // of the raw constant so the switch is flippable without a code change.
+function recordStandDown(strat, rawReason) {   // 8/25: tally why breaks/MR-fades did/didn't fire (regime-starved vs gate-starved)
+  try {
+    if (!state._standDownTally) state._standDownTally = { brk: {}, mrf: {} };
+    const book = strat === "brk" ? state._standDownTally.brk : state._standDownTally.mrf;
+    const key = String(rawReason || "other").replace(/[0-9]+(\.[0-9]+)?/g, "N").replace(/\s+/g, " ").trim().slice(0, 60);
+    book[key] = (book[key] || 0) + 1;
+  } catch (_) {}
+}
 function mrFadeActive(defaultVal) {   // 8/24: runtime kill switch for the literature MR fade (dashboard toggle overrides the constant)
   return (state._mrFadeOverride === true || state._mrFadeOverride === false)
     ? state._mrFadeOverride
@@ -927,7 +936,7 @@ function auditFreshness() {
   } catch (_) {}
 }
 
-module.exports = { state, markDirty, saveStateNow, flushStateIfDirty, logEvent, dataGatherActive, mrFadeActive,
+module.exports = { state, markDirty, saveStateNow, flushStateIfDirty, logEvent, dataGatherActive, mrFadeActive, recordStandDown,
                    markFresh, auditFreshness,
                    redisSave, redisLoad, defaultState, saveDailyLogToRedis, saveTelemetryToRedis, saveOutcomesToRedis, fetchRecentOutcomeRows, getETDateStr,
                    restoreBuffersFromRedis, parseRedisBlob,
