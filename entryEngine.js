@@ -232,7 +232,8 @@ function scoreCandidate(stock, rawPutScore, rawCallScore, putReasons, callReason
 function evaluateEntry(candidate, rulebook, state, context = {}) {
   const rb  = rulebook;
   const g   = rb.gates;
-  const { ticker, optionType, tradeType, score, constraintPass, constraintReason } = candidate;
+  const { ticker, optionType, tradeType, score, constraintPass, constraintReason, structBreak, mrScalp } = candidate;
+  const _eventEntry = !!structBreak || mrScalp === true;   // 8/26: a confirmed break / capitulation scalp is an EVENT, not a score-driven dip-buy — the score-era veto + floor lifts do not apply
 
   const etHour    = context.etHour   || 12;
   const isLateDay = etHour >= 14.5;
@@ -254,14 +255,14 @@ function evaluateEntry(candidate, rulebook, state, context = {}) {
 
   // Put-specific
   if (optionType === "put") {
-    if (g.spyGapUpBlockPuts)  return { pass: false, reason: "SPY gap-up — puts paused in Regime A" };
-    if (g.vixFallingPause)    return { pass: false, reason: "VIX falling — IV crush risk, debit puts lose value" };
+    if (g.spyGapUpBlockPuts && !_eventEntry)  return { pass: false, reason: "SPY gap-up — puts paused in Regime A" };
+    if (g.vixFallingPause && !_eventEntry)    return { pass: false, reason: "VIX falling — IV crush risk, debit puts lose value" };   // 8/26: event break-put is deep-ITM (low vega) — IV crush N/A
     if (g.postReversalBlock)  return { pass: false, reason: "post-reversal cooldown — 30min re-entry block" };
   }
 
   // Call-specific
   if (optionType === "call") {
-    if (g.below200MACallBlock) return { pass: false, reason: "SPY below 200MA — debit calls fight the trend in Regime B" };
+    if (g.below200MACallBlock && !_eventEntry) return { pass: false, reason: "SPY below 200MA — debit calls fight the trend in Regime B" };   // 8/26: confirmed break event supersedes the 200MA directional filter
   }
 
   // Stagger gate — debit naked: 5% profit confirmation within 30min
@@ -380,7 +381,7 @@ function evaluateEntry(candidate, rulebook, state, context = {}) {
         } else {
           _trMacdLift = true; minScore = Math.max(minScore, 85);             // puts: unchanged
         }
-      } else if (optionType === "call" && (macdBearish || _intradayDown) && !carvedOut) {
+      } else if (optionType === "call" && (macdBearish || _intradayDown) && !carvedOut && !_eventEntry) {   // 8/26: struct-break/mr-scalp bypass the falling-knife veto (event, not dip)
         if (_callCarveReversal) {
           _trCarveOut = true; _trCarveKind = "reversal";   // #3: confirmed rebound — stand D2 down (no veto, no 85 lift); score still clears floor
         } else if (_oversoldNow && !_orBreak) {
@@ -444,6 +445,7 @@ function evaluateEntry(candidate, rulebook, state, context = {}) {
     dataGather: _dgApplied,
   };
 
+  if (_eventEntry) minScore = Math.min(minScore, score);   // 8/26: event-driven entry clears its own fixed stamp (break=80 / scalp=78); score-era floor lifts do not gate it
   if (score < minScore)
     return { pass: false, reason: `score ${score} below min ${minScore}`, minScore, minScoreTrace };
 
