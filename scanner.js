@@ -8,7 +8,7 @@ const {
   getStockBars, getIntradayBars, getStockQuote, getCircuitState,
 } = require('./broker');
 
-const { state, logEvent, markDirty, saveStateNow, flushStateIfDirty, paperDataActive, dataGatherActive, mrFadeActive , markFresh, auditFreshness } = require('./state');
+const { state, logEvent, markDirty, saveStateNow, flushStateIfDirty, paperDataActive, dataGatherActive, mrFadeActive, recordStandDown , markFresh, auditFreshness } = require('./state');
 const { recordTelemetry } = require('./telemetry');
 // 8/12: DEFENSIVE REQUIRE. vol.js is OPTIONAL instrumentation — realized vol, IV-RV, surface,
 // feasibility. It gates nothing and executes no trades. A hard top-level require made a missing
@@ -2618,10 +2618,11 @@ async function runScan() {
       } catch (_gxr) {} return null; })();
       if (_reg === "pos") {
         putScore = 0; callScore = 0; liveStock._structBreak = null;
+        recordStandDown("brk", _brk.side ? "positive-gamma standdown" : (_brk.blocked || "no break"));
         if (_brk.side) logEvent("filter", `[BREAK] ${liveStock.ticker} ${_brk.side.toUpperCase()} stood down — positive-gamma regime (fade, don't chase)`);
-      } else if (_brk.side === "put")  { callScore = 0; putScore  = Math.max(putScore,  BREAK_ENTRY_SCORE); liveStock._structBreak = "put"; }
-      else if (_brk.side === "call")   { putScore  = 0; callScore = Math.max(callScore, BREAK_ENTRY_SCORE); liveStock._structBreak = "call"; }
-      else                             { putScore  = 0; callScore = 0; liveStock._structBreak = null; }
+      } else if (_brk.side === "put")  { callScore = 0; putScore  = Math.max(putScore,  BREAK_ENTRY_SCORE); liveStock._structBreak = "put";  recordStandDown("brk", "FIRED"); }
+      else if (_brk.side === "call")   { putScore  = 0; callScore = Math.max(callScore, BREAK_ENTRY_SCORE); liveStock._structBreak = "call"; recordStandDown("brk", "FIRED"); }
+      else                             { putScore  = 0; callScore = 0; liveStock._structBreak = null; recordStandDown("brk", _brk.blocked || "no break"); }
     }
 
     // ── 8/09: MR-SCALP DETECTOR — a disciplined capitulation-snap CALL that runs LIVE alongside
@@ -2995,8 +2996,10 @@ async function runScan() {
         if (_mrDec.fire) {
           const _hasPos = (state.positions || []).some(p => p.ticker === stock.ticker && p.optionType === _mrDec.side && !p.closed);
           if (_hasPos) {
+            recordStandDown("mrf", "position already open");
             logEvent("filter", `[MR-FADE] ${stock.ticker} ${_mrDec.side} setup, but a ${_mrDec.side} position is already open — standing down`);
           } else {
+            recordStandDown("mrf", "FIRED");
             logEvent("filter", `[MR-FADE] ${stock.ticker} FIRE — ${_mrDec.reason}`);
             stock._mrFade = _mrDec;                     // tags entryStrategy + carries invalidation into _entryX
             const _mrSigId = `${stock.ticker}-${_mrDec.side}-mrfade-${Date.now()}`;   // own signalId (the momentum _sigId is defined later — TDZ)
@@ -3005,6 +3008,8 @@ async function runScan() {
             stock._mrFade = null;
             if (_mrOK) continue;                         // handled by the MR path this scan; skip the momentum entry
           }
+        } else {
+          recordStandDown("mrf", _mrDec.reason);        // 8/25: tally the decline reason (regime / not-at-level / not-extreme)
         }
       } catch (_mrErr) { stock._mrFade = null; logEvent("filter", `[MR-FADE] ${stock.ticker} error: ${_mrErr && _mrErr.message}`); }
     }
