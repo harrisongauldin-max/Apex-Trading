@@ -2599,14 +2599,29 @@ async function runScan() {
     }
 
     if (BREAK_TRIGGER_ENFORCE) {
-      // The trigger is authoritative: it picks the side AND decides whether a trade exists.
-      // Driven through the two scores rather than rewiring every downstream score reader — the
-      // score becomes a CARRIER, not a decider. BREAK_ENTRY_SCORE is a fixed stamp, not a quality
-      // measure. Excising the score from sizing (convictionMult) and the slot gates is a separate
-      // pass; until then a break entry is sized by a constant, which is the intended flat sizing.
-      if (_brk.side === "put")       { callScore = 0; putScore  = Math.max(putScore,  BREAK_ENTRY_SCORE); }
-      else if (_brk.side === "call") { putScore  = 0; callScore = Math.max(callScore, BREAK_ENTRY_SCORE); }
-      else                           { putScore  = 0; callScore = 0; }
+      // The trigger is authoritative: it picks the side AND decides whether a trade exists; the score
+      // is a CARRIER, not a decider. 8/25: REGIME-GATED — a break is only chased in NEGATIVE gamma
+      // (trend regime). In POSITIVE gamma (range) the literature says fade, not chase, so the break
+      // stands down and the MR fade covers that regime. Tag stock._structBreak so execution buys the
+      // deep-ITM trend instrument and the exit lets it run.
+      // TAG ON liveStock — that is the object carried into the candidate/executeTrade; the raw `stock`
+      // is a different object (built separately), so tagging it would silently no-op the whole sleeve.
+      // 8/25: compute regime INLINE from the freshest chain (same calc as the telemetry stash below),
+      // not last scan's _gexNow — closes the one-scan lag on the gate that routes the whole sleeve.
+      const _reg = (() => { try {
+        const _gc = state._gexChain && state._gexChain[liveStock.ticker];
+        if (GEX && _gc && _gc.call && _gc.put && _gc.call.dte === _gc.put.dte &&
+            (Date.now() - Math.min(_gc.call.ts || 0, _gc.put.ts || 0) < 300000)) {
+          const _g = GEX.computeGEX(_gc.call.rows, _gc.put.rows, price);
+          return _g ? _g.regime : null;
+        }
+      } catch (_gxr) {} return null; })();
+      if (_reg === "pos") {
+        putScore = 0; callScore = 0; liveStock._structBreak = null;
+        if (_brk.side) logEvent("filter", `[BREAK] ${liveStock.ticker} ${_brk.side.toUpperCase()} stood down — positive-gamma regime (fade, don't chase)`);
+      } else if (_brk.side === "put")  { callScore = 0; putScore  = Math.max(putScore,  BREAK_ENTRY_SCORE); liveStock._structBreak = "put"; }
+      else if (_brk.side === "call")   { putScore  = 0; callScore = Math.max(callScore, BREAK_ENTRY_SCORE); liveStock._structBreak = "call"; }
+      else                             { putScore  = 0; callScore = 0; liveStock._structBreak = null; }
     }
 
     // ── 8/09: MR-SCALP DETECTOR — a disciplined capitulation-snap CALL that runs LIVE alongside
