@@ -328,6 +328,27 @@ async function sendEmail(type) {
                              content: Buffer.from(lines.join("\n"), "utf8").toString("base64") });
           _retainToRedis("nearmiss", dateStr, lines.join("\n")).catch(() => {});
         }
+      } catch (_nmCsvErr) { /* near-miss attachment is best-effort */ }
+
+      // ── 8/25: STAND-DOWN TALLY CSV ────────────────────────────────────────
+      // Why breaks/MR-fades did or didn't fire, one row per reason bucket. Pair with the inline
+      // readout: this is the analyzable version (open in a sheet, sort by count).
+      try {
+        const dateStr = new Date().toLocaleDateString("en-CA", { timeZone: "America/New_York" });
+        const t = (state && state._standDownTally) ? state._standDownTally : { brk: {}, mrf: {} };
+        const lines = ["strategy,reason,count,pct"];
+        for (const [strat, book] of [["break", t.brk || {}], ["mr-fade", t.mrf || {}]]) {
+          const entries = Object.entries(book).sort((a, b) => b[1] - a[1]);
+          const total = entries.reduce((s, [, n]) => s + n, 0) || 1;
+          for (const [reason, n] of entries) {
+            lines.push([strat, `"${String(reason).replace(/"/g, "'")}"`, n, ((n / total) * 100).toFixed(1)].join(","));
+          }
+        }
+        if (lines.length > 1) {
+          attachments.push({ filename: `argo-standdown-${dateStr}.csv`,
+                             content: Buffer.from(lines.join("\n"), "utf8").toString("base64") });
+          _retainToRedis("standdown", dateStr, lines.join("\n")).catch(() => {});
+        }
       } catch (_nmErr) { /* near-miss attachment is best-effort — never block the email */ }
 
       // ── 8/17: FULL SESSION LOG, GZIPPED ─────────────────────────────────────
