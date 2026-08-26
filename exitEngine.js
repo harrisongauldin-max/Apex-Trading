@@ -49,6 +49,7 @@ const {
   MR_SCALP_TRAIL_ARM = 0.10, MR_SCALP_TRAIL_GIVE = 0.04, MR_SCALP_TP = 0.20,
   CP1_CRASH_ENABLED = false, CP1_CRASH_PCT = -5,
   MR_FADE_TP = 0.30, MR_FADE_MAX_HOLD_MIN = 45,
+  BREAK_MAX_HOLD_MIN = 120, BREAK_TRAIL_ARM_PCT = 0.25, BREAK_TRAIL_GIVEBACK_PCT = 0.15,
   FASTCUT_ENABLED = false, FASTCUT_MIN = 6, FASTCUT_PEAK_SHORT = 0.03, FASTCUT_PEAK_MID = 0.02,
   FASTCUT_PEAK_LONG = 0.012,
   USTOP_ENABLED = false, USTOP_ENFORCE = false, USTOP_MOVE_PCT = 0.0035,
@@ -383,6 +384,29 @@ async function checkExits(positions, posSnapshots, posQuotes, posNewsCache, ctx)
         logEvent("scan", `[MR-FADE] ${pos.ticker} HOLD — ${_mfHeld.toFixed(0)}min, chg ${(chg*100).toFixed(1)}% (underwater-first room, stop ${(-STOP_LOSS_PCT*100).toFixed(0)}% / tp ${(MR_FADE_TP*100).toFixed(0)}% / max ${MR_FADE_MAX_HOLD_MIN}min)`);
       }
       continue;   // UNCONDITIONAL — hold or exit, mr-fade never falls through to the momentum/thesis rails
+    }
+
+    // ── 8/25: NEGATIVE-GAMMA TREND SLEEVE EXIT ───────────────────────────────────
+    // The OPPOSITE of the MR exit: a trend must be allowed to RUN (Clenow — let winners run, cut
+    // losers). Exempt from every fast-cut/drift rail (unconditional continue). Managed by: a hard-stop
+    // floor, a TRAILING stop that arms once the trade is up and locks the trend gain on a giveback, and
+    // a long max-hold. The 3:15 cron still flattens. Deep-ITM + longer-DTE (execution) keeps theta off
+    // the hold so the trend has room to develop.
+    if (pos._isStructBreak) {
+      const _bHeld = (Date.now() - new Date(pos.openDate || pos.entryTime || Date.now()).getTime()) / 60000;
+      pos._breakPeakChg = Math.max(typeof pos._breakPeakChg === "number" ? pos._breakPeakChg : -Infinity, chg);
+      let _bReason = null;
+      if (chg <= -STOP_LOSS_PCT)                                                                   _bReason = "break-stop";      // hard floor
+      else if (pos._breakPeakChg >= BREAK_TRAIL_ARM_PCT && chg <= pos._breakPeakChg - BREAK_TRAIL_GIVEBACK_PCT) _bReason = "break-trail";  // lock the trend gain
+      else if (_bHeld >= BREAK_MAX_HOLD_MIN)                                                       _bReason = "break-maxhold";
+      if (_bReason && !_closedThisCycle.has(pi)) {
+        _closedThisCycle.add(pi);
+        logEvent("scan", `[BREAK] ${pos.ticker} exit — ${_bReason} (held ${_bHeld.toFixed(0)}min, chg ${(chg*100).toFixed(1)}%, peak ${(pos._breakPeakChg*100).toFixed(1)}%)`);
+        decisions.push({ pi, ticker: pos.ticker, action: 'close', reason: _bReason, exitPremium: null, contractSym: pos.contractSymbol || null });
+      } else {
+        pos.currentPrice = curP; markDirty();   // HOLD bookkeeping (the end-of-loop HOLD section is bypassed by the continue)
+      }
+      continue;   // UNCONDITIONAL — trend sleeve managed entirely here
     }
 
     // ── 8/11: GENERALIZED FAST-CUT ───────────────────────────────────────────────
