@@ -36,6 +36,7 @@ const { CAPITAL_FLOOR, MIN_OPTION_PREMIUM, MIN_OI,
         WATCHLIST, ALPACA_OPT_SNAP, ALPACA_OPTIONS, OPTION_FEED,
         MAX_HEAT, STOP_LOSS_PCT, TAKE_PROFIT_PCT, DATA_GATHER_MODE,
         MR_SCALP_TARGET_DTE = 1, MR_SCALP_DELTA = 0.42,
+        BREAK_DELTA = 0.70, BREAK_DELTA_MIN = 0.55, BREAK_DELTA_MAX = 0.85, BREAK_TARGET_DTE = 7,
         VOL_INFRA_ENABLED = false, CHAIN_RETAIN_ENABLED = false, CHAIN_RETAIN_MAX = 60,
         SLIPPAGE_LOG_ENABLED = false, DECISION_SPLIT_LOG = false,
         SPREAD_COST_LOG = false, FEASIBILITY_ENABLED = false, FEASIBILITY_ENFORCE = false,
@@ -370,7 +371,7 @@ async function executeTrade(stock, price, score, scoreReasons, vix, optionType =
   // bounce trap while keeping the gamma that captures the fast snap. Detected via stock._mrScalp
   // (set in the scanner detector). Otherwise the normal MR/momentum profile applies.
   const _mrScalp = stock && stock._mrScalp === true;
-  const targetDelta = _mrScalp ? MR_SCALP_DELTA : (isMeanReversion ? 0.42 : 0.35);
+  const targetDelta = (stock && stock._structBreak) ? BREAK_DELTA : (_mrScalp ? MR_SCALP_DELTA : (isMeanReversion ? 0.42 : 0.35));   // 8/25: break = deep-ITM (buy delta not gamma)
   // 6/30 (Harrison): DTE resolution.
   //   dteBand === "sameweek" → force 0-8 DTE leg.  dteBand === "standard" → force the 30-50 momentum band.
   //   dteBand === null (normal call) → DATA_GATHER_MODE forces same-week; otherwise per-profile default.
@@ -378,7 +379,8 @@ async function executeTrade(stock, price, score, scoreReasons, vix, optionType =
   const _dgm = dataGatherActive(DATA_GATHER_MODE);
   // 8/03: THIRD BAND. 13 sits mid-window of an empty 9-16 DTE gap between the two existing
   // legs — 20 sessions produced literally zero trades there, so its behaviour is unknown.
-  const targetDTE = _mrScalp ? MR_SCALP_TARGET_DTE
+  const targetDTE = (stock && stock._structBreak) ? BREAK_TARGET_DTE
+                  : _mrScalp ? MR_SCALP_TARGET_DTE
                   : dteBand === "sameweek" ? 3
                   : dteBand === "biweekly" ? 13
                   : dteBand === "standard" ? 40
@@ -507,8 +509,10 @@ async function executeTrade(stock, price, score, scoreReasons, vix, optionType =
   }
 
   const delta = parseFloat(contract.greeks.delta || 0);
-  if (Math.abs(delta) < TARGET_DELTA_MIN || Math.abs(delta) > TARGET_DELTA_MAX) {
-    logEvent("filter", `${stock.ticker} - delta ${delta} outside target range`);
+  const _dMin = (stock && stock._structBreak) ? BREAK_DELTA_MIN : TARGET_DELTA_MIN;
+  const _dMax = (stock && stock._structBreak) ? BREAK_DELTA_MAX : TARGET_DELTA_MAX;
+  if (Math.abs(delta) < _dMin || Math.abs(delta) > _dMax) {
+    logEvent("filter", `${stock.ticker} - delta ${delta} outside ${stock && stock._structBreak ? "break" : "target"} range`);
     return false;
   }
 
@@ -708,7 +712,7 @@ async function executeTrade(stock, price, score, scoreReasons, vix, optionType =
     fastStopPct:    exitParams.fastStopPct,
     dteLabel:       exitParams.label,
     isMeanReversion: isMeanReversion,
-    entryStrategy:  stock._mrFade ? "mr-fade-lit" : (_mrScalp ? "mr-scalp" : (stock._mrStrong ? "mr" : "breakout-or-context")),   // 8/09: A/B label; 8/24: mr-fade-lit = literature MR strategy
+    entryStrategy:  stock._structBreak ? "struct-break" : (stock._mrFade ? "mr-fade-lit" : (_mrScalp ? "mr-scalp" : (stock._mrStrong ? "mr" : "breakout-or-context"))),   // 8/09: A/B label; 8/24: mr-fade-lit = literature MR strategy
     _mrScalp:       _mrScalp,                                              // 8/09: routes the fast scalp exits in exitEngine
     _mrEntryVWAP:   _mrScalp ? (stock._mrEntryVWAP || price || null) : null,   // reversion target = reclaim of entry VWAP
     dteBand:        dteBand || (_sameWeekLeg ? "sameweek" : "standard"),   // 6/30: A/B leg tag for twin-entry comparison
@@ -862,6 +866,7 @@ async function executeTrade(stock, price, score, scoreReasons, vix, optionType =
     (_openSame || position)._isMrFade = true;
     (_openSame || position)._mrInvalidation = (typeof stock._mrFade.invalidationPx === "number") ? stock._mrFade.invalidationPx : null;
   }
+  if (stock._structBreak) { (_openSame || position)._isStructBreak = true; }
   (_openSame || position)._entryX = {
     mrInvalidation: (stock._mrFade && typeof stock._mrFade.invalidationPx === "number") ? parseFloat(stock._mrFade.invalidationPx.toFixed(2)) : null,
     breadth:    (typeof state._breadth === "number") ? state._breadth : null,
