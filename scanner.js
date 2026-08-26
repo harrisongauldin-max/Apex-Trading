@@ -3056,7 +3056,8 @@ async function runScan() {
 
     const eeResult = evaluateEntry(
       { ticker: stock.ticker, optionType, tradeType: intentType, score, constraintPass: constraintPass !== false, constraintReason: constraintReason || null, tradeIntent: intent,
-        isMeanReversion: isMeanReversion === true, isIndex: stock.isIndex === true },  // V3.2 (6/19) FIX: evaluateEntry carve-outs depend on these — were absent, forcing oversold MR calls to the 85 floor
+        isMeanReversion: isMeanReversion === true, isIndex: stock.isIndex === true,
+      structBreak: stock._structBreak || null, mrScalp: stock._mrScalp === true },   // 8/26: event-driven entries carve out score-era gates in evaluateEntry  // V3.2 (6/19) FIX: evaluateEntry carve-outs depend on these — were absent, forcing oversold MR calls to the 85 floor
       rb, state,
       { etHour: etHourNow, isLateDay, isLastHour, volDecline: _volDeclineExec,
         signals: { rsi: stock.rsi, dailyRsi: stock.dailyRsi || 50, macd: stock.macd || "neutral", macdCurl: stock.macdCurl || "none", adx: stock.adx ?? 20, orBreak: (() => {
