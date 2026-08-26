@@ -1105,8 +1105,64 @@ function executeCreditSpread() {
   return null;
 }
 
+// 8/26: DEDICATED GEX CHAIN FETCH. The incidental _gexChain stash in findContract captured only ONE
+// side (the traded optionType) at ONE DTE, so GEX — which needs BOTH call+put at the SAME near expiry,
+// fresh — almost never had both, and the regime switch ran blind. This pulls the FULL near-expiry call
+// AND put chain (all strikes, no delta filter) and stamps both sides with the same DTE + timestamp.
+async function fetchGexChain(ticker, spot) {
+  try {
+    const today = getETTime();
+    const gte = today.toISOString().split("T")[0];
+    const lte = new Date(today.getTime() + 7 * 86400000).toISOString().split("T")[0];
+    const _sideContracts = async (type) => {
+      let out = [], tok = null;
+      const base = `/options/contracts?underlying_symbol=${ticker}&expiration_date_gte=${gte}&expiration_date_lte=${lte}&type=${type}&limit=200`;
+      for (let p = 0; p < 3; p++) {
+        const pg = await alpacaGet(tok ? `${base}&page_token=${tok}` : base, ALPACA_OPTIONS);
+        if (!pg || !pg.option_contracts) break;
+        out = out.concat(pg.option_contracts);
+        tok = pg.next_page_token || null;
+        if (!tok) break;
+      }
+      return out;
+    };
+    const [calls, puts] = await Promise.all([_sideContracts("call"), _sideContracts("put")]);
+    if (!calls.length || !puts.length) return false;
+    const _nearExp = [...calls, ...puts].map(c => c.expiration_date).sort()[0];   // nearest expiry, both sides
+    const _nc = calls.filter(c => c.expiration_date === _nearExp);
+    const _np = puts.filter(c => c.expiration_date === _nearExp);
+    const _snapRows = async (contracts) => {
+      const syms = contracts.map(c => c.symbol);
+      const batches = [];
+      for (let i = 0; i < syms.length; i += 100) batches.push(syms.slice(i, i + 100).join(","));
+      const results = await Promise.all(batches.map(b => alpacaGet(`/options/snapshots?symbols=${b}&feed=${OPTION_FEED}`, ALPACA_OPT_SNAP).catch(() => null)));
+      const snaps = results.reduce((acc, r) => ({ ...acc, ...((r && r.snapshots) || {}) }), {});
+      const rows = [];
+      for (const c of contracts) {
+        const snap = snaps[c.symbol]; if (!snap) continue;
+        const g = snap.greeks || {};
+        const gamma = parseFloat(g.gamma || 0), oi = parseInt(snap.openInterest || 0);
+        if (gamma || oi) rows.push({ strike: parseFloat(c.strike_price), gamma, oi });
+      }
+      return rows;
+    };
+    const [callRows, putRows] = await Promise.all([_snapRows(_nc), _snapRows(_np)]);
+    if (!callRows.length || !putRows.length) return false;
+    const _dte = Math.max(0, Math.round((new Date(_nearExp + "T16:00:00-04:00").getTime() - Date.now()) / 86400000));
+    const _ts = Date.now();
+    if (!state._gexChain) state._gexChain = {};
+    state._gexChain[ticker] = {
+      call: { rows: callRows, dte: _dte, spot: spot || 0, ts: _ts },
+      put:  { rows: putRows,  dte: _dte, spot: spot || 0, ts: _ts },
+    };
+    logEvent("scan", `[GEX-FETCH] ${ticker} ${_nearExp} (${_dte}DTE): ${callRows.length}c/${putRows.length}p`);
+    return true;
+  } catch (e) { logEvent("scan", `[GEX-FETCH] ${ticker} failed — ${e && e.message}`); return false; }
+}
+
 module.exports = {
   executeTrade,
+  fetchGexChain,
   executeCreditSpread,
   findContract, bsStrikeForDelta, getOptionsPrice,
   initExecution,
