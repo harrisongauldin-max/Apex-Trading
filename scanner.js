@@ -2616,13 +2616,20 @@ async function runScan() {
           return _g ? _g.regime : null;
         }
       } catch (_gxr) {} return null; })();
+      // 8/26 FIX: the enforce must reach the ENTRY, not just side-selection + the verdict log. The
+      // candidate (EE_scoreCandidate below) reads callSetup.score/putSetup.score — the RAW composite,
+      // NOT callScore/putScore — so modifying only the latter left the composite STILL gating entry,
+      // and the paper-experiment path (exp-floor 50) fired dip-buy calls straight past the cutover.
+      // Mirror the mr-scalp dual-write: stamp the enforce decision onto the setup scores too. Preserve
+      // the raw composite on _scoreRaw first so "keep + log the score" still holds.
+      liveStock._scoreRaw = { call: callSetup.score, put: putSetup.score };
       if (_reg === "pos") {
-        putScore = 0; callScore = 0; liveStock._structBreak = null;
+        putScore = 0; callScore = 0; putSetup.score = 0; callSetup.score = 0; liveStock._structBreak = null;
         recordStandDown("brk", _brk.side ? "positive-gamma standdown" : (_brk.blocked || "no break"));
         if (_brk.side) logEvent("filter", `[BREAK] ${liveStock.ticker} ${_brk.side.toUpperCase()} stood down — positive-gamma regime (fade, don't chase)`);
-      } else if (_brk.side === "put")  { callScore = 0; putScore  = Math.max(putScore,  BREAK_ENTRY_SCORE); liveStock._structBreak = "put";  recordStandDown("brk", "FIRED"); }
-      else if (_brk.side === "call")   { putScore  = 0; callScore = Math.max(callScore, BREAK_ENTRY_SCORE); liveStock._structBreak = "call"; recordStandDown("brk", "FIRED"); }
-      else                             { putScore  = 0; callScore = 0; liveStock._structBreak = null; recordStandDown("brk", _brk.blocked || "no break"); }
+      } else if (_brk.side === "put")  { callScore = 0; callSetup.score = 0; putScore = Math.max(putScore, BREAK_ENTRY_SCORE); putSetup.score = Math.max(putSetup.score, BREAK_ENTRY_SCORE); liveStock._structBreak = "put";  recordStandDown("brk", "FIRED"); }
+      else if (_brk.side === "call")   { putScore = 0; putSetup.score = 0; callScore = Math.max(callScore, BREAK_ENTRY_SCORE); callSetup.score = Math.max(callSetup.score, BREAK_ENTRY_SCORE); liveStock._structBreak = "call"; recordStandDown("brk", "FIRED"); }
+      else                             { putScore  = 0; callScore = 0; putSetup.score = 0; callSetup.score = 0; liveStock._structBreak = null; recordStandDown("brk", _brk.blocked || "no break"); }
     }
 
     // ── 8/09: MR-SCALP DETECTOR — a disciplined capitulation-snap CALL that runs LIVE alongside
