@@ -622,8 +622,21 @@ const FASTCUT_PEAK_LONG      = 0.012;  // >21 DTE: a 40-DTE leg CANNOT print +3%
 // daily weather, so it cannot separate trade from trade. The trigger replaces the "which side"
 // and "is there a trade" decisions with an OBSERVED EVENT rather than a prediction.
 const BREAK_TRIGGER_ENABLED       = true;    // compute + log the signal every scan
-const BREAK_TRIGGER_ENFORCE       = false;   // when true the trigger SETS the side and GATES entry
+const BREAK_TRIGGER_ENFORCE       = true ;   // when true the trigger SETS the side and GATES entry  // 8/25 TEARDOWN: AUTHORITATIVE — score demoted to carrier
 const BREAK_TRIGGER_ALLOW_MRSCALP = true;    // MR-scalp is its own scoreless channel — let it arm under enforce
+// ── 8/25: NEGATIVE-GAMMA TREND SLEEVE — literature-aligned instrument for a confirmed break ──
+// Sinclair/Natenberg: for a DIRECTIONAL/trend bet, BUY DELTA NOT GAMMA. Deep-ITM (high delta) tracks
+// the underlying, minimizes theta as a fraction of premium, and doesn't pay for convexity a trend
+// doesn't need. Longer DTE flattens theta further. Moskowitz/Clenow: let the trend RUN (trail, don't
+// fast-cut). So a break entry = deep-ITM, longer-DTE, held with a trailing stop — the opposite of the
+// 0.35-delta / short-DTE / 6-min-fast-cut naked long that lost.
+const BREAK_DELTA                 = 0.70;    // deep ITM: buy delta, not gamma (directional exposure, low theta drag)
+const BREAK_DELTA_MIN             = 0.55;    // accept window for the break contract (carves past TARGET_DELTA_MAX 0.42)
+const BREAK_DELTA_MAX             = 0.85;
+const BREAK_TARGET_DTE            = 7;       // longer DTE flattens daily theta vs the 0-3 DTE default
+const BREAK_MAX_HOLD_MIN          = 120;     // let the trend develop (vs 6-min fast-cut); 3:15 cron still flattens
+const BREAK_TRAIL_ARM_PCT         = 0.25;    // once up 25%, arm the trailing stop
+const BREAK_TRAIL_GIVEBACK_PCT    = 0.15;    // cut if it gives back 15% from the peak (Clenow: lock the trend, let it run)
 const BREAK_ENTRY_SCORE           = 80;      // fixed stamp a break entry carries; clears MIN_SCORE(70)+slot2(75), NOT slot3(85). NOT a quality measure.
 const BREAK_CONFIRM_BARS          = 1;       // bars after the break bar that must not reclaim the level
 const BREAK_MAX_AGE_MIN           = 10;      // signal is stale after this many minutes
@@ -793,6 +806,7 @@ module.exports = {
   MR_SCALP_LIFTOFF_PTS, MR_SCALP_LOW_AGE_MIN_MIN, MR_SCALP_LOW_AGE_MAX_MIN, MR_SCALP_RANGE_MIN_PCT,
   MR_SCALP_VIX_MIN, MR_SCALP_SESSION_MIN_MIN, MR_SCALP_CUTOFF_ET, MR_SCALP_MIN_SCORE,
   MR_SCALP_TARGET_DTE, MR_SCALP_DELTA, MR_SCALP_SIZE_MOD,
+  BREAK_DELTA, BREAK_DELTA_MIN, BREAK_DELTA_MAX, BREAK_TARGET_DTE, BREAK_MAX_HOLD_MIN, BREAK_TRAIL_ARM_PCT, BREAK_TRAIL_GIVEBACK_PCT,
   MR_SCALP_FASTCUT_MIN, MR_SCALP_FASTCUT_PEAK, MR_SCALP_GIVEBACK_PEAK, MR_SCALP_GIVEBACK_FRAC,
   MR_SCALP_TRAIL_ARM, MR_SCALP_TRAIL_GIVE, MR_SCALP_TP,
   HIGH_RISK_MIN_SCORE,
