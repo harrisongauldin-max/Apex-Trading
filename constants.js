@@ -637,6 +637,8 @@ const BREAK_TARGET_DTE            = 7;       // longer DTE flattens daily theta 
 const BREAK_MAX_HOLD_MIN          = 120;     // let the trend develop (vs 6-min fast-cut); 3:15 cron still flattens
 const BREAK_TRAIL_ARM_PCT         = 0.25;    // once up 25%, arm the trailing stop
 const BREAK_TRAIL_GIVEBACK_PCT    = 0.15;    // cut if it gives back 15% from the peak (Clenow: lock the trend, let it run)
+const GEX_FETCH_ENABLED           = true;    // 8/26: dedicated both-sides near-expiry GEX chain fetch (feeds the regime switch)
+const GEX_FETCH_THROTTLE_MS       = 120000;  // per-ticker: refetch the gamma chain at most every 2 min
 const BREAK_ENTRY_SCORE           = 80;      // fixed stamp a break entry carries; clears MIN_SCORE(70)+slot2(75), NOT slot3(85). NOT a quality measure.
 const BREAK_CONFIRM_BARS          = 1;       // bars after the break bar that must not reclaim the level
 const BREAK_MAX_AGE_MIN           = 10;      // signal is stale after this many minutes
@@ -807,6 +809,7 @@ module.exports = {
   MR_SCALP_VIX_MIN, MR_SCALP_SESSION_MIN_MIN, MR_SCALP_CUTOFF_ET, MR_SCALP_MIN_SCORE,
   MR_SCALP_TARGET_DTE, MR_SCALP_DELTA, MR_SCALP_SIZE_MOD,
   BREAK_DELTA, BREAK_DELTA_MIN, BREAK_DELTA_MAX, BREAK_TARGET_DTE, BREAK_MAX_HOLD_MIN, BREAK_TRAIL_ARM_PCT, BREAK_TRAIL_GIVEBACK_PCT,
+  GEX_FETCH_ENABLED, GEX_FETCH_THROTTLE_MS,
   MR_SCALP_FASTCUT_MIN, MR_SCALP_FASTCUT_PEAK, MR_SCALP_GIVEBACK_PEAK, MR_SCALP_GIVEBACK_FRAC,
   MR_SCALP_TRAIL_ARM, MR_SCALP_TRAIL_GIVE, MR_SCALP_TP,
   HIGH_RISK_MIN_SCORE,
