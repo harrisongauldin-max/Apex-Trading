@@ -203,7 +203,13 @@ function detectStructuralBreak(ctx) {
     const bBar = bars[bi];
     const bT = new Date(bBar.t || bBar.timestamp || _now).getTime();
     const ageMin = Number.isFinite(bT) ? (_now - bT) / 60000 : 999;
-    if (!(ageMin <= BREAK_MAX_AGE_MIN)) { out.blocked = `break ${ageMin.toFixed(0)}m old > ${BREAK_MAX_AGE_MIN}m`; return out; }
+    if (!(ageMin <= BREAK_MAX_AGE_MIN)) {
+      // 8/26: the most-recent cross is the freshest one (loop runs recent->old). If IT is past the age
+      // window, there is no FRESH break — report the honest "no fresh level break" state, not the aged
+      // break's growing age. On a sustained move one cross would otherwise be re-counted as "stale"
+      // every scan for hours, burying the real signal (vol / reclaim) in the stand-down tally.
+      out.blocked = "no fresh level break"; out.ageMin = ageMin; return out;
+    }
 
     for (let j = bi + 1; j <= Math.min(last, bi + BREAK_CONFIRM_BARS); j++) {
       const cj = bars[j].c;
