@@ -609,7 +609,7 @@ const FLAT_SIZING_ENABLED   = true;    // ITEM 5: kill convictionMult (score-sca
 // information boundary — it discriminates AFTER entry, where the 40-point win-rate spread lives.
 const CP1_CRASH_ENABLED      = true;   // 8/24: instant-collapse rail — cut on the 1-min checkpoint
 const CP1_CRASH_PCT          = -5;     // cp1 <= -5% => cut. Validated: killed 0/34 eventual +5% recoverers.
-const FASTCUT_ENABLED        = true;
+const FASTCUT_ENABLED        = false;   // 8/27 (Harrison): KILLED. On 439 ground-truth trades the generalized 6-min fast-cut had 9% WR / capped peaks at +0.5% — it guillotined flat-but-alive trades before they could arm the trail-floor (the one profitable exit, +10.9% avg peak). Clenow: cut on invalidation, not a clock. Downside still bounded by CP1 crash rail (-5% @1min), leg/u-stop, and time-cut. mr-scalp keeps its OWN fast-cut. Set true to restore.
 const FASTCUT_MIN            = 6;      // minutes held before judging (scalp uses 5; slightly looser for the slow book)
 const FASTCUT_PEAK_SHORT     = 0.03;   // <=8 DTE: needs +3% peak, same bar as the scalp
 const FASTCUT_PEAK_MID       = 0.02;   // 9-21 DTE
