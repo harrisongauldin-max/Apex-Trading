@@ -1461,14 +1461,21 @@ async function runScan() {
     // 8/26: DEDICATED GEX CHAIN FETCH — throttled per ticker. Populates _gexChain[ticker] with BOTH
     // sides at the same near expiry so the regime gate (enforce + MR-fade) can actually resolve, instead
     // of running blind on the incidental one-side findContract stash. Kill switch: GEX_FETCH_ENABLED.
-    if (GEX_FETCH_ENABLED && fetchGexChain && stock && price > 0) {
-      try {
-        if (!state._gexFetchLast) state._gexFetchLast = {};
-        if ((Date.now() - (state._gexFetchLast[stock.ticker] || 0)) >= GEX_FETCH_THROTTLE_MS) {
-          state._gexFetchLast[stock.ticker] = Date.now();
-          await fetchGexChain(stock.ticker, price);
-        }
-      } catch (_gfe) { /* GEX fetch must never disturb the scan */ }
+    if (GEX_FETCH_ENABLED) {
+      if (typeof fetchGexChain !== "function") {
+        // 8/27: LOUD wiring check. The old `&& fetchGexChain` guard silently no-op'd when the import
+        // didn't resolve — i.e. when scanner.js and execution.js are deployed from different builds,
+        // the reference is undefined and the fetch vanished with zero trace. Never silent again.
+        if (!state._gexWiringWarned) { state._gexWiringWarned = true; logEvent("scan", "[GEX-FETCH] WIRING ERROR — fetchGexChain is undefined (deploy scanner.js + execution.js as a matched pair; execution.js must export fetchGexChain)"); }
+      } else if (stock && price > 0) {
+        try {
+          if (!state._gexFetchLast) state._gexFetchLast = {};
+          if ((Date.now() - (state._gexFetchLast[stock.ticker] || 0)) >= GEX_FETCH_THROTTLE_MS) {
+            state._gexFetchLast[stock.ticker] = Date.now();
+            await fetchGexChain(stock.ticker, price);
+          }
+        } catch (_gfe) { logEvent("scan", `[GEX-FETCH] ${stock.ticker} threw — ${_gfe && _gfe.message}`); }
+      }
     }
     let entryBlocked = false;
     const maxPerTicker = stock.isIndex ? 3 : 2;
