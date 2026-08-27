@@ -1319,6 +1319,23 @@ app.get("/api/outcomes", async (req, res) => {
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
+// 8/27: TRADE HISTORY — pulls EVERY fill this account has made from Alpaca (ground truth) and
+// reconstructs round-trip trades with REAL realized P&L, independent of the (partially corrupt)
+// journal. Secret-gated (reads account activity); GET so the dashboard button downloads it directly.
+app.get("/api/trade-history", requireSecret, async (req, res) => {
+  try {
+    const { buildTradeHistoryCSV } = require('./tradeHistory');
+    const out = await buildTradeHistoryCSV({ after: req.query.after || null, until: req.query.until || null });
+    res.setHeader("Content-Type", "text/csv");
+    res.setHeader("Content-Disposition", `attachment; filename="argo-trade-history.csv"`);
+    res.setHeader("X-TH-Fills", out.fills);
+    res.setHeader("X-TH-Closed", out.closed);
+    res.setHeader("X-TH-Net", out.net);
+    res.setHeader("X-TH-Wins", out.wins);
+    res.send(out.csv);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 // Efficacy report — the "which inputs predicted" readout over the trailing N sessions.
 // ?days=20 (default), ?format=json for the structured object, else plain-text.
 app.get("/api/efficacy", async (req, res) => {
