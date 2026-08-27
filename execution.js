@@ -1145,7 +1145,10 @@ async function fetchGexChain(ticker, spot) {
       for (const c of contracts) {
         const snap = snaps[c.symbol]; if (!snap) continue;
         const g = snap.greeks || {};
-        const gamma = parseFloat(g.gamma || 0), oi = parseInt(snap.openInterest || 0);
+        const gamma = parseFloat(g.gamma || 0);
+        // 8/27 FIX: open interest is on the CONTRACT (/options/contracts open_interest), NOT the snapshot.
+        // snap.openInterest was always undefined -> oi=0 -> netGEX=0. Read c.open_interest; fall back to snap.
+        const oi = parseInt((c.open_interest != null ? c.open_interest : (snap.openInterest != null ? snap.openInterest : (snap.open_interest || 0))) || 0, 10);
         if (gamma || oi) rows.push({ strike: parseFloat(c.strike_price), gamma, oi });
       }
       return rows;
