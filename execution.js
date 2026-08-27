@@ -1128,7 +1128,11 @@ async function fetchGexChain(ticker, spot) {
     };
     const [calls, puts] = await Promise.all([_sideContracts("call"), _sideContracts("put")]);
     if (!calls.length || !puts.length) { logEvent("scan", `[GEX-FETCH] ${ticker} no contracts (${calls.length}c/${puts.length}p) — window ${gte}..${lte}`); return false; }
-    const _nearExp = [...calls, ...puts].map(c => c.expiration_date).sort()[0];   // nearest expiry, both sides
+    // 8/27 FIX: skip 0DTE — Alpaca's snapshot returns no greeks/OI for the same-day expiry (findContract
+    // never uses 0DTE either, only 1-5DTE). Pick the nearest FUTURE expiry, which has populated greeks/OI.
+    const _todayStr = today.toISOString().split("T")[0];
+    const _allExp = [...new Set([...calls, ...puts].map(c => c.expiration_date))].sort();
+    const _nearExp = _allExp.find(e => e > _todayStr) || _allExp[0];
     const _nc = calls.filter(c => c.expiration_date === _nearExp);
     const _np = puts.filter(c => c.expiration_date === _nearExp);
     const _snapRows = async (contracts) => {
