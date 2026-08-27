@@ -1127,15 +1127,15 @@ async function fetchGexChain(ticker, spot) {
       return out;
     };
     const [calls, puts] = await Promise.all([_sideContracts("call"), _sideContracts("put")]);
-    if (!calls.length || !puts.length) return false;
+    if (!calls.length || !puts.length) { logEvent("scan", `[GEX-FETCH] ${ticker} no contracts (${calls.length}c/${puts.length}p) — window ${gte}..${lte}`); return false; }
     const _nearExp = [...calls, ...puts].map(c => c.expiration_date).sort()[0];   // nearest expiry, both sides
     const _nc = calls.filter(c => c.expiration_date === _nearExp);
     const _np = puts.filter(c => c.expiration_date === _nearExp);
     const _snapRows = async (contracts) => {
       const syms = contracts.map(c => c.symbol);
       const batches = [];
-      for (let i = 0; i < syms.length; i += 100) batches.push(syms.slice(i, i + 100).join(","));
-      const results = await Promise.all(batches.map(b => alpacaGet(`/options/snapshots?symbols=${b}&feed=${OPTION_FEED}`, ALPACA_OPT_SNAP).catch(() => null)));
+      for (let i = 0; i < syms.length; i += 25) batches.push(syms.slice(i, i + 25).join(","));   // 8/27 FIX: 100-symbol batches exceed Alpaca's snapshot cap and failed silently; findContract uses 25
+      const results = await Promise.all(batches.map(b => alpacaGet(`/options/snapshots?symbols=${b}&feed=${OPTION_FEED}`, ALPACA_OPT_SNAP).catch(e => { logEvent("scan", `[GEX-FETCH] ${ticker} snapshot batch failed — ${e && e.message}`); return null; })));
       const snaps = results.reduce((acc, r) => ({ ...acc, ...((r && r.snapshots) || {}) }), {});
       const rows = [];
       for (const c of contracts) {
@@ -1147,7 +1147,7 @@ async function fetchGexChain(ticker, spot) {
       return rows;
     };
     const [callRows, putRows] = await Promise.all([_snapRows(_nc), _snapRows(_np)]);
-    if (!callRows.length || !putRows.length) return false;
+    if (!callRows.length || !putRows.length) { logEvent("scan", `[GEX-FETCH] ${ticker} empty greeks/OI rows (${callRows.length}c/${putRows.length}p from ${_nc.length}/${_np.length} contracts @ ${_nearExp})`); return false; }
     const _dte = Math.max(0, Math.round((new Date(_nearExp + "T16:00:00-04:00").getTime() - Date.now()) / 86400000));
     const _ts = Date.now();
     if (!state._gexChain) state._gexChain = {};
