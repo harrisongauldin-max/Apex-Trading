@@ -2632,6 +2632,20 @@ async function runScan() {
         if (GEX && _gc && _gc.call && _gc.put && _gc.call.dte === _gc.put.dte &&
             (Date.now() - Math.min(_gc.call.ts || 0, _gc.put.ts || 0) < 300000)) {
           const _g = GEX.computeGEX(_gc.call.rows, _gc.put.rows, price);
+          // 8/26: LIVE GEX STAMP (per ticker — SPY and QQQ each). Prints raw netGEX + netGexM + regime
+          // AND the strike counts / total OI, so the "is netGexM stuck at 0, and if so why" question is
+          // answerable in the live log, not just the EOD telemetry CSV. Throttled ~60s/ticker.
+          if (_g) {
+            try {
+              if (!state._gexLogLast) state._gexLogLast = {};
+              if ((Date.now() - (state._gexLogLast[liveStock.ticker] || 0)) >= 60000) {
+                state._gexLogLast[liveStock.ticker] = Date.now();
+                const _coi = _gc.call.rows.reduce((s, r) => s + (r.oi || 0), 0);
+                const _poi = _gc.put.rows.reduce((s, r) => s + (r.oi || 0), 0);
+                logEvent("scan", `[GEX] ${liveStock.ticker} netGEX=${_g.netGEX} (${_g.netGexM}M) regime=${_g.regime} | ${_gc.call.rows.length}c/${_gc.put.rows.length}p oi=${_coi}c/${_poi}p ${_gc.call.dte}DTE`);
+              }
+            } catch (_gxl) {}
+          }
           return _g ? _g.regime : null;
         }
       } catch (_gxr) {} return null; })();
