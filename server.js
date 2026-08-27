@@ -699,9 +699,14 @@ cron.schedule("15 19,20 * * 1-5", async () => {
     logEvent("scan", "[EOD CLOSE] Disabled for this session — skipping 3:15pm hard close");
     return;
   }
-  const positions = state.positions || [];
-  if (positions.length === 0) return;
-  logEvent("scan", `[EOD CLOSE] 3:15pm — closing ALL ${positions.length} position(s). Pure intraday: no overnight holds.`);
+  const { isFlattenExempt } = require('./constants');
+  const _allPos = state.positions || [];
+  // 8/27: label-driven flatten. swing-class positions (trend-swing) hold overnight; the exit engine
+  // resumes managing them at next open. Everything intraday still hard-closes at 3:15.
+  const positions = _allPos.filter(p => !isFlattenExempt(p.entryStrategy));
+  const _held = _allPos.length - positions.length;
+  if (positions.length === 0) { if (_held > 0) logEvent("scan", `[EOD CLOSE] 3:15pm — ${_held} swing position(s) HELD overnight, 0 intraday to close.`); return; }
+  logEvent("scan", `[EOD CLOSE] 3:15pm — closing ${positions.length} intraday position(s)${_held ? `; HOLDING ${_held} swing overnight` : ""}.`);
   for (const pos of [...positions]) {
     const _curPrice = (pos.currentPrice != null && !isNaN(pos.currentPrice) && pos.currentPrice > 0)
       ? pos.currentPrice : pos.premium;
