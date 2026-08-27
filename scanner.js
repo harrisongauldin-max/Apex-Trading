@@ -120,6 +120,8 @@ const {
   MR_FADE_ENABLED = false,
   BREAK_TRIGGER_ENABLED = false, BREAK_TRIGGER_ENFORCE = false, BREAK_TRIGGER_ALLOW_MRSCALP = true,
   GEX_FETCH_ENABLED = true, GEX_FETCH_THROTTLE_MS = 120000,
+  TREND_ENABLED = false, TREND_CUTOFF_ET = 15.0, TREND_MA_FAST = 50, TREND_MA_SLOW = 100,
+  TREND_RSI_MIN = 50, TREND_RSI_MAX = 72, TREND_OVEREXT_ATR = 4.0, TREND_BREADTH_MIN = 52,
   BREAK_ENTRY_SCORE = 80, BREAK_CONFIRM_BARS = 1, BREAK_MAX_AGE_MIN = 10, BREAK_VOL_LOOKBACK = 10,
   BREAK_VOL_MULT_PUT = 1.8, BREAK_VOL_MULT_CALL = 2.2, BREAK_ADX_MIN_PUT = 18, BREAK_ADX_MIN_CALL = 22,
   BREAK_VWAP_SLOPE_MIN = 0.0002, BREAK_MAX_EXT_PCT = 0.006, BREAK_CALL_CUTOFF_ET = 12.0,
@@ -172,6 +174,32 @@ let marketContext = {
 // because index up-moves grind while down-moves are fast.
 // Fails CLOSED on every bad input: a null/short/foreign-day bar array, a missing or unlocked
 // opening range, NaN adx/slope, or a zero price all return {side:null} with a stated reason.
+// 8/27: daily trend inputs (50/100d MA + ATR14) for the trend-swing sleeve. Cached per ticker per day.
+async function ensureDailyTrend(ticker) {
+  try {
+    if (!state._dailyMA) state._dailyMA = {};
+    const _today = new Date().toLocaleDateString("en-US", { timeZone: "America/New_York" });
+    const cached = state._dailyMA[ticker];
+    if (cached && cached.date === _today) return cached;
+    const bars = await getStockBars(ticker, 120);
+    if (!bars || bars.length < 50) return cached || null;
+    const closes = bars.map(b => b.c);
+    const _ma = (n) => { const s = closes.slice(-n); return s.length ? s.reduce((a,c)=>a+c,0)/s.length : null; };
+    const ma50 = _ma(50), ma100 = _ma(Math.min(100, closes.length));
+    let atr = null;
+    if (bars.length >= 15) {
+      const tr = [];
+      for (let i = bars.length - 14; i < bars.length; i++) tr.push(Math.max(bars[i].h - bars[i].l, Math.abs(bars[i].h - bars[i-1].c), Math.abs(bars[i].l - bars[i-1].c)));
+      atr = tr.reduce((a,x)=>a+x,0) / tr.length;
+    }
+    if (!ma50 || !ma100 || !atr) return cached || null;
+    const rec = { ma50: +ma50.toFixed(2), ma100: +ma100.toFixed(2), atr: +atr.toFixed(2), date: _today };
+    state._dailyMA[ticker] = rec;
+    logEvent("scan", `[TREND-MA] ${ticker} 50d:$${rec.ma50} 100d:$${rec.ma100} atr:$${rec.atr}`);
+    return rec;
+  } catch (e) { logEvent("warn", `[TREND-MA] ${ticker} failed — ${e && e.message}`); return (state._dailyMA || {})[ticker] || null; }
+}
+
 function detectStructuralBreak(ctx) {
   const out = { side: null, level: null, ageMin: null, volMult: null, extPct: null, blocked: null, why: null };
   try {
@@ -3017,6 +3045,41 @@ async function runScan() {
   for (const { stock, price, score, reasons, optionType, isMeanReversion, tradeIntent, constraintPass, constraintReason, sizeMod } of scored) {
     if (heatPct() >= effectiveHeatCap()) break;
     if (state.cash <= CAPITAL_FLOOR) break;
+
+    // 8/27: TREND-SWING sleeve (daily-momentum, multi-day hold). Own path — bypasses the score/enforce gate
+    // like mr-fade. Daily thesis: price vs 50/100d MA + daily RSI/MACD + breadth, not overextended.
+    if (TREND_ENABLED && stock && price > 0) {
+      try {
+        const _etH = (() => { const d = getETTime(); return d.getHours() + d.getMinutes() / 60; })();
+        if (_etH < TREND_CUTOFF_ET) {
+          const _tm = await ensureDailyTrend(stock.ticker);
+          if (_tm && _tm.ma50 && _tm.ma100 && _tm.atr) {
+            const _drsi  = (typeof stock.dailyRsi === "number") ? stock.dailyRsi : 50;
+            const _macd  = stock.macd || "neutral";
+            const _brdth = (marketContext && marketContext.breadth && typeof marketContext.breadth.breadthPct === "number") ? marketContext.breadth.breadthPct : 50;
+            const _upTrend   = price > _tm.ma50 && _tm.ma50 > _tm.ma100;
+            const _downTrend = price < _tm.ma50 && _tm.ma50 < _tm.ma100;
+            const _overExt   = Math.abs(price - _tm.ma50) > TREND_OVEREXT_ATR * _tm.atr;
+            let _tSide = null, _tReason = null;
+            if (_upTrend && !_overExt && _drsi >= TREND_RSI_MIN && _drsi <= TREND_RSI_MAX && _macd === "bullish" && _brdth >= TREND_BREADTH_MIN) {
+              _tSide = "call"; _tReason = `daily uptrend $${price.toFixed(2)}>50d$${_tm.ma50}>100d$${_tm.ma100} dRSI${_drsi.toFixed(0)} brdth${_brdth}%`;
+            } else if (_downTrend && !_overExt && _drsi <= (100 - TREND_RSI_MIN) && _drsi >= (100 - TREND_RSI_MAX) && _macd === "bearish" && _brdth <= (100 - TREND_BREADTH_MIN)) {
+              _tSide = "put";  _tReason = `daily downtrend $${price.toFixed(2)}<50d$${_tm.ma50}<100d$${_tm.ma100} dRSI${_drsi.toFixed(0)} brdth${_brdth}%`;
+            }
+            const _haveTrend = (state.positions || []).some(p => p.ticker === stock.ticker && p.entryStrategy === "trend-swing" && p.optionType === _tSide && !p.closed);
+            if (_tSide && !_haveTrend) {
+              stock._isTrend = _tSide;
+              const _tSig = `${stock.ticker}-${_tSide}-trend-${Date.now()}`;
+              const _tOK = await executeTrade(stock, price, 0, [_tReason], state.vix, _tSide, false, 1.0, null, null, _tSig);
+              stock._isTrend = null;
+              if (_tOK) { recordStandDown("trend", "FIRED"); logEvent("scan", `[TREND-SWING] ${stock.ticker} ${_tSide.toUpperCase()} FIRED — ${_tReason}`); continue; }
+            } else {
+              recordStandDown("trend", (_upTrend || _downTrend) ? (_overExt ? "overextended from 50d" : "momentum/breadth gate") : "no daily trend");
+            }
+          } else { recordStandDown("trend", "daily MA unavailable"); }
+        } else { recordStandDown("trend", "past 3pm cutoff"); }
+      } catch (_te) { logEvent("warn", `[TREND-SWING] ${stock.ticker} eval failed — ${_te && _te.message}`); }
+    }
 
     // 8/11 FIX 1: MR-SCALP IS CALL-ONLY — revoked ONCE, here, before anything downstream reads the flag.
     // The detector arms liveStock._mrScalp during SCORING, i.e. before direction is resolved (and before
