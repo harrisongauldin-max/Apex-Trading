@@ -48,6 +48,7 @@ const {
   MR_SCALP_FASTCUT_MIN = 5, MR_SCALP_FASTCUT_PEAK = 0.03, MR_SCALP_GIVEBACK_PEAK = 0.08, MR_SCALP_GIVEBACK_FRAC = 0.5,
   MR_SCALP_TRAIL_ARM = 0.10, MR_SCALP_TRAIL_GIVE = 0.04, MR_SCALP_TP = 0.20,
   CP1_CRASH_ENABLED = false, CP1_CRASH_PCT = -5,
+  TREND_STOP_PCT = 0.125, TREND_TRAIL_ARM_PCT = 0.10, TREND_TRAIL_GIVEBACK_PCT = 0.05, TREND_ROLL_DTE = 21,
   MR_FADE_TP = 0.30, MR_FADE_MAX_HOLD_MIN = 45,
   BREAK_MAX_HOLD_MIN = 120, BREAK_TRAIL_ARM_PCT = 0.25, BREAK_TRAIL_GIVEBACK_PCT = 0.15,
   FASTCUT_ENABLED = false, FASTCUT_MIN = 6, FASTCUT_PEAK_SHORT = 0.03, FASTCUT_PEAK_MID = 0.02,
@@ -407,6 +408,27 @@ async function checkExits(positions, posSnapshots, posQuotes, posNewsCache, ctx)
         pos.currentPrice = curP; markDirty();   // HOLD bookkeeping (the end-of-loop HOLD section is bypassed by the continue)
       }
       continue;   // UNCONDITIONAL — trend sleeve managed entirely here
+    }
+
+    // ── 8/27: TREND-SWING (multi-day) ────────────────────────────────────────────
+    // Incremental profit-lock (trail) + -12.5% hard floor + roll before the theta cliff. NO intraday
+    // time-cut/max-hold — this holds overnight (exempt from the 3:15 flatten in server.js; the exit
+    // engine resumes managing it at next open). Unconditional continue, like the other sleeve blocks.
+    if (pos._isTrend) {
+      pos._trendPeakChg = Math.max(typeof pos._trendPeakChg === "number" ? pos._trendPeakChg : -Infinity, chg);
+      const _tDTE = dte;   // 8/27: LIVE dte (line ~198, from expDate) — decrements daily so trend-roll actually fires
+      let _tReason = null;
+      if (chg <= -TREND_STOP_PCT)                                                                              _tReason = "trend-stop";
+      else if (pos._trendPeakChg >= TREND_TRAIL_ARM_PCT && chg <= pos._trendPeakChg - TREND_TRAIL_GIVEBACK_PCT) _tReason = "trend-trail";
+      else if (_tDTE <= TREND_ROLL_DTE)                                                                        _tReason = "trend-roll";
+      if (_tReason && !_closedThisCycle.has(pi)) {
+        _closedThisCycle.add(pi);
+        logEvent("scan", `[TREND] ${pos.ticker} exit — ${_tReason} (chg ${(chg*100).toFixed(1)}%, peak ${(pos._trendPeakChg*100).toFixed(1)}%, ${_tDTE}DTE)`);
+        decisions.push({ pi, ticker: pos.ticker, action: 'close', reason: _tReason, exitPremium: null, contractSym: pos.contractSymbol || null });
+      } else {
+        pos.currentPrice = curP; markDirty();
+      }
+      continue;   // UNCONDITIONAL — swing sleeve, holds overnight
     }
 
     // ── 8/11: GENERALIZED FAST-CUT ───────────────────────────────────────────────
