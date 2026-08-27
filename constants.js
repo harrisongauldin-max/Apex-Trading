@@ -637,6 +637,46 @@ const BREAK_TARGET_DTE            = 7;       // longer DTE flattens daily theta 
 const BREAK_MAX_HOLD_MIN          = 120;     // let the trend develop (vs 6-min fast-cut); 3:15 cron still flattens
 const BREAK_TRAIL_ARM_PCT         = 0.25;    // once up 25%, arm the trailing stop
 const BREAK_TRAIL_GIVEBACK_PCT    = 0.15;    // cut if it gives back 15% from the peak (Clenow: lock the trend, let it run)
+// ============================================================================
+// 8/27: STRATEGY CLASS MAP — the label is the control surface. Every entryStrategy
+// declares its lifecycle here; the flatten cron, exit engine, and execution read
+// from this instead of hardcoding. Adding a strategy = one row. hold:"swing" +
+// flattenExempt:true = holds overnight (exit engine resumes at next open).
+// ============================================================================
+const STRATEGY_CLASS = {
+  "struct-break":         { hold: "intraday", flattenExempt: false },
+  "mr-fade-lit":          { hold: "intraday", flattenExempt: false },
+  "mr-scalp":             { hold: "intraday", flattenExempt: false },
+  "mr":                   { hold: "intraday", flattenExempt: false },
+  "breakout-or-context":  { hold: "intraday", flattenExempt: false },
+  "trend-swing":          { hold: "swing",    flattenExempt: true  },
+};
+function strategyClass(entryStrategy) { return STRATEGY_CLASS[entryStrategy] || STRATEGY_CLASS["breakout-or-context"]; }
+function isFlattenExempt(entryStrategy) { return !!(STRATEGY_CLASS[entryStrategy] && STRATEGY_CLASS[entryStrategy].flattenExempt); }
+
+// ---- TREND-SWING sleeve (daily-momentum, multi-day hold) ----
+// Literature: Moskowitz-Ooi-Pedersen time-series momentum (daily trend), Clenow trailing exit,
+// Daniel-Moskowitz "momentum crash" overextension filter, Moskowitz-Pedersen vol-scaled sizing.
+const TREND_ENABLED       = true;
+const TREND_DELTA         = 0.65;   // deep-ITM: buy delta not gamma (Sinclair/Natenberg)
+const TREND_DELTA_MIN     = 0.55;
+const TREND_DELTA_MAX     = 0.75;
+const TREND_TARGET_DTE    = 60;     // ~60 DTE: slow linear theta, respects the monthly-signal timeframe
+const TREND_DTE_MIN       = 45;
+const TREND_DTE_MAX       = 75;
+const TREND_ROLL_DTE      = 21;     // exit/roll before the theta cliff
+const TREND_MA_FAST       = 50;     // daily trend: price > 50d, 50d > 100d
+const TREND_MA_SLOW       = 100;
+const TREND_RSI_MIN       = 50;     // daily RSI: trending, not exhausted
+const TREND_RSI_MAX       = 72;
+const TREND_OVEREXT_ATR   = 4.0;    // max daily-ATRs above the 50d before it's overextended (momentum-crash zone)
+const TREND_BREADTH_MIN   = 52;     // trend needs participation
+const TREND_CUTOFF_ET     = 15.0;   // no NEW swing entries after 3pm ET
+const TREND_RISK_BUDGET   = 0.01;   // 1% of equity risked per swing trade -> vol-scaled contract count
+const TREND_TRAIL_ARM_PCT = 0.10;   // arm the trail once +10%
+const TREND_STOP_UNDL_PCT = 0.025;  // (alt) hard floor as an UNDERLYING move — available if the option-% floor proves too tight
+const TREND_STOP_PCT      = 0.125;  // -12.5% option hard floor (Harrison)
+const TREND_TRAIL_GIVEBACK_PCT = 0.05;   // incremental profit-lock: give back 5% from peak once armed
 const GEX_FETCH_ENABLED           = true;    // 8/26: dedicated both-sides near-expiry GEX chain fetch (feeds the regime switch)
 const GEX_FETCH_THROTTLE_MS       = 120000;  // per-ticker: refetch the gamma chain at most every 2 min
 const BREAK_ENTRY_SCORE           = 80;      // fixed stamp a break entry carries; clears MIN_SCORE(70)+slot2(75), NOT slot3(85). NOT a quality measure.
@@ -810,6 +850,10 @@ module.exports = {
   MR_SCALP_TARGET_DTE, MR_SCALP_DELTA, MR_SCALP_SIZE_MOD,
   BREAK_DELTA, BREAK_DELTA_MIN, BREAK_DELTA_MAX, BREAK_TARGET_DTE, BREAK_MAX_HOLD_MIN, BREAK_TRAIL_ARM_PCT, BREAK_TRAIL_GIVEBACK_PCT,
   GEX_FETCH_ENABLED, GEX_FETCH_THROTTLE_MS,
+  STRATEGY_CLASS, strategyClass, isFlattenExempt,
+  TREND_ENABLED, TREND_DELTA, TREND_DELTA_MIN, TREND_DELTA_MAX, TREND_TARGET_DTE, TREND_DTE_MIN, TREND_DTE_MAX,
+  TREND_ROLL_DTE, TREND_MA_FAST, TREND_MA_SLOW, TREND_RSI_MIN, TREND_RSI_MAX, TREND_OVEREXT_ATR, TREND_BREADTH_MIN,
+  TREND_CUTOFF_ET, TREND_RISK_BUDGET, TREND_TRAIL_ARM_PCT, TREND_STOP_UNDL_PCT, TREND_STOP_PCT, TREND_TRAIL_GIVEBACK_PCT,
   MR_SCALP_FASTCUT_MIN, MR_SCALP_FASTCUT_PEAK, MR_SCALP_GIVEBACK_PEAK, MR_SCALP_GIVEBACK_FRAC,
   MR_SCALP_TRAIL_ARM, MR_SCALP_TRAIL_GIVE, MR_SCALP_TP,
   HIGH_RISK_MIN_SCORE,
