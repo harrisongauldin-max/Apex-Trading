@@ -571,6 +571,7 @@ input[type=text]:focus{border-color:var(--blue)}
     <button class="btn" style="background:#0a1a2a;border:1px solid #00c4ff;color:#44ccff" onclick="fetch('/api/reset-baseline',{method:'POST',headers:{'Content-Type':'application/json','x-argo-secret':sessionStorage.getItem('apexSecret')||''}}).then(r=>r.json()).then(d=>{ alert(d.ok ? '📍 Baseline reset to $'+d.newBaseline.toFixed(2)+' from Alpaca' : d.error||'Failed'); fetchState(); })" title="Reseed accountBaseline and peakCash from live Alpaca equity — clears stuck drawdown after Full Reset">📍 RESET BASELINE</button>
     <button class="btn" style="background:#0a2a1a;border:1px solid #00c4ff;color:#44ccff" onclick="fetch('/api/sync-cash',{method:'POST',headers:{'Content-Type':'application/json','x-argo-secret':sessionStorage.getItem('apexSecret')||''}}).then(r=>r.json()).then(d=>{ alert(d.ok ? '💵 Cash synced: $'+d.cash.toFixed(2)+' (Alpaca $'+((d.alpacaCash!=null?d.alpacaCash:0)).toFixed(2)+', applied '+(d.applied>=0?'+':'')+d.applied.toFixed(2)+')' : d.error||'Failed'); fetchState(); })" title="Force an immediate cash resync from Alpaca /account — bypasses the market-hours 5-min interval, works after hours">💵 SYNC CASH</button>
     <button class="btn" style="background:#1a0a2a;border:1px solid #a855f7;color:#c084fc" onclick="pullTradeHistory()" title="Pull EVERY fill from Alpaca and reconstruct round-trip trades with real realized P&L — ground truth, independent of the journal">📊 TRADE HISTORY</button>
+    <button class="btn" style="background:#0a2a1a;border:1px solid #22c55e;color:#4ade80" onclick="trendProbe()" title="Live snapshot of the trend-swing evaluator — is it enabled, did it compute the daily MAs today, and what is each ticker's trend structure right now">🎯 TREND PROBE</button>
     <button class="btn" id="mrfade-btn" style="background:#0a2a1a;border:1px solid #666;color:#888" onclick="toggleMrFade()" title="LITERATURE MEAN-REVERSION FADE — live kill switch. ON = APEX takes literature MR fade entries (positive-gamma, at a level, on confluence). OFF = stops instantly, no redeploy. Runtime override of MR_FADE_ENABLED.">🔀 MR-FADE: …</button>
     <button class="btn" style="background:#1a1a40;border:1px solid #ff9900;color:#ffbb44" onclick="clearBlockers()">🔓 CLEAR BLOCKERS</button>
     <button class="btn" style="background:#401010;border:1px solid #ff4444;color:#ff8888" onclick="fullReset()">🗑 FULL RESET</button>
@@ -3143,6 +3144,28 @@ async function pullTradeHistory(){
     const a = document.createElement('a'); a.href = url; a.download = 'argo-trade-history.csv'; document.body.appendChild(a); a.click(); a.remove(); URL.revokeObjectURL(url);
     alert('📊 Trade history: ' + closed + ' round-trips from ' + fills + ' fills · net $' + net + ' · ' + wins + ' wins');
   } catch(e) { alert('Trade history error: ' + e.message); }
+}
+
+// 8/28: live trend-evaluator probe — answers "is the sleeve running?" instantly
+async function trendProbe(){
+  const s = sessionStorage.getItem('apexSecret') || prompt('Enter APEX secret:') || '';
+  try {
+    const r = await fetch('/api/trend-probe', { headers: { 'x-argo-secret': s } });
+    if (!r.ok) { alert('Trend probe failed: HTTP ' + r.status + (r.status===401 ? ' (bad/missing secret)' : '')); return; }
+    const d = await r.json();
+    let m = '🎯 TREND PROBE\n\n';
+    m += 'TREND_ENABLED: ' + d.trendEnabled + '\n';
+    m += 'VERDICT: ' + d.verdict + '\n\n';
+    for (const tk of ['SPY','QQQ']) {
+      const t = d.tickers[tk] || {};
+      m += tk + ': ' + (t.cachedToday ? '\u2713 computed today' : '\u2717 NO today-cache') + '\n';
+      const lc = t.liveCompute || {};
+      if (lc.ma50) m += '  50d $' + lc.ma50 + ' | 100d $' + lc.ma100 + ' | atr $' + lc.atr + '\n';
+      else m += '  live MAs: ' + (lc.error ? ('ERROR ' + lc.error) : 'none returned') + '\n';
+      m += '  price $' + (t.price||0) + ' \u2192 ' + (t.structure||'?') + '\n\n';
+    }
+    alert(m);
+  } catch(e) { alert('Trend probe error: ' + e.message); }
 }
 
 async function resetDailyPnL() {
