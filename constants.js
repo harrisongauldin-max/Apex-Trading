@@ -698,6 +698,8 @@ const ITREND_END_ET       = 13.5;   // no new entries after 1:30pm ET (Gao et al
 const ITREND_TRAIL_ARM_PCT      = 0.15;
 const ITREND_TRAIL_GIVEBACK_PCT = 0.07;
 const ITREND_STOP_PCT     = 0.30;   // hard floor (0.50-delta 14-DTE is more volatile than deep-ITM)
+const ITREND_COOLDOWN_MIN = 30;     // 8/28 (panel): the OR condition is a STATE not an event, so a sustained trend
+                                    // could re-fire right after an exit. Cooldown bounds re-entry churn per ticker.
 const GEX_FETCH_ENABLED           = true;    // 8/26: dedicated both-sides near-expiry GEX chain fetch (feeds the regime switch)
 const GEX_FETCH_THROTTLE_MS       = 120000;  // per-ticker: refetch the gamma chain at most every 2 min
 const BREAK_ENTRY_SCORE           = 80;      // fixed stamp a break entry carries; clears MIN_SCORE(70)+slot2(75), NOT slot3(85). NOT a quality measure.
@@ -877,7 +879,7 @@ module.exports = {
   TREND_CUTOFF_ET, TREND_RISK_BUDGET, TREND_TRAIL_ARM_PCT, TREND_STOP_UNDL_PCT, TREND_STOP_PCT, TREND_TRAIL_GIVEBACK_PCT,
   ITREND_ENABLED, ITREND_DELTA, ITREND_DELTA_MIN, ITREND_DELTA_MAX, ITREND_TARGET_DTE, ITREND_DTE_MIN, ITREND_DTE_MAX,
   ITREND_ADX_MIN, ITREND_VWAP_MIN, ITREND_BREADTH_STRONG, ITREND_START_ET, ITREND_END_ET,
-  ITREND_TRAIL_ARM_PCT, ITREND_TRAIL_GIVEBACK_PCT, ITREND_STOP_PCT,
+  ITREND_TRAIL_ARM_PCT, ITREND_TRAIL_GIVEBACK_PCT, ITREND_STOP_PCT, ITREND_COOLDOWN_MIN,
   MR_SCALP_FASTCUT_MIN, MR_SCALP_FASTCUT_PEAK, MR_SCALP_GIVEBACK_PEAK, MR_SCALP_GIVEBACK_FRAC,
   MR_SCALP_TRAIL_ARM, MR_SCALP_TRAIL_GIVE, MR_SCALP_TP,
   HIGH_RISK_MIN_SCORE,
