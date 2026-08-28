@@ -38,6 +38,7 @@ const { CAPITAL_FLOOR, MIN_OPTION_PREMIUM, MIN_OI,
         MR_SCALP_TARGET_DTE = 1, MR_SCALP_DELTA = 0.42,
         BREAK_DELTA = 0.70, BREAK_DELTA_MIN = 0.55, BREAK_DELTA_MAX = 0.85, BREAK_TARGET_DTE = 7,
         TREND_DELTA = 0.65, TREND_DELTA_MIN = 0.55, TREND_DELTA_MAX = 0.75, TREND_TARGET_DTE = 60, TREND_RISK_BUDGET = 0.01,
+        ITREND_DELTA = 0.50, ITREND_DELTA_MIN = 0.42, ITREND_DELTA_MAX = 0.60, ITREND_TARGET_DTE = 14,
         VOL_INFRA_ENABLED = false, CHAIN_RETAIN_ENABLED = false, CHAIN_RETAIN_MAX = 60,
         SLIPPAGE_LOG_ENABLED = false, DECISION_SPLIT_LOG = false,
         SPREAD_COST_LOG = false, FEASIBILITY_ENABLED = false, FEASIBILITY_ENFORCE = false,
@@ -372,7 +373,7 @@ async function executeTrade(stock, price, score, scoreReasons, vix, optionType =
   // bounce trap while keeping the gamma that captures the fast snap. Detected via stock._mrScalp
   // (set in the scanner detector). Otherwise the normal MR/momentum profile applies.
   const _mrScalp = stock && stock._mrScalp === true;
-  const targetDelta = (stock && stock._isTrend) ? TREND_DELTA : (stock && stock._structBreak) ? BREAK_DELTA : (_mrScalp ? MR_SCALP_DELTA : (isMeanReversion ? 0.42 : 0.35));   // 8/25: break = deep-ITM; 8/27: trend-swing = deep-ITM
+  const targetDelta = (stock && stock._iTrend) ? ITREND_DELTA : (stock && stock._isTrend) ? TREND_DELTA : (stock && stock._structBreak) ? BREAK_DELTA : (_mrScalp ? MR_SCALP_DELTA : (isMeanReversion ? 0.42 : 0.35));   // 8/25 break; 8/27 trend-swing; 8/28 intraday-trend=ATM
   // 6/30 (Harrison): DTE resolution.
   //   dteBand === "sameweek" → force 0-8 DTE leg.  dteBand === "standard" → force the 30-50 momentum band.
   //   dteBand === null (normal call) → DATA_GATHER_MODE forces same-week; otherwise per-profile default.
@@ -380,7 +381,8 @@ async function executeTrade(stock, price, score, scoreReasons, vix, optionType =
   const _dgm = dataGatherActive(DATA_GATHER_MODE);
   // 8/03: THIRD BAND. 13 sits mid-window of an empty 9-16 DTE gap between the two existing
   // legs — 20 sessions produced literally zero trades there, so its behaviour is unknown.
-  const targetDTE = (stock && stock._isTrend) ? TREND_TARGET_DTE
+  const targetDTE = (stock && stock._iTrend) ? ITREND_TARGET_DTE
+                  : (stock && stock._isTrend) ? TREND_TARGET_DTE
                   : (stock && stock._structBreak) ? BREAK_TARGET_DTE
                   : _mrScalp ? MR_SCALP_TARGET_DTE
                   : dteBand === "sameweek" ? 3
@@ -521,8 +523,8 @@ async function executeTrade(stock, price, score, scoreReasons, vix, optionType =
   }
 
   const delta = parseFloat(contract.greeks.delta || 0);
-  const _dMin = (stock && stock._isTrend) ? TREND_DELTA_MIN : (stock && stock._structBreak) ? BREAK_DELTA_MIN : TARGET_DELTA_MIN;
-  const _dMax = (stock && stock._isTrend) ? TREND_DELTA_MAX : (stock && stock._structBreak) ? BREAK_DELTA_MAX : TARGET_DELTA_MAX;
+  const _dMin = (stock && stock._iTrend) ? ITREND_DELTA_MIN : (stock && stock._isTrend) ? TREND_DELTA_MIN : (stock && stock._structBreak) ? BREAK_DELTA_MIN : TARGET_DELTA_MIN;
+  const _dMax = (stock && stock._iTrend) ? ITREND_DELTA_MAX : (stock && stock._isTrend) ? TREND_DELTA_MAX : (stock && stock._structBreak) ? BREAK_DELTA_MAX : TARGET_DELTA_MAX;
   if (Math.abs(delta) < _dMin || Math.abs(delta) > _dMax) {
     logEvent("filter", `${stock.ticker} - delta ${delta} outside ${stock && stock._structBreak ? "break" : "target"} range`);
     return false;
@@ -724,7 +726,7 @@ async function executeTrade(stock, price, score, scoreReasons, vix, optionType =
     fastStopPct:    exitParams.fastStopPct,
     dteLabel:       exitParams.label,
     isMeanReversion: isMeanReversion,
-    entryStrategy:  stock._isTrend ? "trend-swing" : stock._structBreak ? "struct-break" : (stock._mrFade ? "mr-fade-lit" : (_mrScalp ? "mr-scalp" : (stock._mrStrong ? "mr" : "breakout-or-context"))),   // 8/09: A/B; 8/24: mr-fade-lit; 8/27: trend-swing
+    entryStrategy:  stock._iTrend ? "intraday-trend" : stock._isTrend ? "trend-swing" : stock._structBreak ? "struct-break" : (stock._mrFade ? "mr-fade-lit" : (_mrScalp ? "mr-scalp" : (stock._mrStrong ? "mr" : "breakout-or-context"))),   // 8/28: +intraday-trend
     _mrScalp:       _mrScalp,                                              // 8/09: routes the fast scalp exits in exitEngine
     _mrEntryVWAP:   _mrScalp ? (stock._mrEntryVWAP || price || null) : null,   // reversion target = reclaim of entry VWAP
     dteBand:        dteBand || (_sameWeekLeg ? "sameweek" : "standard"),   // 6/30: A/B leg tag for twin-entry comparison
@@ -880,6 +882,7 @@ async function executeTrade(stock, price, score, scoreReasons, vix, optionType =
   }
   if (stock._structBreak) { (_openSame || position)._isStructBreak = true; }
   if (stock._isTrend) { (_openSame || position)._isTrend = true; }
+  if (stock._iTrend) { (_openSame || position)._iTrend = true; }
   (_openSame || position)._entryX = {
     mrInvalidation: (stock._mrFade && typeof stock._mrFade.invalidationPx === "number") ? parseFloat(stock._mrFade.invalidationPx.toFixed(2)) : null,
     breadth:    (typeof state._breadth === "number") ? state._breadth : null,
