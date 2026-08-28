@@ -3061,10 +3061,18 @@ async function runScan() {
             const _downTrend = price < _tm.ma50 && _tm.ma50 < _tm.ma100;
             const _overExt   = Math.abs(price - _tm.ma50) > TREND_OVEREXT_ATR * _tm.atr;
             let _tSide = null, _tReason = null;
-            if (_upTrend && !_overExt && _drsi >= TREND_RSI_MIN && _drsi <= TREND_RSI_MAX && _macd === "bullish" && _brdth >= TREND_BREADTH_MIN) {
-              _tSide = "call"; _tReason = `daily uptrend $${price.toFixed(2)}>50d$${_tm.ma50}>100d$${_tm.ma100} dRSI${_drsi.toFixed(0)} brdth${_brdth}%`;
-            } else if (_downTrend && !_overExt && _drsi <= (100 - TREND_RSI_MIN) && _drsi >= (100 - TREND_RSI_MAX) && _macd === "bearish" && _brdth <= (100 - TREND_BREADTH_MIN)) {
-              _tSide = "put";  _tReason = `daily downtrend $${price.toFixed(2)}<50d$${_tm.ma50}<100d$${_tm.ma100} dRSI${_drsi.toFixed(0)} brdth${_brdth}%`;
+            // 8/27: LOOSENED to the literature (Moskowitz/Clenow) — price-vs-MA IS the signal.
+            // Dropped the MACD-bullish + RSI>=50 confirmation (my add-ons, not the momentum edge).
+            // KEPT: not-overextended (Daniel-Moskowitz crash filter), RSI upper guardrail (exhaustion),
+            // breadth not actively against (light participation check, not a hard gate).
+            const _rsiOverbought = _drsi >= TREND_RSI_MAX;      // don't buy a blow-off top
+            const _rsiOversold   = _drsi <= (100 - TREND_RSI_MAX);
+            const _brdthAgainstCall = _brdth < (100 - TREND_BREADTH_MIN);   // breadth actively bearish
+            const _brdthAgainstPut  = _brdth > TREND_BREADTH_MIN;           // breadth actively bullish
+            if (_upTrend && !_overExt && !_rsiOverbought && !_brdthAgainstCall) {
+              _tSide = "call"; _tReason = `daily uptrend $${price.toFixed(2)}>50d$${_tm.ma50}>100d$${_tm.ma100} dRSI${_drsi.toFixed(0)} brdth${_brdth}% [lit: price-vs-MA]`;
+            } else if (_downTrend && !_overExt && !_rsiOversold && !_brdthAgainstPut) {
+              _tSide = "put";  _tReason = `daily downtrend $${price.toFixed(2)}<50d$${_tm.ma50}<100d$${_tm.ma100} dRSI${_drsi.toFixed(0)} brdth${_brdth}% [lit: price-vs-MA]`;
             }
             const _haveTrend = (state.positions || []).some(p => p.ticker === stock.ticker && p.entryStrategy === "trend-swing" && p.optionType === _tSide && !p.closed);
             if (_tSide && !_haveTrend) {
