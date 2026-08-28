@@ -3638,6 +3638,7 @@ async function runScan() {
 
 module.exports = {
   runScan,
+  ensureDailyTrend,
   getScannerState: () => ({
     scanRunning, dryRunMode, marketContext,
     lastScanStart: _lastScanStart,
