@@ -3112,19 +3112,41 @@ async function runScan() {
         const _mrDec  = MRSTRAT.evaluateMRFade({ rsi: stock.rsi, vwapPct: _mrVwap, adx: stock.adx },
                                                (state._gexNow && state._gexNow[stock.ticker]) || null, price);
         if (_mrDec.fire) {
+          // 8/27: don't fade AGAINST the daily trend (Chan regime-conditional MR). Fading strength in a
+          // daily uptrend (puts) / weakness in a downtrend (calls) is the falling knife — 4/5 puts died this way 8/27.
+          const _dt = await ensureDailyTrend(stock.ticker);
+          let _fadeVsTrend = false;
+          if (_dt && _dt.ma50 && _dt.ma100) {
+            const _dUp = price > _dt.ma50 && _dt.ma50 > _dt.ma100;
+            const _dDn = price < _dt.ma50 && _dt.ma50 < _dt.ma100;
+            if (_mrDec.side === "put"  && _dUp) _fadeVsTrend = true;
+            if (_mrDec.side === "call" && _dDn) _fadeVsTrend = true;
+          } else {
+            // fail-open (don't block on missing data) but LOG it so the protection gap is visible
+            logEvent("filter", `[MR-FADE] ${stock.ticker} daily-trend check unavailable (no MA) — fade NOT gated this scan`);
+          }
+          // VWAP slope — INFORMATIONAL tag only (logged, NOT a blocker; promote to a gate later only if data earns it)
+          const _vwSlope = (state._vwapSlope || {})[stock.ticker] ?? 0;
+          const _vwTag = _vwSlope > 0.0001 ? "up" : (_vwSlope < -0.0001 ? "down" : "flat");
+          const _vwWith = (_vwTag === (_mrDec.side === "put" ? "down" : "up")) ? "with" : (_vwTag === "flat" ? "flat" : "against");
+          if (_fadeVsTrend) {
+            recordStandDown("mrf", "fade vs daily trend");
+            logEvent("filter", `[MR-FADE] ${stock.ticker} ${_mrDec.side} BLOCKED — fading against the daily trend (px vs 50d/100d); vwapSlope ${_vwTag}`);
+          } else {
           const _hasPos = (state.positions || []).some(p => p.ticker === stock.ticker && p.optionType === _mrDec.side && !p.closed);
           if (_hasPos) {
             recordStandDown("mrf", "position already open");
             logEvent("filter", `[MR-FADE] ${stock.ticker} ${_mrDec.side} setup, but a ${_mrDec.side} position is already open — standing down`);
           } else {
             recordStandDown("mrf", "FIRED");
-            logEvent("filter", `[MR-FADE] ${stock.ticker} FIRE — ${_mrDec.reason}`);
+            logEvent("filter", `[MR-FADE] ${stock.ticker} FIRE — ${_mrDec.reason} | vwapSlope ${_vwTag} (${_vwWith} fade)`);
             stock._mrFade = _mrDec;                     // tags entryStrategy + carries invalidation into _entryX
             const _mrSigId = `${stock.ticker}-${_mrDec.side}-mrfade-${Date.now()}`;   // own signalId (the momentum _sigId is defined later — TDZ)
             const _mrScore = (typeof score === "number") ? score : 0;
             const _mrOK = await executeTrade(stock, price, _mrScore, [_mrDec.reason], state.vix, _mrDec.side, true, 1.0, null, null, _mrSigId);
             stock._mrFade = null;
             if (_mrOK) continue;                         // handled by the MR path this scan; skip the momentum entry
+          }
           }
         } else {
           recordStandDown("mrf", _mrDec.reason);        // 8/25: tally the decline reason (regime / not-at-level / not-extreme)
