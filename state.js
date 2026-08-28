@@ -521,7 +521,7 @@ async function saveDailyLogToRedis(isEOD = false) {
     state._momoBlocks = []; state._momoShadow = []; state._momoLastMin = {};
     state._nearMiss = []; state._nmLastMin = {};
     state._entryFwd = [];
-    state._standDownTally = { brk: {}, mrf: {} };   // 8/25: reset the stand-down tally each day
+    state._standDownTally = { brk: {}, mrf: {}, trend: {} };   // 8/25: reset daily; 8/27: +trend bucket
     state._vfSkip = [];
     state._vetoBlocks = [];
     markDirty();
@@ -875,8 +875,8 @@ async function restoreBuffersFromRedis() {
 // of the raw constant so the switch is flippable without a code change.
 function recordStandDown(strat, rawReason) {   // 8/25: tally why breaks/MR-fades did/didn't fire (regime-starved vs gate-starved)
   try {
-    if (!state._standDownTally) state._standDownTally = { brk: {}, mrf: {} };
-    const book = strat === "brk" ? state._standDownTally.brk : state._standDownTally.mrf;
+    if (!state._standDownTally) state._standDownTally = { brk: {}, mrf: {}, trend: {} };
+    const book = strat === "brk" ? state._standDownTally.brk : strat === "trend" ? state._standDownTally.trend : state._standDownTally.mrf;
     const key = String(rawReason || "other").replace(/[0-9]+(\.[0-9]+)?/g, "N").replace(/\s+/g, " ").trim().slice(0, 60);
     book[key] = (book[key] || 0) + 1;
   } catch (_) {}
