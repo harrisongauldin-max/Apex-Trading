@@ -1327,6 +1327,41 @@ app.get("/api/outcomes", async (req, res) => {
 // 8/27: TRADE HISTORY — pulls EVERY fill this account has made from Alpaca (ground truth) and
 // reconstructs round-trip trades with REAL realized P&L, independent of the (partially corrupt)
 // journal. Secret-gated (reads account activity); GET so the dashboard button downloads it directly.
+// 8/28: TREND PROBE — live snapshot of the trend-swing evaluator's state, so "is it running?" is
+// answerable in one click instead of waiting for EOD. Reports TREND_ENABLED, whether _dailyMA was
+// computed today (proves the evaluator ran), a live ensureDailyTrend call (proves the data path),
+// and the current trend structure per ticker.
+app.get("/api/trend-probe", requireSecret, async (req, res) => {
+  try {
+    const { state } = require('./state');
+    const C = require('./constants');
+    const scanner = require('./scanner');
+    const _today = new Date().toLocaleDateString("en-US", { timeZone: "America/New_York" });
+    const out = { trendEnabled: C.TREND_ENABLED, today: _today, cutoffET: C.TREND_CUTOFF_ET, tickers: {} };
+    for (const tk of ["SPY", "QQQ"]) {
+      const cached = (state._dailyMA || {})[tk] || null;
+      let live = null;
+      try { live = await scanner.ensureDailyTrend(tk); } catch (e) { live = { error: e && e.message }; }
+      const price = (tk === "SPY") ? (state._liveSPY || 0) : (state._liveQQQ || state._liveQQ || 0);
+      let structure = "unknown (need live MAs + price)";
+      if (live && live.ma50 && live.ma100 && price > 0) {
+        const up = price > live.ma50 && live.ma50 > live.ma100;
+        const dn = price < live.ma50 && live.ma50 < live.ma100;
+        const overExt = Math.abs(price - live.ma50) > C.TREND_OVEREXT_ATR * live.atr;
+        structure = up ? (overExt ? "uptrend but OVEREXTENDED (no call)" : "UPTREND -> call candidate")
+                  : dn ? (overExt ? "downtrend but OVEREXTENDED (no put)" : "DOWNTREND -> put candidate")
+                  : "no daily trend (price between 50d/100d)";
+      }
+      out.tickers[tk] = { cachedToday: !!(cached && cached.date === _today), cache: cached, liveCompute: live, price, structure };
+    }
+    out.verdict = (!C.TREND_ENABLED) ? "TREND_ENABLED is FALSE — sleeve disabled (deploy constants.js)"
+      : (out.tickers.SPY.cachedToday || out.tickers.QQQ.cachedToday) ? "LIVE — evaluator computed _dailyMA today"
+      : (out.tickers.SPY.liveCompute && out.tickers.SPY.liveCompute.ma50) ? "functions OK — computed just now (no earlier today-cache found)"
+      : "PROBLEM — ensureDailyTrend returned no MAs (check daily bars)";
+    res.json(out);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 app.get("/api/trade-history", requireSecret, async (req, res) => {
   try {
     const { buildTradeHistoryCSV } = require('./tradeHistory');
