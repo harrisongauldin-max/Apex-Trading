@@ -122,6 +122,8 @@ const {
   GEX_FETCH_ENABLED = true, GEX_FETCH_THROTTLE_MS = 120000,
   TREND_ENABLED = false, TREND_CUTOFF_ET = 15.0, TREND_MA_FAST = 50, TREND_MA_SLOW = 100,
   TREND_RSI_MIN = 50, TREND_RSI_MAX = 72, TREND_OVEREXT_ATR = 4.0, TREND_BREADTH_MIN = 52,
+  ITREND_ENABLED = false, ITREND_ADX_MIN = 25, ITREND_VWAP_MIN = 0.05, ITREND_BREADTH_STRONG = 55,
+  ITREND_START_ET = 10.0, ITREND_END_ET = 13.5,
   BREAK_ENTRY_SCORE = 80, BREAK_CONFIRM_BARS = 1, BREAK_MAX_AGE_MIN = 10, BREAK_VOL_LOOKBACK = 10,
   BREAK_VOL_MULT_PUT = 1.8, BREAK_VOL_MULT_CALL = 2.2, BREAK_ADX_MIN_PUT = 18, BREAK_ADX_MIN_CALL = 22,
   BREAK_VWAP_SLOPE_MIN = 0.0002, BREAK_MAX_EXT_PCT = 0.006, BREAK_CALL_CUTOFF_ET = 12.0,
@@ -3087,6 +3089,45 @@ async function runScan() {
           } else { recordStandDown("trend", "daily MA unavailable"); }
         } else { recordStandDown("trend", "past 3pm cutoff"); }
       } catch (_te) { logEvent("warn", `[TREND-SWING] ${stock.ticker} eval failed — ${_te && _te.message}`); }
+    }
+
+    // 8/28: INTRADAY-TREND sleeve — same-day directional (ORB + VWAP + slope + ADX confluence, NO score).
+    // Own path, bypasses the score/enforce like the other sleeves. Deliberate paper experiment: the tape
+    // test said continuation doesn't continue, so this is gated HARD (ADX>=25 + real OR break) and fully
+    // logged so forward fills settle it. Fires 10:00-13:30 ET only.
+    if (ITREND_ENABLED && stock && price > 0) {
+      try {
+        const _iH = (() => { const d = getETTime(); return d.getHours() + d.getMinutes() / 60; })();
+        if (_iH >= ITREND_START_ET && _iH < ITREND_END_ET) {
+          const _ior   = state._openRange ? state._openRange[stock.ticker] : null;
+          const _iVw   = (stock.intradayVWAP > 0 && price > 0) ? ((price - stock.intradayVWAP) / stock.intradayVWAP) * 100 : null;
+          const _iSlope = (state._vwapSlope || {})[stock.ticker] ?? 0;
+          const _iAdx  = (typeof stock.adx === "number") ? stock.adx : 0;
+          const _iBr   = (marketContext && marketContext.breadth && typeof marketContext.breadth.breadthPct === "number") ? marketContext.breadth.breadthPct : 50;
+          if (_ior && _ior.locked && _ior.low > 0 && _ior.high > 0 && _iVw !== null && _iAdx >= ITREND_ADX_MIN) {
+            // breadth is SOFT/fail-open: block only when actively against (neutral ~50 passes both sides)
+            const _brAgainstPut  = _iBr > ITREND_BREADTH_STRONG;          // breadth actively bullish
+            const _brAgainstCall = _iBr < (100 - ITREND_BREADTH_STRONG);  // breadth actively bearish
+            let _iSide = null, _iReason = null;
+            if (_iVw <= -ITREND_VWAP_MIN && _iSlope < 0 && price < _ior.low && !_brAgainstPut) {
+              _iSide = "put";  _iReason = `intraday downtrend: vwap${_iVw.toFixed(2)}% slope<0 px$${price.toFixed(2)}<ORlow$${_ior.low.toFixed(2)} adx${_iAdx.toFixed(0)} brdth${_iBr}%`;
+            } else if (_iVw >= ITREND_VWAP_MIN && _iSlope > 0 && price > _ior.high && !_brAgainstCall) {
+              _iSide = "call"; _iReason = `intraday uptrend: vwap+${_iVw.toFixed(2)}% slope>0 px$${price.toFixed(2)}>ORhigh$${_ior.high.toFixed(2)} adx${_iAdx.toFixed(0)} brdth${_iBr}%`;
+            }
+            const _iHave = (state.positions || []).some(p => p.ticker === stock.ticker && p.entryStrategy === "intraday-trend" && p.optionType === _iSide && !p.closed);
+            if (_iSide && !_iHave) {
+              stock._iTrend = _iSide;
+              const _iOK = await executeTrade(stock, price, 0, [_iReason], state.vix, _iSide, false, 1.0, null, null, `${stock.ticker}-${_iSide}-itrend-${Date.now()}`);
+              stock._iTrend = null;
+              if (_iOK) { recordStandDown("itrend", "FIRED"); logEvent("filter", `[INTRADAY-TREND] ${stock.ticker} ${_iSide.toUpperCase()} FIRED — ${_iReason}`); continue; }
+            } else {
+              recordStandDown("itrend", _iSide ? "position already open" : "no aligned intraday trend (need vwap+slope+ORbreak agree)");
+            }
+          } else {
+            recordStandDown("itrend", (!_ior || !_ior.locked) ? "OR not locked" : (_iAdx < ITREND_ADX_MIN ? `ADX ${_iAdx.toFixed(0)}<${ITREND_ADX_MIN} (chop)` : "no vwap"));
+          }
+        } else { recordStandDown("itrend", "outside 10:00-13:30 window"); }
+      } catch (_ie) { logEvent("warn", `[INTRADAY-TREND] ${stock.ticker} eval failed — ${_ie && _ie.message}`); }
     }
 
     // 8/11 FIX 1: MR-SCALP IS CALL-ONLY — revoked ONCE, here, before anything downstream reads the flag.
