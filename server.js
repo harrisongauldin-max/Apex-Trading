@@ -1331,34 +1331,67 @@ app.get("/api/outcomes", async (req, res) => {
 // answerable in one click instead of waiting for EOD. Reports TREND_ENABLED, whether _dailyMA was
 // computed today (proves the evaluator ran), a live ensureDailyTrend call (proves the data path),
 // and the current trend structure per ticker.
+// 8/28: download the full in-memory session log as a .txt (same buffer the EOD email attaches),
+// so the day's log is one click away instead of waiting for the EOD email.
+app.get("/api/logs/download", requireSecret, (req, res) => {
+  try {
+    const { state } = require('./state');
+    const buf = state._dailyLogBuffer || [];
+    const fmtTime = iso => { try { return new Date(iso).toLocaleTimeString('en-US', { timeZone: 'America/New_York', hour12: true }); } catch (_) { return iso; } };
+    const stamp = new Date().toLocaleString('en-US', { timeZone: 'America/New_York' });
+    const header = `APEX — Server Log — ${stamp}\n${buf.length} entries\n` + "-".repeat(60) + "\n\n";
+    const lines = buf.map(e => `[${fmtTime(e.time)}] ${String(e.type || "").toUpperCase().padEnd(7)} ${e.message || ""}`);
+    res.setHeader("Content-Type", "text/plain");
+    res.setHeader("Content-Disposition", `attachment; filename="argo-server-log-${new Date().toISOString().slice(0,10)}.txt"`);
+    res.setHeader("X-Log-Entries", buf.length);
+    res.send(header + lines.join("\n"));
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 app.get("/api/trend-probe", requireSecret, async (req, res) => {
   try {
     const { state } = require('./state');
     const C = require('./constants');
     const scanner = require('./scanner');
+    const { getStockQuote } = require('./broker');
     const _today = new Date().toLocaleDateString("en-US", { timeZone: "America/New_York" });
-    const out = { trendEnabled: C.TREND_ENABLED, today: _today, cutoffET: C.TREND_CUTOFF_ET, tickers: {} };
+    const rows = [];
+    let anyCachedToday = false, anyMAs = false;
     for (const tk of ["SPY", "QQQ"]) {
       const cached = (state._dailyMA || {})[tk] || null;
+      const cachedToday = !!(cached && cached.date === _today);
+      if (cachedToday) anyCachedToday = true;
       let live = null;
       try { live = await scanner.ensureDailyTrend(tk); } catch (e) { live = { error: e && e.message }; }
-      const price = (tk === "SPY") ? (state._liveSPY || 0) : (state._liveQQQ || state._liveQQ || 0);
-      let structure = "unknown (need live MAs + price)";
-      if (live && live.ma50 && live.ma100 && price > 0) {
-        const up = price > live.ma50 && live.ma50 > live.ma100;
-        const dn = price < live.ma50 && live.ma50 < live.ma100;
-        const overExt = Math.abs(price - live.ma50) > C.TREND_OVEREXT_ATR * live.atr;
-        structure = up ? (overExt ? "uptrend but OVEREXTENDED (no call)" : "UPTREND -> call candidate")
-                  : dn ? (overExt ? "downtrend but OVEREXTENDED (no put)" : "DOWNTREND -> put candidate")
-                  : "no daily trend (price between 50d/100d)";
+      // live price via quote (ticker-agnostic; state only stores SPY)
+      let price = (tk === "SPY") ? (state._liveSPY || 0) : 0;
+      try { const q = await getStockQuote(tk); if (typeof q === "number" && q > 0) price = q; else if (q && q.price > 0) price = q.price; } catch (_) {}
+      let up = "", dn = "", overExt = "", structure = "unknown (need live MAs + price)";
+      if (live && live.ma50 && live.ma100 && live.atr) {
+        anyMAs = true;
+        if (price > 0) {
+          up = String(price > live.ma50 && live.ma50 > live.ma100);
+          dn = String(price < live.ma50 && live.ma50 < live.ma100);
+          overExt = String(Math.abs(price - live.ma50) > C.TREND_OVEREXT_ATR * live.atr);
+          structure = (up === "true") ? (overExt === "true" ? "uptrend but OVEREXTENDED (no call)" : "UPTREND -> call candidate")
+                    : (dn === "true") ? (overExt === "true" ? "downtrend but OVEREXTENDED (no put)" : "DOWNTREND -> put candidate")
+                    : "no daily trend (price between 50d/100d)";
+        }
       }
-      out.tickers[tk] = { cachedToday: !!(cached && cached.date === _today), cache: cached, liveCompute: live, price, structure };
+      rows.push({ tk, cachedToday, ma50: (live && live.ma50) || "", ma100: (live && live.ma100) || "", atr: (live && live.atr) || "", price, up, dn, overExt, structure, err: (live && live.error) || "" });
     }
-    out.verdict = (!C.TREND_ENABLED) ? "TREND_ENABLED is FALSE — sleeve disabled (deploy constants.js)"
-      : (out.tickers.SPY.cachedToday || out.tickers.QQQ.cachedToday) ? "LIVE — evaluator computed _dailyMA today"
-      : (out.tickers.SPY.liveCompute && out.tickers.SPY.liveCompute.ma50) ? "functions OK — computed just now (no earlier today-cache found)"
-      : "PROBLEM — ensureDailyTrend returned no MAs (check daily bars)";
-    res.json(out);
+    const verdict = (!C.TREND_ENABLED) ? "TREND_ENABLED FALSE - sleeve disabled (deploy constants.js)"
+      : anyCachedToday ? "LIVE - evaluator computed _dailyMA today"
+      : anyMAs ? "functions OK - computed just now (no earlier today-cache)"
+      : "PROBLEM - ensureDailyTrend returned no MAs (check daily bars)";
+    const esc = v => { const s = String(v == null ? "" : v); return /[",\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s; };
+    const header = "ticker,trendEnabled,cutoffET,cachedToday,ma50,ma100,atr,price,upTrend,downTrend,overExtended,structure,verdict,error";
+    const lines = [header];
+    for (const r of rows) lines.push([r.tk, C.TREND_ENABLED, C.TREND_CUTOFF_ET, r.cachedToday, r.ma50, r.ma100, r.atr, r.price, r.up, r.dn, r.overExt, r.structure, verdict, r.err].map(esc).join(","));
+    res.setHeader("Content-Type", "text/csv");
+    res.setHeader("Content-Disposition", `attachment; filename="argo-trend-probe.csv"`);
+    res.setHeader("X-TP-Verdict", verdict);
+    res.send(lines.join("\n"));
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
