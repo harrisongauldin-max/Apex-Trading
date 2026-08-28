@@ -123,7 +123,7 @@ const {
   TREND_ENABLED = false, TREND_CUTOFF_ET = 15.0, TREND_MA_FAST = 50, TREND_MA_SLOW = 100,
   TREND_RSI_MIN = 50, TREND_RSI_MAX = 72, TREND_OVEREXT_ATR = 4.0, TREND_BREADTH_MIN = 52,
   ITREND_ENABLED = false, ITREND_ADX_MIN = 25, ITREND_VWAP_MIN = 0.05, ITREND_BREADTH_STRONG = 55,
-  ITREND_START_ET = 10.0, ITREND_END_ET = 13.5,
+  ITREND_START_ET = 10.0, ITREND_END_ET = 13.5, ITREND_COOLDOWN_MIN = 30,
   BREAK_ENTRY_SCORE = 80, BREAK_CONFIRM_BARS = 1, BREAK_MAX_AGE_MIN = 10, BREAK_VOL_LOOKBACK = 10,
   BREAK_VOL_MULT_PUT = 1.8, BREAK_VOL_MULT_CALL = 2.2, BREAK_ADX_MIN_PUT = 18, BREAK_ADX_MIN_CALL = 22,
   BREAK_VWAP_SLOPE_MIN = 0.0002, BREAK_MAX_EXT_PCT = 0.006, BREAK_CALL_CUTOFF_ET = 12.0,
@@ -3115,13 +3115,17 @@ async function runScan() {
               _iSide = "call"; _iReason = `intraday uptrend: vwap+${_iVw.toFixed(2)}% slope>0 px$${price.toFixed(2)}>ORhigh$${_ior.high.toFixed(2)} adx${_iAdx.toFixed(0)} brdth${_iBr}%`;
             }
             const _iHave = (state.positions || []).some(p => p.ticker === stock.ticker && p.entryStrategy === "intraday-trend" && p.optionType === _iSide && !p.closed);
-            if (_iSide && !_iHave) {
+            if (!state._iTrendLast) state._iTrendLast = {};
+            const _iCoolKey = `${stock.ticker}-${_iSide}`;
+            const _iCooling = _iSide && (Date.now() - (state._iTrendLast[_iCoolKey] || 0)) < ITREND_COOLDOWN_MIN * 60000;
+            if (_iSide && !_iHave && !_iCooling) {
               stock._iTrend = _iSide;
+              state._iTrendLast[_iCoolKey] = Date.now();
               const _iOK = await executeTrade(stock, price, 0, [_iReason], state.vix, _iSide, false, 1.0, null, null, `${stock.ticker}-${_iSide}-itrend-${Date.now()}`);
               stock._iTrend = null;
               if (_iOK) { recordStandDown("itrend", "FIRED"); logEvent("filter", `[INTRADAY-TREND] ${stock.ticker} ${_iSide.toUpperCase()} FIRED — ${_iReason}`); continue; }
             } else {
-              recordStandDown("itrend", _iSide ? "position already open" : "no aligned intraday trend (need vwap+slope+ORbreak agree)");
+              recordStandDown("itrend", !_iSide ? "no aligned intraday trend (need vwap+slope+ORbreak agree)" : _iHave ? "position already open" : "cooldown (recent fire)");
             }
           } else {
             recordStandDown("itrend", (!_ior || !_ior.locked) ? "OR not locked" : (_iAdx < ITREND_ADX_MIN ? `ADX ${_iAdx.toFixed(0)}<${ITREND_ADX_MIN} (chop)` : "no vwap"));
