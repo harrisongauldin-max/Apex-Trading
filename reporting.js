@@ -431,6 +431,8 @@ function buildStandDownSection() {
     html += fmt(t.mrf, "MR FADE");
     html += `<br>`;
     html += fmt(t.trend, "TREND-SWING");
+    html += `<br>`;
+    html += fmt(t.itrend, "INTRADAY-TREND");
     html += `<br><i>Read: "regime" / "no break" dominating &rarr; the tape wasn't tradeable (accept, nothing to fix).
              "not at a level" / "ADX too low" / "no extreme+stretch" piling up on real setups &rarr; a gate may be
              too tight (candidate to tune). "positive-gamma standdown" = breaks correctly deferring to the fade.</i><br>`;
