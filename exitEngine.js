@@ -49,6 +49,7 @@ const {
   MR_SCALP_TRAIL_ARM = 0.10, MR_SCALP_TRAIL_GIVE = 0.04, MR_SCALP_TP = 0.20,
   CP1_CRASH_ENABLED = false, CP1_CRASH_PCT = -5,
   TREND_STOP_PCT = 0.125, TREND_TRAIL_ARM_PCT = 0.10, TREND_TRAIL_GIVEBACK_PCT = 0.05, TREND_ROLL_DTE = 21,
+  ITREND_STOP_PCT = 0.30, ITREND_TRAIL_ARM_PCT = 0.15, ITREND_TRAIL_GIVEBACK_PCT = 0.07,
   MR_FADE_TP = 0.30, MR_FADE_MAX_HOLD_MIN = 45,
   BREAK_MAX_HOLD_MIN = 120, BREAK_TRAIL_ARM_PCT = 0.25, BREAK_TRAIL_GIVEBACK_PCT = 0.15,
   FASTCUT_ENABLED = false, FASTCUT_MIN = 6, FASTCUT_PEAK_SHORT = 0.03, FASTCUT_PEAK_MID = 0.02,
@@ -429,6 +430,22 @@ async function checkExits(positions, posSnapshots, posQuotes, posNewsCache, ctx)
         pos.currentPrice = curP; markDirty();
       }
       continue;   // UNCONDITIONAL — swing sleeve, holds overnight
+    }
+
+    // ── 8/28: INTRADAY-TREND (same-day) ──────────────────────────────────────────
+    // Trail + hard stop. Intraday class — flattens at 3:15 via the cron (not exempt). No overnight,
+    // no DTE roll. Own block before the generic rails, unconditional continue.
+    if (pos._iTrend) {
+      pos._iTrendPeak = Math.max(typeof pos._iTrendPeak === "number" ? pos._iTrendPeak : -Infinity, chg);
+      let _iReason = null;
+      if (chg <= -ITREND_STOP_PCT) _iReason = "itrend-stop";
+      else if (pos._iTrendPeak >= ITREND_TRAIL_ARM_PCT && chg <= pos._iTrendPeak - ITREND_TRAIL_GIVEBACK_PCT) _iReason = "itrend-trail";
+      if (_iReason && !_closedThisCycle.has(pi)) {
+        _closedThisCycle.add(pi);
+        logEvent("scan", `[INTRADAY-TREND] ${pos.ticker} exit — ${_iReason} (chg ${(chg*100).toFixed(1)}%, peak ${(pos._iTrendPeak*100).toFixed(1)}%)`);
+        decisions.push({ pi, ticker: pos.ticker, action: 'close', reason: _iReason, exitPremium: null, contractSym: pos.contractSymbol || null });
+      } else { pos.currentPrice = curP; markDirty(); }
+      continue;   // UNCONDITIONAL — intraday-trend sleeve managed here; 3:15 flatten closes survivors
     }
 
     // ── 8/11: GENERALIZED FAST-CUT ───────────────────────────────────────────────
