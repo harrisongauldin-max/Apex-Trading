@@ -551,7 +551,7 @@ const NEARMISS_LEDGER_ENABLED = true;
 const VOLPACE_ARM_ENABLED    = true;   // 8/24: split-book. "vf" arm enters only on elevated volume pace.
 const MR_FADE_ENABLED        = true;   // 8/24: LITERATURE MR FADE live entry path (mrStrategy.js). KILL SWITCH — set false to instantly stop APEX taking literature MR fades.
 const MR_FADE_TP             = 0.30;   // MR-fade take-profit (premium gain) — the reversion to the mean
-const MR_FADE_MAX_HOLD_MIN   = 45;     // MR-fade max hold — long enough for reversion (vs 6-min fast-cut); hard stop + 3:15 still bound it
+const MR_FADE_MAX_HOLD_MIN   = 60;     // 8/31 (Harrison): 60-min max hold (was 45)
 // 8/28: trailing PROFIT-LOCK. Path data showed fades spiking (+19%, +7.9%, +7.5%) then round-tripping to
 // a stop — the fixed +30% TP never triggered and nothing captured the peak. This locks a partial reversion.
 // Defaults are principled, NOT curve-fit to the tiny sample; tune the arm down if small peaks keep round-tripping.
@@ -652,6 +652,28 @@ const BREAK_TRAIL_GIVEBACK_PCT    = 0.15;    // cut if it gives back 15% from th
 // from this instead of hardcoding. Adding a strategy = one row. hold:"swing" +
 // flattenExempt:true = holds overnight (exit engine resumes at next open).
 // ============================================================================
+// 8/31 (Harrison): ratcheting tiered profit-lock, shared by intraday-trend + mr-fade. Each rung's floor
+// = the previous rung's trigger, so the lock steps UP as the trade climbs and never backs down (peak only
+// rises). Above the top rung it trails the peak. Replaces the single arm/giveback — captures the +7-10%
+// peaks that were round-tripping. Ladder: +5%->breakeven, +7.5%->+5%, +8.5%->+7.5%, +10%->+8.5%, ...
+const LOCK_LADDER = [
+  [0.050, 0.000],
+  [0.075, 0.050],
+  [0.085, 0.075],
+  [0.100, 0.085],
+  [0.125, 0.100],
+  [0.150, 0.125],
+];
+const LOCK_LADDER_TRAIL = 0.025;   // above the top rung, floor trails the peak by this
+function ladderFloor(peak) {
+  if (!(peak >= LOCK_LADDER[0][0])) return null;   // not yet armed
+  let floor = LOCK_LADDER[0][1];
+  for (const [arm, f] of LOCK_LADDER) { if (peak >= arm) floor = f; }
+  const top = LOCK_LADDER[LOCK_LADDER.length - 1];
+  if (peak >= top[0]) floor = Math.max(floor, peak - LOCK_LADDER_TRAIL);
+  return floor;
+}
+
 const STRATEGY_CLASS = {
   "struct-break":         { hold: "intraday", flattenExempt: false },
   "mr-fade-lit":          { hold: "intraday", flattenExempt: false },
@@ -707,6 +729,7 @@ const ITREND_END_ET       = 13.5;   // no new entries after 1:30pm ET (Gao et al
 const ITREND_TRAIL_ARM_PCT      = 0.15;
 const ITREND_TRAIL_GIVEBACK_PCT = 0.07;
 const ITREND_STOP_PCT     = 0.30;   // hard floor (0.50-delta 14-DTE is more volatile than deep-ITM)
+const ITREND_MAX_HOLD_MIN = 60;     // 8/31 (Harrison): 60-min max hold — peaks come fast then decay all day
 const ITREND_COOLDOWN_MIN = 30;     // 8/28 (panel): the OR condition is a STATE not an event, so a sustained trend
                                     // could re-fire right after an exit. Cooldown bounds re-entry churn per ticker.
 const GEX_FETCH_ENABLED           = true;    // 8/26: dedicated both-sides near-expiry GEX chain fetch (feeds the regime switch)
@@ -882,13 +905,13 @@ module.exports = {
   MR_SCALP_TARGET_DTE, MR_SCALP_DELTA, MR_SCALP_SIZE_MOD,
   BREAK_DELTA, BREAK_DELTA_MIN, BREAK_DELTA_MAX, BREAK_TARGET_DTE, BREAK_MAX_HOLD_MIN, BREAK_TRAIL_ARM_PCT, BREAK_TRAIL_GIVEBACK_PCT,
   GEX_FETCH_ENABLED, GEX_FETCH_THROTTLE_MS,
-  STRATEGY_CLASS, strategyClass, isFlattenExempt,
+  STRATEGY_CLASS, strategyClass, isFlattenExempt, LOCK_LADDER, LOCK_LADDER_TRAIL, ladderFloor,
   TREND_ENABLED, TREND_DELTA, TREND_DELTA_MIN, TREND_DELTA_MAX, TREND_TARGET_DTE, TREND_DTE_MIN, TREND_DTE_MAX,
   TREND_ROLL_DTE, TREND_MA_FAST, TREND_MA_SLOW, TREND_RSI_MIN, TREND_RSI_MAX, TREND_OVEREXT_ATR, TREND_BREADTH_MIN,
   TREND_CUTOFF_ET, TREND_RISK_BUDGET, TREND_TRAIL_ARM_PCT, TREND_STOP_UNDL_PCT, TREND_STOP_PCT, TREND_TRAIL_GIVEBACK_PCT,
   ITREND_ENABLED, ITREND_DELTA, ITREND_DELTA_MIN, ITREND_DELTA_MAX, ITREND_TARGET_DTE, ITREND_DTE_MIN, ITREND_DTE_MAX,
   ITREND_ADX_MIN, ITREND_VWAP_MIN, ITREND_BREADTH_STRONG, ITREND_START_ET, ITREND_END_ET,
-  ITREND_TRAIL_ARM_PCT, ITREND_TRAIL_GIVEBACK_PCT, ITREND_STOP_PCT, ITREND_COOLDOWN_MIN,
+  ITREND_TRAIL_ARM_PCT, ITREND_TRAIL_GIVEBACK_PCT, ITREND_STOP_PCT, ITREND_COOLDOWN_MIN, ITREND_MAX_HOLD_MIN,
   MR_SCALP_FASTCUT_MIN, MR_SCALP_FASTCUT_PEAK, MR_SCALP_GIVEBACK_PEAK, MR_SCALP_GIVEBACK_FRAC,
   MR_SCALP_TRAIL_ARM, MR_SCALP_TRAIL_GIVE, MR_SCALP_TP,
   HIGH_RISK_MIN_SCORE,
