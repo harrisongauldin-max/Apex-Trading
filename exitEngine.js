@@ -50,7 +50,7 @@ const {
   CP1_CRASH_ENABLED = false, CP1_CRASH_PCT = -5,
   TREND_STOP_PCT = 0.125, TREND_TRAIL_ARM_PCT = 0.10, TREND_TRAIL_GIVEBACK_PCT = 0.05, TREND_ROLL_DTE = 21,
   ITREND_STOP_PCT = 0.30, ITREND_TRAIL_ARM_PCT = 0.15, ITREND_TRAIL_GIVEBACK_PCT = 0.07,
-  MR_FADE_TP = 0.30, MR_FADE_MAX_HOLD_MIN = 45,
+  MR_FADE_TP = 0.30, MR_FADE_MAX_HOLD_MIN = 45, MR_FADE_STOP_PCT = 0.18, MR_FADE_TRAIL_ARM_PCT = 0.10, MR_FADE_TRAIL_GIVEBACK_PCT = 0.05,
   BREAK_MAX_HOLD_MIN = 120, BREAK_TRAIL_ARM_PCT = 0.25, BREAK_TRAIL_GIVEBACK_PCT = 0.15,
   FASTCUT_ENABLED = false, FASTCUT_MIN = 6, FASTCUT_PEAK_SHORT = 0.03, FASTCUT_PEAK_MID = 0.02,
   FASTCUT_PEAK_LONG = 0.012,
@@ -371,9 +371,12 @@ async function checkExits(positions, posSnapshots, posQuotes, posNewsCache, ctx)
       // underwater-first reversion early and defeat the whole strategy. Only the hard stop (floor) + the
       // take-profit + the max-hold cap apply here; the 3:15 hard-close cron still force-flattens externally.
       const _mfHeld = (Date.now() - new Date(pos.openDate || pos.entryTime || Date.now()).getTime()) / 60000;
+      pos._mfPeak = Math.max(typeof pos._mfPeak === "number" ? pos._mfPeak : -Infinity, chg);   // 8/28: track the peak for the trailing lock
       let _mfReason = null;
-      if (chg <= -STOP_LOSS_PCT)                _mfReason = "mr-fade-stop";      // hard floor — safety
-      else if (chg >= MR_FADE_TP)               _mfReason = "mr-fade-tp";        // reversion captured
+      if (chg <= -MR_FADE_STOP_PCT)             _mfReason = "mr-fade-stop";      // 8/28: -18% clears the underwater zone (was -12.5%, firing inside it)
+      else if (chg >= MR_FADE_TP)               _mfReason = "mr-fade-tp";        // full reversion captured
+      else if (pos._mfPeak >= MR_FADE_TRAIL_ARM_PCT && chg <= pos._mfPeak - MR_FADE_TRAIL_GIVEBACK_PCT)
+                                                _mfReason = "mr-fade-lock";      // 8/28: lock a partial-reversion spike before it round-trips to a stop
       else if (_mfHeld >= MR_FADE_MAX_HOLD_MIN) _mfReason = "mr-fade-maxhold";   // gave it room; time up
       if (_mfReason && !_closedThisCycle.has(pi)) {
         _closedThisCycle.add(pi);
