@@ -49,8 +49,8 @@ const {
   MR_SCALP_TRAIL_ARM = 0.10, MR_SCALP_TRAIL_GIVE = 0.04, MR_SCALP_TP = 0.20,
   CP1_CRASH_ENABLED = false, CP1_CRASH_PCT = -5,
   TREND_STOP_PCT = 0.125, TREND_TRAIL_ARM_PCT = 0.10, TREND_TRAIL_GIVEBACK_PCT = 0.05, TREND_ROLL_DTE = 21,
-  ITREND_STOP_PCT = 0.30, ITREND_TRAIL_ARM_PCT = 0.15, ITREND_TRAIL_GIVEBACK_PCT = 0.07,
-  MR_FADE_TP = 0.30, MR_FADE_MAX_HOLD_MIN = 45, MR_FADE_STOP_PCT = 0.18, MR_FADE_TRAIL_ARM_PCT = 0.10, MR_FADE_TRAIL_GIVEBACK_PCT = 0.05,
+  ITREND_STOP_PCT = 0.30, ITREND_MAX_HOLD_MIN = 60, ladderFloor,
+  MR_FADE_TP = 0.30, MR_FADE_MAX_HOLD_MIN = 60, MR_FADE_STOP_PCT = 0.18,
   BREAK_MAX_HOLD_MIN = 120, BREAK_TRAIL_ARM_PCT = 0.25, BREAK_TRAIL_GIVEBACK_PCT = 0.15,
   FASTCUT_ENABLED = false, FASTCUT_MIN = 6, FASTCUT_PEAK_SHORT = 0.03, FASTCUT_PEAK_MID = 0.02,
   FASTCUT_PEAK_LONG = 0.012,
@@ -371,12 +371,13 @@ async function checkExits(positions, posSnapshots, posQuotes, posNewsCache, ctx)
       // underwater-first reversion early and defeat the whole strategy. Only the hard stop (floor) + the
       // take-profit + the max-hold cap apply here; the 3:15 hard-close cron still force-flattens externally.
       const _mfHeld = (Date.now() - new Date(pos.openDate || pos.entryTime || Date.now()).getTime()) / 60000;
-      pos._mfPeak = Math.max(typeof pos._mfPeak === "number" ? pos._mfPeak : -Infinity, chg);   // 8/28: track the peak for the trailing lock
+      pos._mfPeak = Math.max(typeof pos._mfPeak === "number" ? pos._mfPeak : -Infinity, chg);   // track peak for the lock
+      const _mfFloor = ladderFloor(pos._mfPeak);   // 8/31: ratcheting tier ladder (replaces single arm/giveback)
       let _mfReason = null;
-      if (chg <= -MR_FADE_STOP_PCT)             _mfReason = "mr-fade-stop";      // 8/28: -18% clears the underwater zone (was -12.5%, firing inside it)
+      if (chg <= -MR_FADE_STOP_PCT)             _mfReason = "mr-fade-stop";      // -18% clears the underwater zone
       else if (chg >= MR_FADE_TP)               _mfReason = "mr-fade-tp";        // full reversion captured
-      else if (pos._mfPeak >= MR_FADE_TRAIL_ARM_PCT && chg <= pos._mfPeak - MR_FADE_TRAIL_GIVEBACK_PCT)
-                                                _mfReason = "mr-fade-lock";      // 8/28: lock a partial-reversion spike before it round-trips to a stop
+      else if (_mfFloor !== null && chg <= _mfFloor)
+                                                _mfReason = "mr-fade-lock";      // 8/31: tiered ladder — lock the rung floor before it round-trips
       else if (_mfHeld >= MR_FADE_MAX_HOLD_MIN) _mfReason = "mr-fade-maxhold";   // gave it room; time up
       if (_mfReason && !_closedThisCycle.has(pi)) {
         _closedThisCycle.add(pi);
@@ -440,12 +441,15 @@ async function checkExits(positions, posSnapshots, posQuotes, posNewsCache, ctx)
     // no DTE roll. Own block before the generic rails, unconditional continue.
     if (pos._iTrend) {
       pos._iTrendPeak = Math.max(typeof pos._iTrendPeak === "number" ? pos._iTrendPeak : -Infinity, chg);
+      const _iHeld = (Date.now() - new Date(pos.openDate || pos.entryTime || Date.now()).getTime()) / 60000;
+      const _iFloor = ladderFloor(pos._iTrendPeak);   // 8/31: ratcheting tier ladder
       let _iReason = null;
-      if (chg <= -ITREND_STOP_PCT) _iReason = "itrend-stop";
-      else if (pos._iTrendPeak >= ITREND_TRAIL_ARM_PCT && chg <= pos._iTrendPeak - ITREND_TRAIL_GIVEBACK_PCT) _iReason = "itrend-trail";
+      if (chg <= -ITREND_STOP_PCT)               _iReason = "itrend-stop";
+      else if (_iFloor !== null && chg <= _iFloor) _iReason = "itrend-lock";
+      else if (_iHeld >= ITREND_MAX_HOLD_MIN)     _iReason = "itrend-maxhold";
       if (_iReason && !_closedThisCycle.has(pi)) {
         _closedThisCycle.add(pi);
-        logEvent("scan", `[INTRADAY-TREND] ${pos.ticker} exit — ${_iReason} (chg ${(chg*100).toFixed(1)}%, peak ${(pos._iTrendPeak*100).toFixed(1)}%)`);
+        logEvent("scan", `[INTRADAY-TREND] ${pos.ticker} exit — ${_iReason} (chg ${(chg*100).toFixed(1)}%, peak ${(pos._iTrendPeak*100).toFixed(1)}%, floor ${_iFloor===null?"-":(_iFloor*100).toFixed(1)+"%"}, ${_iHeld.toFixed(0)}min)`);
         decisions.push({ pi, ticker: pos.ticker, action: 'close', reason: _iReason, exitPremium: null, contractSym: pos.contractSymbol || null });
       } else { pos.currentPrice = curP; markDirty(); }
       continue;   // UNCONDITIONAL — intraday-trend sleeve managed here; 3:15 flatten closes survivors
