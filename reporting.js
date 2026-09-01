@@ -337,7 +337,7 @@ async function sendEmail(type) {
         const dateStr = new Date().toLocaleDateString("en-CA", { timeZone: "America/New_York" });
         const t = (state && state._standDownTally) ? state._standDownTally : { brk: {}, mrf: {} };
         const lines = ["strategy,reason,count,pct"];
-        for (const [strat, book] of [["break", t.brk || {}], ["mr-fade", t.mrf || {}]]) {
+        for (const [strat, book] of [["break", t.brk || {}], ["mr-fade", t.mrf || {}], ["trend-swing", t.trend || {}], ["intraday-trend", t.itrend || {}]]) {   // 9/01: CSV was hardcoded to brk/mrf — trend/itrend buckets were recorded but never exported
           const entries = Object.entries(book).sort((a, b) => b[1] - a[1]);
           const total = entries.reduce((s, [, n]) => s + n, 0) || 1;
           for (const [reason, n] of entries) {
