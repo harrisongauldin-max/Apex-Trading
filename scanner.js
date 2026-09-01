@@ -188,12 +188,9 @@ async function ensureDailyTrend(ticker) {
     const closes = bars.map(b => b.c);
     const _ma = (n) => { const s = closes.slice(-n); return s.length ? s.reduce((a,c)=>a+c,0)/s.length : null; };
     const ma50 = _ma(50), ma100 = _ma(Math.min(100, closes.length));
-    let atr = null;
-    if (bars.length >= 15) {
-      const tr = [];
-      for (let i = bars.length - 14; i < bars.length; i++) tr.push(Math.max(bars[i].h - bars[i].l, Math.abs(bars[i].h - bars[i-1].c), Math.abs(bars[i].l - bars[i-1].c)));
-      atr = tr.reduce((a,x)=>a+x,0) / tr.length;
-    }
+    // 8/28: use the canonical signals.calcATR (was an inline duplicate — verified equivalent, but the copy
+    // wouldn't inherit future changes to calcATR, so vol-sizing could silently diverge. Single source now.)
+    const atr = calcATR(bars, 14);
     if (!ma50 || !ma100 || !atr) return cached || null;
     const rec = { ma50: +ma50.toFixed(2), ma100: +ma100.toFixed(2), atr: +atr.toFixed(2), date: _today };
     state._dailyMA[ticker] = rec;
@@ -2669,6 +2666,7 @@ async function runScan() {
         if (GEX && _gc && _gc.call && _gc.put && _gc.call.dte === _gc.put.dte &&
             (Date.now() - Math.min(_gc.call.ts || 0, _gc.put.ts || 0) < 300000)) {
           const _g = GEX.computeGEX(_gc.call.rows, _gc.put.rows, price);
+          if (_g) { if (!state._gexRegime) state._gexRegime = {}; state._gexRegime[liveStock.ticker] = _g.regime; }   // 9/01: expose regime per-ticker for the intraday-trend direction gate
           // 8/26: LIVE GEX STAMP (per ticker — SPY and QQQ each). Prints raw netGEX + netGexM + regime
           // AND the strike counts / total OI, so the "is netGexM stuck at 0, and if so why" question is
           // answerable in the live log, not just the EOD telemetry CSV. Throttled ~60s/ticker.
@@ -3114,6 +3112,23 @@ async function runScan() {
             } else if (_iVw >= ITREND_VWAP_MIN && _iSlope > 0 && price > _ior.high && !_brAgainstCall) {
               _iSide = "call"; _iReason = `intraday uptrend: vwap+${_iVw.toFixed(2)}% slope>0 px$${price.toFixed(2)}>ORhigh$${_ior.high.toFixed(2)} adx${_iAdx.toFixed(0)} brdth${_iBr}%`;
             }
+            // 9/01 (Harrison): REGIME-ALIGNED DIRECTION GATE. In NEGATIVE gamma the tape TRENDS (moves
+            // amplify), so the tradeable side is WITH the dominant direction — riding it, not fading it.
+            // 9/01 lost on 5 CALLS fired into intraday bounces during a neg-gamma DOWN day. Fix: in neg
+            // gamma, suppress the side that fights the daily trend (the dominant direction). Fail-open if
+            // regime or daily MA is unknown. Positive gamma (range regime) is left unchanged.
+            let _iSuppressed = false;
+            if (_iSide) {
+              const _iGamma = (state._gexRegime || {})[stock.ticker] || null;
+              const _iDT = (state._dailyMA || {})[stock.ticker] || null;
+              // dominant direction = price vs the 50-day (below = down-biased). Catches a weakening tape
+              // (price under the 50d even before the 50d/100d cross) — 9/01 QQQ was 707 < 50d 712.
+              const _iDailyDir = (_iDT && _iDT.ma50) ? (price > _iDT.ma50 ? 1 : -1) : null;
+              if (_iGamma === "neg" && _iDailyDir !== null) {
+                if (_iSide === "call" && _iDailyDir === -1) { recordStandDown("itrend", "neg-gamma: call fights down-biased tape"); logEvent("filter", `[INTRADAY-TREND] ${stock.ticker} CALL suppressed — neg gamma + price below 50d (ride the trend, don't fade the bounce)`); _iSide = null; _iSuppressed = true; }
+                else if (_iSide === "put" && _iDailyDir === 1) { recordStandDown("itrend", "neg-gamma: put fights up-biased tape"); logEvent("filter", `[INTRADAY-TREND] ${stock.ticker} PUT suppressed — neg gamma + price above 50d`); _iSide = null; _iSuppressed = true; }
+              }
+            }
             const _iHave = (state.positions || []).some(p => p.ticker === stock.ticker && p.entryStrategy === "intraday-trend" && p.optionType === _iSide && !p.closed);
             if (!state._iTrendLast) state._iTrendLast = {};
             const _iCoolKey = `${stock.ticker}-${_iSide}`;
@@ -3124,7 +3139,7 @@ async function runScan() {
               const _iOK = await executeTrade(stock, price, 0, [_iReason], state.vix, _iSide, false, 1.0, null, null, `${stock.ticker}-${_iSide}-itrend-${Date.now()}`);
               stock._iTrend = null;
               if (_iOK) { recordStandDown("itrend", "FIRED"); logEvent("filter", `[INTRADAY-TREND] ${stock.ticker} ${_iSide.toUpperCase()} FIRED — ${_iReason}`); continue; }
-            } else {
+            } else if (!_iSuppressed) {
               recordStandDown("itrend", !_iSide ? "no aligned intraday trend (need vwap+slope+ORbreak agree)" : _iHave ? "position already open" : "cooldown (recent fire)");
             }
           } else {
