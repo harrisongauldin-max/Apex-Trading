@@ -126,7 +126,7 @@ function buildOutcomeRow(pos, o) {
     // y
     (o && o.reason) || "", _n(o && o.exitPremium, 2), _n(o && o.pnl, 2),
     _n(o && (o.pct != null ? parseFloat(o.pct) : (o && o.pnlPct)), 1),
-    (o && o.won) ? 1 : 0, _n(x.underlying, 2), _n(pos.price, 2),
+    (o && o.won) ? 1 : 0, _n(x.underlying, 2), _n((o && o.underlyingExit != null) ? o.underlyingExit : pos.price, 2),   // 9/02 FIX: uExit = live underlying at close (was pos.price = entry underlying, so uExit==uEntry)
     _n(x.rangePct, 3), pos.entryStrategy || "",   // appended 8/09
     // appended 8/11 — keep last, matching OUTCOME_HEADER's tail
     _n(x.rv, 4), x.rvMethod || "", (x.rvSparse != null ? x.rvSparse : ""),
@@ -198,6 +198,7 @@ function recordOutcome(state, pos, o) {
   try {
     if (!state) return;
     if (!Array.isArray(state._outcomeBuffer)) state._outcomeBuffer = [];
+    if (o && o.underlyingExit == null && state._uNow && pos && pos.ticker && state._uNow[pos.ticker] != null) o.underlyingExit = state._uNow[pos.ticker];   // 9/02: real underlying-at-close for uExit
     state._outcomeBuffer.push(buildOutcomeRow(pos, o));
     if (state._outcomeBuffer.length > MAX_ROWS) state._outcomeBuffer = state._outcomeBuffer.slice(-MAX_ROWS);
   } catch (_e) { /* observation only — never disturb a close */ }
