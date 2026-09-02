@@ -181,8 +181,10 @@ async function findContract(ticker, optionType, targetDelta, targetDTE, vix, sto
       // request caps at 55 (covers 30-50). Keeps each twin-entry leg inside its own band.
       // 8/03: biweekly caps at 16 so it cannot drift up into the standard band.
       const _bwBand = targetDTE > 10 && targetDTE <= 20;
-      const DTE_ENTRY_CAP = targetDTE <= 10 ? 8 : (_bwBand ? 16 : 55);
-      const _bandName = targetDTE <= 10 ? "same-week" : (_bwBand ? "biweekly" : "standard");
+      const _swingBand = targetDTE > 45;   // 9/02 FIX: trend-swing (60-DTE, ±15) was hitting the 55 standard cap
+                                           // and NEVER filling — the gate passed but every 57-58DTE contract got skipped.
+      const DTE_ENTRY_CAP = targetDTE <= 10 ? 8 : (_bwBand ? 16 : (_swingBand ? (targetDTE + 15) : 55));
+      const _bandName = targetDTE <= 10 ? "same-week" : (_bwBand ? "biweekly" : (_swingBand ? "swing" : "standard"));
       if (expDTE > DTE_ENTRY_CAP) {
         logEvent("filter", `${ticker} findContract: skipping $${strike} ${expDTE}DTE — exceeds ${DTE_ENTRY_CAP}DTE entry cap (${_bandName} band)`);
         continue;
