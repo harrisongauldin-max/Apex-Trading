@@ -49,7 +49,7 @@ const {
   MR_SCALP_TRAIL_ARM = 0.10, MR_SCALP_TRAIL_GIVE = 0.04, MR_SCALP_TP = 0.20,
   CP1_CRASH_ENABLED = false, CP1_CRASH_PCT = -5,
   TREND_STOP_PCT = 0.125, TREND_TRAIL_ARM_PCT = 0.10, TREND_TRAIL_GIVEBACK_PCT = 0.05, TREND_ROLL_DTE = 21,
-  ITREND_STOP_PCT = 0.30, ITREND_MAX_HOLD_MIN = 60, ladderFloor,
+  ITREND_STOP_PCT = 0.30, ITREND_MAX_HOLD_MIN = 60, ITREND_NOARM_MIN = 20, ladderFloor,
   MR_FADE_TP = 0.30, MR_FADE_MAX_HOLD_MIN = 60, MR_FADE_STOP_PCT = 0.18,
   BREAK_MAX_HOLD_MIN = 120, BREAK_TRAIL_ARM_PCT = 0.25, BREAK_TRAIL_GIVEBACK_PCT = 0.15,
   FASTCUT_ENABLED = false, FASTCUT_MIN = 6, FASTCUT_PEAK_SHORT = 0.03, FASTCUT_PEAK_MID = 0.02,
@@ -446,6 +446,7 @@ async function checkExits(positions, posSnapshots, posQuotes, posNewsCache, ctx)
       let _iReason = null;
       if (chg <= -ITREND_STOP_PCT)               _iReason = "itrend-stop";
       else if (_iFloor !== null && chg <= _iFloor) _iReason = "itrend-lock";
+      else if (_iHeld >= ITREND_NOARM_MIN && _iFloor === null) _iReason = "itrend-noarm";   // 9/02: never reached +5% in 20 min = dud, cut early
       else if (_iHeld >= ITREND_MAX_HOLD_MIN)     _iReason = "itrend-maxhold";
       if (_iReason && !_closedThisCycle.has(pi)) {
         _closedThisCycle.add(pi);
