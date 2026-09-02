@@ -1485,6 +1485,7 @@ async function runScan() {
   logEvent("scan", `Prefetch complete in ${((Date.now()-prefetchStart)/1000).toFixed(1)}s`);
 
   for (const { stock, price, bars, intradayBars, sectorResult, preMarket, newsArticles, analystData, eqScore } of stockData) {
+    if (stock && stock.ticker && price > 0) { if (!state._uNow) state._uNow = {}; state._uNow[stock.ticker] = price; }   // 9/02: live underlying per ticker — feeds outcome uExit (was stale = uEntry)
     // 8/26: DEDICATED GEX CHAIN FETCH — throttled per ticker. Populates _gexChain[ticker] with BOTH
     // sides at the same near expiry so the regime gate (enforce + MR-fade) can actually resolve, instead
     // of running blind on the incidental one-side findContract stash. Kill switch: GEX_FETCH_ENABLED.
