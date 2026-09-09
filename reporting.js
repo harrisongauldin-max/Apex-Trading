@@ -154,6 +154,7 @@ async function sendEmail(type) {
       vfSkip:        (state._vfSkip        || []).slice(),
       vetoBlocks:    (state._vetoBlocks    || []).slice(),
       dailyLog:      (state._dailyLogBuffer || []).slice(),
+      standDownTally: JSON.parse(JSON.stringify(state._standDownTally || { brk:{}, mrf:{}, trend:{}, itrend:{} })),  // 9/09: snapshot before EOD reset wipes it
     };
 
     let attachments = [];
@@ -335,7 +336,7 @@ async function sendEmail(type) {
       // readout: this is the analyzable version (open in a sheet, sort by count).
       try {
         const dateStr = new Date().toLocaleDateString("en-CA", { timeZone: "America/New_York" });
-        const t = (state && state._standDownTally) ? state._standDownTally : { brk: {}, mrf: {} };
+        const t = (_eodSnap && _eodSnap.standDownTally) ? _eodSnap.standDownTally : ((state && state._standDownTally) ? state._standDownTally : { brk: {}, mrf: {} });   // 9/09: snapshot, not live (EOD reset race)
         const lines = ["strategy,reason,count,pct"];
         for (const [strat, book] of [["break", t.brk || {}], ["mr-fade", t.mrf || {}], ["trend-swing", t.trend || {}], ["intraday-trend", t.itrend || {}]]) {   // 9/01: CSV was hardcoded to brk/mrf — trend/itrend buckets were recorded but never exported
           const entries = Object.entries(book).sort((a, b) => b[1] - a[1]);
@@ -397,7 +398,7 @@ async function sendEmail(type) {
       catch (_viErr) { logEvent("warn", `[VOL-INFRA] EOD section skipped: ${_viErr.message}`); }
       try { bodyHtml += buildMomoSection(_eodSnap); }
       catch (_mbErr2) { logEvent("warn", `[CALL-MOMO] EOD section skipped: ${_mbErr2.message}`); }
-      try { bodyHtml += buildStandDownSection(); }
+      try { bodyHtml += buildStandDownSection(_eodSnap); }
       catch (_sdErr) { logEvent("warn", `[STAND-DOWN] EOD section skipped: ${_sdErr.message}`); }
     }
     await sendResendEmail(subject, bodyHtml, attachments);
@@ -409,9 +410,10 @@ async function sendEmail(type) {
 // Turns a quiet day into a diagnosis: for breaks and MR fades, how many times each ALMOST fired and
 // which gate stopped it. Regime-dominated declines = tape wasn't tradeable (accept). Gate-dominated
 // declines on real setups (not-at-a-level, ADX-too-low, not-extreme) = a knob may be too tight (tune).
-function buildStandDownSection() {
+function buildStandDownSection(snap) {
   try {
-    const t = (state && state._standDownTally) ? state._standDownTally : null;
+    const t = (snap && snap.standDownTally) ? snap.standDownTally
+            : ((state && state._standDownTally) ? state._standDownTally : null);
     if (!t) return "";
     const fmt = (book, title) => {
       const entries = Object.entries(book || {}).sort((a, b) => b[1] - a[1]);
@@ -559,7 +561,11 @@ function buildEmailHTML(type) {
   const wins   = trades.filter(t=>t.pnl>0);
   const heat   = (heatPct()*100).toFixed(0);
   const curPortfolio = state.cash + openRisk() ;
-  const daily  = (curPortfolio - state.dayStartCash).toFixed(2);
+  // 9/09 FIX: was (cash+openRisk) - dayStartCash — mixed a portfolio-value number against a CASH baseline,
+  // so an open position's market value leaked in as "P&L" (the +$10,248 on a −$378 day). Use Alpaca truth.
+  const daily  = (state._alpacaTruth && typeof state._alpacaTruth.totalPnL === "number")
+    ? state._alpacaTruth.totalPnL.toFixed(2)
+    : (curPortfolio - (state.dayOpenEquity != null ? state.dayOpenEquity : state.dayStartCash)).toFixed(2);
   const weekly = (curPortfolio - state.weekStartCash).toFixed(2);
 
   const posRows = state.positions.map(p => {
