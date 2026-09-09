@@ -48,7 +48,7 @@ const {
   MR_SCALP_FASTCUT_MIN = 5, MR_SCALP_FASTCUT_PEAK = 0.03, MR_SCALP_GIVEBACK_PEAK = 0.08, MR_SCALP_GIVEBACK_FRAC = 0.5,
   MR_SCALP_TRAIL_ARM = 0.10, MR_SCALP_TRAIL_GIVE = 0.04, MR_SCALP_TP = 0.20,
   CP1_CRASH_ENABLED = false, CP1_CRASH_PCT = -5,
-  TREND_STOP_PCT = 0.125, TREND_TRAIL_ARM_PCT = 0.10, TREND_TRAIL_GIVEBACK_PCT = 0.05, TREND_ROLL_DTE = 21,
+  TREND_STOP_PCT = 0.125, TREND_ATR_STOP_MULT = 3.5, TREND_USTOP_FLOOR = 0.20, TREND_USTOP_CEIL = 0.55, TREND_TRAIL_ARM_PCT = 0.10, TREND_TRAIL_GIVEBACK_PCT = 0.05, TREND_ROLL_DTE = 21,
   ITREND_STOP_PCT = 0.30, ITREND_MAX_HOLD_MIN = 60, ITREND_NOARM_MIN = 20, ladderFloor,
   MR_FADE_TP = 0.30, MR_FADE_MAX_HOLD_MIN = 60, MR_FADE_STOP_PCT = 0.18,
   BREAK_MAX_HOLD_MIN = 120, BREAK_TRAIL_ARM_PCT = 0.25, BREAK_TRAIL_GIVEBACK_PCT = 0.15,
@@ -422,8 +422,24 @@ async function checkExits(positions, posSnapshots, posQuotes, posNewsCache, ctx)
     if (pos._isTrend) {
       pos._trendPeakChg = Math.max(typeof pos._trendPeakChg === "number" ? pos._trendPeakChg : -Infinity, chg);
       const _tDTE = dte;   // 8/27: LIVE dte (line ~198, from expDate) — decrements daily so trend-roll actually fires
+      // 9/09 (Harrison): ATR-BASED UNDERLYING STOP. Flat -12.5% premium = ~0.85% underlying on a 0.65-delta call —
+      // a normal down-day, not a trend break; it stopped -$654 & -$602 this week on noise. Clenow: stop on the
+      // UNDERLYING at a volatility multiple. Convert 3.5*ATR into this leg's option-% each scan, clamped.
+      let _tStopPct = TREND_STOP_PCT;
+      const _tAtr   = (state._dailyMA && state._dailyMA[pos.ticker]) ? state._dailyMA[pos.ticker].atr : null;
+      const _tDelta = Math.abs(parseFloat(pos.greeks && pos.greeks.delta) || 0) || 0.65;
+      const _tPrem  = pos.premium || 0;
+      if (_tAtr > 0 && _tDelta > 0 && _tPrem > 0) {
+        const _moveUnder = TREND_ATR_STOP_MULT * _tAtr;
+        const _rawOptPct = (_tDelta * _moveUnder) / _tPrem;
+        _tStopPct        = Math.min(TREND_USTOP_CEIL, Math.max(TREND_USTOP_FLOOR, _rawOptPct));
+        if (!pos._tStopLogged) {
+          pos._tStopLogged = true;
+          logEvent("scan", `[TREND-STOP] ${pos.ticker} ${_tDTE}DTE d${_tDelta.toFixed(2)} atr$${_tAtr.toFixed(2)} — ${TREND_ATR_STOP_MULT}xATR ($${_moveUnder.toFixed(1)} underlying) = ${(_rawOptPct*100).toFixed(0)}% option (clamped ${(_tStopPct*100).toFixed(0)}%) vs old ${(TREND_STOP_PCT*100).toFixed(0)}%`);
+        }
+      }
       let _tReason = null;
-      if (chg <= -TREND_STOP_PCT)                                                                              _tReason = "trend-stop";
+      if (chg <= -_tStopPct)                                                                                  _tReason = "trend-stop";
       else if (pos._trendPeakChg >= TREND_TRAIL_ARM_PCT && chg <= pos._trendPeakChg - TREND_TRAIL_GIVEBACK_PCT) _tReason = "trend-trail";
       else if (_tDTE <= TREND_ROLL_DTE)                                                                        _tReason = "trend-roll";
       if (_tReason && !_closedThisCycle.has(pi)) {
