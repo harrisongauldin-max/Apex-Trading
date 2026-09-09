@@ -707,7 +707,10 @@ const TREND_CUTOFF_ET     = 15.0;   // no NEW swing entries after 3pm ET
 const TREND_RISK_BUDGET   = 0.01;   // 1% of equity risked per swing trade -> vol-scaled contract count
 const TREND_TRAIL_ARM_PCT = 0.10;   // arm the trail once +10%
 const TREND_STOP_UNDL_PCT = 0.025;  // (alt) hard floor as an UNDERLYING move — available if the option-% floor proves too tight
-const TREND_STOP_PCT      = 0.125;  // -12.5% option hard floor (Harrison)
+const TREND_STOP_PCT      = 0.125;  // legacy premium floor — now only a fallback when ATR/greeks unavailable
+const TREND_ATR_STOP_MULT = 3.5;    // 9/09: trend stop = 3.5*ATR of the UNDERLYING (Clenow) — a real break, not a 0.85% wiggle
+const TREND_USTOP_FLOOR   = 0.20;   // never tighter than -20% premium (noise backstop)
+const TREND_USTOP_CEIL    = 0.55;   // never looser than -55% premium (dollar-risk cap)
 const TREND_TRAIL_GIVEBACK_PCT = 0.05;   // incremental profit-lock: give back 5% from peak once armed
 // ---- INTRADAY-TREND sleeve (same-day directional; ORB + VWAP + ADX confluence, no score) ----
 // NOTE: the underlying-tape test (8/24-27) showed intraday trend-continuation does NOT continue
@@ -909,7 +912,7 @@ module.exports = {
   STRATEGY_CLASS, strategyClass, isFlattenExempt, LOCK_LADDER, LOCK_LADDER_TRAIL, ladderFloor,
   TREND_ENABLED, TREND_DELTA, TREND_DELTA_MIN, TREND_DELTA_MAX, TREND_TARGET_DTE, TREND_DTE_MIN, TREND_DTE_MAX,
   TREND_ROLL_DTE, TREND_MA_FAST, TREND_MA_SLOW, TREND_RSI_MIN, TREND_RSI_MAX, TREND_OVEREXT_ATR, TREND_BREADTH_MIN,
-  TREND_CUTOFF_ET, TREND_RISK_BUDGET, TREND_TRAIL_ARM_PCT, TREND_STOP_UNDL_PCT, TREND_STOP_PCT, TREND_TRAIL_GIVEBACK_PCT,
+  TREND_CUTOFF_ET, TREND_RISK_BUDGET, TREND_TRAIL_ARM_PCT, TREND_STOP_UNDL_PCT, TREND_STOP_PCT, TREND_ATR_STOP_MULT, TREND_USTOP_FLOOR, TREND_USTOP_CEIL, TREND_TRAIL_GIVEBACK_PCT,
   ITREND_ENABLED, ITREND_DELTA, ITREND_DELTA_MIN, ITREND_DELTA_MAX, ITREND_TARGET_DTE, ITREND_DTE_MIN, ITREND_DTE_MAX,
   ITREND_ADX_MIN, ITREND_VWAP_MIN, ITREND_BREADTH_STRONG, ITREND_START_ET, ITREND_END_ET,
   ITREND_TRAIL_ARM_PCT, ITREND_TRAIL_GIVEBACK_PCT, ITREND_STOP_PCT, ITREND_COOLDOWN_MIN, ITREND_MAX_HOLD_MIN, ITREND_NOARM_MIN,
