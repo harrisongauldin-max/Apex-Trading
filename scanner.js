@@ -2685,6 +2685,168 @@ async function runScan() {
           return _g ? _g.regime : null;
         }
       } catch (_gxr) {} return null; })();
+    // 9/12 (Harrison): BYPASS SLEEVES relocated here from the scored loop. They previously ran AFTER the
+    // per-ticker position guard (~2857 sameTickerSameDir continue), so holding SPY+QQQ skipped both
+    // tickers before trend/itrend/mr-fade ever evaluated (9/10-9/11: BREAK ran, these three did not).
+    // Self-dedup + own side, so they run before the momentum guards; still subordinate to drawdown/
+    // circuit (those continue earlier). Heat/capital via this if (was the scored-loop break). stock->
+    // liveStock: in this loop `stock` is the RAW object; enriched fields live on liveStock.
+    if (heatPct() < effectiveHeatCap() && state.cash > CAPITAL_FLOOR) {
+    // 8/27: TREND-SWING sleeve (daily-momentum, multi-day hold). Own path — bypasses the score/enforce gate
+    // like mr-fade. Daily thesis: price vs 50/100d MA + daily RSI/MACD + breadth, not overextended.
+    if (TREND_ENABLED && liveStock && price > 0) {
+      try {
+        const _etH = (() => { const d = getETTime(); return d.getHours() + d.getMinutes() / 60; })();
+        if (_etH < TREND_CUTOFF_ET) {
+          const _tm = await ensureDailyTrend(liveStock.ticker);
+          if (_tm && _tm.ma50 && _tm.ma100 && _tm.atr) {
+            const _drsi  = (typeof liveStock.dailyRsi === "number") ? liveStock.dailyRsi : 50;
+            const _macd  = liveStock.macd || "neutral";
+            const _brdth = (marketContext && marketContext.breadth && typeof marketContext.breadth.breadthPct === "number") ? marketContext.breadth.breadthPct : 50;
+            const _upTrend   = price > _tm.ma50 && _tm.ma50 > _tm.ma100;
+            const _downTrend = price < _tm.ma50 && _tm.ma50 < _tm.ma100;
+            const _overExt   = Math.abs(price - _tm.ma50) > TREND_OVEREXT_ATR * _tm.atr;
+            let _tSide = null, _tReason = null;
+            // 8/27: LOOSENED to the literature (Moskowitz/Clenow) — price-vs-MA IS the signal.
+            // Dropped the MACD-bullish + RSI>=50 confirmation (my add-ons, not the momentum edge).
+            // KEPT: not-overextended (Daniel-Moskowitz crash filter), RSI upper guardrail (exhaustion),
+            // breadth not actively against (light participation check, not a hard gate).
+            const _rsiOverbought = _drsi >= TREND_RSI_MAX;      // don't buy a blow-off top
+            const _rsiOversold   = _drsi <= (100 - TREND_RSI_MAX);
+            const _brdthAgainstCall = _brdth < (100 - TREND_BREADTH_MIN);   // breadth actively bearish
+            const _brdthAgainstPut  = _brdth > TREND_BREADTH_MIN;           // breadth actively bullish
+            if (_upTrend && !_overExt && !_rsiOverbought && !_brdthAgainstCall) {
+              _tSide = "call"; _tReason = `daily uptrend $${price.toFixed(2)}>50d$${_tm.ma50}>100d$${_tm.ma100} dRSI${_drsi.toFixed(0)} brdth${_brdth}% [lit: price-vs-MA]`;
+            } else if (_downTrend && !_overExt && !_rsiOversold && !_brdthAgainstPut) {
+              _tSide = "put";  _tReason = `daily downtrend $${price.toFixed(2)}<50d$${_tm.ma50}<100d$${_tm.ma100} dRSI${_drsi.toFixed(0)} brdth${_brdth}% [lit: price-vs-MA]`;
+            }
+            const _haveTrend = (state.positions || []).some(p => p.ticker === liveStock.ticker && p.entryStrategy === "trend-swing" && p.optionType === _tSide && !p.closed);
+            if (_tSide && !_haveTrend) {
+              liveStock._isTrend = _tSide;
+              const _tSig = `${liveStock.ticker}-${_tSide}-trend-${Date.now()}`;
+              const _tOK = await executeTrade(liveStock, price, 0, [_tReason], state.vix, _tSide, false, 1.0, null, null, _tSig);
+              liveStock._isTrend = null;
+              if (_tOK) { recordStandDown("trend", "FIRED"); logEvent("scan", `[TREND-SWING] ${liveStock.ticker} ${_tSide.toUpperCase()} FIRED — ${_tReason}`); continue; }
+            } else {
+              recordStandDown("trend", (_upTrend || _downTrend) ? (_overExt ? "overextended from 50d" : "momentum/breadth gate") : "no daily trend");
+            }
+          } else { recordStandDown("trend", "daily MA unavailable"); }
+        } else { recordStandDown("trend", "past 3pm cutoff"); }
+      } catch (_te) { logEvent("warn", `[TREND-SWING] ${liveStock.ticker} eval failed — ${_te && _te.message}`); }
+    }
+
+    // 8/28: INTRADAY-TREND sleeve — same-day directional (ORB + VWAP + slope + ADX confluence, NO score).
+    // Own path, bypasses the score/enforce like the other sleeves. Deliberate paper experiment: the tape
+    // test said continuation doesn't continue, so this is gated HARD (ADX>=25 + real OR break) and fully
+    // logged so forward fills settle it. Fires 10:00-13:30 ET only.
+    if (ITREND_ENABLED && liveStock && price > 0) {
+      try {
+        const _iH = (() => { const d = getETTime(); return d.getHours() + d.getMinutes() / 60; })();
+        if (_iH >= ITREND_START_ET && _iH < ITREND_END_ET) {
+          const _ior   = state._openRange ? state._openRange[liveStock.ticker] : null;
+          const _iVw   = (liveStock.intradayVWAP > 0 && price > 0) ? ((price - liveStock.intradayVWAP) / liveStock.intradayVWAP) * 100 : null;
+          const _iSlope = (state._vwapSlope || {})[liveStock.ticker] ?? 0;
+          const _iAdx  = (typeof liveStock.adx === "number") ? liveStock.adx : 0;
+          const _iBr   = (marketContext && marketContext.breadth && typeof marketContext.breadth.breadthPct === "number") ? marketContext.breadth.breadthPct : 50;
+          if (_ior && _ior.locked && _ior.low > 0 && _ior.high > 0 && _iVw !== null && _iAdx >= ITREND_ADX_MIN) {
+            // breadth is SOFT/fail-open: block only when actively against (neutral ~50 passes both sides)
+            const _brAgainstPut  = _iBr > ITREND_BREADTH_STRONG;          // breadth actively bullish
+            const _brAgainstCall = _iBr < (100 - ITREND_BREADTH_STRONG);  // breadth actively bearish
+            let _iSide = null, _iReason = null;
+            if (_iVw <= -ITREND_VWAP_MIN && _iSlope < 0 && price < _ior.low && !_brAgainstPut) {
+              _iSide = "put";  _iReason = `intraday downtrend: vwap${_iVw.toFixed(2)}% slope<0 px$${price.toFixed(2)}<ORlow$${_ior.low.toFixed(2)} adx${_iAdx.toFixed(0)} brdth${_iBr}%`;
+            } else if (_iVw >= ITREND_VWAP_MIN && _iSlope > 0 && price > _ior.high && !_brAgainstCall) {
+              _iSide = "call"; _iReason = `intraday uptrend: vwap+${_iVw.toFixed(2)}% slope>0 px$${price.toFixed(2)}>ORhigh$${_ior.high.toFixed(2)} adx${_iAdx.toFixed(0)} brdth${_iBr}%`;
+            }
+            // 9/01 (Harrison): REGIME-ALIGNED DIRECTION GATE. In NEGATIVE gamma the tape TRENDS (moves
+            // amplify), so the tradeable side is WITH the dominant direction — riding it, not fading it.
+            // 9/01 lost on 5 CALLS fired into intraday bounces during a neg-gamma DOWN day. Fix: in neg
+            // gamma, suppress the side that fights the daily trend (the dominant direction). Fail-open if
+            // regime or daily MA is unknown. Positive gamma (range regime) is left unchanged.
+            let _iSuppressed = false;
+            if (_iSide) {
+              const _iGamma = (state._gexRegime || {})[liveStock.ticker] || null;
+              const _iDT = (state._dailyMA || {})[liveStock.ticker] || null;
+              // dominant direction = price vs the 50-day (below = down-biased). Catches a weakening tape
+              // (price under the 50d even before the 50d/100d cross) — 9/01 QQQ was 707 < 50d 712.
+              const _iDailyDir = (_iDT && _iDT.ma50) ? (price > _iDT.ma50 ? 1 : -1) : null;
+              if (_iGamma === "neg" && _iDailyDir !== null) {
+                if (_iSide === "call" && _iDailyDir === -1) { recordStandDown("itrend", "neg-gamma: call fights down-biased tape"); logEvent("filter", `[INTRADAY-TREND] ${liveStock.ticker} CALL suppressed — neg gamma + price below 50d (ride the trend, don't fade the bounce)`); _iSide = null; _iSuppressed = true; }
+                else if (_iSide === "put" && _iDailyDir === 1) { recordStandDown("itrend", "neg-gamma: put fights up-biased tape"); logEvent("filter", `[INTRADAY-TREND] ${liveStock.ticker} PUT suppressed — neg gamma + price above 50d`); _iSide = null; _iSuppressed = true; }
+              }
+            }
+            const _iHave = (state.positions || []).some(p => p.ticker === liveStock.ticker && p.entryStrategy === "intraday-trend" && p.optionType === _iSide && !p.closed);
+            if (!state._iTrendLast) state._iTrendLast = {};
+            const _iCoolKey = `${liveStock.ticker}-${_iSide}`;
+            const _iCooling = _iSide && (Date.now() - (state._iTrendLast[_iCoolKey] || 0)) < ITREND_COOLDOWN_MIN * 60000;
+            if (_iSide && !_iHave && !_iCooling) {
+              liveStock._iTrend = _iSide;
+              state._iTrendLast[_iCoolKey] = Date.now();
+              const _iOK = await executeTrade(liveStock, price, 0, [_iReason], state.vix, _iSide, false, 1.0, null, null, `${liveStock.ticker}-${_iSide}-itrend-${Date.now()}`);
+              liveStock._iTrend = null;
+              if (_iOK) { recordStandDown("itrend", "FIRED"); logEvent("filter", `[INTRADAY-TREND] ${liveStock.ticker} ${_iSide.toUpperCase()} FIRED — ${_iReason}`); continue; }
+            } else if (!_iSuppressed) {
+              recordStandDown("itrend", !_iSide ? "no aligned intraday trend (need vwap+slope+ORbreak agree)" : _iHave ? "position already open" : "cooldown (recent fire)");
+            }
+          } else {
+            recordStandDown("itrend", (!_ior || !_ior.locked) ? "OR not locked" : (_iAdx < ITREND_ADX_MIN ? `ADX ${_iAdx.toFixed(0)}<${ITREND_ADX_MIN} (chop)` : "no vwap"));
+          }
+        } else { recordStandDown("itrend", "outside 10:00-13:30 window"); }
+      } catch (_ie) { logEvent("warn", `[INTRADAY-TREND] ${liveStock.ticker} eval failed — ${_ie && _ie.message}`); }
+    }
+    // ═══ LITERATURE MR FADE (mrStrategy.js) ═══ a coherent mean-reversion entry, gated on
+    // regime(gamma) + level(gamma wall / VWAP band) + confluence. Fires its OWN fade side when the
+    // full confluence aligns, reusing executeTrade. Bypasses the momentum-era gates by design — it is
+    // a DIFFERENT strategy — but respects the position guard below. Kill switch: MR_FADE_ENABLED.
+    // Wrapped so a fault can never disturb the scan.
+    if (mrFadeActive(MR_FADE_ENABLED) && MRSTRAT && liveStock) {   // runtime kill switch (dashboard toggle)
+      try {
+        const _mrVwap = (liveStock.intradayVWAP > 0 && price > 0) ? ((price - liveStock.intradayVWAP) / liveStock.intradayVWAP) * 100 : null;
+        const _mrDec  = MRSTRAT.evaluateMRFade({ rsi: liveStock.rsi, vwapPct: _mrVwap, adx: liveStock.adx },
+                                               (state._gexNow && state._gexNow[liveStock.ticker]) || null, price);
+        if (_mrDec.fire) {
+          // 8/27: don't fade AGAINST the daily trend (Chan regime-conditional MR). Fading strength in a
+          // daily uptrend (puts) / weakness in a downtrend (calls) is the falling knife — 4/5 puts died this way 8/27.
+          const _dt = await ensureDailyTrend(liveStock.ticker);
+          let _fadeVsTrend = false;
+          if (_dt && _dt.ma50 && _dt.ma100) {
+            const _dUp = price > _dt.ma50 && _dt.ma50 > _dt.ma100;
+            const _dDn = price < _dt.ma50 && _dt.ma50 < _dt.ma100;
+            if (_mrDec.side === "put"  && _dUp) _fadeVsTrend = true;
+            if (_mrDec.side === "call" && _dDn) _fadeVsTrend = true;
+          } else {
+            // fail-open (don't block on missing data) but LOG it so the protection gap is visible
+            logEvent("filter", `[MR-FADE] ${liveStock.ticker} daily-trend check unavailable (no MA) — fade NOT gated this scan`);
+          }
+          // VWAP slope — INFORMATIONAL tag only (logged, NOT a blocker; promote to a gate later only if data earns it)
+          const _vwSlope = (state._vwapSlope || {})[liveStock.ticker] ?? 0;
+          const _vwTag = _vwSlope > 0.0001 ? "up" : (_vwSlope < -0.0001 ? "down" : "flat");
+          const _vwWith = (_vwTag === (_mrDec.side === "put" ? "down" : "up")) ? "with" : (_vwTag === "flat" ? "flat" : "against");
+          if (_fadeVsTrend) {
+            recordStandDown("mrf", "fade vs daily trend");
+            logEvent("filter", `[MR-FADE] ${liveStock.ticker} ${_mrDec.side} BLOCKED — fading against the daily trend (px vs 50d/100d); vwapSlope ${_vwTag}`);
+          } else {
+          const _hasPos = (state.positions || []).some(p => p.ticker === liveStock.ticker && p.optionType === _mrDec.side && !p.closed);
+          if (_hasPos) {
+            recordStandDown("mrf", "position already open");
+            logEvent("filter", `[MR-FADE] ${liveStock.ticker} ${_mrDec.side} setup, but a ${_mrDec.side} position is already open — standing down`);
+          } else {
+            recordStandDown("mrf", "FIRED");
+            logEvent("filter", `[MR-FADE] ${liveStock.ticker} FIRE — ${_mrDec.reason} | vwapSlope ${_vwTag} (${_vwWith} fade)`);
+            liveStock._mrFade = _mrDec;                     // tags entryStrategy + carries invalidation into _entryX
+            const _mrSigId = `${liveStock.ticker}-${_mrDec.side}-mrfade-${Date.now()}`;   // own signalId (the momentum _sigId is defined later — TDZ)
+            const _mrScore = 0;
+            const _mrOK = await executeTrade(liveStock, price, _mrScore, [_mrDec.reason], state.vix, _mrDec.side, true, 1.0, null, null, _mrSigId);
+            liveStock._mrFade = null;
+            if (_mrOK) continue;                         // handled by the MR path this scan; skip the momentum entry
+          }
+          }
+        } else {
+          recordStandDown("mrf", _mrDec.reason);        // 8/25: tally the decline reason (regime / not-at-level / not-extreme)
+        }
+      } catch (_mrErr) { liveStock._mrFade = null; logEvent("filter", `[MR-FADE] ${liveStock.ticker} error: ${_mrErr && _mrErr.message}`); }
+    }
+    }
       // 8/26 FIX: the enforce must reach the ENTRY, not just side-selection + the verdict log. The
       // candidate (EE_scoreCandidate below) reads callSetup.score/putSetup.score — the RAW composite,
       // NOT callScore/putScore — so modifying only the latter left the composite STILL gating entry,
@@ -3047,108 +3209,6 @@ async function runScan() {
     if (heatPct() >= effectiveHeatCap()) break;
     if (state.cash <= CAPITAL_FLOOR) break;
 
-    // 8/27: TREND-SWING sleeve (daily-momentum, multi-day hold). Own path — bypasses the score/enforce gate
-    // like mr-fade. Daily thesis: price vs 50/100d MA + daily RSI/MACD + breadth, not overextended.
-    if (TREND_ENABLED && stock && price > 0) {
-      try {
-        const _etH = (() => { const d = getETTime(); return d.getHours() + d.getMinutes() / 60; })();
-        if (_etH < TREND_CUTOFF_ET) {
-          const _tm = await ensureDailyTrend(stock.ticker);
-          if (_tm && _tm.ma50 && _tm.ma100 && _tm.atr) {
-            const _drsi  = (typeof stock.dailyRsi === "number") ? stock.dailyRsi : 50;
-            const _macd  = stock.macd || "neutral";
-            const _brdth = (marketContext && marketContext.breadth && typeof marketContext.breadth.breadthPct === "number") ? marketContext.breadth.breadthPct : 50;
-            const _upTrend   = price > _tm.ma50 && _tm.ma50 > _tm.ma100;
-            const _downTrend = price < _tm.ma50 && _tm.ma50 < _tm.ma100;
-            const _overExt   = Math.abs(price - _tm.ma50) > TREND_OVEREXT_ATR * _tm.atr;
-            let _tSide = null, _tReason = null;
-            // 8/27: LOOSENED to the literature (Moskowitz/Clenow) — price-vs-MA IS the signal.
-            // Dropped the MACD-bullish + RSI>=50 confirmation (my add-ons, not the momentum edge).
-            // KEPT: not-overextended (Daniel-Moskowitz crash filter), RSI upper guardrail (exhaustion),
-            // breadth not actively against (light participation check, not a hard gate).
-            const _rsiOverbought = _drsi >= TREND_RSI_MAX;      // don't buy a blow-off top
-            const _rsiOversold   = _drsi <= (100 - TREND_RSI_MAX);
-            const _brdthAgainstCall = _brdth < (100 - TREND_BREADTH_MIN);   // breadth actively bearish
-            const _brdthAgainstPut  = _brdth > TREND_BREADTH_MIN;           // breadth actively bullish
-            if (_upTrend && !_overExt && !_rsiOverbought && !_brdthAgainstCall) {
-              _tSide = "call"; _tReason = `daily uptrend $${price.toFixed(2)}>50d$${_tm.ma50}>100d$${_tm.ma100} dRSI${_drsi.toFixed(0)} brdth${_brdth}% [lit: price-vs-MA]`;
-            } else if (_downTrend && !_overExt && !_rsiOversold && !_brdthAgainstPut) {
-              _tSide = "put";  _tReason = `daily downtrend $${price.toFixed(2)}<50d$${_tm.ma50}<100d$${_tm.ma100} dRSI${_drsi.toFixed(0)} brdth${_brdth}% [lit: price-vs-MA]`;
-            }
-            const _haveTrend = (state.positions || []).some(p => p.ticker === stock.ticker && p.entryStrategy === "trend-swing" && p.optionType === _tSide && !p.closed);
-            if (_tSide && !_haveTrend) {
-              stock._isTrend = _tSide;
-              const _tSig = `${stock.ticker}-${_tSide}-trend-${Date.now()}`;
-              const _tOK = await executeTrade(stock, price, 0, [_tReason], state.vix, _tSide, false, 1.0, null, null, _tSig);
-              stock._isTrend = null;
-              if (_tOK) { recordStandDown("trend", "FIRED"); logEvent("scan", `[TREND-SWING] ${stock.ticker} ${_tSide.toUpperCase()} FIRED — ${_tReason}`); continue; }
-            } else {
-              recordStandDown("trend", (_upTrend || _downTrend) ? (_overExt ? "overextended from 50d" : "momentum/breadth gate") : "no daily trend");
-            }
-          } else { recordStandDown("trend", "daily MA unavailable"); }
-        } else { recordStandDown("trend", "past 3pm cutoff"); }
-      } catch (_te) { logEvent("warn", `[TREND-SWING] ${stock.ticker} eval failed — ${_te && _te.message}`); }
-    }
-
-    // 8/28: INTRADAY-TREND sleeve — same-day directional (ORB + VWAP + slope + ADX confluence, NO score).
-    // Own path, bypasses the score/enforce like the other sleeves. Deliberate paper experiment: the tape
-    // test said continuation doesn't continue, so this is gated HARD (ADX>=25 + real OR break) and fully
-    // logged so forward fills settle it. Fires 10:00-13:30 ET only.
-    if (ITREND_ENABLED && stock && price > 0) {
-      try {
-        const _iH = (() => { const d = getETTime(); return d.getHours() + d.getMinutes() / 60; })();
-        if (_iH >= ITREND_START_ET && _iH < ITREND_END_ET) {
-          const _ior   = state._openRange ? state._openRange[stock.ticker] : null;
-          const _iVw   = (stock.intradayVWAP > 0 && price > 0) ? ((price - stock.intradayVWAP) / stock.intradayVWAP) * 100 : null;
-          const _iSlope = (state._vwapSlope || {})[stock.ticker] ?? 0;
-          const _iAdx  = (typeof stock.adx === "number") ? stock.adx : 0;
-          const _iBr   = (marketContext && marketContext.breadth && typeof marketContext.breadth.breadthPct === "number") ? marketContext.breadth.breadthPct : 50;
-          if (_ior && _ior.locked && _ior.low > 0 && _ior.high > 0 && _iVw !== null && _iAdx >= ITREND_ADX_MIN) {
-            // breadth is SOFT/fail-open: block only when actively against (neutral ~50 passes both sides)
-            const _brAgainstPut  = _iBr > ITREND_BREADTH_STRONG;          // breadth actively bullish
-            const _brAgainstCall = _iBr < (100 - ITREND_BREADTH_STRONG);  // breadth actively bearish
-            let _iSide = null, _iReason = null;
-            if (_iVw <= -ITREND_VWAP_MIN && _iSlope < 0 && price < _ior.low && !_brAgainstPut) {
-              _iSide = "put";  _iReason = `intraday downtrend: vwap${_iVw.toFixed(2)}% slope<0 px$${price.toFixed(2)}<ORlow$${_ior.low.toFixed(2)} adx${_iAdx.toFixed(0)} brdth${_iBr}%`;
-            } else if (_iVw >= ITREND_VWAP_MIN && _iSlope > 0 && price > _ior.high && !_brAgainstCall) {
-              _iSide = "call"; _iReason = `intraday uptrend: vwap+${_iVw.toFixed(2)}% slope>0 px$${price.toFixed(2)}>ORhigh$${_ior.high.toFixed(2)} adx${_iAdx.toFixed(0)} brdth${_iBr}%`;
-            }
-            // 9/01 (Harrison): REGIME-ALIGNED DIRECTION GATE. In NEGATIVE gamma the tape TRENDS (moves
-            // amplify), so the tradeable side is WITH the dominant direction — riding it, not fading it.
-            // 9/01 lost on 5 CALLS fired into intraday bounces during a neg-gamma DOWN day. Fix: in neg
-            // gamma, suppress the side that fights the daily trend (the dominant direction). Fail-open if
-            // regime or daily MA is unknown. Positive gamma (range regime) is left unchanged.
-            let _iSuppressed = false;
-            if (_iSide) {
-              const _iGamma = (state._gexRegime || {})[stock.ticker] || null;
-              const _iDT = (state._dailyMA || {})[stock.ticker] || null;
-              // dominant direction = price vs the 50-day (below = down-biased). Catches a weakening tape
-              // (price under the 50d even before the 50d/100d cross) — 9/01 QQQ was 707 < 50d 712.
-              const _iDailyDir = (_iDT && _iDT.ma50) ? (price > _iDT.ma50 ? 1 : -1) : null;
-              if (_iGamma === "neg" && _iDailyDir !== null) {
-                if (_iSide === "call" && _iDailyDir === -1) { recordStandDown("itrend", "neg-gamma: call fights down-biased tape"); logEvent("filter", `[INTRADAY-TREND] ${stock.ticker} CALL suppressed — neg gamma + price below 50d (ride the trend, don't fade the bounce)`); _iSide = null; _iSuppressed = true; }
-                else if (_iSide === "put" && _iDailyDir === 1) { recordStandDown("itrend", "neg-gamma: put fights up-biased tape"); logEvent("filter", `[INTRADAY-TREND] ${stock.ticker} PUT suppressed — neg gamma + price above 50d`); _iSide = null; _iSuppressed = true; }
-              }
-            }
-            const _iHave = (state.positions || []).some(p => p.ticker === stock.ticker && p.entryStrategy === "intraday-trend" && p.optionType === _iSide && !p.closed);
-            if (!state._iTrendLast) state._iTrendLast = {};
-            const _iCoolKey = `${stock.ticker}-${_iSide}`;
-            const _iCooling = _iSide && (Date.now() - (state._iTrendLast[_iCoolKey] || 0)) < ITREND_COOLDOWN_MIN * 60000;
-            if (_iSide && !_iHave && !_iCooling) {
-              stock._iTrend = _iSide;
-              state._iTrendLast[_iCoolKey] = Date.now();
-              const _iOK = await executeTrade(stock, price, 0, [_iReason], state.vix, _iSide, false, 1.0, null, null, `${stock.ticker}-${_iSide}-itrend-${Date.now()}`);
-              stock._iTrend = null;
-              if (_iOK) { recordStandDown("itrend", "FIRED"); logEvent("filter", `[INTRADAY-TREND] ${stock.ticker} ${_iSide.toUpperCase()} FIRED — ${_iReason}`); continue; }
-            } else if (!_iSuppressed) {
-              recordStandDown("itrend", !_iSide ? "no aligned intraday trend (need vwap+slope+ORbreak agree)" : _iHave ? "position already open" : "cooldown (recent fire)");
-            }
-          } else {
-            recordStandDown("itrend", (!_ior || !_ior.locked) ? "OR not locked" : (_iAdx < ITREND_ADX_MIN ? `ADX ${_iAdx.toFixed(0)}<${ITREND_ADX_MIN} (chop)` : "no vwap"));
-          }
-        } else { recordStandDown("itrend", "outside 10:00-13:30 window"); }
-      } catch (_ie) { logEvent("warn", `[INTRADAY-TREND] ${stock.ticker} eval failed — ${_ie && _ie.message}`); }
-    }
 
     // 8/11 FIX 1: MR-SCALP IS CALL-ONLY — revoked ONCE, here, before anything downstream reads the flag.
     // The detector arms liveStock._mrScalp during SCORING, i.e. before direction is resolved (and before
@@ -3162,58 +3222,6 @@ async function runScan() {
       logEvent("filter", `[MR-SCALP] ${stock.ticker} scalp flag REVOKED — candidate resolved to ${optionType}; the scalp is call-only`);
     }
 
-    // ═══ LITERATURE MR FADE (mrStrategy.js) ═══ a coherent mean-reversion entry, gated on
-    // regime(gamma) + level(gamma wall / VWAP band) + confluence. Fires its OWN fade side when the
-    // full confluence aligns, reusing executeTrade. Bypasses the momentum-era gates by design — it is
-    // a DIFFERENT strategy — but respects the position guard below. Kill switch: MR_FADE_ENABLED.
-    // Wrapped so a fault can never disturb the scan.
-    if (mrFadeActive(MR_FADE_ENABLED) && MRSTRAT && stock) {   // runtime kill switch (dashboard toggle)
-      try {
-        const _mrVwap = (stock.intradayVWAP > 0 && price > 0) ? ((price - stock.intradayVWAP) / stock.intradayVWAP) * 100 : null;
-        const _mrDec  = MRSTRAT.evaluateMRFade({ rsi: stock.rsi, vwapPct: _mrVwap, adx: stock.adx },
-                                               (state._gexNow && state._gexNow[stock.ticker]) || null, price);
-        if (_mrDec.fire) {
-          // 8/27: don't fade AGAINST the daily trend (Chan regime-conditional MR). Fading strength in a
-          // daily uptrend (puts) / weakness in a downtrend (calls) is the falling knife — 4/5 puts died this way 8/27.
-          const _dt = await ensureDailyTrend(stock.ticker);
-          let _fadeVsTrend = false;
-          if (_dt && _dt.ma50 && _dt.ma100) {
-            const _dUp = price > _dt.ma50 && _dt.ma50 > _dt.ma100;
-            const _dDn = price < _dt.ma50 && _dt.ma50 < _dt.ma100;
-            if (_mrDec.side === "put"  && _dUp) _fadeVsTrend = true;
-            if (_mrDec.side === "call" && _dDn) _fadeVsTrend = true;
-          } else {
-            // fail-open (don't block on missing data) but LOG it so the protection gap is visible
-            logEvent("filter", `[MR-FADE] ${stock.ticker} daily-trend check unavailable (no MA) — fade NOT gated this scan`);
-          }
-          // VWAP slope — INFORMATIONAL tag only (logged, NOT a blocker; promote to a gate later only if data earns it)
-          const _vwSlope = (state._vwapSlope || {})[stock.ticker] ?? 0;
-          const _vwTag = _vwSlope > 0.0001 ? "up" : (_vwSlope < -0.0001 ? "down" : "flat");
-          const _vwWith = (_vwTag === (_mrDec.side === "put" ? "down" : "up")) ? "with" : (_vwTag === "flat" ? "flat" : "against");
-          if (_fadeVsTrend) {
-            recordStandDown("mrf", "fade vs daily trend");
-            logEvent("filter", `[MR-FADE] ${stock.ticker} ${_mrDec.side} BLOCKED — fading against the daily trend (px vs 50d/100d); vwapSlope ${_vwTag}`);
-          } else {
-          const _hasPos = (state.positions || []).some(p => p.ticker === stock.ticker && p.optionType === _mrDec.side && !p.closed);
-          if (_hasPos) {
-            recordStandDown("mrf", "position already open");
-            logEvent("filter", `[MR-FADE] ${stock.ticker} ${_mrDec.side} setup, but a ${_mrDec.side} position is already open — standing down`);
-          } else {
-            recordStandDown("mrf", "FIRED");
-            logEvent("filter", `[MR-FADE] ${stock.ticker} FIRE — ${_mrDec.reason} | vwapSlope ${_vwTag} (${_vwWith} fade)`);
-            stock._mrFade = _mrDec;                     // tags entryStrategy + carries invalidation into _entryX
-            const _mrSigId = `${stock.ticker}-${_mrDec.side}-mrfade-${Date.now()}`;   // own signalId (the momentum _sigId is defined later — TDZ)
-            const _mrScore = (typeof score === "number") ? score : 0;
-            const _mrOK = await executeTrade(stock, price, _mrScore, [_mrDec.reason], state.vix, _mrDec.side, true, 1.0, null, null, _mrSigId);
-            stock._mrFade = null;
-            if (_mrOK) continue;                         // handled by the MR path this scan; skip the momentum entry
-          }
-          }
-        } else {
-          recordStandDown("mrf", _mrDec.reason);        // 8/25: tally the decline reason (regime / not-at-level / not-extreme)
-        }
-      } catch (_mrErr) { stock._mrFade = null; logEvent("filter", `[MR-FADE] ${stock.ticker} error: ${_mrErr && _mrErr.message}`); }
-    }
 
     const { pass, reason } = await checkAllFilters(stock, price, null);
     if (!pass) {
