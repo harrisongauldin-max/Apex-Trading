@@ -48,7 +48,7 @@ const {
   MR_SCALP_FASTCUT_MIN = 5, MR_SCALP_FASTCUT_PEAK = 0.03, MR_SCALP_GIVEBACK_PEAK = 0.08, MR_SCALP_GIVEBACK_FRAC = 0.5,
   MR_SCALP_TRAIL_ARM = 0.10, MR_SCALP_TRAIL_GIVE = 0.04, MR_SCALP_TP = 0.20,
   CP1_CRASH_ENABLED = false, CP1_CRASH_PCT = -5,
-  TREND_STOP_PCT = 0.125, TREND_ATR_STOP_MULT = 3.5, TREND_USTOP_FLOOR = 0.20, TREND_USTOP_CEIL = 0.55, TREND_TRAIL_ARM_PCT = 0.10, TREND_TRAIL_GIVEBACK_PCT = 0.05, TREND_ROLL_DTE = 21,
+  TREND_STOP_PCT = 0.125, TREND_ATR_STOP_MULT = 3.5, TREND_USTOP_FLOOR = 0.20, TREND_USTOP_CEIL = 0.55, TREND_STALE_DAYS = 14, TREND_STALE_PEAK = 0.05, TREND_TRAIL_ARM_PCT = 0.10, TREND_TRAIL_GIVEBACK_PCT = 0.05, TREND_ROLL_DTE = 21,
   ITREND_STOP_PCT = 0.30, ITREND_MAX_HOLD_MIN = 60, ITREND_NOARM_MIN = 20, ladderFloor,
   MR_FADE_TP = 0.30, MR_FADE_MAX_HOLD_MIN = 60, MR_FADE_STOP_PCT = 0.18,
   BREAK_MAX_HOLD_MIN = 120, BREAK_TRAIL_ARM_PCT = 0.25, BREAK_TRAIL_GIVEBACK_PCT = 0.15,
@@ -442,6 +442,17 @@ async function checkExits(positions, posSnapshots, posQuotes, posNewsCache, ctx)
       if (chg <= -_tStopPct)                                                                                  _tReason = "trend-stop";
       else if (pos._trendPeakChg >= TREND_TRAIL_ARM_PCT && chg <= pos._trendPeakChg - TREND_TRAIL_GIVEBACK_PCT) _tReason = "trend-trail";
       else if (_tDTE <= TREND_ROLL_DTE)                                                                        _tReason = "trend-roll";
+      else {
+        // 9/14 (Harrison): STALE-TREND cut. Momentum has a horizon (Jegadeesh-Titman / Moskowitz-Pedersen);
+        // a trade that never peaked +TREND_STALE_PEAK within TREND_STALE_DAYS calendar days is a signal that
+        // didn't fire — exit rather than pay theta to wait. PEAK (not chg): a trade that ran +8% then faded is
+        // handled by the trail; stale = never moved.
+        const _tAgeDays = (Date.now() - new Date(pos.openDate || pos.entryTime || Date.now()).getTime()) / MS_PER_DAY;
+        if (_tAgeDays >= TREND_STALE_DAYS && (pos._trendPeakChg || -Infinity) < TREND_STALE_PEAK) {
+          _tReason = "trend-stale";
+          logEvent("scan", `[TREND-STALE] ${pos.ticker} ${_tAgeDays.toFixed(1)}d old, peak only ${((pos._trendPeakChg||0)*100).toFixed(1)}% (<${(TREND_STALE_PEAK*100).toFixed(0)}%) — failed signal, cutting`);
+        }
+      }
       if (_tReason && !_closedThisCycle.has(pi)) {
         _closedThisCycle.add(pi);
         logEvent("scan", `[TREND] ${pos.ticker} exit — ${_tReason} (chg ${(chg*100).toFixed(1)}%, peak ${(pos._trendPeakChg*100).toFixed(1)}%, ${_tDTE}DTE)`);
