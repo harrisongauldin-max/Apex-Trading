@@ -51,7 +51,7 @@ const {
   TREND_STOP_PCT = 0.125, TREND_ATR_STOP_MULT = 3.5, TREND_USTOP_FLOOR = 0.20, TREND_USTOP_CEIL = 0.55, TREND_STALE_DAYS = 14, TREND_STALE_PEAK = 0.05, TREND_TRAIL_ARM_PCT = 0.10, TREND_TRAIL_GIVEBACK_PCT = 0.05, TREND_ROLL_DTE = 21,
   ITREND_STOP_PCT = 0.30, ITREND_MAX_HOLD_MIN = 60, ITREND_NOARM_MIN = 20, ladderFloor,
   UNIVERSAL_NOARM_ENABLED = false, UNIVERSAL_NOARM_MIN = 25,
-  STRADDLE_TP_PCT = 0.35, STRADDLE_LEG_STOP_PCT = 0.60, STRADDLE_MAX_HOLD_MIN = 75,
+  STRADDLE_TP_PCT = 0.35, STRADDLE_MAX_HOLD_MIN = 75,
   MR_FADE_TP = 0.30, MR_FADE_MAX_HOLD_MIN = 60, MR_FADE_STOP_PCT = 0.18,
   BREAK_MAX_HOLD_MIN = 120, BREAK_TRAIL_ARM_PCT = 0.25, BREAK_TRAIL_GIVEBACK_PCT = 0.15,
   FASTCUT_ENABLED = false, FASTCUT_MIN = 6, FASTCUT_PEAK_SHORT = 0.03, FASTCUT_PEAK_MID = 0.02,
@@ -401,26 +401,66 @@ async function checkExits(positions, posSnapshots, posQuotes, posNewsCache, ctx)
     // a long max-hold. The 3:15 cron still flattens. Deep-ITM + longer-DTE (execution) keeps theta off
     // the hold so the trend has room to develop.
     if (pos._isStraddle) {
-      // 9/14: VOL-STRADDLE leg. Non-directional long-vol; managed as: take-profit if this leg runs
-      // (the move paid), a TIME-STOP at STRADDLE_MAX_HOLD (the 0.87 signal is a ~60min forward move —
-      // if vol hasn't delivered by then it isn't coming, cut before theta eats both legs), and a
-      // regime-flip exit (neg->pos = the amplifying regime is gone, edge invalid).
+      // 9/14 (pair-coupled rewrite): a long straddle is ONE non-directional position made of two legs.
+      // It is managed as a PAIR, never leg-by-leg — the losing leg being deep red is the expected,
+      // healthy state (it's the premium bought for the winner's convexity), NOT a stop signal. Cutting
+      // a leg independently would (a) throw away the hedge and (b) leave a naked directional winner if
+      // the underlying then reverses. So: combined-$ take-profit closes BOTH legs; a pair time-stop
+      // closes BOTH; regime-flip closes BOTH. No per-leg stop. Orphan (incomplete fill) still closes the
+      // lone leg. Legs are matched by shared signalId.
       const _stHeld = (Date.now() - new Date(pos.openDate || pos.entryTime || Date.now()).getTime()) / 60000;
       const _stReg  = state._gexNow && state._gexNow[pos.ticker] && state._gexNow[pos.ticker].regime;
-      let _stReason = null;
-      if (pos._straddleOrphan)                       _stReason = "straddle-orphan";    // incomplete straddle — close the lone leg, never hold naked-directional
-      else if (chg >= STRADDLE_TP_PCT)               _stReason = "straddle-tp";        // this leg ran — the move paid
-      else if (chg <= -STRADDLE_LEG_STOP_PCT)        _stReason = "straddle-legstop";   // this leg is a total loss, cut it (other leg carries)
-      else if (_stHeld >= STRADDLE_MAX_HOLD_MIN)     _stReason = "straddle-timestop";  // vol didn't show in the window
-      else if (_stReg === "pos")                     _stReason = "straddle-regimeflip";// amplifying regime gone
-      if (_stReason && !_closedThisCycle.has(pi)) {
+
+      // orphan (only one leg ever filled) — close this lone leg, never hold naked-directional
+      if (pos._straddleOrphan && !_closedThisCycle.has(pi)) {
         _closedThisCycle.add(pi);
-        logEvent("scan", `[VOL-STRADDLE] ${pos.ticker} ${pos.optionType||""} exit — ${_stReason} (held ${_stHeld.toFixed(0)}min, chg ${(chg*100).toFixed(1)}%)`);
-        decisions.push({ pi, ticker: pos.ticker, action: 'close', reason: _stReason, exitPremium: null, contractSym: pos.contractSymbol || null });
+        logEvent("scan", `[VOL-STRADDLE] ${pos.ticker} ${pos.optionType||""} — ORPHAN close (incomplete straddle, not held naked)`);
+        decisions.push({ pi, ticker: pos.ticker, action: 'close', reason: "straddle-orphan", exitPremium: null, contractSym: pos.contractSymbol || null });
+        continue;
+      }
+
+      // find the sibling leg (same signalId, opposite option type). If missing → treat as orphan.
+      const _sibIdx = state.positions.findIndex((q, qi) => qi !== pi && q._isStraddle
+                        && q.signalId && pos.signalId && q.signalId === pos.signalId);
+      if (_sibIdx === -1) {
+        // sibling already closed/never existed → this leg is now naked; close it.
+        if (!_closedThisCycle.has(pi)) {
+          _closedThisCycle.add(pi);
+          logEvent("scan", `[VOL-STRADDLE] ${pos.ticker} ${pos.optionType||""} — sibling gone, closing lone leg (no naked-directional)`);
+          decisions.push({ pi, ticker: pos.ticker, action: 'close', reason: "straddle-orphan", exitPremium: null, contractSym: pos.contractSymbol || null });
+        }
+        continue;
+      }
+      const _sib = state.positions[_sibIdx];
+
+      // COMBINED dollar P&L across both legs = (curr - entry) * contracts * 100 for each leg.
+      const _legPnl = (p, cur) => (((cur || p.currentPrice || p.premium) - p.premium) * (p.contracts || 1) * 100);
+      const _thisPnl = _legPnl(pos, curP);
+      const _sibCur  = _sib.currentPrice || _sib.premium;
+      const _sibPnl  = _legPnl(_sib, _sibCur);
+      const _pairPnl = _thisPnl + _sibPnl;
+      const _pairCost = ((pos.cost || pos.premium * (pos.contracts||1) * 100) + (_sib.cost || _sib.premium * (_sib.contracts||1) * 100)) || 1;
+      const _pairPct  = _pairPnl / _pairCost;   // combined return on total premium paid
+
+      // decide on the PAIR; act on BOTH legs at once (only the lower-index leg drives, to avoid double-firing)
+      let _stReason = null;
+      if (_pairPct >= STRADDLE_TP_PCT)             _stReason = "straddle-tp";         // combined move paid — harvest both
+      else if (_stHeld >= STRADDLE_MAX_HOLD_MIN)   _stReason = "straddle-timestop";   // vol didn't show in the window — dump both
+      else if (_stReg === "pos")                   _stReason = "straddle-regimeflip"; // amplifying regime gone — exit both
+
+      if (_stReason) {
+        // close BOTH legs together (guard each against double-close)
+        for (const _li of [pi, _sibIdx]) {
+          if (_closedThisCycle.has(_li)) continue;
+          _closedThisCycle.add(_li);
+          const _lp = state.positions[_li];
+          decisions.push({ pi: _li, ticker: _lp.ticker, action: 'close', reason: _stReason, exitPremium: null, contractSym: _lp.contractSymbol || null });
+        }
+        logEvent("scan", `[VOL-STRADDLE] ${pos.ticker} PAIR exit — ${_stReason} (held ${_stHeld.toFixed(0)}min, combined ${(_pairPct*100).toFixed(1)}% / $${_pairPnl.toFixed(0)})`);
       } else {
         pos.currentPrice = curP; markDirty();
       }
-      continue;   // straddle legs managed entirely here
+      continue;   // straddle legs managed entirely here (as a pair)
     }
 
     if (pos._isStructBreak) {
@@ -523,7 +563,9 @@ async function checkExits(positions, posSnapshots, posQuotes, posNewsCache, ctx)
     // four worst losses. Validated on the deduped set: a cut at cp1 <= -5% killed ZERO eventual +5%
     // recoverers (their cp1 never fell below -4.3%) while catching the fast crashes. Placed BEFORE the
     // fast-cut so it gets first say. Narrow by design: catches collapse, not drift.
-    if (CP1_CRASH_ENABLED && !pos._mrScalp && !pos._isMrFade && !pos._cp1CrashFired && pos._cp && typeof pos._cp[1] === "number") {
+    // 9/14: straddle legs exempt from cp1-crash. One leg of a straddle is ALWAYS red by design; cp1-crash
+    // would amputate the losing leg within minutes, leaving a naked directional position (the trade we avoid).
+    if (CP1_CRASH_ENABLED && !pos._mrScalp && !pos._isMrFade && !pos._isStraddle && !pos._cp1CrashFired && pos._cp && typeof pos._cp[1] === "number") {
       if (pos._cp[1] <= CP1_CRASH_PCT && !_closedThisCycle.has(pi)) {
         pos._cp1CrashFired = true;
         _closedThisCycle.add(pi);
