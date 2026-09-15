@@ -9,6 +9,7 @@ const {
 } = require('./broker');
 
 const { state, logEvent, markDirty, saveStateNow, flushStateIfDirty, paperDataActive, dataGatherActive, mrFadeActive, recordStandDown , markFresh, auditFreshness } = require('./state');
+const STRADDLESTRAT = require('./straddleStrategy');
 const { recordTelemetry } = require('./telemetry');
 // 8/12: DEFENSIVE REQUIRE. vol.js is OPTIONAL instrumentation — realized vol, IV-RV, surface,
 // feasibility. It gates nothing and executes no trades. A hard top-level require made a missing
@@ -2668,6 +2669,7 @@ async function runScan() {
             (Date.now() - Math.min(_gc.call.ts || 0, _gc.put.ts || 0) < 300000)) {
           const _g = GEX.computeGEX(_gc.call.rows, _gc.put.rows, price);
           if (_g) { if (!state._gexRegime) state._gexRegime = {}; state._gexRegime[liveStock.ticker] = _g.regime; }   // 9/01: expose regime per-ticker for the intraday-trend direction gate
+          if (_g) { if (!state._gexFresh) state._gexFresh = {}; state._gexFresh[liveStock.ticker] = _g; }   // 9/14: FRESH full gex obj (this-scan, no lag) for the vol-straddle gate — avoids the stale _gexNow (written 300+ lines later)
           // 8/26: LIVE GEX STAMP (per ticker — SPY and QQQ each). Prints raw netGEX + netGexM + regime
           // AND the strike counts / total OI, so the "is netGexM stuck at 0, and if so why" question is
           // answerable in the live log, not just the EOD telemetry CSV. Throttled ~60s/ticker.
@@ -2845,6 +2847,41 @@ async function runScan() {
           recordStandDown("mrf", _mrDec.reason);        // 8/25: tally the decline reason (regime / not-at-level / not-extreme)
         }
       } catch (_mrErr) { liveStock._mrFade = null; logEvent("filter", `[MR-FADE] ${liveStock.ticker} error: ${_mrErr && _mrErr.message}`); }
+    }
+
+    // 9/14 (Harrison): VOL-CONDITIONAL STRADDLE — the ONLY negative-gamma edge this tape confirms.
+    // Non-directional (ATM call + ATM put); fires only when neg gamma AND trailing 30-min range > 0.50%
+    // (corr 0.87 with a straddle-payable forward move; 89% hit in the active bucket, 0% when dead).
+    if (STRADDLESTRAT.STRADDLE.ENABLED && liveStock) {
+      try {
+        const _sGex = (state._gexFresh && state._gexFresh[liveStock.ticker]) || (state._gexNow && state._gexNow[liveStock.ticker]) || null;  // 9/14: fresh-first (no one-scan lag)
+        const _sDec = STRADDLESTRAT.evaluateStraddle(liveStock.ticker,
+                        { intradayBars, nowMs: Date.now() }, _sGex, price, state);
+        if (_sDec.fire) {
+          if (heatPct() < effectiveHeatCap() && state.cash > CAPITAL_FLOOR) {
+            const _sSig = `${liveStock.ticker}-straddle-${Date.now()}`;
+            liveStock._straddle = true;   // tag both legs (execution stamps _isStraddle from this)
+            const _legC = await executeTrade(liveStock, price, 0, [_sDec.reason], state.vix, "call", false, 1.0, null, null, _sSig);
+            const _legP = await executeTrade(liveStock, price, 0, [_sDec.reason], state.vix, "put",  false, 1.0, null, null, _sSig);
+            liveStock._straddle = null;
+            if (!state._lastStraddleAt) state._lastStraddleAt = {};
+            state._lastStraddleAt[liveStock.ticker] = Date.now();
+            // ATOMICITY (panel 9/14): a straddle must be BOTH legs or neither. If exactly one leg filled,
+            // we are naked-directional — the exact -$929 trade we're avoiding. Flag the surviving leg so
+            // the exit engine force-closes it next scan (straddle-orphan). Never left holding one leg.
+            if (_legC !== _legP) {   // one filled, one didn't (true/false mismatch)
+              const _orphanSide = _legC ? "call" : "put";
+              const _op = state.positions.find(p => p._isStraddle && p.optionType === _orphanSide &&
+                            p.signalId === _sSig);   // 9/14: match THIS straddle's exact signalId (not just ticker/side) — can't mis-flag a prior straddle's leg
+              if (_op) { _op._straddleOrphan = true; markDirty(); }
+              logEvent("warn", `[VOL-STRADDLE] ${liveStock.ticker} INCOMPLETE — only ${_orphanSide} filled; flagged orphan for close (not left naked-directional)`);
+            }
+            if (_legC || _legP) continue;   // handled by the straddle path this scan
+          }
+        } else if (_sGex && _sGex.regime === "neg") {
+          recordStandDown("straddle", _sDec.reason);   // only tally in neg gamma (where it could have fired)
+        }
+      } catch (_sErr) { liveStock._straddle = null; logEvent("filter", `[VOL-STRADDLE] ${liveStock.ticker} error: ${_sErr && _sErr.message}`); }
     }
     }
       // 8/26 FIX: the enforce must reach the ENTRY, not just side-selection + the verdict log. The
