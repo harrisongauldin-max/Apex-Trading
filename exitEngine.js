@@ -50,6 +50,8 @@ const {
   CP1_CRASH_ENABLED = false, CP1_CRASH_PCT = -5,
   TREND_STOP_PCT = 0.125, TREND_ATR_STOP_MULT = 3.5, TREND_USTOP_FLOOR = 0.20, TREND_USTOP_CEIL = 0.55, TREND_STALE_DAYS = 14, TREND_STALE_PEAK = 0.05, TREND_TRAIL_ARM_PCT = 0.10, TREND_TRAIL_GIVEBACK_PCT = 0.05, TREND_ROLL_DTE = 21,
   ITREND_STOP_PCT = 0.30, ITREND_MAX_HOLD_MIN = 60, ITREND_NOARM_MIN = 20, ladderFloor,
+  UNIVERSAL_NOARM_ENABLED = false, UNIVERSAL_NOARM_MIN = 25,
+  STRADDLE_TP_PCT = 0.35, STRADDLE_LEG_STOP_PCT = 0.60, STRADDLE_MAX_HOLD_MIN = 75,
   MR_FADE_TP = 0.30, MR_FADE_MAX_HOLD_MIN = 60, MR_FADE_STOP_PCT = 0.18,
   BREAK_MAX_HOLD_MIN = 120, BREAK_TRAIL_ARM_PCT = 0.25, BREAK_TRAIL_GIVEBACK_PCT = 0.15,
   FASTCUT_ENABLED = false, FASTCUT_MIN = 6, FASTCUT_PEAK_SHORT = 0.03, FASTCUT_PEAK_MID = 0.02,
@@ -398,12 +400,37 @@ async function checkExits(positions, posSnapshots, posQuotes, posNewsCache, ctx)
     // floor, a TRAILING stop that arms once the trade is up and locks the trend gain on a giveback, and
     // a long max-hold. The 3:15 cron still flattens. Deep-ITM + longer-DTE (execution) keeps theta off
     // the hold so the trend has room to develop.
+    if (pos._isStraddle) {
+      // 9/14: VOL-STRADDLE leg. Non-directional long-vol; managed as: take-profit if this leg runs
+      // (the move paid), a TIME-STOP at STRADDLE_MAX_HOLD (the 0.87 signal is a ~60min forward move —
+      // if vol hasn't delivered by then it isn't coming, cut before theta eats both legs), and a
+      // regime-flip exit (neg->pos = the amplifying regime is gone, edge invalid).
+      const _stHeld = (Date.now() - new Date(pos.openDate || pos.entryTime || Date.now()).getTime()) / 60000;
+      const _stReg  = state._gexNow && state._gexNow[pos.ticker] && state._gexNow[pos.ticker].regime;
+      let _stReason = null;
+      if (pos._straddleOrphan)                       _stReason = "straddle-orphan";    // incomplete straddle — close the lone leg, never hold naked-directional
+      else if (chg >= STRADDLE_TP_PCT)               _stReason = "straddle-tp";        // this leg ran — the move paid
+      else if (chg <= -STRADDLE_LEG_STOP_PCT)        _stReason = "straddle-legstop";   // this leg is a total loss, cut it (other leg carries)
+      else if (_stHeld >= STRADDLE_MAX_HOLD_MIN)     _stReason = "straddle-timestop";  // vol didn't show in the window
+      else if (_stReg === "pos")                     _stReason = "straddle-regimeflip";// amplifying regime gone
+      if (_stReason && !_closedThisCycle.has(pi)) {
+        _closedThisCycle.add(pi);
+        logEvent("scan", `[VOL-STRADDLE] ${pos.ticker} ${pos.optionType||""} exit — ${_stReason} (held ${_stHeld.toFixed(0)}min, chg ${(chg*100).toFixed(1)}%)`);
+        decisions.push({ pi, ticker: pos.ticker, action: 'close', reason: _stReason, exitPremium: null, contractSym: pos.contractSymbol || null });
+      } else {
+        pos.currentPrice = curP; markDirty();
+      }
+      continue;   // straddle legs managed entirely here
+    }
+
     if (pos._isStructBreak) {
       const _bHeld = (Date.now() - new Date(pos.openDate || pos.entryTime || Date.now()).getTime()) / 60000;
       pos._breakPeakChg = Math.max(typeof pos._breakPeakChg === "number" ? pos._breakPeakChg : -Infinity, chg);
       let _bReason = null;
       if (chg <= -STOP_LOSS_PCT)                                                                   _bReason = "break-stop";      // hard floor
       else if (pos._breakPeakChg >= BREAK_TRAIL_ARM_PCT && chg <= pos._breakPeakChg - BREAK_TRAIL_GIVEBACK_PCT) _bReason = "break-trail";  // lock the trend gain
+      else if (UNIVERSAL_NOARM_ENABLED && _bHeld >= UNIVERSAL_NOARM_MIN && pos.trailFloorPct == null)
+                                                                                                  _bReason = "break-noarm";   // 9/14: 54% of breakout trades never armed (+5%) & bled to maxhold. Cut on TIME+unarmed (like intraday no-arm), NOT on P&L — a dud at 25min is a dud at -3% or -10%.
       else if (_bHeld >= BREAK_MAX_HOLD_MIN)                                                       _bReason = "break-maxhold";
       if (_bReason && !_closedThisCycle.has(pi)) {
         _closedThisCycle.add(pi);
