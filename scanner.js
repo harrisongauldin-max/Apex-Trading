@@ -2036,6 +2036,41 @@ async function runScan() {
       if (!state._buEpisode) state._buEpisode = {};   // 8/05: breakout (up) episode — call-side mirror of _bdEpisode
       {
         const _tk   = stock.ticker;
+        // 9/15 (Harrison): CUMULATIVE VOLUME DELTA — bar-based order-flow proxy (real TICK/order-flow not on
+        // this feed). Each 1-min bar: range-weighted signed volume (+v if closed at high, -v at low). Cumulate
+        // over the session. Trend day = CVD marches one-sided; chop day = CVD oscillates around 0. MEASUREMENT
+        // ONLY — logged & stamped, never gates an entry until it's proven to separate trend from chop.
+        try {
+          if (!state._cumVolDelta) state._cumVolDelta = {};
+          if (!state._cvdHist) state._cvdHist = {};
+          const _tday = new Date().toDateString();
+          const _todayBars = Array.isArray(intradayBars)
+            ? intradayBars.filter(b => { const t=b.t||b.timestamp; return t && new Date(t).toDateString()===_tday; })
+            : [];
+          if (_todayBars.length) {
+            let _cvd = 0;
+            for (const _b of _todayBars) {
+              const h=+_b.h, l=+_b.l, c=+_b.c, v=+_b.v||0;
+              if (!(h>l) || !v) continue;
+              const _w = (2*(c-l)/(h-l)) - 1;   // +1 close@high (all buy), -1 close@low (all sell)
+              _cvd += v * _w;
+            }
+            state._cumVolDelta[_tk] = _cvd;
+            const _ch = state._cvdHist[_tk] || [];
+            if (!_ch.length || _ch[_ch.length-1].day !== _tday) _ch.length = 0;   // reset daily
+            _ch.push({ day:_tday, t:Date.now(), cvd:_cvd });
+            if (_ch.length > 30) _ch.shift();
+            state._cvdHist[_tk] = _ch;
+            // slope = change over last ~5 readings (is flow accelerating one-sided?)
+            state._cvdSlope = state._cvdSlope || {};
+            state._cvdSlope[_tk] = _ch.length >= 5 ? (_cvd - _ch[Math.max(0,_ch.length-5)].cvd) : 0;
+            if (!state._cvdLogAt) state._cvdLogAt = {};
+            if (!state._cvdLogAt[_tk] || Date.now() - state._cvdLogAt[_tk] > 5*60*1000) {   // log every ~5min
+              state._cvdLogAt[_tk] = Date.now();
+              logEvent("scan", `[CVD] ${_tk} cumVolDelta ${Math.round(_cvd)} slope5 ${Math.round(state._cvdSlope[_tk])} (order-flow proxy — measurement only)`);
+            }
+          }
+        } catch (_cvdErr) { /* measurement only — never break the scan */ }
         const _sm   = state._sessionMinsNow ?? 0;
         const _pxN  = price;
         const _vwN  = signals.intradayVWAP || 0;
@@ -3001,10 +3036,13 @@ async function runScan() {
           blocker: _clears ? "" : _killer,
           callReasons: callSetup.reasons, putReasons: putSetup.reasons,
           direction: optionType,
-          volPace: signals.volPaceRatio, breadth: signals.breadth,   // 8/24: enrich the tape for backtesting
+          volPace: signals.volPaceRatio,
+          breadth: (marketContext && marketContext.breadth && typeof marketContext.breadth.breadthPct === "number") ? marketContext.breadth.breadthPct : null,   // 9/15 FIX: was signals.breadth (nonexistent → column always empty); breadth lives on marketContext.breadth.breadthPct
           gexRegime: _gexRec ? _gexRec.regime : null, netGexM: _gexRec ? _gexRec.netGexM : null,   // 8/24: dealer-gamma REGIME on the tape (pos=range/MR-friendly, neg=trend)
           callWall: _gexRec ? _gexRec.callWall : null, putWall: _gexRec ? _gexRec.putWall : null,
           distCW: _gexRec ? _gexRec.distCallWallPct : null, distPW: _gexRec ? _gexRec.distPutWallPct : null,
+          cumVolDelta: (state._cumVolDelta && state._cumVolDelta[stock.ticker] != null) ? state._cumVolDelta[stock.ticker] : null,
+          cvdSlope: (state._cvdSlope && state._cvdSlope[stock.ticker] != null) ? state._cvdSlope[stock.ticker] : null,
         });
       } catch (_telErr) { /* telemetry must never break the scan */ }
     }
