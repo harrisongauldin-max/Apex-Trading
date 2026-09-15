@@ -20,7 +20,7 @@ const SCORE_DELTA  = 3;               // |score| move that counts as material
 const MAX_ROWS     = 6000;            // safety cap on a runaway day
 const BLOCKER_MAX  = 60;              // truncate the headline blocker text
 
-const TELEMETRY_HEADER = "time,tkr,px,iRSI,dRSI,call,put,isMR,curl,vwap%,blocker,drivers,shadow,adx,gate,pgate,isC,isP,volPace,breadth,gexRegime,netGexM,callWall,putWall,distCW,distPW";
+const TELEMETRY_HEADER = "time,tkr,px,iRSI,dRSI,call,put,isMR,curl,vwap%,blocker,drivers,shadow,adx,gate,pgate,isC,isP,volPace,breadth,gexRegime,netGexM,callWall,putWall,distCW,distPW,cumVolDelta,cvdSlope";
 
 // intraday-RSI tier — a crossing is "material" so dips/spikes always log a row
 function _rsiTier(r) {
@@ -179,6 +179,8 @@ function recordTelemetry(state, rec) {
       rec.putWall  == null ? "" : rec.putWall,
       rec.distCW   == null ? "" : rec.distCW,
       rec.distPW   == null ? "" : rec.distPW,
+      rec.cumVolDelta == null ? "" : Math.round(rec.cumVolDelta),   // 9/15: cumulative bar-based volume delta (order-flow proxy) — measurement-only, testing trend-vs-chop separation
+      rec.cvdSlope    == null ? "" : Number(rec.cvdSlope).toFixed(0),
     ].map(_csv).join(",");
 
     state._telemetryBuffer.push(row);
