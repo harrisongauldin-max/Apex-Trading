@@ -736,6 +736,14 @@ const ITREND_TRAIL_GIVEBACK_PCT = 0.07;
 const ITREND_STOP_PCT     = 0.30;   // hard floor (0.50-delta 14-DTE is more volatile than deep-ITM)
 const ITREND_MAX_HOLD_MIN = 60;     // 8/31 (Harrison): 60-min max hold — peaks come fast then decay all day
 const ITREND_NOARM_MIN    = 20;     // 9/02 (Harrison): if not armed (+5%) within 20 min it's a dud — cut it early instead of bleeding to maxhold
+const UNIVERSAL_NOARM_ENABLED = true; // 9/14: apply the no-arm cut to ALL sleeves. 76% of trades never armed (+5%) & lost -$10.3k;
+const UNIVERSAL_NOARM_MIN     = 25;   //       capping unarmed losers early (vs bleeding to -$21/-$74) saves ~$6.3k over the book.
+//       cut an unarmed position once held >= MIN minutes (on TIME, like the intraday no-arm cut — no P&L gate). No prediction: reacts to observed deadness.
+const RSI_DEADZONE_VETO       = true; // 9/14: veto entries with iRSI 45-55 (no signal) or call-side iRSI<30 (oversold-call, no edge)
+// ── VOL-STRADDLE exits (9/14): non-directional neg-gamma long-vol; the entry gate lives in straddleStrategy.js ──
+const STRADDLE_TP_PCT         = 0.35; // take-profit per leg — if one leg runs +35%, the move paid; harvest it
+const STRADDLE_LEG_STOP_PCT   = 0.60; // per-leg total-loss cut (the losing leg of a paid straddle); the winning leg carries
+const STRADDLE_MAX_HOLD_MIN   = 75;   // time-stop: the +0.87 signal is a ~60min forward move; give it a little over that, then cut before theta
 const ITREND_COOLDOWN_MIN = 30;     // 8/28 (panel): the OR condition is a STATE not an event, so a sustained trend
                                     // could re-fire right after an exit. Cooldown bounds re-entry churn per ticker.
 const GEX_FETCH_ENABLED           = true;    // 8/26: dedicated both-sides near-expiry GEX chain fetch (feeds the regime switch)
@@ -918,6 +926,8 @@ module.exports = {
   ITREND_ENABLED, ITREND_DELTA, ITREND_DELTA_MIN, ITREND_DELTA_MAX, ITREND_TARGET_DTE, ITREND_DTE_MIN, ITREND_DTE_MAX,
   ITREND_ADX_MIN, ITREND_VWAP_MIN, ITREND_BREADTH_STRONG, ITREND_START_ET, ITREND_END_ET,
   ITREND_TRAIL_ARM_PCT, ITREND_TRAIL_GIVEBACK_PCT, ITREND_STOP_PCT, ITREND_COOLDOWN_MIN, ITREND_MAX_HOLD_MIN, ITREND_NOARM_MIN,
+  UNIVERSAL_NOARM_ENABLED, UNIVERSAL_NOARM_MIN, RSI_DEADZONE_VETO,
+  STRADDLE_TP_PCT, STRADDLE_LEG_STOP_PCT, STRADDLE_MAX_HOLD_MIN,
   MR_SCALP_FASTCUT_MIN, MR_SCALP_FASTCUT_PEAK, MR_SCALP_GIVEBACK_PEAK, MR_SCALP_GIVEBACK_FRAC,
   MR_SCALP_TRAIL_ARM, MR_SCALP_TRAIL_GIVE, MR_SCALP_TP,
   HIGH_RISK_MIN_SCORE,
