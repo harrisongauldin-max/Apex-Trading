@@ -2861,8 +2861,8 @@ async function runScan() {
           if (heatPct() < effectiveHeatCap() && state.cash > CAPITAL_FLOOR) {
             const _sSig = `${liveStock.ticker}-straddle-${Date.now()}`;
             liveStock._straddle = true;   // tag both legs (execution stamps _isStraddle from this)
-            const _legC = await executeTrade(liveStock, price, 0, [_sDec.reason], state.vix, "call", false, 1.0, null, null, _sSig);
-            const _legP = await executeTrade(liveStock, price, 0, [_sDec.reason], state.vix, "put",  false, 1.0, null, null, _sSig);
+            const _legC = await executeTrade(liveStock, price, 0, [_sDec.reason], state.vix, "call", false, 1.0, "sameweek", null, _sSig);
+            const _legP = await executeTrade(liveStock, price, 0, [_sDec.reason], state.vix, "put",  false, 1.0, "sameweek", null, _sSig);
             liveStock._straddle = null;
             if (!state._lastStraddleAt) state._lastStraddleAt = {};
             state._lastStraddleAt[liveStock.ticker] = Date.now();
