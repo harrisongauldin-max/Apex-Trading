@@ -1929,6 +1929,14 @@ function renderVixAlert() {
   else                { el.className='alert alert-green';  el.innerHTML=`<strong>VIX ${vix} — NORMAL</strong> Calm market conditions. Full position sizing active.`; }
 }
 
+function _openedLabel(p) {
+  if (!p || !p.openDate) return '--';
+  const ms = new Date(p.openDate).getTime();
+  if (!ms) return '--';
+  const d = new Date(ms).toLocaleDateString('en-US',{month:'numeric',day:'numeric'});
+  const age = Math.max(0, Math.floor((Date.now() - ms) / 86400000));
+  return d + ' (' + age + 'd)';
+}
 function renderPositions() {
   const wrap = document.getElementById('positions-wrap');
   const positions = state.positions || [];
@@ -2169,6 +2177,7 @@ function renderNativeSpread(p) {
       <div><div style="font-size:9px;color:var(--muted)">MARGIN</div><div style="font-weight:700">${fmt(p.cost)}</div></div>
       <div><div style="font-size:9px;color:var(--muted)">BREAKEVEN</div><div style="font-weight:700">$${breakeven}</div></div>
       <div><div style="font-size:9px;color:var(--muted)">CONTRACTS</div><div style="font-weight:700">${c}x</div></div>
+      <div><div style="font-size:9px;color:var(--muted)">OPENED</div><div style="font-weight:700">${_openedLabel(p)}</div></div>
       <div><div style="font-size:9px;color:var(--muted)">EXP DATE</div><div style="font-weight:700">${p.expDate}</div></div>
     </div>
   </div>`;
@@ -2218,6 +2227,7 @@ function renderSingleLeg(p) {
       <div><div style="font-size:9px;color:var(--muted)">ENTRY PRICE</div><div style="font-weight:700">${fmt(p.premium)}</div></div>
       <div><div style="font-size:9px;color:var(--muted)">CURRENT PRICE</div><div style="font-weight:700">$${curPrice.toFixed(2)}</div></div>
       <div><div style="font-size:9px;color:var(--muted)">CONTRACTS</div><div style="font-weight:700">${c}x</div></div>
+      <div><div style="font-size:9px;color:var(--muted)">OPENED</div><div style="font-weight:700">${_openedLabel(p)}</div></div>
       <div><div style="font-size:9px;color:var(--muted)">EXP DATE</div><div style="font-weight:700">${p.expDate}</div></div>
       <div><div style="font-size:9px;color:var(--muted)">TARGET</div><div style="font-weight:700;color:var(--green)">${p.target ? fmt(p.target) : p.premium ? fmt(parseFloat((parseFloat(p.premium)*1.5).toFixed(2))) : '--'}</div></div>
       <div><div style="font-size:9px;color:var(--muted)">STOP</div><div style="font-weight:700;color:var(--red)">${p.stop ? fmt(p.stop) : p.premium ? fmt(parseFloat((parseFloat(p.premium)*0.65).toFixed(2))) : '--'}</div></div>
@@ -2355,7 +2365,8 @@ function renderSingleCard(p) {
         <div><div style="font-size:9px;color:var(--muted)">${p.isCreditSpread?'MARGIN':'COST'}</div><div style="font-weight:700">${fmt(p.cost)}</div></div>
         <div><div style="font-size:9px;color:var(--muted)">DTE</div><div style="font-weight:700">${Math.max(1,Math.round((new Date(p.expDate)-new Date())/86400000))}d</div></div>
         <div><div style="font-size:9px;color:var(--muted)">CONTRACTS</div><div style="font-weight:700">${p.contracts}x</div></div>
-        <div><div style="font-size:9px;color:var(--muted)">EXP DATE</div><div style="font-weight:700">${p.expDate}</div></div>
+        <div><div style="font-size:9px;color:var(--muted)">OPENED</div><div style="font-weight:700">${_openedLabel(p)}</div></div>
+      <div><div style="font-size:9px;color:var(--muted)">EXP DATE</div><div style="font-weight:700">${p.expDate}</div></div>
         <div><div style="font-size:9px;color:var(--muted)">PROB OF PROFIT</div><div style="font-weight:700;color:${p.probabilityOfProfit>=70?'var(--green)':p.probabilityOfProfit>=50?'var(--gold)':'var(--red)'}">${p.probabilityOfProfit!=null?p.probabilityOfProfit+'%':'--'}</div></div>
         <div><div style="font-size:9px;color:var(--muted)">BREAKEVEN</div><div style="font-weight:700">$${p.breakeven||'--'}</div></div>
         <div><div style="font-size:9px;color:var(--muted)">${p.ticker} STOCK</div><div style="font-weight:700;color:var(--blue)">${p.price?'$'+p.price.toFixed(2):'--'}</div></div>
