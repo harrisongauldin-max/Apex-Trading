@@ -710,6 +710,7 @@ async function executeTrade(stock, price, score, scoreReasons, vix, optionType =
   state.todayTrades++;
 
   const position = {
+    signalId:       signalId || null,   // 9/14: store on the position (was only on the telemetry row) — needed for straddle leg-pair matching
     ticker:         stock.ticker,
     sector:         stock.sector,
     assetClass:     ["GLD","SLV","USO","TLT","GDX"].includes(stock.ticker) ? "commodity" : "equity",
@@ -728,7 +729,7 @@ async function executeTrade(stock, price, score, scoreReasons, vix, optionType =
     fastStopPct:    exitParams.fastStopPct,
     dteLabel:       exitParams.label,
     isMeanReversion: isMeanReversion,
-    entryStrategy:  stock._iTrend ? "intraday-trend" : stock._isTrend ? "trend-swing" : stock._structBreak ? "struct-break" : (stock._mrFade ? "mr-fade-lit" : (_mrScalp ? "mr-scalp" : (stock._mrStrong ? "mr" : "breakout-or-context"))),   // 8/28: +intraday-trend
+    entryStrategy:  stock._straddle ? "vol-straddle" : stock._iTrend ? "intraday-trend" : stock._isTrend ? "trend-swing" : stock._structBreak ? "struct-break" : (stock._mrFade ? "mr-fade-lit" : (_mrScalp ? "mr-scalp" : (stock._mrStrong ? "mr" : "breakout-or-context"))),   // 8/28: +intraday-trend
     _mrScalp:       _mrScalp,                                              // 8/09: routes the fast scalp exits in exitEngine
     _mrEntryVWAP:   _mrScalp ? (stock._mrEntryVWAP || price || null) : null,   // reversion target = reclaim of entry VWAP
     dteBand:        dteBand || (_sameWeekLeg ? "sameweek" : "standard"),   // 6/30: A/B leg tag for twin-entry comparison
@@ -882,6 +883,7 @@ async function executeTrade(stock, price, score, scoreReasons, vix, optionType =
     (_openSame || position)._isMrFade = true;
     (_openSame || position)._mrInvalidation = (typeof stock._mrFade.invalidationPx === "number") ? stock._mrFade.invalidationPx : null;
   }
+  if (stock._straddle) { (_openSame || position)._isStraddle = true; }
   if (stock._structBreak) { (_openSame || position)._isStructBreak = true; }
   if (stock._isTrend) { (_openSame || position)._isTrend = true; }
   if (stock._iTrend) { (_openSame || position)._iTrend = true; }
