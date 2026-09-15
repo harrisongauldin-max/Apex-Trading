@@ -28,7 +28,7 @@ const MR = {
   REQUIRE_POSITIVE_GAMMA: true,   // core regime gate. If GEX is unavailable, fall back to ADX proxy below.
   ADX_RANGE_MAX:          15,     // proxy regime when GEX missing: low ADX = range. Gamma is the real signal.
   RSI_OVERSOLD:           30,     // fade-up trigger (buy call)
-  RSI_OVERBOUGHT:         70,     // fade-down trigger (buy put)
+  RSI_OVERBOUGHT:         65,     // 9/14 (Harrison): loosened 70->65. Put-fade (overbought->buy put) in POS gamma is the validated edge; at 65-70 it still reached +0.4% fav ~49% (vs 57% strict) — more fires, thinner edge. Call side (OVERSOLD) left STRICT — fade-up is weak on this tape.
   VWAP_STRETCH_PCT:       0.19,   // must be stretched at least this far from VWAP (mean)
   WALL_PROXIMITY_PCT:     0.35,   // "at a level" = within this % of the relevant gamma wall
   ALLOW_VWAP_BAND:        true,   // if no wall nearby, a deep VWAP-band stretch also counts as a location
