@@ -741,8 +741,7 @@ const UNIVERSAL_NOARM_MIN     = 25;   //       capping unarmed losers early (vs 
 //       cut an unarmed position once held >= MIN minutes (on TIME, like the intraday no-arm cut — no P&L gate). No prediction: reacts to observed deadness.
 const RSI_DEADZONE_VETO       = true; // 9/14: veto entries with iRSI 45-55 (no signal) or call-side iRSI<30 (oversold-call, no edge)
 // ── VOL-STRADDLE exits (9/14): non-directional neg-gamma long-vol; the entry gate lives in straddleStrategy.js ──
-const STRADDLE_TP_PCT         = 0.35; // take-profit per leg — if one leg runs +35%, the move paid; harvest it
-const STRADDLE_LEG_STOP_PCT   = 0.60; // per-leg total-loss cut (the losing leg of a paid straddle); the winning leg carries
+const STRADDLE_TP_PCT         = 0.15; // 9/14: COMBINED-pair take-profit (not per-leg). A ~1% move (the 0.87-trigger median) nets ~+8-15% on total premium; a ~1.5% move ~+22%. 0.15 harvests the predicted move; a bigger move rides to timestop. (Was 0.35 = a per-leg number that needed a ~2% move as a pair — too high, timestop would have dominated.)
 const STRADDLE_MAX_HOLD_MIN   = 75;   // time-stop: the +0.87 signal is a ~60min forward move; give it a little over that, then cut before theta
 const ITREND_COOLDOWN_MIN = 30;     // 8/28 (panel): the OR condition is a STATE not an event, so a sustained trend
                                     // could re-fire right after an exit. Cooldown bounds re-entry churn per ticker.
@@ -927,7 +926,7 @@ module.exports = {
   ITREND_ADX_MIN, ITREND_VWAP_MIN, ITREND_BREADTH_STRONG, ITREND_START_ET, ITREND_END_ET,
   ITREND_TRAIL_ARM_PCT, ITREND_TRAIL_GIVEBACK_PCT, ITREND_STOP_PCT, ITREND_COOLDOWN_MIN, ITREND_MAX_HOLD_MIN, ITREND_NOARM_MIN,
   UNIVERSAL_NOARM_ENABLED, UNIVERSAL_NOARM_MIN, RSI_DEADZONE_VETO,
-  STRADDLE_TP_PCT, STRADDLE_LEG_STOP_PCT, STRADDLE_MAX_HOLD_MIN,
+  STRADDLE_TP_PCT, STRADDLE_MAX_HOLD_MIN,
   MR_SCALP_FASTCUT_MIN, MR_SCALP_FASTCUT_PEAK, MR_SCALP_GIVEBACK_PEAK, MR_SCALP_GIVEBACK_FRAC,
   MR_SCALP_TRAIL_ARM, MR_SCALP_TRAIL_GIVE, MR_SCALP_TP,
   HIGH_RISK_MIN_SCORE,
