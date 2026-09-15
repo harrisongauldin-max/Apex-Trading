@@ -23,6 +23,7 @@ const SCORE_CAP      = 95;
 // via Math.max below, so MR_CALL_MIN_SCORE cannot drop the effective floor under 70.
 const MR_CALL_MIN_SCORE      = 70;  // bull-regime mean-reversion (dip-buy) calls clear this instead of the 75 generic call floor. Set to 75 to revert to carve-out-only.
 const CALL_MACD_CARVEOUT_RSI = 35;  // an index MR call with intraday RSI <= this is exempt from the bearish-MACD floor lift (bearish daily MACD IS the dip). Set to 0 to disable the carve-out.
+const RSI_DEADZONE_VETO = true;     // 9/14 (Harrison): veto iRSI 45-55 (no-signal middle, full-book -$2825) & call-side iRSI<30 (oversold-call, -$1908). Loss-reduction, not alpha.
 const MACD_BEARISH_CALL_VETO = true; // D2: true => re-key carve-out off DAILY RSI + require bull_curl, and HARD-VETO a bearish-MACD call that is not even daily-oversold (falling knife). false = prior 85-lift behavior.
 // ── #3 D2 CARVE-OUT (6/26, LIVE) — present-tense reversal exemptions. Mirrors constants.js.
 //    Call: stand D2 down on gap-up-holding + breadth rising (leans WITH bull regime).
@@ -240,6 +241,15 @@ function evaluateEntry(candidate, rulebook, state, context = {}) {
   const signals   = context.signals  || {};
   const dailyRsi  = signals.dailyRsi || signals.rsi || 50;
   const intradayRsi = (signals.rsi != null) ? signals.rsi : dailyRsi;
+  // 9/14 (Harrison): RSI dead-zone veto. Full-book audit: entries with iRSI 45-55 (no signal, "middle of
+  // nowhere") lost -$2825; call-side fades of oversold (iRSI<30 buying a call) lost -$1908. Neither has a
+  // findable edge. Veto both — loss-reduction, not alpha; keeps the extremes that do work (overbought puts).
+  if (RSI_DEADZONE_VETO) {
+    if (intradayRsi >= 45 && intradayRsi <= 55)
+      return { pass: false, reason: `iRSI ${intradayRsi.toFixed(0)} in the 45-55 dead zone — no edge in the middle (full-book -$2825)` };
+    if (optionType === "call" && intradayRsi < 30)
+      return { pass: false, reason: `call into iRSI ${intradayRsi.toFixed(0)} (oversold) — fading oversold-to-calls has no edge on this tape (full-book -$1908)` };
+  }
   const macdSignal = signals.macd    || "neutral";
   const macdBullish = macdSignal.includes("bullish");
   const macdBearish = macdSignal.includes("bearish");
