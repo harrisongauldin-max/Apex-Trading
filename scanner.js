@@ -1143,9 +1143,17 @@ async function runScan() {
     const breadthDrop = breadthPrev - breadthNow;
     if (breadthDrop >= 30 && breadthNow <= 35) {
       for (const pos of [...state.positions]) {
-        if (pos.optionType === "call" && !isDayTrade(pos)) {
+        // 9/16 (Harrison): breadth-collapse is a legacy discretionary panic-close (pre-literature era). It
+        // fired ahead of the trend-swing ATR/stale exits on 9/16 and dumped 2 calls at -30%/-24% (-$3176) on
+        // a one-day breadth blip — the exact undisciplined behavior the ATR stop replaced. EXEMPT the
+        // literature-bound sleeves: trend-swing exits ONLY on its ATR stop / trail / stale (Clenow), and
+        // straddle legs are non-directional (a breadth drop is not a straddle signal). Momentum calls still
+        // get the panic-close (they have no disciplined exit of their own).
+        if (pos.optionType === "call" && !isDayTrade(pos) && !pos._isTrend && !pos._isStraddle) {
           logEvent("warn", `[BREADTH COLLAPSE] Breadth dropped ${breadthDrop.toFixed(0)}pts - closing call ${pos.ticker}`);
           await closePosition(pos.ticker, "breadth-collapse", null, pos.contractSymbol || pos.buySymbol);
+        } else if (pos.optionType === "call" && (pos._isTrend || pos._isStraddle)) {
+          logEvent("scan", `[BREADTH COLLAPSE] ${pos.ticker} EXEMPT (${pos._isTrend?"trend-swing":"straddle"}) — managed by its own literature-bound exit, not this panic-close`);
         }
       }
     }
@@ -2901,17 +2909,19 @@ async function runScan() {
             liveStock._straddle = null;
             if (!state._lastStraddleAt) state._lastStraddleAt = {};
             state._lastStraddleAt[liveStock.ticker] = Date.now();
-            // ATOMICITY (panel 9/14): a straddle must be BOTH legs or neither. If exactly one leg filled,
-            // we are naked-directional — the exact -$929 trade we're avoiding. Flag the surviving leg so
-            // the exit engine force-closes it next scan (straddle-orphan). Never left holding one leg.
-            if (_legC !== _legP) {   // one filled, one didn't (true/false mismatch)
-              const _orphanSide = _legC ? "call" : "put";
-              const _op = state.positions.find(p => p._isStraddle && p.optionType === _orphanSide &&
-                            p.signalId === _sSig);   // 9/14: match THIS straddle's exact signalId (not just ticker/side) — can't mis-flag a prior straddle's leg
-              if (_op) { _op._straddleOrphan = true; markDirty(); }
-              logEvent("warn", `[VOL-STRADDLE] ${liveStock.ticker} INCOMPLETE — only ${_orphanSide} filled; flagged orphan for close (not left naked-directional)`);
+            // ATOMICITY (9/16 rewrite): a straddle must be BOTH legs or neither. The old check compared the
+            // two executeTrade RETURN values (_legC !== _legP) — but the return reflects submit/ack timing,
+            // not confirmed fill, so it FALSELY flagged good straddles as orphans (6/8 on 9/16, both legs had
+            // actually filled). Fix: read GROUND TRUTH from state.positions — count the legs that actually
+            // exist for this signalId. 2 = real straddle (do nothing). 1 = real orphan (flag it). 0 = neither.
+            const _legs = state.positions.filter(p => p._isStraddle && p.signalId === _sSig);
+            if (_legs.length === 1) {
+              _legs[0]._straddleOrphan = true; markDirty();
+              logEvent("warn", `[VOL-STRADDLE] ${liveStock.ticker} INCOMPLETE — only ${_legs[0].optionType} leg exists; flagged orphan for close (not left naked-directional)`);
+            } else if (_legs.length === 2) {
+              logEvent("scan", `[VOL-STRADDLE] ${liveStock.ticker} PAIR OPEN — both legs filled (call+put @ ATM, delta-neutral)`);
             }
-            if (_legC || _legP) continue;   // handled by the straddle path this scan
+            if (_legs.length >= 1) continue;   // handled by the straddle path this scan
           }
         } else if (_sGex && _sGex.regime === "neg") {
           recordStandDown("straddle", _sDec.reason);   // only tally in neg gamma (where it could have fired)
