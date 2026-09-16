@@ -237,8 +237,14 @@ async function _doClosePosition(ticker, reason, exitPremium = null, contractSym 
 
   const closeQty = contractsToSell;
   const heldSeconds = (Date.now() - new Date(pos.openDate).getTime()) / 1000;
-  const alpacaCloseAllowed = heldSeconds >= 60;
+  // 9/16 (Harrison): a straddle-orphan is a FORCED risk close of a mistakenly-naked leg — it must NOT be
+  // blocked by the 60s wash-trade guard, or the naked directional leg stays open for a full minute (the exact
+  // -$929 exposure the orphan mechanism exists to prevent). A same-minute close of a half-filled hedge is
+  // risk management, not a wash sale. Exempt it (and any explicit force-close via opts.forceClose).
+  const _forceClose = reason === "straddle-orphan" || (opts && opts.forceClose === true);
+  const alpacaCloseAllowed = heldSeconds >= 60 || _forceClose;
   if (!alpacaCloseAllowed) logEvent("warn", `${ticker} held only ${heldSeconds.toFixed(0)}s - skipping Alpaca close order to avoid wash trade`);
+  else if (_forceClose && heldSeconds < 60) logEvent("scan", `${ticker} force-close (${reason}) — bypassing 60s wash guard (naked-leg risk > wash concern)`);
   if (!pos.isSpread && closeQty > 0 && !_dryRunMode && alpacaCloseAllowed) {
     const isShortLeg = !!(pos.sellSymbol && !pos.buySymbol);
     const closeSym   = pos.contractSymbol || pos.buySymbol || pos.sellSymbol;
