@@ -375,7 +375,7 @@ async function executeTrade(stock, price, score, scoreReasons, vix, optionType =
   // bounce trap while keeping the gamma that captures the fast snap. Detected via stock._mrScalp
   // (set in the scanner detector). Otherwise the normal MR/momentum profile applies.
   const _mrScalp = stock && stock._mrScalp === true;
-  const targetDelta = (stock && stock._iTrend) ? ITREND_DELTA : (stock && stock._isTrend) ? TREND_DELTA : (stock && stock._structBreak) ? BREAK_DELTA : (_mrScalp ? MR_SCALP_DELTA : (isMeanReversion ? 0.42 : 0.35));   // 8/25 break; 8/27 trend-swing; 8/28 intraday-trend=ATM
+  const targetDelta = (stock && stock._straddle) ? 0.50 : (stock && stock._iTrend) ? ITREND_DELTA : (stock && stock._isTrend) ? TREND_DELTA : (stock && stock._structBreak) ? BREAK_DELTA : (_mrScalp ? MR_SCALP_DELTA : (isMeanReversion ? 0.42 : 0.35));   // 9/16: straddle legs ATM 0.50 (symmetric = delta-neutral). 8/25 break; 8/27 trend-swing; 8/28 intraday-trend=ATM
   // 6/30 (Harrison): DTE resolution.
   //   dteBand === "sameweek" → force 0-8 DTE leg.  dteBand === "standard" → force the 30-50 momentum band.
   //   dteBand === null (normal call) → DATA_GATHER_MODE forces same-week; otherwise per-profile default.
