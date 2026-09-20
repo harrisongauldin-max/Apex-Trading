@@ -525,16 +525,16 @@ async function executeTrade(stock, price, score, scoreReasons, vix, optionType =
   }
 
   const delta = parseFloat(contract.greeks.delta || 0);
-  const _dMin = (stock && stock._iTrend) ? ITREND_DELTA_MIN : (stock && stock._isTrend) ? TREND_DELTA_MIN : (stock && stock._structBreak) ? BREAK_DELTA_MIN : TARGET_DELTA_MIN;
-  const _dMax = (stock && stock._iTrend) ? ITREND_DELTA_MAX : (stock && stock._isTrend) ? TREND_DELTA_MAX : (stock && stock._structBreak) ? BREAK_DELTA_MAX : TARGET_DELTA_MAX;
+  const _dMin = (stock && stock._straddle) ? 0.40 : (stock && stock._iTrend) ? ITREND_DELTA_MIN : (stock && stock._isTrend) ? TREND_DELTA_MIN : (stock && stock._structBreak) ? BREAK_DELTA_MIN : TARGET_DELTA_MIN;
+  const _dMax = (stock && stock._straddle) ? 0.60 : (stock && stock._iTrend) ? ITREND_DELTA_MAX : (stock && stock._isTrend) ? TREND_DELTA_MAX : (stock && stock._structBreak) ? BREAK_DELTA_MAX : TARGET_DELTA_MAX;   // 9/20: straddle legs are ATM 0.50 — the momentum band (0.22-0.42) was rejecting every straddle PUT (delta 0.499 > 0.42) → the real orphan cause
   if (Math.abs(delta) < _dMin || Math.abs(delta) > _dMax) {
     logEvent("filter", `${stock.ticker} - delta ${delta} outside ${stock && stock._structBreak ? "break" : "target"} range`);
     return false;
   }
 
-  if (!_dryRunMode && state._pendingOrder && state._pendingOrder.ticker === stock.ticker) {
+  if (!_dryRunMode && !(stock && stock._straddle) && state._pendingOrder && state._pendingOrder.ticker === stock.ticker) {
     logEvent("filter", `${stock.ticker} pending order exists - skipping naked/MR submission`);
-    return false;
+    return false;   // 9/20: straddle legs EXEMPT — a straddle is intentionally 2 same-ticker orders back-to-back; the single-entry lock would reject leg 2 and orphan the straddle
   }
   // 7/30: arm the pending-order flag ONLY when an order will really be sent. This condition is
   // DELIBERATELY BYTE-IDENTICAL to the submit guard below (contract.symbol && contract.ask > 0 &&
