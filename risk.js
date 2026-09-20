@@ -66,7 +66,12 @@ function getDrawdownProtocol() {
   // all entries (false CRITICAL) or slashes sizing (false profit-lock). If it diverges from current
   // equity by >3x either way, distrust it and use equity as the reference (→ ~0 drawdown, no false halt).
   if (current > 0 && peak > 0 && (peak > current * 3 || peak < current / 3)) {
-    logEvent("warn", `[DRAWDOWN] baseline $${peak.toFixed(0)} diverges >3x from equity $${current.toFixed(0)} — distrusting, using equity (re-sync baseline)`);
+    // 9/20: PERSIST the re-sync. Was local-only → the stale baseline stayed in state and re-triggered this
+    // warning on EVERY risk check (log spam). Write it back once so it self-heals instead of warning forever.
+    if (state.accountBaseline !== current) {
+      logEvent("warn", `[DRAWDOWN] baseline $${peak.toFixed(0)} diverges >3x from equity $${current.toFixed(0)} — re-syncing baseline to equity (persisted)`);
+      state.accountBaseline = current;
+    }
     peak = current;
   }
   const drawdown  = (current - peak) / peak * 100;
