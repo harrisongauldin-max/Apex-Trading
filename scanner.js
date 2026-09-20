@@ -118,12 +118,12 @@ const {
   FEASIBILITY_MAX_RATIO = 1.0, FEASIBILITY_HOLD_MIN = 20, SPREAD_COST_LOG = false,
   MACRO_MAX_AGE_MIN = 240, NEARMISS_LEDGER_ENABLED = false,
   VOLPACE_ARM_ENABLED = false, VOLPACE_ARM_MIN = 0, VOLPACE_ARM_PCTILE = 50, VOLPACE_ARM_WINDOW = 300, VOLPACE_ARM_WARMUP = 20,
-  MR_FADE_ENABLED = false,
+  MR_FADE_ENABLED = true,   // 9/20: aligned to constants (was false — silent-OFF drift would kill the mr-fade sleeve)
   BREAK_TRIGGER_ENABLED = false, BREAK_TRIGGER_ENFORCE = false, BREAK_TRIGGER_ALLOW_MRSCALP = true,
   GEX_FETCH_ENABLED = true, GEX_FETCH_THROTTLE_MS = 120000,
-  TREND_ENABLED = false, TREND_CUTOFF_ET = 15.0, TREND_MA_FAST = 50, TREND_MA_SLOW = 100,
+  TREND_ENABLED = true, TREND_CUTOFF_ET = 15.0,   // 9/20: aligned to constants (was false) TREND_MA_FAST = 50, TREND_MA_SLOW = 100,
   TREND_RSI_MIN = 50, TREND_RSI_MAX = 72, TREND_OVEREXT_ATR = 4.0, TREND_BREADTH_MIN = 52,
-  ITREND_ENABLED = false, ITREND_ADX_MIN = 25, ITREND_VWAP_MIN = 0.05, ITREND_BREADTH_STRONG = 55,
+  ITREND_ENABLED = true, ITREND_ADX_MIN = 25,   // 9/20: aligned to constants=true (still the live value; kill via constants, not this default) ITREND_VWAP_MIN = 0.05, ITREND_BREADTH_STRONG = 55,
   ITREND_START_ET = 10.0, ITREND_END_ET = 13.5, ITREND_COOLDOWN_MIN = 30,
   BREAK_ENTRY_SCORE = 80, BREAK_CONFIRM_BARS = 1, BREAK_MAX_AGE_MIN = 10, BREAK_VOL_LOOKBACK = 10,
   BREAK_VOL_MULT_PUT = 1.8, BREAK_VOL_MULT_CALL = 2.2, BREAK_ADX_MIN_PUT = 18, BREAK_ADX_MIN_CALL = 22,
@@ -627,7 +627,10 @@ async function runScan() {
         triggers:      agentMacroForAuth.catalysts || [],
       };
       if (agentAuthAge > 30 && !dryRunMode) {
-        logEvent("warn", `[MACRO] Agent signal is ${agentAuthAge.toFixed(0)}min old`);
+        if (!state._macroStaleLoggedAt || Date.now() - state._macroStaleLoggedAt > 30*60*1000) {
+          state._macroStaleLoggedAt = Date.now();
+          logEvent("warn", `[MACRO] Agent signal is ${agentAuthAge.toFixed(0)}min old (news agent not running — external; throttled to 30min)`);
+        }
       }
       if (marketContext.macro.mode !== 'normal') {
         logEvent("macro", `[5min] Macro: ${marketContext.macro.signal} via agent (${marketContext.macro.scoreModifier > 0 ? '+' : ''}${marketContext.macro.scoreModifier}) age:${agentAuthAge.toFixed(0)}min`);
