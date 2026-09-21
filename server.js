@@ -691,10 +691,11 @@ cron.schedule("55 19,20 * * 1-5", async () => {
   await saveDailyLogToRedis(false);
 });
 
-// 3:15pm ET hard close — pure intraday
-cron.schedule("15 19,20 * * 1-5", async () => {
+// 3:45pm ET hard close — pure intraday (9/21: moved 3:15 → 3:45; entries still cut at 3:15, giving
+// positions opened before 3:15 an extra 30min to work before the flatten)
+cron.schedule("45 19,20 * * 1-5", async () => {
   const et = getETTime();
-  if (!(et.getHours() === 15 && et.getMinutes() === 15)) return;
+  if (!(et.getHours() === 15 && et.getMinutes() === 45)) return;
   if (state._overnightCutDisabled) {
     logEvent("scan", "[EOD CLOSE] Disabled for this session — skipping 3:15pm hard close");
     return;
@@ -705,8 +706,8 @@ cron.schedule("15 19,20 * * 1-5", async () => {
   // resumes managing them at next open. Everything intraday still hard-closes at 3:15.
   const positions = _allPos.filter(p => !isFlattenExempt(p.entryStrategy));
   const _held = _allPos.length - positions.length;
-  if (positions.length === 0) { if (_held > 0) logEvent("scan", `[EOD CLOSE] 3:15pm — ${_held} swing position(s) HELD overnight, 0 intraday to close.`); return; }
-  logEvent("scan", `[EOD CLOSE] 3:15pm — closing ${positions.length} intraday position(s)${_held ? `; HOLDING ${_held} swing overnight` : ""}.`);
+  if (positions.length === 0) { if (_held > 0) logEvent("scan", `[EOD CLOSE] 3:45pm — ${_held} swing position(s) HELD overnight, 0 intraday to close.`); return; }
+  logEvent("scan", `[EOD CLOSE] 3:45pm — closing ${positions.length} intraday position(s)${_held ? `; HOLDING ${_held} swing overnight` : ""}.`);
   for (const pos of [...positions]) {
     const _curPrice = (pos.currentPrice != null && !isNaN(pos.currentPrice) && pos.currentPrice > 0)
       ? pos.currentPrice : pos.premium;
