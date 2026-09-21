@@ -56,7 +56,7 @@ const {
 } = require('./entryEngine');
 let GEX = null; try { GEX = require('./gex'); } catch (_gexReqErr) { /* gex module optional */ }
 let MRSTRAT = null; try { MRSTRAT = require('./mrStrategy'); } catch (_mrReqErr) { /* mr strategy optional */ }
-const { INSTRUMENT_CONSTRAINTS } = require('./entryEngine');
+const { INSTRUMENT_CONSTRAINTS, CORRELATED_GROUPS } = require('./entryEngine');   // 9/21: CORRELATED_GROUPS for the trend-swing coherence rule
 
 const {
   executeTrade,
@@ -2769,12 +2769,48 @@ async function runScan() {
               _tSide = "put";  _tReason = `daily downtrend $${price.toFixed(2)}<50d$${_tm.ma50}<100d$${_tm.ma100} dRSI${_drsi.toFixed(0)} brdth${_brdth}% [lit: price-vs-MA]`;
             }
             const _haveTrend = (state.positions || []).some(p => p.ticker === liveStock.ticker && p.entryStrategy === "trend-swing" && p.optionType === _tSide && !p.closed);
-            if (_tSide && !_haveTrend) {
+
+            // 9/21 (Harrison): CORRELATION COHERENCE (Clenow — group correlated instruments as ONE trend unit).
+            // SPY & QQQ are ~0.95 correlated. Holding opposite-direction trend-swings on them is not two trend
+            // bets — it's an accidental, un-calibrated relative-value spread that pays double theta to harvest
+            // the ~10% residual, and gets steamrolled when correlation reasserts in a trend (9/21: QQQ-put +
+            // SPY-call, market rallied together, the put lost -$2784). Rule: within a correlated group, do not
+            // open a trend-swing OPPOSITE to a leg already held (or decided this scan) on a partner ticker;
+            // keep only the STRONGER signal (larger ATR-normalised distance from the 50d). Stand the weaker down.
+            let _cohBlock = null;
+            if (_tSide) {
+              if (!state._trendDir) state._trendDir = {};
+              // strength of THIS ticker's signal = |price-50d| / atr (how far into the trend, vol-normalised)
+              const _thisStr = (_tm.atr > 0) ? Math.abs(price - _tm.ma50) / _tm.atr : 0;
+              state._trendDir[liveStock.ticker] = { side: _tSide, strength: _thisStr, ts: Date.now() };
+              const _grp = (CORRELATED_GROUPS || []).find(g => g.tickers.includes(liveStock.ticker));
+              if (_grp) {
+                for (const _partner of _grp.tickers) {
+                  if (_partner === liveStock.ticker) continue;
+                  // partner leg already HELD, opposite side?
+                  const _heldOpp = (state.positions || []).some(p => p.ticker === _partner && p.entryStrategy === "trend-swing" && p.optionType && p.optionType !== _tSide && !p.closed);
+                  // partner DECIDED opposite this scan (fresher than 5min)?
+                  const _pd = state._trendDir[_partner];
+                  const _decidedOpp = _pd && _pd.side && _pd.side !== _tSide && (Date.now() - _pd.ts) < 5*60*1000;
+                  if (_heldOpp) { _cohBlock = `partner ${_partner} already HELD ${_tSide==="call"?"put":"call"} (opposite) — correlated pair, not opening the mismatched leg`; break; }
+                  if (_decidedOpp) {
+                    // both decided this scan, opposite dirs → keep only the stronger signal
+                    if (_pd.strength >= _thisStr) { _cohBlock = `partner ${_partner} has the stronger opposite signal (${_pd.strength.toFixed(2)} vs ${_thisStr.toFixed(2)} ATR from 50d) — standing this weaker leg down`; break; }
+                    // else: this one is stronger — it proceeds, partner will block itself when it re-evaluates
+                  }
+                }
+              }
+            }
+
+            if (_tSide && !_haveTrend && !_cohBlock) {
               liveStock._isTrend = _tSide;
               const _tSig = `${liveStock.ticker}-${_tSide}-trend-${Date.now()}`;
               const _tOK = await executeTrade(liveStock, price, 0, [_tReason], state.vix, _tSide, false, 1.0, null, null, _tSig);
               liveStock._isTrend = null;
               if (_tOK) { recordStandDown("trend", "FIRED"); logEvent("scan", `[TREND-SWING] ${liveStock.ticker} ${_tSide.toUpperCase()} FIRED — ${_tReason}`); continue; }
+            } else if (_cohBlock) {
+              recordStandDown("trend", _cohBlock);
+              logEvent("scan", `[TREND-SWING] ${liveStock.ticker} ${_tSide.toUpperCase()} STOOD DOWN (correlation coherence) — ${_cohBlock}`);
             } else {
               recordStandDown("trend", (_upTrend || _downTrend) ? (_overExt ? "overextended from 50d" : "momentum/breadth gate") : "no daily trend");
             }
