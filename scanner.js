@@ -121,9 +121,9 @@ const {
   MR_FADE_ENABLED = true,   // 9/20: aligned to constants (was false — silent-OFF drift would kill the mr-fade sleeve)
   BREAK_TRIGGER_ENABLED = false, BREAK_TRIGGER_ENFORCE = false, BREAK_TRIGGER_ALLOW_MRSCALP = true,
   GEX_FETCH_ENABLED = true, GEX_FETCH_THROTTLE_MS = 120000,
-  TREND_ENABLED = true, TREND_CUTOFF_ET = 15.0,   // 9/20: aligned to constants (was false) TREND_MA_FAST = 50, TREND_MA_SLOW = 100,
+  TREND_ENABLED = true, TREND_CUTOFF_ET = 15.0, TREND_MA_FAST = 50, TREND_MA_SLOW = 100,   // 9/20: TREND_ENABLED aligned to constants. 9/21 FIX: comment had eaten TREND_MA_FAST + TREND_MA_SLOW
   TREND_RSI_MIN = 50, TREND_RSI_MAX = 72, TREND_OVEREXT_ATR = 4.0, TREND_BREADTH_MIN = 52,
-  ITREND_ENABLED = true, ITREND_ADX_MIN = 25,   // 9/20: aligned to constants=true (still the live value; kill via constants, not this default) ITREND_VWAP_MIN = 0.05, ITREND_BREADTH_STRONG = 55,
+  ITREND_ENABLED = true, ITREND_ADX_MIN = 25, ITREND_VWAP_MIN = 0.05, ITREND_BREADTH_STRONG = 55,   // 9/20: ITREND_ENABLED aligned to constants=true (kill via constants, not this default). 9/21 FIX: comment had eaten ITREND_VWAP_MIN + ITREND_BREADTH_STRONG off this line → itrend crashed all 9/21
   ITREND_START_ET = 10.0, ITREND_END_ET = 13.5, ITREND_COOLDOWN_MIN = 30,
   BREAK_ENTRY_SCORE = 80, BREAK_CONFIRM_BARS = 1, BREAK_MAX_AGE_MIN = 10, BREAK_VOL_LOOKBACK = 10,
   BREAK_VOL_MULT_PUT = 1.8, BREAK_VOL_MULT_CALL = 2.2, BREAK_ADX_MIN_PUT = 18, BREAK_ADX_MIN_CALL = 22,
