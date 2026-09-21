@@ -799,6 +799,7 @@ const MR_SCALP_VIX_MIN                = 17;    // 8/11: 20 -> 17. The scalp neve
                                                // 17-20 band where this regime actually trades.
 const MR_SCALP_SESSION_MIN_MIN  = 30;     // VWAP unreliable before this many session minutes
 const MR_SCALP_CUTOFF_ET        = 14.5;   // no NEW mr-scalp entry after 2:30pm ET (needs ~14min to work + exit before 3:15 flatten)
+const MR_FADE_CUTOFF_ET         = 15.25;  // 9/21: no NEW mr-fade entry after 3:15pm ET (the flatten time) — was ungated → opened a 3:18pm put that sat overnight
 const MR_SCALP_MIN_SCORE        = 78;     // floor the setup clears (also clears slot-2's 75); the CONDITIONS are the edge, not the score
 // ── instrument / size ──
 const MR_SCALP_TARGET_DTE       = 1;      // 0-1 DTE = lowest vega (dodges IV collapse) + highest gamma (captures the fast pop)
@@ -914,7 +915,7 @@ module.exports = {
   BREAK_CALL_CUTOFF_ET, BREAK_MIN_SESSION_MIN,
   MR_SCALP_ENABLED, MR_SCALP_SESSLOW_RSI_MAX, MR_SCALP_FLUSH_DD_MIN, MR_SCALP_VWAP_EXT_MIN,
   MR_SCALP_LIFTOFF_PTS, MR_SCALP_LOW_AGE_MIN_MIN, MR_SCALP_LOW_AGE_MAX_MIN, MR_SCALP_RANGE_MIN_PCT,
-  MR_SCALP_VIX_MIN, MR_SCALP_SESSION_MIN_MIN, MR_SCALP_CUTOFF_ET, MR_SCALP_MIN_SCORE,
+  MR_SCALP_VIX_MIN, MR_SCALP_SESSION_MIN_MIN, MR_SCALP_CUTOFF_ET, MR_FADE_CUTOFF_ET, MR_SCALP_MIN_SCORE,
   MR_SCALP_TARGET_DTE, MR_SCALP_DELTA, MR_SCALP_SIZE_MOD,
   BREAK_DELTA, BREAK_DELTA_MIN, BREAK_DELTA_MAX, BREAK_TARGET_DTE, BREAK_MAX_HOLD_MIN, BREAK_TRAIL_ARM_PCT, BREAK_TRAIL_GIVEBACK_PCT,
   GEX_FETCH_ENABLED, GEX_FETCH_THROTTLE_MS,
