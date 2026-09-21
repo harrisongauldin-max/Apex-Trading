@@ -612,7 +612,7 @@ function isEntryWindow(optionType = null, isIndex = false) {
   if (day === 0 || day === 6) return false;
 
   const minsSinceMidnight = h * 60 + m;
-  const marketClose       = 15 * 60 + 45; // 3:45 PM - index options stay open later
+  const marketClose       = 15 * 60 + 15; // 9/21 (Harrison): 3:15 PM — HARD cutoff. No new entries after the 3:15 flatten (was 3:45, which let trades in 30min past the flatten → stranded overnight).
   const indexStart        = 9 * 60 + 30;  // 9:30 AM - SPY/QQQ open at bell
   const stockStart        = 9 * 60 + 45;  // 9:45 AM - individual stocks need price discovery
 
