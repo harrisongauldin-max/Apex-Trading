@@ -118,7 +118,7 @@ const {
   FEASIBILITY_MAX_RATIO = 1.0, FEASIBILITY_HOLD_MIN = 20, SPREAD_COST_LOG = false,
   MACRO_MAX_AGE_MIN = 240, NEARMISS_LEDGER_ENABLED = false,
   VOLPACE_ARM_ENABLED = false, VOLPACE_ARM_MIN = 0, VOLPACE_ARM_PCTILE = 50, VOLPACE_ARM_WINDOW = 300, VOLPACE_ARM_WARMUP = 20,
-  MR_FADE_ENABLED = true,   // 9/20: aligned to constants (was false — silent-OFF drift would kill the mr-fade sleeve)
+  MR_FADE_ENABLED = true, MR_FADE_CUTOFF_ET = 15.25,   // 9/20: aligned to constants. 9/21: 3:15 hard entry cutoff
   BREAK_TRIGGER_ENABLED = false, BREAK_TRIGGER_ENFORCE = false, BREAK_TRIGGER_ALLOW_MRSCALP = true,
   GEX_FETCH_ENABLED = true, GEX_FETCH_THROTTLE_MS = 120000,
   TREND_ENABLED = true, TREND_CUTOFF_ET = 15.0, TREND_MA_FAST = 50, TREND_MA_SLOW = 100,   // 9/20: TREND_ENABLED aligned to constants. 9/21 FIX: comment had eaten TREND_MA_FAST + TREND_MA_SLOW
@@ -2224,7 +2224,7 @@ async function runScan() {
 
     const volDecline  = todayVol < avgVol * 0.7;
     const timeOfDayMult = 1.0;
-    const entryWindowClosed = etHourNow >= 15.5;
+    const entryWindowClosed = etHourNow >= 15.25;   // 9/21: 3:15 hard cutoff (was 15.5) — no entries after the flatten
     const weeklyTrend = stock._weeklyTrend || { trend: 'neutral', above10wk: null };
 
     // Score both put and call setups
@@ -2885,6 +2885,14 @@ async function runScan() {
     // Wrapped so a fault can never disturb the scan.
     if (mrFadeActive(MR_FADE_ENABLED) && MRSTRAT && liveStock) {   // runtime kill switch (dashboard toggle)
       try {
+        // 9/21 (Harrison): EOD entry cutoff. mr-fade is an intraday sleeve but had NO time gate, so it opened
+        // a QQQ 740P at 3:18pm — AFTER the 3:15 flatten already ran — and it sat open overnight (the flatten is
+        // a one-time 3:15 event; nothing closes positions opened after it). Match MR_SCALP_CUTOFF_ET: no new
+        // mr-fade entry after MR_FADE_CUTOFF_ET (needs time to work + must exit before the 3:15 flatten).
+        const _mrETH = (() => { const d = getETTime(); return d.getHours() + d.getMinutes() / 60; })();
+        if (_mrETH >= MR_FADE_CUTOFF_ET) {
+          recordStandDown("mrf", `after ${MR_FADE_CUTOFF_ET}h ET cutoff — no new intraday entry into the 3:15 flatten`);
+        } else {
         const _mrVwap = (liveStock.intradayVWAP > 0 && price > 0) ? ((price - liveStock.intradayVWAP) / liveStock.intradayVWAP) * 100 : null;
         const _mrDec  = MRSTRAT.evaluateMRFade({ rsi: liveStock.rsi, vwapPct: _mrVwap, adx: liveStock.adx },
                                                (state._gexNow && state._gexNow[liveStock.ticker]) || null, price);
@@ -2928,6 +2936,7 @@ async function runScan() {
         } else {
           recordStandDown("mrf", _mrDec.reason);        // 8/25: tally the decline reason (regime / not-at-level / not-extreme)
         }
+        }   // end EOD-cutoff else
       } catch (_mrErr) { liveStock._mrFade = null; logEvent("filter", `[MR-FADE] ${liveStock.ticker} error: ${_mrErr && _mrErr.message}`); }
     }
 
