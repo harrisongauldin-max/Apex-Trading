@@ -30,7 +30,8 @@ const MR = {
   RSI_OVERSOLD:           30,     // fade-up trigger (buy call)
   RSI_OVERBOUGHT:         65,     // 9/14 (Harrison): loosened 70->65. Put-fade (overbought->buy put) in POS gamma is the validated edge; at 65-70 it still reached +0.4% fav ~49% (vs 57% strict) — more fires, thinner edge. Call side (OVERSOLD) left STRICT — fade-up is weak on this tape.
   VWAP_STRETCH_PCT:       0.19,   // must be stretched at least this far from VWAP (mean)
-  WALL_PROXIMITY_PCT:     0.35,   // "at a level" = within this % of the relevant gamma wall
+  WALL_PROXIMITY_PCT:     0.30,   // 9/22 (Harrison): tightened 0.35→0.30. DATA: fades ≤0.30% from the wall reverted 43% vs 22% mid-range (n=87 vs 74). The wall IS the fade signal (dealers defend it) — proven on tape, not just literature.
+  REQUIRE_WALL:           false,  // 9/22: when true, ONLY fade at a wall (drop the vwap-band fallback = the weak 22% mid-range group). Default false = still take band-fades but TAGGED (locationSource) so we can measure wall vs band separately, THEN flip true if band-fades confirm weak. Governing principle: measure before restricting.
   ALLOW_VWAP_BAND:        true,   // if no wall nearby, a deep VWAP-band stretch also counts as a location
   VWAP_BAND_PCT:          0.40,   // the VWAP-band distance that qualifies as a location on its own
   INVALIDATION_PCT:       0.25,   // thesis dead if price extends this % beyond entry against the fade
@@ -72,8 +73,12 @@ function evaluateMRFade(signals = {}, gex, px, cfg = MR) {
       location = `${side === "call" ? "put" : "call"}-wall@${wall} (${wallDist.toFixed(2)}%)`;
     }
   }
+  let locationSource = location ? "wall" : null;
+  if (!location && cfg.REQUIRE_WALL) {
+    return { fire: false, reason: `extreme + stretched but NOT at a wall — mid-range fade (data: 22% revert vs 43% at-wall); REQUIRE_WALL on, standing down`, regimeSource, side };
+  }
   if (!location && cfg.ALLOW_VWAP_BAND && Math.abs(vwap) >= cfg.VWAP_BAND_PCT) {
-    location = `vwap-band ${vwap.toFixed(2)}%`;
+    location = `vwap-band ${vwap.toFixed(2)}%`; locationSource = "vwap-band";   // 9/22: tagged — vwap-band fades are the WEAKER mid-range group (22% revert); measure them separately before trusting
   }
   if (!location) return { fire: false, reason: `extreme but not AT a level (no wall/band) — "oversold in the middle of nowhere"`, regimeSource, side };
 
@@ -82,7 +87,7 @@ function evaluateMRFade(signals = {}, gex, px, cfg = MR) {
     ? px * (1 - cfg.INVALIDATION_PCT / 100)    // long call (fade up): dead if price makes a decisive new low
     : px * (1 + cfg.INVALIDATION_PCT / 100);   // long put  (fade down): dead if price makes a decisive new high
   return {
-    fire: true, side, regimeSource, location,
+    fire: true, side, regimeSource, location, locationSource,   // 9/22: which path qualified (wall = strong 43%, vwap-band = weak 22%) — for measuring before REQUIRE_WALL
     entryPx: px, invalidationPx,
     reason: `MR fade ${side} — ${regimeSource}, ${location}, rsi ${rsi}, vwap ${vwap.toFixed(2)}% [confluence]`,
   };
