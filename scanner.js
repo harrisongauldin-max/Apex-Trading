@@ -2924,7 +2924,7 @@ async function runScan() {
             logEvent("filter", `[MR-FADE] ${liveStock.ticker} ${_mrDec.side} setup, but a ${_mrDec.side} position is already open — standing down`);
           } else {
             recordStandDown("mrf", "FIRED");
-            logEvent("filter", `[MR-FADE] ${liveStock.ticker} FIRE — ${_mrDec.reason} | vwapSlope ${_vwTag} (${_vwWith} fade)`);
+            logEvent("filter", `[MR-FADE] ${liveStock.ticker} FIRE — ${_mrDec.reason} | loc:${_mrDec.locationSource||"?"} | vwapSlope ${_vwTag} (${_vwWith} fade)`);   // 9/22: log locationSource (wall=strong 43% / vwap-band=weak 22%) for measuring before REQUIRE_WALL
             liveStock._mrFade = _mrDec;                     // tags entryStrategy + carries invalidation into _entryX
             const _mrSigId = `${liveStock.ticker}-${_mrDec.side}-mrfade-${Date.now()}`;   // own signalId (the momentum _sigId is defined later — TDZ)
             const _mrScore = 0;
