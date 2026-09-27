@@ -134,9 +134,15 @@ async function sendResendEmail(subject, html, attachments = []) {
 
 async function sendEmail(type) {
   if (!RESEND_API_KEY || !GMAIL_USER) { logEvent("warn", "Email not configured"); return; }
+  // 9/27 FIX (Harrison): subject now shows REALIZED daily P&L (today's closed trades), matching the body's
+  // Realized tile. Was (cash - dayStartCash) = a cash-flow delta that matched NEITHER the body nor reality.
+  const _subjToday = new Date().toISOString().slice(0,10);
+  const _subjRealized = (state.closedTrades || [])
+    .filter(t => t.closeTime && new Date(t.closeTime).toISOString().slice(0,10) === _subjToday)
+    .reduce((s,t) => s + (typeof t.pnl === "number" ? t.pnl : 0), 0);
   const subject = type === "morning"
     ? `APEX Morning Briefing - ${new Date().toLocaleDateString()}`
-    : `APEX EOD Report - P&L ${(state.cash-state.dayStartCash)>=0?"+":""}$${(state.cash-state.dayStartCash).toFixed(2)}`;
+    : `APEX EOD Report - Realized ${_subjRealized>=0?"+":""}$${_subjRealized.toFixed(2)}`;
   try {
     // ── 8/11 RACE FIX ───────────────────────────────────────────────────
     // server.js:651 calls sendEmail("eod") WITHOUT awaiting it, then line 652 runs
@@ -563,9 +569,21 @@ function buildEmailHTML(type) {
   const curPortfolio = state.cash + openRisk() ;
   // 9/09 FIX: was (cash+openRisk) - dayStartCash — mixed a portfolio-value number against a CASH baseline,
   // so an open position's market value leaked in as "P&L" (the +$10,248 on a −$378 day). Use Alpaca truth.
-  const daily  = (state._alpacaTruth && typeof state._alpacaTruth.totalPnL === "number")
-    ? state._alpacaTruth.totalPnL.toFixed(2)
-    : (curPortfolio - (state.dayOpenEquity != null ? state.dayOpenEquity : state.dayStartCash)).toFixed(2);
+  // 9/27 FIX (Harrison): SPLIT daily into REALIZED (today's closed-trade P&L = "how did I trade") vs
+  // UNREALIZED (open-position mark-to-market = "how did my holdings reprice"). The old single "Daily P&L"
+  // was the combined mark, so a green TRADING day read as a loss when a held call was marked down
+  // (e.g. 9/23 traded +$186 but showed -$1036 from the SPY-764C markdown). Now shown as two lines.
+  const _todayStr = new Date().toISOString().slice(0,10);
+  const _realizedToday = (state.closedTrades || [])
+    .filter(t => t.closeTime && new Date(t.closeTime).toISOString().slice(0,10) === _todayStr)
+    .reduce((s,t) => s + (typeof t.pnl === "number" ? t.pnl : 0), 0);
+  const _totalDaily = (state._alpacaTruth && typeof state._alpacaTruth.totalPnL === "number")
+    ? state._alpacaTruth.totalPnL
+    : (curPortfolio - (state.dayOpenEquity != null ? state.dayOpenEquity : state.dayStartCash));
+  const _unrealizedToday = _totalDaily - _realizedToday;   // open-position repricing = total minus what was realized
+  const realizedDay   = _realizedToday.toFixed(2);
+  const unrealizedDay = _unrealizedToday.toFixed(2);
+  const daily         = _totalDaily.toFixed(2);   // kept for the isGood color + any downstream use
   const weekly = (curPortfolio - state.weekStartCash).toFixed(2);
 
   const posRows = state.positions.map(p => {
@@ -592,8 +610,9 @@ function buildEmailHTML(type) {
     <div style="font-size:18px;font-weight:700;color:#00ff88">${fmt(state.cash)}</div>
   </div>
   <div style="background:#0a1628;border:1px solid #0d3050;border-radius:8px;padding:14px">
-    <div style="font-size:10px;color:#336688">DAILY P&L</div>
-    <div style="font-size:18px;font-weight:700;color:${isGood?"#00ff88":"#ff5555"}">${daily>=0?"+":""}$${daily}</div>
+    <div style="font-size:10px;color:#336688">REALIZED P&L (today's trades)</div>
+    <div style="font-size:18px;font-weight:700;color:${parseFloat(realizedDay)>=0?"#00ff88":"#ff5555"}">${parseFloat(realizedDay)>=0?"+":""}$${realizedDay}</div>
+    <div style="font-size:9px;color:#557799;margin-top:4px">Unrealized (open marks): <span style="color:${parseFloat(unrealizedDay)>=0?"#00c488":"#dd7777"}">${parseFloat(unrealizedDay)>=0?"+":""}$${unrealizedDay}</span></div>
   </div>
   <div style="background:#0a1628;border:1px solid #0d3050;border-radius:8px;padding:14px">
     <div style="font-size:10px;color:#336688">POSITIONS</div>
