@@ -507,7 +507,7 @@ async function _doClosePosition(ticker, reason, exitPremium = null, contractSym 
     }
   }
 
-  if (state.closedTrades.length > 200) state.closedTrades = state.closedTrades.slice(0, 200);
+  if (state.closedTrades.length > 200) state.closedTrades = state.closedTrades.slice(-200);   // 9/27 FIX (Harrison): was slice(0,200) = kept the OLDEST 200, discarding new trades → "Recent Trades" frozen at 7/28 forever. slice(-200) keeps the NEWEST 200. Same inversion as the Kelly slice(0,30) bug already fixed at execution.js:306.
 
   if (!state.exitStats) state.exitStats = {};
   if (!state.exitStats[reason]) state.exitStats[reason] = { count:0, wins:0, totalPnl:0, avgPnl:0, winRate:0 };
