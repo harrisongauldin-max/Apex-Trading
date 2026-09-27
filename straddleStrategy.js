@@ -20,7 +20,7 @@
 //   AND data-validated (the +0.87 / 89% test). It is NON-directional by construction.
 
 const STRADDLE = {
-  ENABLED:             true,
+  ENABLED:             false,   // 9/27 (Harrison): AXED. Week 9/21-25 side-by-side: WITH straddle expectancy +$12.27/trade, WITHOUT +$15.60 — it DILUTED the intraday engine (was -$5.00/trade itself, 50% WR, regimeflip churn). Also structurally wrong side of the volatility risk premium (long vol on liquid indices = buying overpriced options). Kill switch; existing positions close normally, other sleeves untouched.
   REQUIRE_NEG_GAMMA:   true,    // core gate: only in negative gamma (the amplifying regime)
   VOL_MIN_PCT:         0.50,    // trailing 30-min range must exceed this % (the +0.87 trigger; <0.50% = dead, 0% payable)
   RANGE_WINDOW_MIN:    30,      // trailing window for the range calc (minutes)
