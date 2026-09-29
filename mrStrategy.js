@@ -35,6 +35,14 @@ const MR = {
   ALLOW_VWAP_BAND:        true,   // if no wall nearby, a deep VWAP-band stretch also counts as a location
   VWAP_BAND_PCT:          0.40,   // the VWAP-band distance that qualifies as a location on its own
   INVALIDATION_PCT:       0.25,   // thesis dead if price extends this % beyond entry against the fade
+  // ── 9/29 (Harrison): NEGATIVE-GAMMA FADE. Data: neg-gamma fades revert MORE than pos-gamma (39% vs 18%),
+  // and the precise setup "at a wall + CVD-exhaustion" reverts 64% (n=56) vs 35% neither. Literature
+  // (SpotGamma: fade the overshoot AT the wall; Sinclair: only after flow EXHAUSTS) + expert panel + data
+  // all converge. So: ALSO fade in neg gamma, but ONLY when at-wall AND CVD shows exhaustion (flow stalling/
+  // turning against the push). Pos-gamma path unchanged. Measure-first via a flag, then confirm live.
+  NEG_GAMMA_FADE:         true,   // allow neg-gamma fades (under the strict conditions below)
+  NEG_REQUIRE_WALL:       true,   // neg-gamma fade REQUIRES at-wall (the 47% vs 35% split); no vwap-band fallback in neg
+  NEG_REQUIRE_CVD_EXHAUST:true,   // neg-gamma fade REQUIRES CVD exhaustion at the level (the 51% vs 36% split; stacked = 64%)
 };
 
 // signals: { rsi, vwapPct, adx }         (vwapPct = (px - vwap)/vwap * 100)
@@ -49,9 +57,12 @@ function evaluateMRFade(signals = {}, gex, px, cfg = MR) {
 
   // --- Gate 1: REGIME (positive gamma; ADX-low proxy only if GEX absent) ---
   let regimeOK, regimeSource;
+  let _negFade = false;
   if (gex && gex.regime) {
-    regimeOK = !cfg.REQUIRE_POSITIVE_GAMMA || gex.regime === "pos";
-    regimeSource = `gamma:${gex.regime}`;
+    if (gex.regime === "pos") { regimeOK = true; }
+    else if (gex.regime === "neg" && cfg.NEG_GAMMA_FADE) { regimeOK = true; _negFade = true; }   // 9/29: neg-gamma fade path (strict conditions enforced at Gate 3)
+    else { regimeOK = !cfg.REQUIRE_POSITIVE_GAMMA; }
+    regimeSource = `gamma:${gex.regime}${_negFade ? "-neg-fade" : ""}`;
   } else {
     regimeOK = (adx != null && adx <= cfg.ADX_RANGE_MAX);   // proxy — the real gate is gamma
     regimeSource = `adx-proxy:${adx != null ? adx.toFixed(0) : "?"}`;
@@ -64,6 +75,13 @@ function evaluateMRFade(signals = {}, gex, px, cfg = MR) {
   if (rsi >= cfg.RSI_OVERBOUGHT && vwap >=  cfg.VWAP_STRETCH_PCT) side = "put";    // overbought + above VWAP -> fade DOWN
   if (!side) return { fire: false, reason: `no extreme+stretch (rsi ${rsi}, vwap ${vwap.toFixed(2)}%)`, regimeSource };
 
+  // 9/29: CVD EXHAUSTION — the flow driving the overshoot is stalling/turning. fade-down (price pushed UP,
+  // side=put): exhaustion = up-flow no longer building (cvdSlope <= 0). fade-up (price pushed DOWN, side=call):
+  // exhaustion = down-flow no longer building (cvdSlope >= 0). Only consumed by the neg-gamma gate below.
+  const _cs = signals.cvdSlope;
+  signals.cvdExhaust = (_cs == null) ? null
+    : (side === "put" ? (_cs <= 0) : (_cs >= 0));
+
   // --- Gate 3: LOCATION — at a gamma wall, or (optionally) a deep VWAP-band stretch ---
   let location = null;
   if (gex) {
@@ -74,6 +92,16 @@ function evaluateMRFade(signals = {}, gex, px, cfg = MR) {
     }
   }
   let locationSource = location ? "wall" : null;
+  // 9/29: NEG-GAMMA FADE strict gate — must be AT A WALL and CVD-EXHAUSTING (the 64% n=56 setup).
+  if (_negFade) {
+    if (!location && cfg.NEG_REQUIRE_WALL) {
+      return { fire: false, reason: `neg-gamma fade but NOT at a wall (needs at-wall; data 47% vs 35%)`, regimeSource, side };
+    }
+    if (cfg.NEG_REQUIRE_CVD_EXHAUST && signals.cvdExhaust !== true) {
+      const _why = signals.cvdExhaust == null ? "no CVD data" : "CVD still pushing (not exhausted)";
+      return { fire: false, reason: `neg-gamma fade at wall but ${_why} — need exhaustion (data 51% vs 36%, stacked 64%)`, regimeSource, side };
+    }
+  }
   if (!location && cfg.REQUIRE_WALL) {
     return { fire: false, reason: `extreme + stretched but NOT at a wall — mid-range fade (data: 22% revert vs 43% at-wall); REQUIRE_WALL on, standing down`, regimeSource, side };
   }
