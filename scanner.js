@@ -2863,8 +2863,21 @@ async function runScan() {
             if (!state._iTrendLast) state._iTrendLast = {};
             const _iCoolKey = `${liveStock.ticker}-${_iSide}`;
             const _iCooling = _iSide && (Date.now() - (state._iTrendLast[_iCoolKey] || 0)) < ITREND_COOLDOWN_MIN * 60000;
+            // 9/28 (Harrison): CVD-SIGN AGREE/CONFLICT tag — MEASUREMENT ONLY (does not gate/flip).
+            // Back-check: entries where side agrees with cumulative-CVD-sign made +$14/trade; conflicts made
+            // +$1.9 (flat). Tag it so the split self-populates on live outcomes; decide the VETO later if it holds.
+            let _iCvdTag = "no-cvd";
+            if (_iSide) {
+              const _iCvd = (state._cumVolDelta || {})[liveStock.ticker];
+              if (typeof _iCvd === "number") {
+                const _agree = (_iSide === "call" && _iCvd > 0) || (_iSide === "put" && _iCvd < 0);
+                _iCvdTag = _agree ? "cvd-agree" : "cvd-conflict";
+                logEvent("filter", `[ITREND-CVD] ${liveStock.ticker} ${_iSide.toUpperCase()} — ${_iCvdTag} (cumCVD ${Math.round(_iCvd)}) [measure-only, no gate]`);
+              }
+            }
             if (_iSide && !_iHave && !_iCooling) {
               liveStock._iTrend = _iSide;
+              liveStock._iCvdTag = _iCvdTag;   // stamped onto the outcome for the agree-vs-conflict measurement
               state._iTrendLast[_iCoolKey] = Date.now();
               const _iOK = await executeTrade(liveStock, price, 0, [_iReason], state.vix, _iSide, false, 1.0, null, null, `${liveStock.ticker}-${_iSide}-itrend-${Date.now()}`);
               liveStock._iTrend = null;
