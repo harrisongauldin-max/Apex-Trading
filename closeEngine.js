@@ -399,6 +399,7 @@ async function _doClosePosition(ticker, reason, exitPremium = null, contractSym 
     // consumer that reaches for pos.contracts instead would be reconciling against the wrong size.
     pnl, pct, reason, exitPremium: ep, epSource: _epSrc, closedQty: contractsToSell,
     date: new Date().toLocaleDateString(), closeTime: Date.now(),
+    cvdTag: pos._iCvdTag || null,   // 9/28: CVD agree/conflict tag → into outcomes CSV for the agree-vs-conflict measurement
     won: pnl > 0,
     entryScore:    pos.score || 0,
     entryRSI:      pos.entryRSI || 0,
