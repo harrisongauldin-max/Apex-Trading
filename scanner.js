@@ -2907,14 +2907,20 @@ async function runScan() {
           recordStandDown("mrf", `after ${MR_FADE_CUTOFF_ET}h ET cutoff — no new intraday entry into the 3:15 flatten`);
         } else {
         const _mrVwap = (liveStock.intradayVWAP > 0 && price > 0) ? ((price - liveStock.intradayVWAP) / liveStock.intradayVWAP) * 100 : null;
-        const _mrDec  = MRSTRAT.evaluateMRFade({ rsi: liveStock.rsi, vwapPct: _mrVwap, adx: liveStock.adx },
+        const _mrCvdSlope = (state._cvdSlope && state._cvdSlope[liveStock.ticker] != null) ? state._cvdSlope[liveStock.ticker] : null;   // 9/29: for neg-gamma CVD-exhaustion gate
+        const _mrDec  = MRSTRAT.evaluateMRFade({ rsi: liveStock.rsi, vwapPct: _mrVwap, adx: liveStock.adx, cvdSlope: _mrCvdSlope },
                                                (state._gexNow && state._gexNow[liveStock.ticker]) || null, price);
         if (_mrDec.fire) {
           // 8/27: don't fade AGAINST the daily trend (Chan regime-conditional MR). Fading strength in a
           // daily uptrend (puts) / weakness in a downtrend (calls) is the falling knife — 4/5 puts died this way 8/27.
           const _dt = await ensureDailyTrend(liveStock.ticker);
           let _fadeVsTrend = false;
-          if (_dt && _dt.ma50 && _dt.ma100) {
+          // 9/29: NEG-GAMMA fades are EXEMPT from the daily-trend blocker. They fade an OVERSHOOT (which
+          // usually aligns WITH the daily trend — 74% of the 64%-reverting setups do), and they carry their
+          // OWN, better falling-knife guard (CVD-exhaustion required). The daily-trend check was calibrated
+          // for general/pos-gamma fades; applying it here would veto ~74% of the validated neg-gamma edge.
+          const _isNegFade = _mrDec.regimeSource && _mrDec.regimeSource.includes("neg-fade");
+          if (_dt && _dt.ma50 && _dt.ma100 && !_isNegFade) {
             const _dUp = price > _dt.ma50 && _dt.ma50 > _dt.ma100;
             const _dDn = price < _dt.ma50 && _dt.ma50 < _dt.ma100;
             if (_mrDec.side === "put"  && _dUp) _fadeVsTrend = true;
