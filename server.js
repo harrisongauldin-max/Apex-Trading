@@ -1338,7 +1338,20 @@ app.get("/api/logs/download", requireSecret, (req, res) => {
   try {
     const { state } = require('./state');
     const buf = state._dailyLogBuffer || [];
-    const fmtTime = iso => { try { return new Date(iso).toLocaleTimeString('en-US', { timeZone: 'America/New_York', hour12: true }); } catch (_) { return iso; } };
+    // 9/30 (Harrison): full unambiguous ET timestamp YYYY-MM-DD HH:MM:SS (24h) — was time-only 12h, which
+    // produced ambiguous/mangled stamps. Guards a bad time value by echoing it raw instead of mangling.
+    const fmtTime = iso => {
+      try {
+        const d = new Date(iso);
+        if (isNaN(d.getTime())) return String(iso);
+        const p = d.toLocaleString('en-US', { timeZone: 'America/New_York', hour12: false,
+          year: 'numeric', month: '2-digit', day: '2-digit',
+          hour: '2-digit', minute: '2-digit', second: '2-digit' });
+        // toLocaleString gives "MM/DD/YYYY, HH:MM:SS" — normalize to "YYYY-MM-DD HH:MM:SS"
+        const m = p.match(/(\d{2})\/(\d{2})\/(\d{4}),?\s+(\d{2}):(\d{2}):(\d{2})/);
+        return m ? `${m[3]}-${m[1]}-${m[2]} ${m[4]}:${m[5]}:${m[6]}` : p;
+      } catch (_) { return String(iso); }
+    };
     const stamp = new Date().toLocaleString('en-US', { timeZone: 'America/New_York' });
     const header = `APEX — Server Log — ${stamp}\n${buf.length} entries\n` + "-".repeat(60) + "\n\n";
     const lines = buf.map(e => `[${fmtTime(e.time)}] ${String(e.type || "").toUpperCase().padEnd(7)} ${e.message || ""}`);
