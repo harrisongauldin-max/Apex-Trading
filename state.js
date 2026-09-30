@@ -320,6 +320,15 @@ function logEvent(type, message) {
   state.tradeLog.unshift(entry);
   if (state.tradeLog.length > 1000) state.tradeLog = state.tradeLog.slice(0, 1000);
   if (!state._dailyLogBuffer) state._dailyLogBuffer = [];
+  // 9/30 (Harrison): DAY-ROLLOVER GUARD. If the ET date changed since the last log, the buffer holds a
+  // PRIOR day's entries (EOD cron reset didn't run / a restart reloaded stale state) — which the "Download
+  // full day" export then serves under a "today" header (9/29 under 9/30). Clear it on the first log of a
+  // new ET day so the buffer is always TODAY-only. (Prior day's log is already durable in Redis from EOD.)
+  const _etDay = getETDateStr();
+  if (state._dailyLogDay && state._dailyLogDay !== _etDay && state._dailyLogBuffer.length) {
+    state._dailyLogBuffer = [];
+  }
+  state._dailyLogDay = _etDay;
   state._dailyLogBuffer.push(entry);
   if (state._dailyLogBuffer.length > 30000)
     state._dailyLogBuffer = state._dailyLogBuffer.slice(-30000);
