@@ -730,7 +730,12 @@ const ITREND_ADX_MIN      = 25;     // trend-strength floor — telemetry p50=22
 const ITREND_VWAP_MIN     = 0.05;   // |vwap%| floor — clearly on one side of VWAP (p50 dist = 0.09%)
 const ITREND_BREADTH_STRONG = 55;   // soft breadth: block only when breadth is actively AGAINST (fail-open at neutral)
 const ITREND_START_ET     = 10.0;   // after OR locks (9:45) + let the trend establish
-const ITREND_END_ET       = 13.5;   // no new entries after 1:30pm ET (Gao et al. morning-window; reversals cluster late)
+const ITREND_END_ET       = 13.5;
+// 9/30 (Harrison): intraday-trend stands aside ENTIRELY in negative gamma. Data 9/14-9/30: itrend-family
+// entries in neg gamma 7 trades / 14% WR / -$37 avg vs pos gamma 38 / 60% / +$15; and on this tape moves
+// REVERSE more in neg gamma (81 rev vs 37 cont), in every time-of-day window. A momentum sleeve has no
+// business there. false = fall back to the older direction-only gate below it.
+const ITREND_NEG_GAMMA_BLOCK = true;   // no new entries after 1:30pm ET (Gao et al. morning-window; reversals cluster late)
 const ITREND_TRAIL_ARM_PCT      = 0.15;
 const ITREND_TRAIL_GIVEBACK_PCT = 0.07;
 const ITREND_STOP_PCT     = 0.30;   // hard floor (0.50-delta 14-DTE is more volatile than deep-ITM)
@@ -746,7 +751,16 @@ const STRADDLE_MAX_HOLD_MIN   = 75;   // time-stop: the +0.87 signal is a ~60min
 const ITREND_COOLDOWN_MIN = 30;     // 8/28 (panel): the OR condition is a STATE not an event, so a sustained trend
                                     // could re-fire right after an exit. Cooldown bounds re-entry churn per ticker.
 const GEX_FETCH_ENABLED           = true;    // 8/26: dedicated both-sides near-expiry GEX chain fetch (feeds the regime switch)
-const GEX_FETCH_THROTTLE_MS       = 120000;  // per-ticker: refetch the gamma chain at most every 2 min
+const GEX_FETCH_THROTTLE_MS       = 120000;
+// 9/30 (Harrison): GEX v2 — full-book dealer gamma instead of one expiry. v1 used only the nearest future
+// expiry, so "regime" reflected one day of options; the published GEX research uses the whole book.
+// v2: first N future expiries (0DTE still excluded — Alpaca has no greeks/OI for it) within MAX_DAYS,
+// strikes within +/-STRIKE_BAND of spot, aggregated by strike, plus a gamma-FLIP level. Kill: false = v1.
+const GEX_V2_ENABLED              = true;
+const GEX_V2_MAX_EXPIRIES         = 6;
+const GEX_V2_MAX_DAYS             = 35;
+const GEX_V2_STRIKE_BAND          = 0.05;    // +/-5% of spot
+const GEX_V2_SNAP_CONCURRENCY     = 6;       // snapshot batches in flight at once (avoid bursting the API)  // per-ticker: refetch the gamma chain at most every 2 min
 const BREAK_ENTRY_SCORE           = 80;      // fixed stamp a break entry carries; clears MIN_SCORE(70)+slot2(75), NOT slot3(85). NOT a quality measure.
 const BREAK_CONFIRM_BARS          = 1;       // bars after the break bar that must not reclaim the level
 const BREAK_MAX_AGE_MIN           = 10;      // signal is stale after this many minutes
@@ -919,12 +933,13 @@ module.exports = {
   MR_SCALP_TARGET_DTE, MR_SCALP_DELTA, MR_SCALP_SIZE_MOD,
   BREAK_DELTA, BREAK_DELTA_MIN, BREAK_DELTA_MAX, BREAK_TARGET_DTE, BREAK_MAX_HOLD_MIN, BREAK_TRAIL_ARM_PCT, BREAK_TRAIL_GIVEBACK_PCT,
   GEX_FETCH_ENABLED, GEX_FETCH_THROTTLE_MS,
+  GEX_V2_ENABLED, GEX_V2_MAX_EXPIRIES, GEX_V2_MAX_DAYS, GEX_V2_STRIKE_BAND, GEX_V2_SNAP_CONCURRENCY,
   STRATEGY_CLASS, strategyClass, isFlattenExempt, LOCK_LADDER, LOCK_LADDER_TRAIL, ladderFloor,
   TREND_ENABLED, TREND_DELTA, TREND_DELTA_MIN, TREND_DELTA_MAX, TREND_TARGET_DTE, TREND_DTE_MIN, TREND_DTE_MAX,
   TREND_ROLL_DTE, TREND_MA_FAST, TREND_MA_SLOW, TREND_RSI_MIN, TREND_RSI_MAX, TREND_OVEREXT_ATR, TREND_BREADTH_MIN,
   TREND_CUTOFF_ET, TREND_RISK_BUDGET, TREND_TRAIL_ARM_PCT, TREND_STOP_UNDL_PCT, TREND_STOP_PCT, TREND_ATR_STOP_MULT, TREND_USTOP_FLOOR, TREND_USTOP_CEIL, TREND_STALE_DAYS, TREND_STALE_PEAK, TREND_TRAIL_GIVEBACK_PCT,
   ITREND_ENABLED, ITREND_DELTA, ITREND_DELTA_MIN, ITREND_DELTA_MAX, ITREND_TARGET_DTE, ITREND_DTE_MIN, ITREND_DTE_MAX,
-  ITREND_ADX_MIN, ITREND_VWAP_MIN, ITREND_BREADTH_STRONG, ITREND_START_ET, ITREND_END_ET,
+  ITREND_ADX_MIN, ITREND_VWAP_MIN, ITREND_BREADTH_STRONG, ITREND_START_ET, ITREND_END_ET, ITREND_NEG_GAMMA_BLOCK,
   ITREND_TRAIL_ARM_PCT, ITREND_TRAIL_GIVEBACK_PCT, ITREND_STOP_PCT, ITREND_COOLDOWN_MIN, ITREND_MAX_HOLD_MIN, ITREND_NOARM_MIN,
   UNIVERSAL_NOARM_ENABLED, UNIVERSAL_NOARM_MIN, RSI_DEADZONE_VETO,
   STRADDLE_TP_PCT, STRADDLE_MAX_HOLD_MIN,
