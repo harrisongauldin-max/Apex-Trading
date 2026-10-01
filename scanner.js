@@ -123,6 +123,7 @@ const {
   GEX_FETCH_ENABLED = true, GEX_FETCH_THROTTLE_MS = 120000,
   TREND_ENABLED = true, TREND_CUTOFF_ET = 15.0, TREND_MA_FAST = 50, TREND_MA_SLOW = 100,   // 9/20: TREND_ENABLED aligned to constants. 9/21 FIX: comment had eaten TREND_MA_FAST + TREND_MA_SLOW
   TREND_RSI_MIN = 50, TREND_RSI_MAX = 72, TREND_OVEREXT_ATR = 4.0, TREND_BREADTH_MIN = 52,
+  ITREND_NEG_GAMMA_BLOCK = true,
   ITREND_ENABLED = true, ITREND_ADX_MIN = 25, ITREND_VWAP_MIN = 0.05, ITREND_BREADTH_STRONG = 55,   // 9/20: ITREND_ENABLED aligned to constants=true (kill via constants, not this default). 9/21 FIX: comment had eaten ITREND_VWAP_MIN + ITREND_BREADTH_STRONG off this line → itrend crashed all 9/21
   ITREND_START_ET = 10.0, ITREND_END_ET = 13.5, ITREND_COOLDOWN_MIN = 30,
   BREAK_ENTRY_SCORE = 80, BREAK_CONFIRM_BARS = 1, BREAK_MAX_AGE_MIN = 10, BREAK_VOL_LOOKBACK = 10,
@@ -2726,7 +2727,7 @@ async function runScan() {
                 state._gexLogLast[liveStock.ticker] = Date.now();
                 const _coi = _gc.call.rows.reduce((s, r) => s + (r.oi || 0), 0);
                 const _poi = _gc.put.rows.reduce((s, r) => s + (r.oi || 0), 0);
-                logEvent("scan", `[GEX] ${liveStock.ticker} netGEX=${_g.netGEX} (${_g.netGexM}M) regime=${_g.regime} | ${_gc.call.rows.length}c/${_gc.put.rows.length}p oi=${_coi}c/${_poi}p ${_gc.call.dte}DTE`);
+                logEvent("scan", `[GEX] ${liveStock.ticker} netGEX=${_g.netGEX} (${_g.netGexM}M) regime=${_g.regime} | near=${_g.regimeNear}(${_g.netGexNearM}M) flip=${_g.flipLevel ?? _g.flipNote}${_g.distFlipPct != null ? ` (${_g.distFlipPct}%)` : ""} ${_g.nExpiries}exp | ${_gc.call.rows.length}c/${_gc.put.rows.length}p oi=${_coi}c/${_poi}p ${_gc.call.dte}${_gc.farDte != null ? `-${_gc.farDte}` : ""}DTE`);
               }
             } catch (_gxl) {}
           }
@@ -2850,6 +2851,12 @@ async function runScan() {
             let _iSuppressed = false;
             if (_iSide) {
               const _iGamma = (state._gexRegime || {})[liveStock.ticker] || null;
+              // 9/30 (Harrison): full stand-aside in negative gamma (see ITREND_NEG_GAMMA_BLOCK in constants).
+              if (ITREND_NEG_GAMMA_BLOCK && _iGamma === "neg") {
+                recordStandDown("itrend", "neg-gamma regime — itrend stands aside");
+                logEvent("filter", `[INTRADAY-TREND] ${liveStock.ticker} ${_iSide.toUpperCase()} blocked — negative gamma (momentum reverses here; itrend stands aside)`);
+                _iSide = null; _iSuppressed = true;
+              }
               const _iDT = (state._dailyMA || {})[liveStock.ticker] || null;
               // dominant direction = price vs the 50-day (below = down-biased). Catches a weakening tape
               // (price under the 50d even before the 50d/100d cross) — 9/01 QQQ was 707 < 50d 712.
@@ -3100,7 +3107,7 @@ async function runScan() {
         const _gc = state._gexChain && state._gexChain[stock.ticker];
         if (GEX && _gc && _gc.call && _gc.put && _gc.call.dte === _gc.put.dte &&
             (Date.now() - Math.min(_gc.call.ts || 0, _gc.put.ts || 0) < 300000))
-          return GEX.computeGEX(_gc.call.rows, _gc.put.rows, price);   // same near expiry only
+          return GEX.computeGEX(_gc.call.rows, _gc.put.rows, price);   // 9/30: full-book chain under GEX v2 (near-expiry only if v2 fell back to v1)
       } catch (_gxe) {} return null; })();
       if (_gexRec) { if (!state._gexNow) state._gexNow = {}; state._gexNow[stock.ticker] = _gexRec; }   // 8/24: expose regime to the MR fade
       recordTelemetry(state, {
@@ -3120,6 +3127,8 @@ async function runScan() {
           distCW: _gexRec ? _gexRec.distCallWallPct : null, distPW: _gexRec ? _gexRec.distPutWallPct : null,
           cumVolDelta: (state._cumVolDelta && state._cumVolDelta[stock.ticker] != null) ? state._cumVolDelta[stock.ticker] : null,
           cvdSlope: (state._cvdSlope && state._cvdSlope[stock.ticker] != null) ? state._cvdSlope[stock.ticker] : null,
+          gexNear: _gexRec ? _gexRec.regimeNear : null, netGexNearM: _gexRec ? _gexRec.netGexNearM : null,   // 9/30: GEX v2 comparison fields
+          flipLvl: _gexRec ? _gexRec.flipLevel : null, distFlip: _gexRec ? _gexRec.distFlipPct : null,
         });
       } catch (_telErr) { /* telemetry must never break the scan */ }
     }
