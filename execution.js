@@ -43,6 +43,7 @@ const { CAPITAL_FLOOR, MIN_OPTION_PREMIUM, MIN_OI,
         SLIPPAGE_LOG_ENABLED = false, DECISION_SPLIT_LOG = false,
         SPREAD_COST_LOG = false, FEASIBILITY_ENABLED = false, FEASIBILITY_ENFORCE = false,
         FEASIBILITY_MAX_RATIO = 1.0, FEASIBILITY_HOLD_MIN = 20, FLAT_SIZING_ENABLED = false,
+        GEX_V2_ENABLED = true, GEX_V2_MAX_EXPIRIES = 6, GEX_V2_MAX_DAYS = 35, GEX_V2_STRIKE_BAND = 0.05, GEX_V2_SNAP_CONCURRENCY = 6,
 }                                          = require('./constants');
 const { confirmPendingOrder } = require('./closeEngine');
 const { writeJournalEntry } = require('./state');
@@ -1131,7 +1132,101 @@ function executeCreditSpread() {
 // side (the traded optionType) at ONE DTE, so GEX — which needs BOTH call+put at the SAME near expiry,
 // fresh — almost never had both, and the regime switch ran blind. This pulls the FULL near-expiry call
 // AND put chain (all strikes, no delta filter) and stamps both sides with the same DTE + timestamp.
+// 9/30 (Harrison): GEX v2 dispatcher — full-book chain (multi-expiry, strike-bounded). Falls back to the
+// v1 single-expiry fetch if v2 is disabled or comes back empty, so the regime is never lost.
 async function fetchGexChain(ticker, spot) {
+  if (GEX_V2_ENABLED && spot > 0) {
+    const ok = await _fetchGexChainV2(ticker, spot);
+    if (ok) return true;
+    logEvent("scan", `[GEX-FETCH] ${ticker} v2 empty — falling back to v1 (single expiry)`);
+  }
+  return _fetchGexChainV1(ticker, spot);
+}
+
+async function _fetchGexChainV2(ticker, spot) {
+  const _t0 = Date.now();
+  try {
+    const today = getETTime();
+    const todayStr = today.toISOString().split("T")[0];
+    const gte = todayStr;
+    const lte = new Date(today.getTime() + GEX_V2_MAX_DAYS * 86400000).toISOString().split("T")[0];
+    const sLo = (spot * (1 - GEX_V2_STRIKE_BAND)).toFixed(2);
+    const sHi = (spot * (1 + GEX_V2_STRIKE_BAND)).toFixed(2);
+    const _list = async (type) => {
+      let out = [], tok = null;
+      const base = `/options/contracts?underlying_symbol=${ticker}&expiration_date_gte=${gte}&expiration_date_lte=${lte}` +
+                   `&strike_price_gte=${sLo}&strike_price_lte=${sHi}&type=${type}&limit=1000`;
+      for (let p = 0; p < 8; p++) {
+        const pg = await alpacaGet(tok ? `${base}&page_token=${tok}` : base, ALPACA_OPTIONS);
+        if (!pg || !pg.option_contracts) break;
+        out = out.concat(pg.option_contracts);
+        tok = pg.next_page_token || null;
+        if (!tok) break;
+      }
+      return out;
+    };
+    const [callsAll, putsAll] = await Promise.all([_list("call"), _list("put")]);
+    // first N FUTURE expiries (0DTE excluded — no greeks/OI on Alpaca's same-day snapshot)
+    const exps = [...new Set([...callsAll, ...putsAll].map(c => c.expiration_date))]
+                   .filter(e => e > todayStr).sort().slice(0, GEX_V2_MAX_EXPIRIES);
+    if (!exps.length) return false;
+    const expSet = new Set(exps);
+    const calls = callsAll.filter(c => expSet.has(c.expiration_date));
+    const puts  = putsAll.filter(c => expSet.has(c.expiration_date));
+    if (!calls.length || !puts.length) return false;
+
+    // snapshots in batches of 25 (Alpaca cap), limited concurrency so we don't burst the API
+    const _snaps = async (contracts) => {
+      const syms = contracts.map(c => c.symbol), batches = [];
+      for (let i = 0; i < syms.length; i += 25) batches.push(syms.slice(i, i + 25).join(","));
+      const snaps = {};
+      for (let i = 0; i < batches.length; i += GEX_V2_SNAP_CONCURRENCY) {
+        const chunk = batches.slice(i, i + GEX_V2_SNAP_CONCURRENCY);
+        const res = await Promise.all(chunk.map(b =>
+          alpacaGet(`/options/snapshots?symbols=${b}&feed=${OPTION_FEED}`, ALPACA_OPT_SNAP)
+            .catch(e => { logEvent("scan", `[GEX-FETCH] ${ticker} v2 snapshot batch failed — ${e && e.message}`); return null; })));
+        for (const r of res) Object.assign(snaps, (r && r.snapshots) || {});
+      }
+      return snaps;
+    };
+    // sides run sequentially so GEX_V2_SNAP_CONCURRENCY is the TOTAL in-flight cap, not per side
+    const cSnap = await _snaps(calls);
+    const pSnap = await _snaps(puts);
+    const _rows = (contracts, snaps) => {
+      const rows = [];
+      for (const c of contracts) {
+        const snap = snaps[c.symbol]; if (!snap) continue;
+        const g = snap.greeks || {};
+        const gamma = parseFloat(g.gamma || 0);
+        const oi = parseInt((c.open_interest != null ? c.open_interest : (snap.openInterest || snap.open_interest || 0)) || 0, 10);
+        const iv = parseFloat(snap.impliedVolatility || 0);
+        const T = Math.max(1 / 365, (new Date(c.expiration_date + "T16:00:00-04:00").getTime() - Date.now()) / (365 * 86400000));
+        if (gamma || oi) rows.push({ strike: parseFloat(c.strike_price), gamma, oi, iv, T, exp: c.expiration_date });
+      }
+      return rows;
+    };
+    const callRows = _rows(calls, cSnap), putRows = _rows(puts, pSnap);
+    if (!callRows.length || !putRows.length) return false;
+
+    const nearExp = exps[0];
+    const dte = Math.max(0, Math.round((new Date(nearExp + "T16:00:00-04:00").getTime() - Date.now()) / 86400000));
+    const farDte = Math.max(0, Math.round((new Date(exps[exps.length - 1] + "T16:00:00-04:00").getTime() - Date.now()) / 86400000));
+    const ts = Date.now();
+    if (!state._gexChain) state._gexChain = {};
+    state._gexChain[ticker] = {
+      call: { rows: callRows, dte, spot, ts },
+      put:  { rows: putRows,  dte, spot, ts },
+      v2: true, exps, farDte,
+    };
+    logEvent("scan", `[GEX-FETCH] ${ticker} v2 ${exps.length} exp (${dte}-${farDte}DTE) strikes ±${(GEX_V2_STRIKE_BAND*100).toFixed(0)}%: ${callRows.length}c/${putRows.length}p rows in ${Date.now() - _t0}ms`);
+    return true;
+  } catch (e) {
+    logEvent("scan", `[GEX-FETCH] ${ticker} v2 failed — ${e && e.message}`);
+    return false;
+  }
+}
+
+async function _fetchGexChainV1(ticker, spot) {
   try {
     const today = getETTime();
     const gte = today.toISOString().split("T")[0];
