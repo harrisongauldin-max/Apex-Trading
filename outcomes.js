@@ -74,6 +74,7 @@ const OUTCOME_HEADER = [
   "brokerPnl","pnlDelta","epSource","addonMerged",
   "eVolPace",   // 8/24: continuous volume pace at entry (the reject-side direction signal), now on takes
   "arm",        // 8/24: volPace split-book arm (vf | ctl); blank pre-experiment
+  "cvdTag",     // 9/30: CVD agree/conflict tag on intraday-trend entries (measure-only)
 ].join(",");
 
 function _csv(s) {
@@ -187,6 +188,7 @@ function buildOutcomeRow(pos, o) {
     pos._addonMerged ? 1 : 0,
     _n(x.volPace, 2),
     (x.arm || ""),
+    (pos._iCvdTag || ""),   // 9/30: matches OUTCOME_HEADER "cvdTag" — stamped on the position by execution.js
   ].map(_csv).join(",");
 
   return row;
