@@ -730,7 +730,7 @@ const ITREND_ADX_MIN      = 25;     // trend-strength floor — telemetry p50=22
 const ITREND_VWAP_MIN     = 0.05;   // |vwap%| floor — clearly on one side of VWAP (p50 dist = 0.09%)
 const ITREND_BREADTH_STRONG = 55;   // soft breadth: block only when breadth is actively AGAINST (fail-open at neutral)
 const ITREND_START_ET     = 10.0;   // after OR locks (9:45) + let the trend establish
-const ITREND_END_ET       = 13.5;
+const ITREND_END_ET       = 12.0;   // 10/2 (Harrison): was 13.5. Live itrend 9/14-10/2: 10-11 ET +$20.2/trade (n=29), 11-12 -$1.7 (n=18), 12-13:30 -$9.3 (n=30, 33% WR). Edge is in the first trading hour; midday entries bleed (midday volume lull, Admati & Pfleiderer 1988). Entries only — open positions still exit normally.
 // 9/30 (Harrison): intraday-trend stands aside ENTIRELY in negative gamma. Data 9/14-9/30: itrend-family
 // entries in neg gamma 7 trades / 14% WR / -$37 avg vs pos gamma 38 / 60% / +$15; and on this tape moves
 // REVERSE more in neg gamma (81 rev vs 37 cont), in every time-of-day window. A momentum sleeve has no
