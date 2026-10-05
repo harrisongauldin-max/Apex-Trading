@@ -2068,6 +2068,24 @@ async function runScan() {
               _cvd += v * _w;
             }
             state._cumVolDelta[_tk] = _cvd;
+            // 10/5 (Harrison): DRIFT-DAY counters (MEASUREMENT ONLY). Per ticker, per day: share of scans with
+            // CVD above/below its OPENING level, and (from 10:00 ET) price above/below session VWAP. Stamped on
+            // each mr-fade entry (as shares AGAINST the fade) so we can test whether fades taken on one-sided
+            // drift days lose. 10/5 test, 27 fades: price beyond VWAP >=80% of session -> 40% WR / -$25 (n=10)
+            // vs 70% / +$165 otherwise. Never gates anything.
+            try {
+              if (!state._driftAcc) state._driftAcc = {};
+              let _da = state._driftAcc[_tk];
+              if (!_da || _da.day !== _tday) _da = state._driftAcc[_tk] = { day:_tday, cvdOpen:_cvd, nC:0, cUp:0, cDn:0, nV:0, vUp:0, vDn:0 };
+              _da.nC++; if (_cvd > _da.cvdOpen) _da.cUp++; else if (_cvd < _da.cvdOpen) _da.cDn++;
+              const _etD = getETTime(); const _etH = _etD.getHours() + _etD.getMinutes() / 60;
+              if (_etH >= 10) {
+                let _pv = 0, _vv = 0;
+                for (const _b of _todayBars) { const v=+_b.v||0; if (!v) continue; _pv += ((+_b.h + +_b.l + +_b.c) / 3) * v; _vv += v; }
+                const _last = +_todayBars[_todayBars.length - 1].c;
+                if (_vv > 0 && _last > 0) { const _vw = _pv / _vv; _da.nV++; if (_last > _vw) _da.vUp++; else if (_last < _vw) _da.vDn++; }
+              }
+            } catch (_daErr) { /* measurement only — never break the scan */ }
             const _ch = state._cvdHist[_tk] || [];
             if (!_ch.length || _ch[_ch.length-1].day !== _tday) _ch.length = 0;   // reset daily
             _ch.push({ day:_tday, t:Date.now(), cvd:_cvd });
@@ -2952,10 +2970,17 @@ async function runScan() {
             recordStandDown("mrf", "FIRED");
             logEvent("filter", `[MR-FADE] ${liveStock.ticker} FIRE — ${_mrDec.reason} | loc:${_mrDec.locationSource||"?"} | vwapSlope ${_vwTag} (${_vwWith} fade)`);   // 9/22: log locationSource (wall=strong 43% / vwap-band=weak 22%) for measuring before REQUIRE_WALL
             liveStock._mrFade = _mrDec;                     // tags entryStrategy + carries invalidation into _entryX
+            { // 10/5: drift-day tag — shares AGAINST the fade (put fade fights up-drift; call fade fights down-drift)
+              const _da = (state._driftAcc || {})[liveStock.ticker];
+              const _isPut = _mrDec.side === "put";
+              liveStock._driftFlow = (_da && _da.nC >= 10) ? +((_isPut ? _da.cUp : _da.cDn) / _da.nC).toFixed(2) : null;
+              liveStock._driftVwap = (_da && _da.nV >= 5)  ? +((_isPut ? _da.vUp : _da.vDn) / _da.nV).toFixed(2) : null;
+              logEvent("filter", `[MR-FADE] ${liveStock.ticker} drift tag — flow-against ${liveStock._driftFlow ?? "n/a"} | price-beyond-VWAP ${liveStock._driftVwap ?? "n/a"} [measure-only]`);
+            }
             const _mrSigId = `${liveStock.ticker}-${_mrDec.side}-mrfade-${Date.now()}`;   // own signalId (the momentum _sigId is defined later — TDZ)
             const _mrScore = 0;
             const _mrOK = await executeTrade(liveStock, price, _mrScore, [_mrDec.reason], state.vix, _mrDec.side, true, 1.0, null, null, _mrSigId);
-            liveStock._mrFade = null;
+            liveStock._mrFade = null; liveStock._driftFlow = null; liveStock._driftVwap = null;
             if (_mrOK) continue;                         // handled by the MR path this scan; skip the momentum entry
           }
           }
