@@ -75,6 +75,8 @@ const OUTCOME_HEADER = [
   "eVolPace",   // 8/24: continuous volume pace at entry (the reject-side direction signal), now on takes
   "arm",        // 8/24: volPace split-book arm (vf | ctl); blank pre-experiment
   "cvdTag",     // 9/30: CVD agree/conflict tag on intraday-trend entries (measure-only)
+  "driftFlow",  // 10/5: mr-fade — share of session scans with CVD against the fade (measure-only)
+  "driftVwap",  // 10/5: mr-fade — share of session scans (from 10:00 ET) with price on the far side of VWAP
 ].join(",");
 
 function _csv(s) {
@@ -189,6 +191,8 @@ function buildOutcomeRow(pos, o) {
     _n(x.volPace, 2),
     (x.arm || ""),
     (pos._iCvdTag || ""),   // 9/30: matches OUTCOME_HEADER "cvdTag" — stamped on the position by execution.js
+    (pos._driftFlow != null ? pos._driftFlow : ""),   // 10/5: matches "driftFlow"
+    (pos._driftVwap != null ? pos._driftVwap : ""),   // 10/5: matches "driftVwap"
   ].map(_csv).join(",");
 
   return row;
