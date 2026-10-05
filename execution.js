@@ -713,6 +713,8 @@ async function executeTrade(stock, price, score, scoreReasons, vix, optionType =
   const position = {
     signalId:       signalId || null,   // 9/14: store on the position (was only on the telemetry row) — needed for straddle leg-pair matching
     _iCvdTag:       stock._iCvdTag || null,   // 9/28: CVD agree/conflict measurement tag
+    _driftFlow:     (stock._driftFlow != null) ? stock._driftFlow : null,   // 10/5: mr-fade drift-day tag (measure-only)
+    _driftVwap:     (stock._driftVwap != null) ? stock._driftVwap : null,
     ticker:         stock.ticker,
     sector:         stock.sector,
     assetClass:     ["GLD","SLV","USO","TLT","GDX"].includes(stock.ticker) ? "commodity" : "equity",
@@ -890,6 +892,8 @@ async function executeTrade(stock, price, score, scoreReasons, vix, optionType =
   if (stock._isTrend) { (_openSame || position)._isTrend = true; }
   if (stock._iTrend) { (_openSame || position)._iTrend = true; }
   if (stock._iCvdTag) { (_openSame || position)._iCvdTag = stock._iCvdTag; }   // 9/28: CVD agree/conflict tag (measure-only) → flows to outcome
+  if (stock._driftFlow != null) { (_openSame || position)._driftFlow = stock._driftFlow; }   // 10/5: drift tag -> outcome
+  if (stock._driftVwap != null) { (_openSame || position)._driftVwap = stock._driftVwap; }
   (_openSame || position)._entryX = {
     mrInvalidation: (stock._mrFade && typeof stock._mrFade.invalidationPx === "number") ? parseFloat(stock._mrFade.invalidationPx.toFixed(2)) : null,
     breadth:    (typeof state._breadth === "number") ? state._breadth : null,
