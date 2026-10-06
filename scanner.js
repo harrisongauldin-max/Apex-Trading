@@ -126,6 +126,8 @@ const {
   TREND_ENABLED = true, TREND_CUTOFF_ET = 15.0, TREND_MA_FAST = 50, TREND_MA_SLOW = 100,   // 9/20: TREND_ENABLED aligned to constants. 9/21 FIX: comment had eaten TREND_MA_FAST + TREND_MA_SLOW
   TREND_RSI_MIN = 50, TREND_RSI_MAX = 72, TREND_OVEREXT_ATR = 4.0, TREND_BREADTH_MIN = 52,
   ITREND_NEG_GAMMA_BLOCK = true,
+  GEX_REGIME_HYST_M = 250,
+  ITREND_LATE_START_ET = 11.0, ITREND_LATE_ADX_MIN = 40,
   ITREND_ENABLED = true, ITREND_ADX_MIN = 25, ITREND_VWAP_MIN = 0.05, ITREND_BREADTH_STRONG = 55,   // 9/20: ITREND_ENABLED aligned to constants=true (kill via constants, not this default). 9/21 FIX: comment had eaten ITREND_VWAP_MIN + ITREND_BREADTH_STRONG off this line → itrend crashed all 9/21
   ITREND_START_ET = 10.0, ITREND_END_ET = 12.0, ITREND_COOLDOWN_MIN = 30,
   BREAK_ENTRY_SCORE = 80, BREAK_CONFIRM_BARS = 1, BREAK_MAX_AGE_MIN = 10, BREAK_VOL_LOOKBACK = 10,
@@ -2135,6 +2137,10 @@ async function runScan() {
             state._openRange[_tk] = { high: _pxN, low: _pxN, locked: false, day: new Date().toDateString() };
           }
           const _or = state._openRange[_tk];
+          if (_or.locked) {   // 10/6: first breach of each side after the range locks (measure-only, for the both-sides study)
+            if (_pxN > _or.high && !_or.brokeHighAt) _or.brokeHighAt = Date.now();
+            if (_pxN < _or.low  && !_or.brokeLowAt)  _or.brokeLowAt  = Date.now();
+          }
           if (!_or.locked) {
             if (_pxN > _or.high) _or.high = _pxN;
             if (_pxN < _or.low)  _or.low  = _pxN;
@@ -2749,7 +2755,7 @@ async function runScan() {
         const _gc = state._gexChain && state._gexChain[liveStock.ticker];
         if (GEX && _gc && _gc.call && _gc.put && _gc.call.dte === _gc.put.dte &&
             (Date.now() - Math.min(_gc.call.ts || 0, _gc.put.ts || 0) < 300000)) {
-          const _g = GEX.computeGEX(_gc.call.rows, _gc.put.rows, price);
+          const _g = GEX.applyRegimeHysteresis(state, liveStock.ticker, GEX.computeGEX(_gc.call.rows, _gc.put.rows, price), GEX_REGIME_HYST_M);   // 10/6: hysteresis
           if (_g) { if (!state._gexRegime) state._gexRegime = {}; state._gexRegime[liveStock.ticker] = _g.regime; }   // 9/01: expose regime per-ticker for the intraday-trend direction gate
           if (_g) { if (!state._gexFresh) state._gexFresh = {}; state._gexFresh[liveStock.ticker] = _g; }   // 9/14: FRESH full gex obj (this-scan, no lag) for the vol-straddle gate — avoids the stale _gexNow (written 300+ lines later)
           // 8/26: LIVE GEX STAMP (per ticker — SPY and QQQ each). Prints raw netGEX + netGexM + regime
@@ -2868,7 +2874,8 @@ async function runScan() {
           const _iSlope = (state._vwapSlope || {})[liveStock.ticker] ?? 0;
           const _iAdx  = (typeof liveStock.adx === "number") ? liveStock.adx : 0;
           const _iBr   = (marketContext && marketContext.breadth && typeof marketContext.breadth.breadthPct === "number") ? marketContext.breadth.breadthPct : 50;
-          if (_ior && _ior.locked && _ior.low > 0 && _ior.high > 0 && _iVw !== null && _iAdx >= ITREND_ADX_MIN) {
+          const _iAdxMin = (_iH >= ITREND_LATE_START_ET) ? Math.max(ITREND_ADX_MIN, ITREND_LATE_ADX_MIN) : ITREND_ADX_MIN;   // 10/6: ADX 40+ after 11:00 ET
+          if (_ior && _ior.locked && _ior.low > 0 && _ior.high > 0 && _iVw !== null && _iAdx >= _iAdxMin) {
             // breadth is SOFT/fail-open: block only when actively against (neutral ~50 passes both sides)
             const _brAgainstPut  = _iBr > ITREND_BREADTH_STRONG;          // breadth actively bullish
             const _brAgainstCall = _iBr < (100 - ITREND_BREADTH_STRONG);  // breadth actively bearish
@@ -2920,17 +2927,23 @@ async function runScan() {
             if (_iSide && !_iHave && !_iCooling) {
               liveStock._iTrend = _iSide;
               liveStock._iCvdTag = _iCvdTag;   // stamped onto the outcome for the agree-vs-conflict measurement
+              try {   // 10/6: opening-range context at entry — APEX's range AND the textbook 9:30-9:44 range (measure-only)
+                const _ot = DAYCTX.orEntryTag(state, liveStock.ticker, _iSide, price);
+                liveStock._iOrTag = _ot;
+                const _f = v => (v == null ? "n/a" : v);
+                logEvent("filter", `[ITREND-OR] ${liveStock.ticker} ${_iSide.toUpperCase()} — APEX range w${_f(_ot.w)}% brk${_f(_ot.brk)}% opposite:${_ot.opp == null ? "n/a" : _ot.opp ? "BROKEN" : "intact"} | textbook range w${_f(_ot.tw)}% brk${_f(_ot.tbrk)}%${_ot.tbrk != null && _ot.tbrk <= 0 ? " (NOT a break)" : ""} opposite:${_ot.topp == null ? "n/a" : _ot.topp ? "BROKEN" : "intact"} [measure-only]`);
+              } catch (_otErr) { liveStock._iOrTag = null; }
               state._iTrendLast[_iCoolKey] = Date.now();
               const _iOK = await executeTrade(liveStock, price, 0, [_iReason], state.vix, _iSide, false, 1.0, null, null, `${liveStock.ticker}-${_iSide}-itrend-${Date.now()}`);
-              liveStock._iTrend = null;
+              liveStock._iTrend = null; liveStock._iCvdTag = null; liveStock._iOrTag = null;   // 10/6: don't let tags leak onto a later entry
               if (_iOK) { recordStandDown("itrend", "FIRED"); logEvent("filter", `[INTRADAY-TREND] ${liveStock.ticker} ${_iSide.toUpperCase()} FIRED — ${_iReason}`); continue; }
             } else if (!_iSuppressed) {
               recordStandDown("itrend", !_iSide ? "no aligned intraday trend (need vwap+slope+ORbreak agree)" : _iHave ? "position already open" : "cooldown (recent fire)");
             }
           } else {
-            recordStandDown("itrend", (!_ior || !_ior.locked) ? "OR not locked" : (_iAdx < ITREND_ADX_MIN ? `ADX ${_iAdx.toFixed(0)}<${ITREND_ADX_MIN} (chop)` : "no vwap"));
+            recordStandDown("itrend", (!_ior || !_ior.locked) ? "OR not locked" : (_iAdx < _iAdxMin ? `ADX ${_iAdx.toFixed(0)}<${_iAdxMin}${_iAdxMin > ITREND_ADX_MIN ? " (after 11:00 ET)" : " (chop)"}` : "no vwap"));
           }
-        } else { recordStandDown("itrend", "outside 10:00-13:30 window"); }
+        } else { recordStandDown("itrend", `outside ${ITREND_START_ET}-${ITREND_END_ET} ET window`); }
       } catch (_ie) { logEvent("warn", `[INTRADAY-TREND] ${liveStock.ticker} eval failed — ${_ie && _ie.message}`); }
     }
     // ═══ LITERATURE MR FADE (mrStrategy.js) ═══ a coherent mean-reversion entry, gated on
@@ -3149,7 +3162,7 @@ async function runScan() {
         const _gc = state._gexChain && state._gexChain[stock.ticker];
         if (GEX && _gc && _gc.call && _gc.put && _gc.call.dte === _gc.put.dte &&
             (Date.now() - Math.min(_gc.call.ts || 0, _gc.put.ts || 0) < 300000))
-          return GEX.computeGEX(_gc.call.rows, _gc.put.rows, price);   // 9/30: full-book chain under GEX v2 (near-expiry only if v2 fell back to v1)
+          return GEX.applyRegimeHysteresis(state, stock.ticker, GEX.computeGEX(_gc.call.rows, _gc.put.rows, price), GEX_REGIME_HYST_M);   // 9/30 v2 full book; 10/6 hysteresis
       } catch (_gxe) {} return null; })();
       if (_gexRec) { if (!state._gexNow) state._gexNow = {}; state._gexNow[stock.ticker] = _gexRec; }   // 8/24: expose regime to the MR fade
       recordTelemetry(state, {
@@ -3169,7 +3182,10 @@ async function runScan() {
           distCW: _gexRec ? _gexRec.distCallWallPct : null, distPW: _gexRec ? _gexRec.distPutWallPct : null,
           cumVolDelta: (state._cumVolDelta && state._cumVolDelta[stock.ticker] != null) ? state._cumVolDelta[stock.ticker] : null,
           cvdSlope: (state._cvdSlope && state._cvdSlope[stock.ticker] != null) ? state._cvdSlope[stock.ticker] : null,
-          gexNear: _gexRec ? _gexRec.regimeNear : null, netGexNearM: _gexRec ? _gexRec.netGexNearM : null,   // 9/30: GEX v2 comparison fields
+          gexNear: _gexRec ? _gexRec.regimeNear : null, netGexNearM: _gexRec ? _gexRec.netGexNearM : null,
+          gexRaw: _gexRec ? (_gexRec.regimeRaw ?? null) : null,   // 10/6: label BEFORE hysteresis
+          orHi: (state._openRange && state._openRange[stock.ticker] && state._openRange[stock.ticker].locked) ? state._openRange[stock.ticker].high : null,   // 10/6: APEX range
+          orLo: (state._openRange && state._openRange[stock.ticker] && state._openRange[stock.ticker].locked) ? state._openRange[stock.ticker].low : null,   // 9/30: GEX v2 comparison fields
           flipLvl: _gexRec ? _gexRec.flipLevel : null, distFlip: _gexRec ? _gexRec.distFlipPct : null,
           ...(() => { try { return DAYCTX.telemetryFields(state, stock.ticker, price); } catch (_) { return {}; } })(),   // 10/6: day context
           ...(() => { try { return { ...require('./market').getVixFields(), ...INTERNALS.fields(state) }; } catch (_) { return {}; } })(),   // 10/6: VIX anchor/term + internals
