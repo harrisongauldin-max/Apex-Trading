@@ -7,6 +7,8 @@ const {
   alpacaGet, alpacaPost, alpacaDelete,
   getStockBars, getIntradayBars, getStockQuote, getCircuitState,
 } = require('./broker');
+const DAYCTX = require('./dayContext');   // 10/6: day-type / calendar / prior-day context (measurement only)
+const INTERNALS = require('./marketInternals');   // 10/6: 50-stock internals proxy (measurement only)
 
 const { state, logEvent, markDirty, saveStateNow, flushStateIfDirty, paperDataActive, dataGatherActive, mrFadeActive, recordStandDown , markFresh, auditFreshness } = require('./state');
 const STRADDLESTRAT = require('./straddleStrategy');
@@ -354,6 +356,8 @@ async function runScan() {
   const newVIX  = await getVIX() || state.vix;
   const isBlackSwan = checkVIXVelocity(newVIX);
   state.vix     = newVIX;
+  // 10/6: market-internals proxy — one basket snapshot per minute, fire-and-forget (never delays or breaks a scan)
+  try { INTERNALS.refresh(state, alpacaGet, ALPACA_DATA, require('./broker').ALPACA_CONN_DROP).catch(() => {}); } catch (_iErr) {}
 
   // ── IV Rank (real-VIX subsystem, Path 1.5) ───────────────────────────────────
   // Ranks the latest REAL CBOE VIX close against a REAL one-year VIX window (_vixDaily,
@@ -1697,6 +1701,7 @@ async function runScan() {
           // #3 carve-out inputs: capture present-tense tape state; assigned onto liveStock below
           // (liveStock is constructed later in this loop, ~1462, so stash in loop-scoped vars now).
           _carveGapState = _gapState;
+          try { DAYCTX.setSessionRef(state, stock.ticker, { open: _gapOpen, prevC: _gapPrevC, gapPct: _gapPct, prevBar: _lastBarIsToday ? bars[bars.length - 2] : bars[bars.length - 1] }); } catch (_dcErr) { /* measurement only */ }
           // _carveVwapRatio is set above, outside this bars-dependent block (7/31) — do not
           // reassign it here; that is what tied the live VWAP read to the daily bar fetch.
           logEvent("scan",
@@ -2097,6 +2102,7 @@ async function runScan() {
                 if (_vv > 0 && _last > 0) { const _vw = _pv / _vv; _da.nV++; if (_last > _vw) _da.vUp++; else if (_last < _vw) _da.vDn++; }
               }
             } catch (_daErr) { /* measurement only — never break the scan */ }
+            try { DAYCTX.updateDay(state, _tk, _todayBars); DAYCTX.ensurePriorProfile(state, _tk); } catch (_dcErr) { /* measurement only */ }
             const _ch = state._cvdHist[_tk] || [];
             if (!_ch.length || _ch[_ch.length-1].day !== _tday) _ch.length = 0;   // reset daily
             _ch.push({ day:_tday, t:Date.now(), cvd:_cvd });
@@ -3165,6 +3171,8 @@ async function runScan() {
           cvdSlope: (state._cvdSlope && state._cvdSlope[stock.ticker] != null) ? state._cvdSlope[stock.ticker] : null,
           gexNear: _gexRec ? _gexRec.regimeNear : null, netGexNearM: _gexRec ? _gexRec.netGexNearM : null,   // 9/30: GEX v2 comparison fields
           flipLvl: _gexRec ? _gexRec.flipLevel : null, distFlip: _gexRec ? _gexRec.distFlipPct : null,
+          ...(() => { try { return DAYCTX.telemetryFields(state, stock.ticker, price); } catch (_) { return {}; } })(),   // 10/6: day context
+          ...(() => { try { return { ...require('./market').getVixFields(), ...INTERNALS.fields(state) }; } catch (_) { return {}; } })(),   // 10/6: VIX anchor/term + internals
         });
       } catch (_telErr) { /* telemetry must never break the scan */ }
     }
