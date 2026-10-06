@@ -288,6 +288,7 @@ async function runScan() {
   _lastScanStart = Date.now();
   const thisScanGen = ++_scanGen;
   try {
+  state._observeOnly = false;   // 10/5: reset every scan; set below only for the 3:15-4:00 ET observe window
   if (!ALPACA_KEY) { logEvent("warn", "No ALPACA_KEY set - check Railway variables"); scanRunning = false; return; }
   if (!isMarketHours() && !dryRunMode) { logEvent("scan", "Outside market hours - skipping trade logic"); scanRunning = false; return; }
   // Heartbeat — a real scan is now proceeding. Set lastScan BEFORE any entry-halt early-return
@@ -1193,9 +1194,19 @@ async function runScan() {
       }
     }
   }
-  if (!callsAllowed && !putsAllowed) return;
+  // 10/5 (Harrison): telemetry must run to the CLOSE. After the entry window shuts (3:15 ET) the scan used to
+  // stop here, so nothing after 3:15 was ever recorded (no telemetry/CVD/GEX for 3:15-4:00 — e.g. the
+  // "momentum into the close" literature couldn't be tested). Now: keep scanning in OBSERVE-ONLY mode until
+  // 4:00 ET. No entries — executeTrade refuses while state._observeOnly is set — and stand-down tallies pause.
+  const _observeOnly = !callsAllowed && !putsAllowed && !dryRunMode && etHourNow >= 15.25 && etHourNow < 16;
+  state._observeOnly = _observeOnly;
+  if (_observeOnly && state._observeLoggedDay !== new Date().toDateString()) {
+    state._observeLoggedDay = new Date().toDateString();
+    logEvent("scan", "[OBSERVE] Entry window closed — observe-only until 4:00 ET (telemetry continues, no new entries)");
+  }
+  if (!callsAllowed && !putsAllowed && !_observeOnly) return;
 
-  for (const pos of [...(state.positions || [])]) {
+  for (const pos of (state._observeOnly ? [] : [...(state.positions || [])])) {   // 10/5: skipped in observe-only
     if (pos._morningExitFlag) {
       logEvent("warn", `[MORNING REVIEW] Closing ${pos.ticker} flagged overnight - ${pos._morningExitReason}`);
       await closePosition(pos.ticker, "morning-review");
@@ -3215,8 +3226,8 @@ async function runScan() {
     const isMREntry = (callSetup.isMeanReversion || putSetup.isMeanReversion);
     const mrWindowOpen = etHourNow < 15.5;
     if (entryWindowClosed && !dryRunMode) {
-      if (!isMREntry) { logEvent("filter", `${stock.ticker} entry window closed`); continue; }
-      else if (!mrWindowOpen) { logEvent("filter", `${stock.ticker} MR entry window closed`); continue; }
+      if (!isMREntry) { if (!state._observeOnly) logEvent("filter", `${stock.ticker} entry window closed`); continue; }
+      else if (!mrWindowOpen) { if (!state._observeOnly) logEvent("filter", `${stock.ticker} MR entry window closed`); continue; }
     }
 
     if (optionType === "put" && rb.isBullRegime && !isMREntry && !dryRunMode) {
@@ -3887,6 +3898,7 @@ async function runScan() {
     }
   } finally {
     if (!state._scanFailures) state._scanFailures = 0;
+    state._observeOnly = false;   // 10/5: never let observe-only leak past the scan that set it
     scanRunning = false;
   }
 }
