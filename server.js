@@ -1431,6 +1431,41 @@ app.get("/api/logs/download", requireSecret, (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
+// 10/6 (Harrison): TREND-SWING ENTRY STUDY — historical test of the entry logic on daily SPY/QQQ bars
+// (trendBacktest.js). Read-only: fetches history, runs the study, returns a text report (or ?format=json).
+// Optional ?start=YYYY-MM-DD (default 2015-01-01). Uses completed bars only (through yesterday).
+app.get("/api/trend-backtest", requireSecret, async (req, res) => {
+  try {
+    const { alpacaGet, ALPACA_CONN_DROP } = require("./broker");
+    const { ALPACA_DATA } = require("./constants");
+    const TB = require("./trendBacktest");
+    const start = /^\d{4}-\d{2}-\d{2}$/.test(String(req.query.start || "")) ? req.query.start : "2015-01-01";
+    const end = new Date(Date.now() - 86400000).toISOString().slice(0, 10);
+    const fetchDaily = async (tk) => {
+      for (const feed of ["sip", "iex"]) {
+        const out = []; let token = null, pages = 0;
+        do {
+          const url = `/stocks/${tk}/bars?timeframe=1Day&start=${start}&end=${end}&adjustment=all&feed=${feed}&limit=10000` + (token ? `&page_token=${encodeURIComponent(token)}` : "");
+          const d = await alpacaGet(url, ALPACA_DATA);
+          if (!d || d === ALPACA_CONN_DROP || !Array.isArray(d.bars)) break;
+          out.push(...d.bars); token = d.next_page_token || null; pages++;
+        } while (token && pages < 10);
+        if (out.length > 250) return out;
+      }
+      return [];
+    };
+    const data = {};
+    for (const tk of ["SPY", "QQQ"]) {
+      data[tk] = await fetchDaily(tk);
+      if (data[tk].length < 250) return res.status(502).type("text/plain").send(`Not enough daily history for ${tk} (${data[tk].length} bars) — Alpaca fetch failed or start date too recent.`);
+    }
+    const study = TB.runStudy(data);
+    logEvent("scan", `[TREND-BACKTEST] ran on SPY ${data.SPY.length} / QQQ ${data.QQQ.length} daily bars since ${start}`);
+    if (req.query.format === "json") return res.json({ start, end, ...study });
+    res.type("text/plain").send(study.report);
+  } catch (e) { res.status(500).type("text/plain").send("trend-backtest error: " + e.message); }
+});
+
 app.get("/api/trend-probe", requireSecret, async (req, res) => {
   try {
     const { state } = require('./state');
