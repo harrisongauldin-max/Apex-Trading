@@ -133,7 +133,51 @@ function updateDay(state, tk, todayBars) {
     c.ibExt = up && dn ? "both" : up ? "up" : dn ? "down" : "none";
     c.rngVsIB = (c.ibHi > c.ibLo) ? +((c.hi - c.lo) / (c.ibHi - c.ibLo)).toFixed(2) : null;
   } else { c.ibExt = "forming"; c.rngVsIB = null; }
+
+  // 10/6 (Harrison): TEXTBOOK OPENING RANGE — true high/low of the 9:30-9:44 one-minute bars (Crabel/Dalton),
+  // alongside APEX's own range (sampled scan prices from ~9:35). First breach of each side is taken from bar
+  // highs/lows after 9:45, so a spike between scans still counts. Measurement only.
+  const orBars = bars.filter(b => etm(b) < O15_END);
+  if (orBars.length) {
+    const hi = _r2(Math.max(...orBars.map(b => +b.h))), lo = _r2(Math.min(...orBars.map(b => +b.l)));
+    const done = lastMin >= O15_END;
+    let upMin = null, dnMin = null;
+    if (done) {
+      for (const b of bars) {
+        const m = etm(b);
+        if (m < O15_END) continue;
+        if (upMin == null && +b.h > hi) upMin = m;
+        if (dnMin == null && +b.l < lo) dnMin = m;
+        if (upMin != null && dnMin != null) break;
+      }
+    }
+    c.orT = { hi, lo, done, upMin, dnMin, firstBarMin: c.firstBarMin };
+  }
   return c;
+}
+
+// 10/6: describe an intraday-trend entry against BOTH opening ranges. apexOR = state._openRange[tk]
+// ({high, low, locked, brokeHighAt, brokeLowAt}); side 'call' breaks the HIGH, 'put' breaks the LOW.
+function orEntryTag(state, tk, side, price, nowMs = Date.now()) {
+  const call = side === "call";
+  const pct = (a, b) => +(((a - b) / b) * 100).toFixed(3);
+  const out = {};
+  const a = state._openRange && state._openRange[tk];
+  if (a && a.high > 0 && a.low > 0) {
+    out.w = pct(a.high, a.low);                                             // APEX range width %
+    out.brk = call ? pct(price, a.high) : pct(a.low, price);                // distance past the broken side %
+    out.opp = !!(call ? a.brokeLowAt : a.brokeHighAt);                      // opposite side already broken?
+  }
+  const c = (state._dayCtx && state._dayCtx[tk]) || {};
+  const t = c.day === etDateStr(nowMs) ? c.orT : null;
+  if (t && t.done && t.hi > 0 && t.lo > 0) {
+    const nowMin = (() => { const p = _fmtHM.formatToParts(new Date(nowMs)); return ((+p.find(x => x.type === "hour").value) % 24) * 60 + (+p.find(x => x.type === "minute").value); })();
+    out.tw = pct(t.hi, t.lo);
+    out.tbrk = call ? pct(price, t.hi) : pct(t.lo, price);                  // negative = NOT a break of the true range
+    const oppMin = call ? t.dnMin : t.upMin;
+    out.topp = oppMin != null && oppMin < nowMin;
+  }
+  return out;
 }
 
 // ── 4. Prior-day volume profile (fetched once per ticker per day; fire-and-forget) ───────────────────────
@@ -190,7 +234,9 @@ function telemetryFields(state, tk, price) {
   const pd = cur.pd || {}, prof = (state._pdProfile && state._pdProfile[tk]) || {};
   const poc = (prof.date && prof.date === pd.date && prof.poc != null) ? prof.poc : null;
   const pos = (price > 0 && pd.h && pd.l) ? (price > pd.h ? "above-PDH" : price < pd.l ? "below-PDL" : "inside") : null;
+  const t = cur.orT || {};
   return {
+    orTHi: t.hi ?? null, orTLo: t.lo ?? null,
     sessOpen: cur.sessOpen ?? null, prevClose: cur.prevClose ?? null, gapTrue: cur.gapPct ?? null,
     openType: cur.openType ?? null, o15Ret: cur.o15Ret ?? null,
     ibHi: cur.ibHi ?? null, ibLo: cur.ibLo ?? null, ibRngPct: cur.ibRngPct ?? null,
@@ -208,4 +254,4 @@ function entryContext(state, tk, price) {
 }
 
 module.exports = { eventTags, monthlyOpex, etDateStr, setSessionRef, updateDay, computeProfile, ensurePriorProfile,
-                   telemetryFields, entryContext, CAL };
+                   telemetryFields, entryContext, orEntryTag, CAL };
