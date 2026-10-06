@@ -131,4 +131,21 @@ function computeGEX(callRows, putRows, spot) {
   };
 }
 
-module.exports = { computeGEX };
+// 10/6 (Harrison): regime HYSTERESIS. Keeps the previous label unless the new reading is decisive
+// (|netGexM| >= thresholdM). Resets each ET day. Records the unadjusted label as g.regimeRaw. Mutates and returns g.
+function applyRegimeHysteresis(state, ticker, g, thresholdM) {
+  if (!g || !state) return g;
+  g.regimeRaw = g.regime;
+  if (!(thresholdM > 0)) return g;
+  if (!state._gexRegHyst) state._gexRegHyst = {};
+  const day = new Date().toLocaleDateString("en-CA", { timeZone: "America/New_York" });
+  const prev = state._gexRegHyst[ticker];
+  if (prev && prev.day === day && g.regime !== prev.regime && Math.abs(g.netGexM) < thresholdM) {
+    g.regime = prev.regime;            // weak opposite reading — hold the label
+    g.regimeHeld = true;
+  }
+  state._gexRegHyst[ticker] = { regime: g.regime, day };
+  return g;
+}
+
+module.exports = { computeGEX, applyRegimeHysteresis };
