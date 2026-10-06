@@ -80,6 +80,7 @@ const OUTCOME_HEADER = [
   "eOpenType","eIbExt","eGapTrue","ePosVsPd","eEvt","eRngVsIB",   // 10/6: day context at entry (dayContext.js)
   "exitBid","exitAsk","exitQuoteAgeS",                             // 10/6: last monitored quote at exit -> real exit spread
   "eVixSrc","eTerm9d","eTerm3m","eIntAdv","eIntVwap","eIntCumTick", // 10/6: VIX source/term structure + internals at entry
+  "eOrW","eOrBrk","eOrOpp","eOrTW","eOrTBrk","eOrTOpp",             // 10/6: opening range at entry — APEX range, then textbook range
 ].join(",");
 
 function _csv(s) {
@@ -200,6 +201,8 @@ function buildOutcomeRow(pos, o) {
     (pos.bid > 0 ? pos.bid : ""), (pos.ask > 0 ? pos.ask : ""),
     (pos._bidAt ? Math.round((closeMs - pos._bidAt) / 1000) : ""),   // 10/6: seconds between last quote and the exit
     ...(() => { const m = pos._mkt || {}; return [m.vixSrc ?? "", m.term9d ?? "", m.term3m ?? "", m.intAdvPct ?? "", m.intVwapPct ?? "", m.intCumTick ?? ""]; })(),   // 10/6
+    ...(() => { const o = pos._iOrTag || {}; const b = v => v == null ? "" : (v ? 1 : 0);
+                return [o.w ?? "", o.brk ?? "", b(o.opp), o.tw ?? "", o.tbrk ?? "", b(o.topp)]; })(),   // 10/6: opening-range tag
   ].map(_csv).join(",");
 
   return row;
