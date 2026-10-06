@@ -175,6 +175,7 @@ input[type=text]:focus{border-color:var(--blue)}
   <div class="tab" onclick="switchTab('analytics')">ANALYTICS</div>
   <div class="tab" onclick="switchTab('theta')">RISK &amp; HEALTH</div>
   <div class="tab" onclick="switchTab('attribution')">ATTRIBUTION</div>
+  <div class="tab" onclick="switchTab('trendbt')">TREND BACKTEST</div>
   <div class="tab" onclick="switchTab('journal')">JOURNAL</div>
   <div class="tab" onclick="switchTab('report')">REPORT</div>
   <div class="tab" onclick="switchTab('log')">SERVER LOG</div>
@@ -504,7 +505,6 @@ input[type=text]:focus{border-color:var(--blue)}
     <button class="btn" style="background:#0a2a1a;border:1px solid #00c4ff;color:#44ccff" onclick="fetch('/api/sync-cash',{method:'POST',headers:{'Content-Type':'application/json','x-argo-secret':sessionStorage.getItem('apexSecret')||''}}).then(r=>r.json()).then(d=>{ alert(d.ok ? '💵 Cash synced: $'+d.cash.toFixed(2)+' (Alpaca $'+((d.alpacaCash!=null?d.alpacaCash:0)).toFixed(2)+', applied '+(d.applied>=0?'+':'')+d.applied.toFixed(2)+')' : d.error||'Failed'); fetchState(); })" title="Force an immediate cash resync from Alpaca /account — bypasses the market-hours 5-min interval, works after hours">💵 SYNC CASH</button>
     <button class="btn" style="background:#1a0a2a;border:1px solid #a855f7;color:#c084fc" onclick="pullTradeHistory()" title="Pull EVERY fill from Alpaca and reconstruct round-trip trades with real realized P&L — ground truth, independent of the journal">📊 TRADE HISTORY</button>
     <button class="btn" style="background:#0a2a1a;border:1px solid #22c55e;color:#4ade80" onclick="trendProbe()" title="Live snapshot of the trend-swing evaluator — is it enabled, did it compute the daily MAs today, and what is each ticker's trend structure right now">🎯 TREND PROBE</button>
-    <button class="btn" style="background:#0a1a2a;border:1px solid #38bdf8;color:#7dd3fc" onclick="trendBacktest()" title="Historical test of the trend-swing ENTRY logic on ~10 years of daily SPY/QQQ bars: the live rule vs 5 alternative entries, under the same exits. Downloads a text report (takes ~10-30 s).">🧪 TREND BACKTEST</button>
     <button class="btn" style="background:#1a1a0a;border:1px solid #eab308;color:#fde047" onclick="downloadServerLog()" title="Download the full in-memory session log as a text file — the same log the EOD email attaches, available anytime">📄 SERVER LOG</button>
     <button class="btn" id="mrfade-btn" style="background:#0a2a1a;border:1px solid #666;color:#888" onclick="toggleMrFade()" title="LITERATURE MEAN-REVERSION FADE — live kill switch. ON = APEX takes literature MR fade entries (positive-gamma, at a level, on confluence). OFF = stops instantly, no redeploy. Runtime override of MR_FADE_ENABLED.">🔀 MR-FADE: …</button>
     <button class="btn" style="background:#1a1a40;border:1px solid #ff9900;color:#ffbb44" onclick="clearBlockers()">🔓 CLEAR BLOCKERS</button>
@@ -686,6 +686,32 @@ input[type=text]:focus{border-color:var(--blue)}
       </div>
       <div class="sub">warns if avg &gt; 15s</div>
     </div>
+  </div>
+</div>
+
+<!-- ═══════════════ TREND BACKTEST TAB (10/6) ═══════════════ -->
+<div id="tab-trendbt" class="content">
+  <div class="card" style="margin-bottom:12px;padding:12px 16px">
+    <div style="font-size:11px;font-weight:700;letter-spacing:1px;color:var(--blue);margin-bottom:6px">TREND-SWING ENTRY STUDY</div>
+    <div style="font-size:12px;color:var(--text);line-height:1.6">
+      Tests the trend-swing <b>entry</b> logic on years of daily SPY and QQQ bars: the live rule versus five alternative entries,
+      each under the <b>same exits</b>, so differences come from the entry alone. Two exit sets are shown: APEX's current rules and a
+      Clenow-style 3-ATR trail. Figures are % of the underlying per trade, after a round-trip cost and a daily time-decay charge.
+    </div>
+    <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:10px">
+      <span style="font-size:11px;color:var(--muted)">START</span>
+      <input type="date" id="tbt-start" value="2015-01-01" style="background:var(--panel);border:1px solid var(--border);color:var(--text);padding:4px 6px;border-radius:4px;font-family:inherit">
+      <button class="btn btn-green" id="tbt-run" onclick="runTrendBacktestTab()">▶ RUN STUDY</button>
+      <button class="btn" id="tbt-dl" onclick="downloadTrendBacktestReport()" disabled style="opacity:.5">⬇ DOWNLOAD REPORT</button>
+      <span id="tbt-status" style="font-size:11px;color:var(--muted)">Not run yet — takes about 10-30 seconds.</span>
+    </div>
+  </div>
+  <div id="tbt-results"></div>
+  <div class="card" style="padding:10px 16px;font-size:11px;color:var(--muted);line-height:1.6">
+    <b style="color:var(--text)">How to read it.</b> The live rule is highlighted. A <span style="color:var(--green)">✓</span> marks a variant that beats it
+    in <b>both halves</b> of the period <b>and</b> on <b>both tickers</b> — anything less can be chance.
+    <b style="color:var(--text)">Limits:</b> underlying-level (option P&amp;L approximated, not repriced); breadth not modeled; SPY and QQQ run independently
+    (the live correlation rule isn't modeled). Read-only — running it never places a trade.
   </div>
 </div>
 
@@ -2620,18 +2646,70 @@ async function trendProbe(){
   } catch(e) { alert('Trend probe error: ' + e.message); }
 }
 
-// 10/6: run the trend-swing entry study on the server and download its report
-async function trendBacktest(){
+// 10/6: TREND BACKTEST tab — runs /api/trend-backtest?format=json and renders the study in-page.
+let _tbtLast = null;
+const _tbtF = (x, d = 3) => (x == null || isNaN(x) ? '–' : (x >= 0 ? '+' : '') + Number(x).toFixed(d));
+const _tbtCol = (x) => (x == null ? 'var(--muted)' : x > 0 ? 'var(--green)' : x < 0 ? 'var(--red)' : 'var(--text)');
+function _tbtBeats(r, cur) {        // better than the live rule in BOTH halves and on BOTH tickers
+  if (!r || !cur || r.variant === 'current') return false;
+  const g = (a, b) => a != null && b != null && a > b;
+  return g(r.H1.avg, cur.H1.avg) && g(r.H2.avg, cur.H2.avg) &&
+         g((r.byTicker.SPY || {}).avg, (cur.byTicker.SPY || {}).avg) && g((r.byTicker.QQQ || {}).avg, (cur.byTicker.QQQ || {}).avg);
+}
+function renderTrendBacktest(d) {
+  const wrap = document.getElementById('tbt-results'); if (!wrap || !d || !Array.isArray(d.results)) return;
+  const th = (t, tip) => `<th style="padding:6px 8px;text-align:right;font-size:9px;color:var(--muted);font-weight:600;white-space:nowrap"${tip ? ` title="${tip}"` : ''}>${t}</th>`;
+  const td = (v, col, bold) => `<td style="padding:5px 8px;text-align:right;color:${col || 'var(--text)'};${bold ? 'font-weight:700;' : ''}white-space:nowrap">${v}</td>`;
+  let html = '';
+  for (const ex of ['apex', 'chandelier']) {
+    const rows = d.results.filter(r => r.exitSet === ex), cur = rows.find(r => r.variant === 'current');
+    html += `<div class="card" style="margin-bottom:12px;padding:12px 16px"><div style="font-size:11px;font-weight:700;letter-spacing:1px;color:var(--blue);margin-bottom:8px">` +
+      (ex === 'apex' ? 'EXITS: APEX LIVE RULES <span style="color:var(--muted);font-weight:400">— stop 3.5 ATR (capped), tight trail, 14-day stale exit</span>'
+                     : 'EXITS: CLENOW-STYLE 3-ATR TRAIL <span style="color:var(--muted);font-weight:400">— from the highest close; rolls charged</span>') + '</div>';
+    html += '<div style="overflow-x:auto"><table style="width:100%;border-collapse:collapse;font-size:11px"><thead><tr>' +
+      '<th style="padding:6px 8px;text-align:left;font-size:9px;color:var(--muted);font-weight:600">VARIANT</th>' +
+      th('TRADES') + th('WIN %') + th('AVG / TRADE', 'Average % of the underlying per trade, after costs') + th('TOTAL') + th('PF', 'Profit factor: gross wins / gross losses') +
+      th('AVG WIN') + th('AVG LOSS') + th('MAX DD', 'Worst peak-to-trough of the summed trade returns') + th('DAYS', 'Average days held') +
+      th('1ST HALF', 'Average per trade, trades entered in the first half of the period (n)') + th('2ND HALF', 'Second half (n)') + th('SPY') + th('QQQ') + th('RAW', 'Average before costs') +
+      '</tr></thead><tbody>';
+    for (const r of rows) {
+      const a = r.all || {}, isCur = r.variant === 'current', beats = _tbtBeats(r, cur);
+      html += `<tr style="border-top:1px solid var(--border);${isCur ? 'background:rgba(0,196,255,.07)' : ''}">` +
+        `<td style="padding:5px 8px;white-space:nowrap" title="${(d.variants || {})[r.variant] || ''}"><b>${r.variant}</b>${isCur ? ' <span style="font-size:9px;color:var(--blue)">LIVE</span>' : ''}${beats ? ' <span style="color:var(--green);font-weight:700" title="Beats the live rule in both halves and on both tickers">✓</span>' : ''}</td>` +
+        td(a.n ?? 0) + td(a.wr ?? '–') + td(_tbtF(a.avg), _tbtCol(a.avg), true) + td(_tbtF(a.total, 1), _tbtCol(a.total)) + td(a.pf ?? '–', a.pf == null ? null : a.pf >= 1 ? 'var(--green)' : 'var(--red)') +
+        td(_tbtF(a.avgWin, 2), 'var(--green)') + td(_tbtF(a.avgLoss, 2), 'var(--red)') + td(_tbtF(a.maxDD, 1), 'var(--red)') + td(a.avgDays ?? '–') +
+        td(`${_tbtF(r.H1.avg)} <span style="color:var(--muted)">(${r.H1.n || 0})</span>`, _tbtCol(r.H1.avg)) +
+        td(`${_tbtF(r.H2.avg)} <span style="color:var(--muted)">(${r.H2.n || 0})</span>`, _tbtCol(r.H2.avg)) +
+        td(_tbtF((r.byTicker.SPY || {}).avg), _tbtCol((r.byTicker.SPY || {}).avg)) + td(_tbtF((r.byTicker.QQQ || {}).avg), _tbtCol((r.byTicker.QQQ || {}).avg)) +
+        td(_tbtF((r.allRaw || {}).avg), _tbtCol((r.allRaw || {}).avg)) + '</tr>';
+    }
+    html += '</tbody></table></div><div style="margin-top:8px;font-size:10px;color:var(--muted);line-height:1.6">' +
+      rows.map(r => `<b>${r.variant}</b> exits: ${Object.entries(r.exitMix || {}).map(([k, v]) => k + ' ' + v).join(' · ') || '–'}`).join('<br>') + '</div></div>';
+  }
+  html += `<div style="font-size:10px;color:var(--muted);margin:-4px 0 12px 2px">Data ${d.start || '?'} → ${d.end || '?'} · halves split at ${((d.results[0] || {}).mid) || '?'}</div>`;
+  wrap.innerHTML = html;
+}
+async function runTrendBacktestTab() {
+  const btn = document.getElementById('tbt-run'), st = document.getElementById('tbt-status'), dl = document.getElementById('tbt-dl');
+  const start = (document.getElementById('tbt-start') || {}).value || '2015-01-01';
   const s = sessionStorage.getItem('apexSecret') || prompt('Enter APEX secret:') || '';
+  btn.disabled = true; btn.textContent = '⏳ RUNNING…'; st.textContent = 'Fetching daily history and running the study…'; st.style.color = 'var(--muted)';
   try {
-    const r = await fetch('/api/trend-backtest', { headers: { 'x-argo-secret': s } });
-    const txt = await r.text();
-    if (!r.ok) { alert('Trend backtest failed: HTTP ' + r.status + (r.status===401 ? ' (bad/missing secret)' : '') + '\n' + txt.slice(0,200)); return; }
+    const r = await fetch('/api/trend-backtest?format=json&start=' + encodeURIComponent(start), { headers: { 'x-argo-secret': s } });
+    if (!r.ok) { const t = await r.text(); st.textContent = 'Failed: HTTP ' + r.status + (r.status === 401 ? ' (bad/missing secret)' : r.status === 404 ? ' (server.js / trendBacktest.js not deployed?)' : '') + ' ' + t.slice(0, 120); st.style.color = 'var(--red)'; return; }
     if (s) sessionStorage.setItem('apexSecret', s);
-    const url = URL.createObjectURL(new Blob([txt], { type: 'text/plain' }));
-    const a = document.createElement('a'); a.href = url; a.download = 'apex-trend-backtest-' + new Date().toISOString().slice(0,10) + '.txt';
-    document.body.appendChild(a); a.click(); a.remove(); URL.revokeObjectURL(url);
-  } catch(e) { alert('Trend backtest error: ' + e.message); }
+    _tbtLast = await r.json();
+    renderTrendBacktest(_tbtLast);
+    st.textContent = `Done — ${new Date().toLocaleTimeString()}`; st.style.color = 'var(--green)';
+    dl.disabled = false; dl.style.opacity = '1';
+  } catch (e) { st.textContent = 'Error: ' + e.message; st.style.color = 'var(--red)'; }
+  finally { btn.disabled = false; btn.textContent = '▶ RUN STUDY'; }
+}
+function downloadTrendBacktestReport() {
+  if (!_tbtLast || !_tbtLast.report) return;
+  const url = URL.createObjectURL(new Blob([_tbtLast.report], { type: 'text/plain' }));
+  const a = document.createElement('a'); a.href = url; a.download = 'apex-trend-backtest-' + new Date().toISOString().slice(0, 10) + '.txt';
+  document.body.appendChild(a); a.click(); a.remove(); URL.revokeObjectURL(url);
 }
 
 // 8/28: download the full session log on demand
