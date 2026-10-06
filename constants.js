@@ -840,8 +840,8 @@ const BACKUP_FILE              = 'state_backup.json';
 // ── Real CBOE ^VIX daily closes (source: cdn.cboe.com VIX_History.csv) ──────────
 // Trailing 252 trading days 2025-06-30 → 2026-06-19. Used to SEED state._vixDaily so the
 // IV-Rank subsystem ranks the current REAL VIX close against a REAL one-year VIX
-// distribution. This is intentionally separate from getVIX() (which returns the
-// VIXY share price used by the risk gates) — IVR must rank real-vs-real to be
+// distribution. This is intentionally separate from getVIX() (10/6: now a VIX-scale estimate anchored to
+// Cboe's prior close; previously the raw VIXY share price) — IVR must rank real-vs-real to be
 // units-correct. state._vixDaily self-replaces this seed via the daily CBOE refresh.
 const VIX_DAILY_SEED = [
   16.73, 16.83, 16.64, 16.38, 17.48, 17.79, 16.81, 15.94, 15.78, 16.40, 17.20, 17.38,
@@ -867,9 +867,19 @@ const VIX_DAILY_SEED = [
   15.40, 21.51, 18.92, 19.87, 22.22, 19.44, 17.68, 16.20, 16.41, 18.44, 16.40, 16.78
 ];
 const VIX_HISTORY_URL = "https://cdn.cboe.com/api/global/us_indices/daily_prices/VIX_History.csv";
+// 10/6 (Harrison): getVIX() now returns a VIX-scale ESTIMATE: Cboe's official prior-day VIX close x (VIXY now /
+// VIXY prior close) — see vixContext.js. Before this it returned the raw VIXY share price, and every VIX risk gate
+// compared VIX-scale thresholds against an ETF price. false = legacy VIXY price.
+const VIX_ANCHOR_ENABLED   = true;
+// 10/6: the old black-swan "artifact" rule reset the velocity baseline silently whenever the PREVIOUS reading was
+// below 18 — meant to skip the cache's default 15, but real VIX sits at 15-18 most of the year, so a crash FROM A
+// CALM MARKET (16 -> 30) could never trigger the close-all. Replaced by a check on whether the previous reading was a
+// real fetch. true = restore the old <18 rule.
+const VIX_LOWBASE_SUPPRESS = false;
 
 module.exports = {
   ALPACA_KEY, ALPACA_SECRET, ALPACA_BASE, ALPACA_DATA, ALPACA_OPTIONS,
+  VIX_ANCHOR_ENABLED, VIX_LOWBASE_SUPPRESS,
   ALPACA_OPT_SNAP, ALPACA_NEWS, OPTION_FEED, GMAIL_USER, RESEND_API_KEY,
   ANTHROPIC_API_KEY, ANTHROPIC_MODEL, REDIS_URL, REDIS_TOKEN, REDIS_KEY,
   REDIS_SAVE_INTERVAL, MARKETAUX_KEY, MONTHLY_BUDGET, DEFAULT_VIX, CAPITAL_FLOOR,
