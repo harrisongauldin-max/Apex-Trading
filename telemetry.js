@@ -20,7 +20,7 @@ const SCORE_DELTA  = 3;               // |score| move that counts as material
 const MAX_ROWS     = 6000;            // safety cap on a runaway day
 const BLOCKER_MAX  = 60;              // truncate the headline blocker text
 
-const TELEMETRY_HEADER = "time,tkr,px,iRSI,dRSI,call,put,isMR,curl,vwap%,blocker,drivers,shadow,adx,gate,pgate,isC,isP,volPace,breadth,gexRegime,netGexM,callWall,putWall,distCW,distPW,cumVolDelta,cvdSlope,gexNear,netGexNearM,flipLvl,distFlip,sessOpen,prevClose,gapTrue,openType,o15Ret,ibHi,ibLo,ibRngPct,ibExt,rngVsIB,pdH,pdL,pdVW,pdPOC,dPOC,posVsPd,evt,vixEst,vixSrc,vixyRaw,vixPrev,vix9dPrev,vix3mPrev,term9d,term3m,intN,intAdvPct,intVwapPct,intUpMinPct,intCumTick";
+const TELEMETRY_HEADER = "time,tkr,px,iRSI,dRSI,call,put,isMR,curl,vwap%,blocker,drivers,shadow,adx,gate,pgate,isC,isP,volPace,breadth,gexRegime,netGexM,callWall,putWall,distCW,distPW,cumVolDelta,cvdSlope,gexNear,netGexNearM,flipLvl,distFlip,sessOpen,prevClose,gapTrue,openType,o15Ret,ibHi,ibLo,ibRngPct,ibExt,rngVsIB,pdH,pdL,pdVW,pdPOC,dPOC,posVsPd,evt,vixEst,vixSrc,vixyRaw,vixPrev,vix9dPrev,vix3mPrev,term9d,term3m,intN,intAdvPct,intVwapPct,intUpMinPct,intCumTick,gexRaw,orHi,orLo,orTHi,orTLo";
 
 // intraday-RSI tier — a crossing is "material" so dips/spikes always log a row
 function _rsiTier(r) {
@@ -217,6 +217,11 @@ function recordTelemetry(state, rec) {
       rec.intVwapPct  == null ? "" : rec.intVwapPct,
       rec.intUpMinPct == null ? "" : rec.intUpMinPct,
       rec.intCumTick  == null ? "" : rec.intCumTick,
+      rec.gexRaw      == null ? "" : rec.gexRaw,         // 10/6: regime before hysteresis
+      rec.orHi        == null ? "" : rec.orHi,           // 10/6: APEX opening range (sampled scan prices, locks 9:45)
+      rec.orLo        == null ? "" : rec.orLo,
+      rec.orTHi       == null ? "" : rec.orTHi,          // 10/6: textbook opening range (9:30-9:44 bar highs/lows)
+      rec.orTLo       == null ? "" : rec.orTLo,
     ].map(_csv).join(",");
 
     state._telemetryBuffer.push(row);
