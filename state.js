@@ -883,6 +883,7 @@ async function restoreBuffersFromRedis() {
 // in state (Redis-backed) so a toggle survives restarts/redeploys. Every read-site calls this instead
 // of the raw constant so the switch is flippable without a code change.
 function recordStandDown(strat, rawReason) {   // 8/25: tally why breaks/MR-fades did/didn't fire (regime-starved vs gate-starved)
+  if (state._observeOnly) return;   // 10/5: 3:15-4:00 ET observe-only scans don't count toward stand-down tallies
   try {
     if (!state._standDownTally) state._standDownTally = { brk: {}, mrf: {}, trend: {}, itrend: {} };
     const book = strat === "brk" ? state._standDownTally.brk : strat === "trend" ? state._standDownTally.trend : strat === "itrend" ? state._standDownTally.itrend : state._standDownTally.mrf;
