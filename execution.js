@@ -367,7 +367,11 @@ function calcPositionSize(premium, score, vix) {
 
 async function executeTrade(stock, price, score, scoreReasons, vix, optionType = "call", isMeanReversion = false, sizeMod = 1.0, dteBand = null, targetCost = null, signalId = null) {
   // 10/5 (Harrison): observe-only window (3:15-4:00 ET) — scan keeps running for telemetry, but NO entries.
-  if (state._observeOnly) {
+  // Checks the CLOCK as well as the flag: if the watchdog force-resets a stuck scan, two scans can overlap and
+  // one can clear the flag while the other is still past 3:15. The clock check can't be cleared. (Before this
+  // change no entry could ever happen after 3:15 — scans stopped there — so refusing by clock removes nothing.)
+  const _etNowX = getETTime(); const _etHX = _etNowX.getHours() + _etNowX.getMinutes() / 60;
+  if (state._observeOnly || (!_dryRunMode && _etHX >= 15.25 && _etHX < 16)) {
     if (!state._obsSkipLogAt || Date.now() - state._obsSkipLogAt > 60000) {
       state._obsSkipLogAt = Date.now();
       logEvent("skip", `${stock && stock.ticker} — entry refused: observe-only after 3:15 ET`);
