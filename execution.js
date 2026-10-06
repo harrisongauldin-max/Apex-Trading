@@ -727,6 +727,8 @@ async function executeTrade(stock, price, score, scoreReasons, vix, optionType =
     _iCvdTag:       stock._iCvdTag || null,   // 9/28: CVD agree/conflict measurement tag
     _driftFlow:     (stock._driftFlow != null) ? stock._driftFlow : null,   // 10/5: mr-fade drift-day tag (measure-only)
     _driftVwap:     (stock._driftVwap != null) ? stock._driftVwap : null,
+    _ctx:           (() => { try { return require('./dayContext').entryContext(state, stock.ticker, price); } catch (_) { return null; } })(),   // 10/6: day context at entry (measure-only)
+    _mkt:           (() => { try { const v = require('./market').getVixFields(), i = require('./marketInternals').fields(state); return { vixSrc: v.vixSrc, term9d: v.term9d, term3m: v.term3m, intAdvPct: i.intAdvPct, intVwapPct: i.intVwapPct, intCumTick: i.intCumTick }; } catch (_) { return null; } })(),   // 10/6: VIX source/term + internals at entry
     ticker:         stock.ticker,
     sector:         stock.sector,
     assetClass:     ["GLD","SLV","USO","TLT","GDX"].includes(stock.ticker) ? "commodity" : "equity",
