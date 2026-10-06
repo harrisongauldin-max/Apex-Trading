@@ -366,6 +366,14 @@ function calcPositionSize(premium, score, vix) {
 }
 
 async function executeTrade(stock, price, score, scoreReasons, vix, optionType = "call", isMeanReversion = false, sizeMod = 1.0, dteBand = null, targetCost = null, signalId = null) {
+  // 10/5 (Harrison): observe-only window (3:15-4:00 ET) — scan keeps running for telemetry, but NO entries.
+  if (state._observeOnly) {
+    if (!state._obsSkipLogAt || Date.now() - state._obsSkipLogAt > 60000) {
+      state._obsSkipLogAt = Date.now();
+      logEvent("skip", `${stock && stock.ticker} — entry refused: observe-only after 3:15 ET`);
+    }
+    return false;
+  }
   const estimatedMinCost = price * 0.03 * 100;
   if (state.cash - estimatedMinCost < CAPITAL_FLOOR) {
     logEvent("skip", `${stock.ticker} - insufficient cash pre-check (est. min cost ${fmt(estimatedMinCost)})`);
