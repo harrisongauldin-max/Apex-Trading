@@ -20,7 +20,7 @@ const SCORE_DELTA  = 3;               // |score| move that counts as material
 const MAX_ROWS     = 6000;            // safety cap on a runaway day
 const BLOCKER_MAX  = 60;              // truncate the headline blocker text
 
-const TELEMETRY_HEADER = "time,tkr,px,iRSI,dRSI,call,put,isMR,curl,vwap%,blocker,drivers,shadow,adx,gate,pgate,isC,isP,volPace,breadth,gexRegime,netGexM,callWall,putWall,distCW,distPW,cumVolDelta,cvdSlope,gexNear,netGexNearM,flipLvl,distFlip";
+const TELEMETRY_HEADER = "time,tkr,px,iRSI,dRSI,call,put,isMR,curl,vwap%,blocker,drivers,shadow,adx,gate,pgate,isC,isP,volPace,breadth,gexRegime,netGexM,callWall,putWall,distCW,distPW,cumVolDelta,cvdSlope,gexNear,netGexNearM,flipLvl,distFlip,sessOpen,prevClose,gapTrue,openType,o15Ret,ibHi,ibLo,ibRngPct,ibExt,rngVsIB,pdH,pdL,pdVW,pdPOC,dPOC,posVsPd,evt,vixEst,vixSrc,vixyRaw,vixPrev,vix9dPrev,vix3mPrev,term9d,term3m,intN,intAdvPct,intVwapPct,intUpMinPct,intCumTick";
 
 // intraday-RSI tier — a crossing is "material" so dips/spikes always log a row
 function _rsiTier(r) {
@@ -185,6 +185,38 @@ function recordTelemetry(state, rec) {
       rec.netGexNearM == null ? "" : rec.netGexNearM,
       rec.flipLvl     == null ? "" : rec.flipLvl,          // 9/30: GEX v2 gamma-flip level
       rec.distFlip    == null ? "" : rec.distFlip,         // 9/30: % distance spot -> flip (negative = spot above flip)
+      // 10/6: day context (dayContext.js) — session ref, opening type, initial balance, prior-day levels, event tag
+      rec.sessOpen   == null ? "" : rec.sessOpen,
+      rec.prevClose  == null ? "" : rec.prevClose,
+      rec.gapTrue    == null ? "" : rec.gapTrue,
+      rec.openType   == null ? "" : rec.openType,
+      rec.o15Ret     == null ? "" : rec.o15Ret,
+      rec.ibHi       == null ? "" : rec.ibHi,
+      rec.ibLo       == null ? "" : rec.ibLo,
+      rec.ibRngPct   == null ? "" : rec.ibRngPct,
+      rec.ibExt      == null ? "" : rec.ibExt,
+      rec.rngVsIB    == null ? "" : rec.rngVsIB,
+      rec.pdH        == null ? "" : rec.pdH,
+      rec.pdL        == null ? "" : rec.pdL,
+      rec.pdVW       == null ? "" : rec.pdVW,
+      rec.pdPOC      == null ? "" : rec.pdPOC,
+      rec.dPOC       == null ? "" : rec.dPOC,
+      rec.posVsPd    == null ? "" : rec.posVsPd,
+      rec.evt        == null ? "" : rec.evt,
+      // 10/6: VIX anchoring/term structure (vixContext.js) + internals proxy (marketInternals.js)
+      rec.vixEst      == null ? "" : rec.vixEst,
+      rec.vixSrc      == null ? "" : rec.vixSrc,
+      rec.vixyRaw     == null ? "" : rec.vixyRaw,
+      rec.vixPrev     == null ? "" : rec.vixPrev,
+      rec.vix9dPrev   == null ? "" : rec.vix9dPrev,
+      rec.vix3mPrev   == null ? "" : rec.vix3mPrev,
+      rec.term9d      == null ? "" : rec.term9d,
+      rec.term3m      == null ? "" : rec.term3m,
+      rec.intN        == null ? "" : rec.intN,
+      rec.intAdvPct   == null ? "" : rec.intAdvPct,
+      rec.intVwapPct  == null ? "" : rec.intVwapPct,
+      rec.intUpMinPct == null ? "" : rec.intUpMinPct,
+      rec.intCumTick  == null ? "" : rec.intCumTick,
     ].map(_csv).join(",");
 
     state._telemetryBuffer.push(row);
