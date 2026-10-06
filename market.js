@@ -42,7 +42,9 @@ function registerMacroCallbacks(cbs) {
   if (cbs.applyExitUrgency)           _applyExitUrgency           = cbs.applyExitUrgency;
 }
 const { SLOW_CACHE_TTL, BARS_CACHE_TTL, MARKETAUX_KEY,
-        MS_PER_DAY, ALPACA_NEWS, VIX_HISTORY_URL, OPTION_FEED } = require('./constants');
+        MS_PER_DAY, ALPACA_NEWS, VIX_HISTORY_URL, OPTION_FEED,
+        VIX_ANCHOR_ENABLED = true, VIX_LOWBASE_SUPPRESS = false } = require('./constants');
+const VIXCTX = require('./vixContext');   // 10/6: VIX anchoring + term structure
 
 // ─── In-process cache ────────────────────────────────────────────
 const _slowCache     = new Map();
@@ -51,6 +53,10 @@ let   _marketauxCache = { data: [], fetchedAt: 0 };
 let _vixCache       = { value: 15, ts: 0 };   // cached VIX value + timestamp
 let lastVIXReading  = 0;                       // 0 = uninitialized; used by checkVIXVelocity
 let vixFallingPause = false;                   // true when VIX falling - suppresses put entries
+let _vixLastWasReal = false;                   // 10/6: did the latest getVIX() value come from a real fetch?
+let _velPrevReal    = false;                   // 10/6: realness of the PREVIOUS velocity reading
+let _vixLastReading = null;                    // 10/6: last anchored()/legacy reading, for telemetry
+let _vixRefInflight = null, _vixRefLastTry = 0;
 let marketContext   = null;                    // set externally by scanner before calls
 
 // ─── Constants (moved from monolith during V3.2 modular split) ──────────────
@@ -1209,12 +1215,18 @@ async function getPreMarketData(ticker) {
 }
 
 function checkVIXVelocity(currentVIX) {
+  const _prevReal = _velPrevReal; _velPrevReal = _vixLastWasReal;   // 10/6: was the previous reading a real fetch?
   if (lastVIXReading === 0) { lastVIXReading = currentVIX; return false; }
+  if (!VIX_LOWBASE_SUPPRESS && !_prevReal) {
+    logEvent("warn", `[VIX] previous reading ${lastVIXReading} was not a real fetch (default/cache) — rebasing to ${currentVIX}, no alert`);
+    lastVIXReading = currentVIX;
+    return false;
+  }
   // Sanity check: if previous reading was implausibly low (< 18) and current is normal,
   // this is almost certainly a data artifact (API timeout returning stale/default data).
   // Reset the baseline silently rather than firing a false black swan alert.
   // Real VIX rarely drops below 12 in modern markets; sub-18 at a 28+ VIX regime = corrupted.
-  if (lastVIXReading < 18 && currentVIX > lastVIXReading) {
+  if (VIX_LOWBASE_SUPPRESS && lastVIXReading < 18 && currentVIX > lastVIXReading) {   // 10/6: legacy rule, OFF by default
     logEvent("warn", `[VIX] Suspicious low reading ${lastVIXReading} correcting to ${currentVIX} — data artifact, resetting baseline (no alert)`);
     lastVIXReading = currentVIX;
     return false;
@@ -1269,20 +1281,101 @@ async function getEarningsQualityScore(ticker, bars) {
   } catch(e) { return { score: 50, signal: "unknown" }; }
 }
 
+// 10/6 (Harrison): Cboe prior-day closes for VIX / VIX9D / VIX3M. Fetched when there's no reference yet, or when
+// VIXY's prior daily bar is NEWER than the reference (Cboe adds each close in the evening). Throttled to one try
+// per 30 min; the first call after a restart is awaited so APEX never starts on the wrong scale.
+function _refreshVixRef() {
+  if (_vixRefInflight) return _vixRefInflight;
+  if (Date.now() - _vixRefLastTry < 30 * 60000) return Promise.resolve(VIXCTX.getRef());
+  _vixRefLastTry = Date.now();
+  const get = async (url) => {
+    try { const r = await withTimeout(fetch(url), 8000); return (r && r.ok) ? VIXCTX.parseCboeCsv(await r.text()) : null; }
+    catch (_) { return null; }
+  };
+  _vixRefInflight = (async () => {
+    const [vix, vix9d, vix3m] = await Promise.all([get(VIXCTX.FILES.vix), get(VIXCTX.FILES.vix9d), get(VIXCTX.FILES.vix3m)]);
+    const nr = VIXCTX.buildRef({ vix, vix9d, vix3m });
+    if (nr) {
+      VIXCTX.setRef(nr); state._vixRef = nr; markDirty();
+      logEvent("scan", `[VIX-REF] Cboe closes ${nr.asOf}: VIX ${nr.vix} | VIX9D ${nr.vix9d ?? "n/a"} | VIX3M ${nr.vix3m ?? "n/a"} | 9D/VIX ${nr.term9d ?? "n/a"} | VIX/3M ${nr.term3m ?? "n/a"}`);
+    } else {
+      logEvent("warn", "[VIX-REF] Cboe download failed — VIX stays on carry/legacy until it succeeds (retry in 30 min)");
+    }
+    return nr || VIXCTX.getRef();
+  })().finally(() => { _vixRefInflight = null; });
+  return _vixRefInflight;
+}
+
 async function getVIX() {
   // OPT-2: 60s TTL -- VIX at 30s granularity has zero trading value, saves 1 API call/scan
   if (Date.now() - _vixCache.ts < 60000) return _vixCache.value;
-  const data = await alpacaGet(`/stocks/VIXY/quotes/latest`, ALPACA_DATA);
-  if (data && data.quote) {
-    _vixCache = { value: parseFloat(data.quote.ap || 15), ts: Date.now() };
-    return _vixCache.value;
+  // 10/6: ONE snapshot call (same budget as the old quotes/latest) gives VIXY now AND its prior close/date.
+  const snap = await alpacaGet(`/stocks/VIXY/snapshot`, ALPACA_DATA);
+  if (!snap || snap === ALPACA_CONN_DROP) return _vixCache.value;   // keep last known on error
+  const q = snap.latestQuote || {}, tr = snap.latestTrade || {}, pb = snap.prevDailyBar || {};
+  const vixyNow  = (q.ap > 0 && q.bp > 0) ? (q.ap + q.bp) / 2 : (q.ap > 0 ? q.ap : (tr.p > 0 ? tr.p : null));
+  const vixyPrev = pb.c > 0 ? pb.c : null;
+  const prevDate = pb.t ? String(pb.t).slice(0, 10) : null;
+  if (!(vixyNow > 0)) return _vixCache.value;
+  try {
+    if (!VIXCTX.getRef() && state._vixRef) VIXCTX.setRef(state._vixRef);          // restore after a restart
+    const ref = VIXCTX.getRef();
+    if (VIX_ANCHOR_ENABLED && (!ref || (prevDate && ref.asOf < prevDate))) {
+      const p = _refreshVixRef();
+      if (!ref && !state._vixK) await p;                                           // first ever run: don't start on VIXY scale
+    }
+    const prevFamily = _vixLastReading ? _vixLastReading.family : null;
+    const _opts = { enabled: VIX_ANCHOR_ENABLED, carryK: state._vixK };
+    let r = VIXCTX.anchored(vixyNow, vixyPrev, prevDate, _opts);
+    if (r.splitSuspect) {
+      // A split doesn't move the stock market; a crash that doubles VIXY does. Cross-check SPY (rare extra call).
+      let spyChg = null;
+      try {
+        const s = await alpacaGet(`/stocks/SPY/snapshot`, ALPACA_DATA);
+        const sp = s && s.latestTrade && s.latestTrade.p, sc = s && s.prevDailyBar && s.prevDailyBar.c;
+        if (sp > 0 && sc > 0) spyChg = (sp - sc) / sc * 100;
+      } catch (_) {}
+      if (spyChg != null && Math.abs(spyChg) >= 2) {
+        r = VIXCTX.anchored(vixyNow, vixyPrev, prevDate, { ..._opts, noSplitCheck: true });   // REAL volatility
+        logEvent("warn", `[VIX] VIXY ${(vixyNow / vixyPrev).toFixed(2)}x is split-shaped but SPY moved ${spyChg.toFixed(1)}% — treating as REAL volatility (VIX ${r.value})`);
+        state._vixSplitPend = null;
+      } else {
+        // Commit the split-adjusted carry factor only after 3 consecutive confirming readings (a single bad quote
+        // must not permanently rescale VIX), and only once per split.
+        const pend = (state._vixSplitPend && state._vixSplitPend.f === r.splitFactor && state._vixSplitPend.d === prevDate)
+          ? state._vixSplitPend : { f: r.splitFactor, d: prevDate, n: 0 };
+        pend.n++; state._vixSplitPend = pend;
+        if (pend.n >= 3 && r.kAdj > 0 && r.source === "carry(split-pending)") {
+          state._vixK = { k: r.kAdj, ts: Date.now(), splitAdj: { f: r.splitFactor, d: prevDate } }; markDirty();
+          logEvent("warn", `[VIX] split confirmed (${pend.n} readings) — carry factor rescaled by 1/${r.splitFactor}`);
+        }
+      }
+    } else if (state._vixSplitPend) { state._vixSplitPend = null; }
+    if (r.source === "anchored" && r.k > 0) { state._vixK = { k: r.k, ts: Date.now() }; }
+    if (r.splitSuspect && (!state._vixSplitLogAt || Date.now() - state._vixSplitLogAt > 30 * 60000)) {
+      state._vixSplitLogAt = Date.now();
+      logEvent("warn", `[VIX] VIXY moved ${r.ratio.toFixed(3)}x vs prior close — treated as a ${r.splitFactor >= 1 ? "1:" + r.splitFactor : 1 / r.splitFactor + ":1"} split, not volatility. VIX ${r.value} via ${r.source}.`);
+    }
+    if (prevFamily && r.family !== prevFamily) {
+      lastVIXReading = 0;   // units changed (VIX scale <-> VIXY price): rebase velocity instead of reading it as a spike
+      logEvent("warn", `[VIX] source changed ${prevFamily} -> ${r.family} (${r.source}); velocity baseline reset`);
+    }
+    _vixLastReading = r;
+    if (!state._vixLogAt || Date.now() - state._vixLogAt > 5 * 60000) {
+      state._vixLogAt = Date.now();
+      logEvent("scan", `[VIX] ${r.value} via ${r.source} | VIXY ${vixyNow.toFixed(2)} (prev ${vixyPrev ?? "?"} @ ${prevDate ?? "?"})`);
+    }
+    if (r.value > 0) { _vixCache = { value: r.value, ts: Date.now() }; _vixLastWasReal = true; }
+  } catch (e) {
+    _vixCache = { value: parseFloat(vixyNow.toFixed(2)), ts: Date.now() }; _vixLastWasReal = true;   // legacy fallback
   }
-  return _vixCache.value; // return last known on error
+  return _vixCache.value;
 }
+function getVixFields() { try { return VIXCTX.fields(_vixLastReading); } catch (_) { return {}; } }
 
 // Real CBOE ^VIX daily closes — the IV-Rank baseline (pairs with VIX_DAILY_SEED in constants).
 // Fetched once per trading day so IVR ranks the current REAL VIX close against a REAL one-year
-// VIX window. Deliberately separate from getVIX() (VIXY share price, used by the risk gates) so
+// VIX window. Deliberately separate from getVIX() (10/6: Cboe-anchored VIX estimate for the risk gates) so
 // the rank is real-vs-real and units-correct. Returns numeric closes oldest→newest, or null on
 // any failure/garbage — the caller then keeps the existing seeded _vixDaily (self-healing).
 async function getVIXDailyCloses(limit = 252) {
@@ -1313,5 +1406,5 @@ module.exports = {
   getDXY, getYieldCurve, getEarningsDate, getNewsForTicker, analyzeNews, getMarketauxNews,
   scoreArticle, getAnalystActivity, getShortInterestSignal,
   getUpcomingMacroEvents, getMacroCalendarModifier, getPreMarketData,
-  checkVIXVelocity, getVIXReversionDays, getVIX, getVIXDailyCloses, setMarketContext, registerMacroCallbacks,
+  checkVIXVelocity, getVIXReversionDays, getVIX, getVixFields, getVIXDailyCloses, setMarketContext, registerMacroCallbacks,
 };
