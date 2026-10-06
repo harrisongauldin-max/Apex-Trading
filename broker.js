@@ -295,13 +295,34 @@ async function getIntradayBars(ticker, minutes = 390) {
   } catch(e) { return []; }
 }
 
+// 10/6 (Harrison): one full regular session of 1-min bars for a PAST date (YYYY-MM-DD, ET). Used once per
+// ticker per day by dayContext.js to build the prior day's volume profile (point of control / value area).
+// Same feed order as getIntradayBars (SIP, then IEX). Returns [] on any failure — measurement only.
+async function getDayBars(ticker, dateStr) {
+  try {
+    const [y, m, d] = String(dateStr).split("-").map(Number);
+    if (!y || !m || !d) return [];
+    // ET offset for THAT date (handles DST): what hour is 12:00 UTC in New York?
+    const nyNoon = parseInt(new Date(Date.UTC(y, m - 1, d, 12)).toLocaleString("en-US", { timeZone: "America/New_York", hour: "numeric", hour12: false }), 10);
+    const off = 12 - nyNoon;                                   // 4 in EDT, 5 in EST
+    const startISO = new Date(Date.UTC(y, m - 1, d, 9 + off, 30)).toISOString();
+    const endISO   = new Date(Date.UTC(y, m - 1, d, 16 + off, 0)).toISOString();
+    for (const feed of ["sip", "iex"]) {
+      const data = await alpacaGet(`/stocks/${ticker}/bars?timeframe=1Min&start=${startISO}&end=${endISO}&limit=1000&feed=${feed}`, ALPACA_DATA);
+      if (data === ALPACA_CONN_DROP) return [];
+      if (data && Array.isArray(data.bars) && data.bars.length >= 30) return data.bars;
+    }
+    return [];
+  } catch (e) { return []; }
+}
+
 // Get VIX - cached for 60 seconds to avoid redundant API calls
 let _vixCache = { value: 15, ts: 0 };
 
 
 module.exports = {
   alpacaGet, alpacaPost, alpacaDelete,
-  getStockQuote, getStockBars, getIntradayBars,
+  getStockQuote, getStockBars, getIntradayBars, getDayBars,
   getCircuitState, setBrokerLogger,
   alpacaHeaders, withTimeout,
   ALPACA_CONN_DROP,   // 7/1 fix: export so non-broker callers (market.js getNewsForTicker, etc.) can
