@@ -44,6 +44,8 @@ const { CAPITAL_FLOOR, MIN_OPTION_PREMIUM, MIN_OI,
         SPREAD_COST_LOG = false, FEASIBILITY_ENABLED = false, FEASIBILITY_ENFORCE = false,
         FEASIBILITY_MAX_RATIO = 1.0, FEASIBILITY_HOLD_MIN = 20, FLAT_SIZING_ENABLED = false,
         GEX_V2_ENABLED = true, GEX_V2_MAX_EXPIRIES = 6, GEX_V2_MAX_DAYS = 35, GEX_V2_STRIKE_BAND = 0.05, GEX_V2_SNAP_CONCURRENCY = 6,
+        ITREND_ADX_SIZE_ENABLED = false, ITREND_ADX_SIZE_MIN = 40, ITREND_ADX_SIZE_CONTRACTS = 2, GEX_V2_INCLUDE_MONTHLY = false,
+        TREND_SIZE_AT_STOP = false, TREND_MAX_RISK_PCT = 0.03, TREND_ATR_STOP_MULT = 3.5, TREND_USTOP_FLOOR = 0.20, TREND_USTOP_CEIL = 0.55,
 }                                          = require('./constants');
 const { confirmPendingOrder } = require('./closeEngine');
 const { writeJournalEntry } = require('./state');
@@ -259,7 +261,12 @@ async function findContract(ticker, optionType, targetDelta, targetDTE, vix, sto
           // 40-DTE standard leg's chain gives a different, wrong regime. Tag the DTE so the scanner
           // nets calls+puts from the SAME expiry only (mixing expiries = meaningless net GEX).
           const _cdte = (_chainRows[0] && _chainRows[0].dte != null) ? _chainRows[0].dte : null;
-          if (_cdte != null && _cdte <= 7) {
+          // 10/6 (Harrison): BUG FIX — this pre-v2 path wrote ONE side's single-expiry chain (~24 rows) over GEX v2's
+          // full-book chain whenever a short-dated contract was evaluated, so GEX mixed full-book calls with a sliver of
+          // puts until the next v2 fetch (10/2 QQQ: 186 corrupted readings, regime swinging +2,000M <-> -950M). Only
+          // write here when the stored chain is NOT from v2 (i.e., v2 is off or fell back to v1).
+          const _isV2Chain = !!(state._gexChain && state._gexChain[ticker] && state._gexChain[ticker].v2);
+          if (_cdte != null && _cdte <= 7 && !_isV2Chain) {
             if (!state._gexChain) state._gexChain = {};
             if (!state._gexChain[ticker]) state._gexChain[ticker] = {};
             state._gexChain[ticker][optionType] = { rows: _chainRows, dte: _cdte, spot: (stock && (stock.price || stock.lastPrice)) || 0, ts: Date.now() };
@@ -483,9 +490,30 @@ async function executeTrade(stock, price, score, scoreReasons, vix, optionType =
     const _dma = state._dailyMA && state._dailyMA[stock.ticker];
     const _atr = (_dma && _dma.atr > 0) ? _dma.atr : price * 0.01;
     const _equity = state.equity || state.cash || 90000;
-    const _riskPerContract = Math.max(1, TREND_DELTA * _atr * 100);
-    contracts = Math.max(1, Math.min(5, Math.round((TREND_RISK_BUDGET * _equity) / _riskPerContract)));
+    let _riskPerContract = Math.max(1, TREND_DELTA * _atr * 100);
+    if (TREND_SIZE_AT_STOP) {
+      // 10/6: risk = the loss AT THE EXIT STOP — same formula exitEngine uses for "trend-stop":
+      //   stopPct = clamp(delta x TREND_ATR_STOP_MULT x ATR / premium, TREND_USTOP_FLOOR, TREND_USTOP_CEIL)
+      const _d = Math.abs(parseFloat(contract.greeks && contract.greeks.delta)) || Math.abs(parseFloat(contract.delta)) || TREND_DELTA;
+      const _stopPct = Math.min(TREND_USTOP_CEIL, Math.max(TREND_USTOP_FLOOR, (_d * TREND_ATR_STOP_MULT * _atr) / contract.premium));
+      _riskPerContract = Math.max(1, _stopPct * contract.premium * 100);
+      contracts = Math.max(1, Math.min(5, Math.floor((TREND_RISK_BUDGET * _equity) / _riskPerContract)));
+      const _riskPct = (contracts * _riskPerContract) / _equity;
+      if (_riskPct > TREND_MAX_RISK_PCT) {
+        logEvent("skip", `[TREND-SIZE] ${stock.ticker} skipped — 1 contract risks $${_riskPerContract.toFixed(0)} (${(_riskPct * 100).toFixed(1)}% of equity) at its ${(_stopPct * 100).toFixed(0)}% stop; cap ${(TREND_MAX_RISK_PCT * 100).toFixed(1)}%`);
+        return false;
+      }
+    } else {
+      contracts = Math.max(1, Math.min(5, Math.round((TREND_RISK_BUDGET * _equity) / _riskPerContract)));
+    }
     logEvent("scan", `[TREND-SIZE] ${stock.ticker} ${contracts}x (budget $${(TREND_RISK_BUDGET*_equity).toFixed(0)} / $${_riskPerContract.toFixed(0)}/ct, atr $${_atr})`);
+  }
+  // 10/6 (Harrison): intraday-trend ADX tier — strong trends (ADX >= 40) carry the sleeve's edge; size them up.
+  // Cash and heat caps below still apply to the larger order.
+  if (ITREND_ADX_SIZE_ENABLED && stock && stock._iTrend && typeof stock.adx === "number" && stock.adx >= ITREND_ADX_SIZE_MIN) {
+    const _prev = contracts;
+    contracts = Math.max(contracts, ITREND_ADX_SIZE_CONTRACTS);
+    if (contracts !== _prev) logEvent("scan", `[ITREND-SIZE] ${stock.ticker} ADX ${stock.adx.toFixed(0)} >= ${ITREND_ADX_SIZE_MIN} -> ${contracts} contracts (was ${_prev})`);
   }
   if (sizeMod < 1.0) {
     contracts = Math.max(1, Math.floor(contracts * sizeMod));
@@ -725,6 +753,7 @@ async function executeTrade(stock, price, score, scoreReasons, vix, optionType =
   const position = {
     signalId:       signalId || null,   // 9/14: store on the position (was only on the telemetry row) — needed for straddle leg-pair matching
     _iCvdTag:       stock._iCvdTag || null,   // 9/28: CVD agree/conflict measurement tag
+    _iOrTag:        stock._iOrTag || null,    // 10/6: opening-range context at entry (APEX + textbook range)
     _driftFlow:     (stock._driftFlow != null) ? stock._driftFlow : null,   // 10/5: mr-fade drift-day tag (measure-only)
     _driftVwap:     (stock._driftVwap != null) ? stock._driftVwap : null,
     _ctx:           (() => { try { return require('./dayContext').entryContext(state, stock.ticker, price); } catch (_) { return null; } })(),   // 10/6: day context at entry (measure-only)
@@ -905,7 +934,8 @@ async function executeTrade(stock, price, score, scoreReasons, vix, optionType =
   if (stock._structBreak) { (_openSame || position)._isStructBreak = true; }
   if (stock._isTrend) { (_openSame || position)._isTrend = true; }
   if (stock._iTrend) { (_openSame || position)._iTrend = true; }
-  if (stock._iCvdTag) { (_openSame || position)._iCvdTag = stock._iCvdTag; }   // 9/28: CVD agree/conflict tag (measure-only) → flows to outcome
+  if (stock._iCvdTag) { (_openSame || position)._iCvdTag = stock._iCvdTag; }
+  if (stock._iOrTag && !(_openSame && _openSame._iOrTag)) { (_openSame || position)._iOrTag = stock._iOrTag; }   // 10/6: keep the FIRST entry's range context   // 9/28: CVD agree/conflict tag (measure-only) → flows to outcome
   if (stock._driftFlow != null) { (_openSame || position)._driftFlow = stock._driftFlow; }   // 10/5: drift tag -> outcome
   if (stock._driftVwap != null) { (_openSame || position)._driftVwap = stock._driftVwap; }
   (_openSame || position)._entryX = {
@@ -1185,8 +1215,19 @@ async function _fetchGexChainV2(ticker, spot) {
     };
     const [callsAll, putsAll] = await Promise.all([_list("call"), _list("put")]);
     // first N FUTURE expiries (0DTE excluded — no greeks/OI on Alpaca's same-day snapshot)
-    const exps = [...new Set([...callsAll, ...putsAll].map(c => c.expiration_date))]
-                   .filter(e => e > todayStr).sort().slice(0, GEX_V2_MAX_EXPIRIES);
+    const _allExps = [...new Set([...callsAll, ...putsAll].map(c => c.expiration_date))].filter(e => e > todayStr).sort();
+    const exps = _allExps.slice(0, GEX_V2_MAX_EXPIRIES);
+    if (GEX_V2_INCLUDE_MONTHLY) {   // 10/6: always include the monthly (third-Friday) expiration inside the window
+      try {
+        const DC = require('./dayContext');
+        const [yy, mm] = todayStr.split("-").map(Number);
+        for (const [y, m] of [[yy, mm], [mm === 12 ? yy + 1 : yy, mm === 12 ? 1 : mm + 1]]) {
+          const mo = DC.monthlyOpex(y, m);
+          if (_allExps.includes(mo) && !exps.includes(mo)) exps.push(mo);
+        }
+        exps.sort();
+      } catch (_moErr) { /* monthly is a bonus — never fail the fetch over it */ }
+    }
     if (!exps.length) return false;
     const expSet = new Set(exps);
     const calls = callsAll.filter(c => expSet.has(c.expiration_date));
