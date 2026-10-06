@@ -735,7 +735,25 @@ const ITREND_END_ET       = 12.0;   // 10/2 (Harrison): was 13.5. Live itrend 9/
 // entries in neg gamma 7 trades / 14% WR / -$37 avg vs pos gamma 38 / 60% / +$15; and on this tape moves
 // REVERSE more in neg gamma (81 rev vs 37 cont), in every time-of-day window. A momentum sleeve has no
 // business there. false = fall back to the older direction-only gate below it.
-const ITREND_NEG_GAMMA_BLOCK = true;   // no new entries after 1:30pm ET (Gao et al. morning-window; reversals cluster late)
+const ITREND_NEG_GAMMA_BLOCK = true;
+// 10/6 (Harrison): ADX-TIERED SIZING for intraday-trend. Under today's rules (10:00-12:00 ET, not negative gamma),
+// live itrend at ADX 40+ = 13 trades, 76% WR, +$49.2/trade (t=+2.95); ADX 25-40 = 21 trades, -$227. Counterfactual
+// 2x at 40+: net +$1,051 vs +$412, worst drawdown -$168 vs -$230. Caveat: 7 of the 13 were on 9/21. Cash and heat
+// caps still apply after sizing. false = flat 1 contract.
+const ITREND_ADX_SIZE_ENABLED   = true;
+const ITREND_ADX_SIZE_MIN       = 40;
+const ITREND_ADX_SIZE_CONTRACTS = 2;
+// 10/6 (Harrison): TREND-SWING SIZED TO THE STOP. The old formula budgeted 1 daily ATR of risk per contract
+// (delta x ATR x 100) but the exit stop is 3.5 ATR (clamped 20-55% of premium) — so each trade really risked ~3-4x
+// its 1% budget (all 6 trades were 2 contracts; losses -$2,784, -$1,932, -$1,244). Literature (Clenow, *Following
+// the Trend*; Kaufman): size so the loss AT THE STOP equals the budget, using the exit's own stop formula, and round
+// DOWN. Min 1 contract; skip the trade if one contract would risk more than TREND_MAX_RISK_PCT of equity at its stop.
+const TREND_SIZE_AT_STOP  = true;
+const TREND_MAX_RISK_PCT  = 0.03;
+// 10/6 (Harrison, Sunday list): intraday-trend after 11:00 ET only at ADX 40+. Live itrend through 10/5 (n=94):
+// 11-12 ET ADX 25-40 = 17 trades, -$17.4/trade; ADX 40+ = 5 trades, +$33.6/trade. 10-11 ET keeps ADX >= 25.
+const ITREND_LATE_START_ET = 11.0;
+const ITREND_LATE_ADX_MIN  = 40;   // no new entries after 1:30pm ET (Gao et al. morning-window; reversals cluster late)
 const ITREND_TRAIL_ARM_PCT      = 0.15;
 const ITREND_TRAIL_GIVEBACK_PCT = 0.07;
 const ITREND_STOP_PCT     = 0.30;   // hard floor (0.50-delta 14-DTE is more volatile than deep-ITM)
@@ -760,7 +778,14 @@ const GEX_V2_ENABLED              = true;
 const GEX_V2_MAX_EXPIRIES         = 6;
 const GEX_V2_MAX_DAYS             = 35;
 const GEX_V2_STRIKE_BAND          = 0.05;    // +/-5% of spot
-const GEX_V2_SNAP_CONCURRENCY     = 6;       // snapshot batches in flight at once (avoid bursting the API)  // per-ticker: refetch the gamma chain at most every 2 min
+const GEX_V2_SNAP_CONCURRENCY     = 6;       // snapshot batches in flight at once (avoid bursting the API)
+// 10/6 (Harrison): always include the MONTHLY (third-Friday) expiration in the v2 book — the 6 nearest daily
+// expiries only reach ~8 DTE and miss the monthly, where much of the open interest sits. +1 expiry per fetch.
+const GEX_V2_INCLUDE_MONTHLY      = true;
+// 10/6: REGIME HYSTERESIS. The label only changes when the new reading is decisive (|net GEX| >= this, in $M);
+// weaker opposite readings keep the previous label. 10/1 QQQ flipped 6x on readings between -149M and +240M;
+// typical |net GEX| is 900M-4,000M (10th-90th pct of v2 readings). 0 = no hysteresis.
+const GEX_REGIME_HYST_M           = 250;  // per-ticker: refetch the gamma chain at most every 2 min
 const BREAK_ENTRY_SCORE           = 80;      // fixed stamp a break entry carries; clears MIN_SCORE(70)+slot2(75), NOT slot3(85). NOT a quality measure.
 const BREAK_CONFIRM_BARS          = 1;       // bars after the break bar that must not reclaim the level
 const BREAK_MAX_AGE_MIN           = 10;      // signal is stale after this many minutes
@@ -944,12 +969,15 @@ module.exports = {
   BREAK_DELTA, BREAK_DELTA_MIN, BREAK_DELTA_MAX, BREAK_TARGET_DTE, BREAK_MAX_HOLD_MIN, BREAK_TRAIL_ARM_PCT, BREAK_TRAIL_GIVEBACK_PCT,
   GEX_FETCH_ENABLED, GEX_FETCH_THROTTLE_MS,
   GEX_V2_ENABLED, GEX_V2_MAX_EXPIRIES, GEX_V2_MAX_DAYS, GEX_V2_STRIKE_BAND, GEX_V2_SNAP_CONCURRENCY,
+  GEX_V2_INCLUDE_MONTHLY, GEX_REGIME_HYST_M,
   STRATEGY_CLASS, strategyClass, isFlattenExempt, LOCK_LADDER, LOCK_LADDER_TRAIL, ladderFloor,
   TREND_ENABLED, TREND_DELTA, TREND_DELTA_MIN, TREND_DELTA_MAX, TREND_TARGET_DTE, TREND_DTE_MIN, TREND_DTE_MAX,
   TREND_ROLL_DTE, TREND_MA_FAST, TREND_MA_SLOW, TREND_RSI_MIN, TREND_RSI_MAX, TREND_OVEREXT_ATR, TREND_BREADTH_MIN,
   TREND_CUTOFF_ET, TREND_RISK_BUDGET, TREND_TRAIL_ARM_PCT, TREND_STOP_UNDL_PCT, TREND_STOP_PCT, TREND_ATR_STOP_MULT, TREND_USTOP_FLOOR, TREND_USTOP_CEIL, TREND_STALE_DAYS, TREND_STALE_PEAK, TREND_TRAIL_GIVEBACK_PCT,
   ITREND_ENABLED, ITREND_DELTA, ITREND_DELTA_MIN, ITREND_DELTA_MAX, ITREND_TARGET_DTE, ITREND_DTE_MIN, ITREND_DTE_MAX,
   ITREND_ADX_MIN, ITREND_VWAP_MIN, ITREND_BREADTH_STRONG, ITREND_START_ET, ITREND_END_ET, ITREND_NEG_GAMMA_BLOCK,
+  ITREND_ADX_SIZE_ENABLED, ITREND_ADX_SIZE_MIN, ITREND_ADX_SIZE_CONTRACTS, TREND_SIZE_AT_STOP, TREND_MAX_RISK_PCT,
+  ITREND_LATE_START_ET, ITREND_LATE_ADX_MIN,
   ITREND_TRAIL_ARM_PCT, ITREND_TRAIL_GIVEBACK_PCT, ITREND_STOP_PCT, ITREND_COOLDOWN_MIN, ITREND_MAX_HOLD_MIN, ITREND_NOARM_MIN,
   UNIVERSAL_NOARM_ENABLED, UNIVERSAL_NOARM_MIN, RSI_DEADZONE_VETO,
   STRADDLE_TP_PCT, STRADDLE_MAX_HOLD_MIN,
