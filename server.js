@@ -832,6 +832,75 @@ cron.schedule("0 13,14 * * 1", async () => {
 app.use(express.json());
 app.use(express.static(path.join(__dirname, "public")));
 
+// 10/6 (Harrison): MARKET STATE for the dashboard panel — the current dealer regime, VIX, internals, day context,
+// gates and sleeve activity in one small payload (read-only; computed from state the scanner already maintains).
+const _SLEEVE_OF = (t) => {
+  if (t && t.entryStrategy) return t.entryStrategy;
+  const r = String((t && (t.reason || t.exitReason)) || "");
+  return /^itrend/.test(r) ? "intraday-trend" : /^mr-fade/.test(r) ? "mr-fade-lit" : /^trend/.test(r) ? "trend-swing"
+       : /^break/.test(r) ? "break" : /straddle/.test(r) ? "vol-straddle" : "other";
+};
+app.get("/api/market-state", (req, res) => {
+  try {
+    const C = require("./constants"), DC = require("./dayContext"), INT = require("./marketInternals"), M = require("./market");
+    const et = getETTime(), h = et.getHours() + et.getMinutes() / 60, today = DC.etDateStr();
+    const hhmm = x => `${Math.floor(x)}:${String(Math.round((x % 1) * 60)).padStart(2, "0")}`;
+    const open = isMarketHours();
+    const tickers = {};
+    for (const tk of ["SPY", "QQQ"]) {
+      const g = (state._gexNow || {})[tk] || null, o = (state._openRange || {})[tk] || null;
+      const dc = (state._dayCtx || {})[tk], d = dc && dc.day === today ? dc : null;
+      tickers[tk] = {
+        gex: g ? { regime: g.regime, raw: g.regimeRaw ?? g.regime, held: !!g.regimeHeld, near: g.regimeNear ?? null,
+                   netGexM: g.netGexM ?? null, netGexNearM: g.netGexNearM ?? null, flip: g.flipLevel ?? null,
+                   distFlipPct: g.distFlipPct ?? null, callWall: g.callWall ?? null, putWall: g.putWall ?? null, nExp: g.nExpiries ?? null } : null,
+        cvd: (state._cumVolDelta || {})[tk] ?? null,
+        or:  o && o.locked ? { hi: o.high, lo: o.low, brokeHigh: !!o.brokeHighAt, brokeLow: !!o.brokeLowAt } : null,
+        orT: d && d.orT && d.orT.done ? { hi: d.orT.hi, lo: d.orT.lo, brokeHigh: d.orT.upMin != null, brokeLow: d.orT.dnMin != null } : null,
+        day: d ? { openType: d.openType ?? null, o15Ret: d.o15Ret ?? null, ibHi: d.ibHi ?? null, ibLo: d.ibLo ?? null,
+                   ibExt: d.ibExt ?? null, rngVsIB: d.rngVsIB ?? null, gapPct: d.gapPct ?? null } : null,
+      };
+    }
+    const vf = (M.getVixFields && M.getVixFields()) || {};
+    const negBlocked = C.ITREND_NEG_GAMMA_BLOCK ? ["SPY", "QQQ"].filter(tk => (state._gexRegime || {})[tk] === "neg") : [];
+    const sleeves = {};
+    const add = (k) => (sleeves[k] = sleeves[k] || { closed: 0, wins: 0, pnl: 0, open: 0, openPnl: 0 });
+    for (const t of state.closedTrades || []) {
+      const ms = t.closeTime || (t.date ? Date.parse(t.date) : null);
+      if (!ms || DC.etDateStr(ms) !== today) continue;
+      const s = add(_SLEEVE_OF(t)); s.closed++; s.pnl += +t.pnl || 0; if ((+t.pnl || 0) > 0) s.wins++;
+    }
+    for (const p of state.positions || []) {
+      const s = add(_SLEEVE_OF(p)); s.open++;
+      const prem = +p.premium || 0, cur = +p.currentPrice || prem; s.openPnl += (cur - prem) * 100 * (p.contracts || 1);
+    }
+    for (const s of Object.values(sleeves)) { s.pnl = +s.pnl.toFixed(2); s.openPnl = +s.openPnl.toFixed(2); }
+    res.json({
+      asOf: Date.now(), etTime: hhmm(h), marketOpen: open, event: DC.eventTags(today) || "",
+      vix: { value: state.vix ?? null, source: vf.vixSrc ?? null, vixy: vf.vixyRaw ?? null, prevClose: vf.vixPrev ?? null,
+             vix9d: vf.vix9dPrev ?? null, vix3m: vf.vix3mPrev ?? null, term9d: vf.term9d ?? null, term3m: vf.term3m ?? null,
+             asOf: (state._vixRef && state._vixRef.asOf) || null },
+      internals: INT.fields(state),
+      tickers,
+      gates: {
+        itrend: { window: `${hhmm(C.ITREND_START_ET)}-${hhmm(C.ITREND_END_ET)} ET`, open: open && h >= C.ITREND_START_ET && h < C.ITREND_END_ET,
+                  adxMinNow: h >= (C.ITREND_LATE_START_ET ?? 99) ? Math.max(C.ITREND_ADX_MIN, C.ITREND_LATE_ADX_MIN ?? 0) : C.ITREND_ADX_MIN,
+                  negGammaBlocked: negBlocked, sizeUpAtAdx: C.ITREND_ADX_SIZE_ENABLED ? C.ITREND_ADX_SIZE_MIN : null },
+        mrFade:     { cutoff: `${hhmm(C.MR_FADE_CUTOFF_ET)} ET`, open: open && h < C.MR_FADE_CUTOFF_ET },
+        trendSwing: { cutoff: `${hhmm(C.TREND_CUTOFF_ET)} ET`, open: open && h < C.TREND_CUTOFF_ET },
+        observeOnly: open && h >= 15.25,
+      },
+      sleeves,
+    });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// 10/6: internal buffers the dashboard never reads — kept OUT of /api/state, which the page polls every 10 s.
+// (The full-day log buffer alone can be tens of thousands of entries; serializing it every 10 s also costs
+// event-loop time on the same thread that runs scans.)
+const _STATE_UI_EXCLUDE = new Set(["_dailyLogBuffer", "_telemetryBuffer", "_gexChain", "_chainSnaps", "_chainSnapLast", "_entryFwd",
+  "_nearMiss", "_cvdHist", "_vwapHist", "_outcomeBuffer", "_vixDaily", "_vixHistory", "_spyBars20", "_gldBars"]);
+
 app.get("/api/state", async (req, res) => {
   const enrichedPositions = (state.positions || []).map(pos => {
     const c   = pos.contracts || 1;
@@ -862,7 +931,7 @@ app.get("/api/state", async (req, res) => {
     return _clean;
   });
   res.json({
-    ...state,
+    ...Object.fromEntries(Object.entries(state).filter(([k]) => !_STATE_UI_EXCLUDE.has(k))),   // 10/6: slimmed
     positions: enrichedPositions,
     dataGatherActive: require('./state').dataGatherActive(require('./constants').DATA_GATHER_MODE),
     heatPct:       parseFloat((heatPct()*100).toFixed(1)),
