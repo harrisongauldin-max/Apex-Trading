@@ -773,6 +773,7 @@ async function executeTrade(stock, price, score, scoreReasons, vix, optionType =
     signalId:       signalId || null,   // 9/14: store on the position (was only on the telemetry row) — needed for straddle leg-pair matching
     _iCvdTag:       stock._iCvdTag || null,   // 9/28: CVD agree/conflict measurement tag
     _iOrTag:        stock._iOrTag || null,    // 10/6: opening-range context at entry (APEX + textbook range)
+    _iMeta:         stock._iMeta || null,     // 10/7: meta-label features at entry (ADX tier, gamma, skipBy)
     _driftFlow:     (stock._driftFlow != null) ? stock._driftFlow : null,   // 10/5: mr-fade drift-day tag (measure-only)
     _driftVwap:     (stock._driftVwap != null) ? stock._driftVwap : null,
     _ctx:           (() => { try { return require('./dayContext').entryContext(state, stock.ticker, price); } catch (_) { return null; } })(),   // 10/6: day context at entry (measure-only)
@@ -954,7 +955,8 @@ async function executeTrade(stock, price, score, scoreReasons, vix, optionType =
   if (stock._isTrend) { (_openSame || position)._isTrend = true; }
   if (stock._iTrend) { (_openSame || position)._iTrend = true; }
   if (stock._iCvdTag) { (_openSame || position)._iCvdTag = stock._iCvdTag; }
-  if (stock._iOrTag && !(_openSame && _openSame._iOrTag)) { (_openSame || position)._iOrTag = stock._iOrTag; }   // 10/6: keep the FIRST entry's range context   // 9/28: CVD agree/conflict tag (measure-only) → flows to outcome
+  if (stock._iOrTag && !(_openSame && _openSame._iOrTag)) { (_openSame || position)._iOrTag = stock._iOrTag; }
+  if (stock._iMeta && !(_openSame && _openSame._iMeta)) { (_openSame || position)._iMeta = stock._iMeta; }   // 10/7: keep the FIRST entry's labels   // 10/6: keep the FIRST entry's range context   // 9/28: CVD agree/conflict tag (measure-only) → flows to outcome
   if (stock._driftFlow != null) { (_openSame || position)._driftFlow = stock._driftFlow; }   // 10/5: drift tag -> outcome
   if (stock._driftVwap != null) { (_openSame || position)._driftVwap = stock._driftVwap; }
   (_openSame || position)._entryX = {
