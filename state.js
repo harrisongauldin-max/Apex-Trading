@@ -325,6 +325,7 @@ function logEvent(type, message) {
   // full day" export then serves under a "today" header (9/29 under 9/30). Clear it on the first log of a
   // new ET day so the buffer is always TODAY-only. (Prior day's log is already durable in Redis from EOD.)
   const _etDay = getETDateStr();
+  rolloverBuffers(_etDay);   // 10/7: telemetry / chain-snap / outcome buffers get the same day guard as the log
   if (state._dailyLogDay && state._dailyLogDay !== _etDay && state._dailyLogBuffer.length) {
     state._dailyLogBuffer = [];
   }
@@ -545,6 +546,7 @@ async function saveDailyLogToRedis(isEOD = false) {
 // Fix: persist chainSnaps to Redis (throttled, chunked; they are large) and restore on boot, exactly
 // like telemetry. Overwrite is safe because boot-restore makes the in-memory buffer authoritative.
 async function saveChainSnapsToRedis(isEOD = false) {
+  rolloverBuffers();
   if (!REDIS_URL || !REDIS_TOKEN) return;
   const snaps = state._chainSnaps || [];
   if (snaps.length === 0) return;
@@ -572,7 +574,33 @@ async function saveChainSnapsToRedis(isEOD = false) {
   } catch (e) { console.error("[CHAINSNAPS] save error:", e.message); }
 }
 
+// 10/7 (Harrison): DAY-ROLLOVER for the day-scoped data buffers (telemetry rows, option-chain snapshots, outcome
+// rows). They were cleared ONLY by the end-of-day save — when that didn't complete on 10/6, the next morning's 9:30
+// checkpoint wrote 10/6's rows into the 10/7 Redis keys (10/7 files: 41% of telemetry, 52% of volsurface were 10/6).
+// Called from every write AND save path (the 9:30 checkpoint runs before the day's first telemetry row exists).
+// Prior-day rows are already durable in Redis from that day's checkpoints. The first call after a deploy only stamps
+// the day (never clears), so deploying mid-session can't wipe the current day's buffers.
+function rolloverBuffers(etDay = getETDateStr()) {
+  const prev = state._buffersDay;
+  if (prev && prev !== etDay) {
+    const n = { tel: (state._telemetryBuffer || []).length, snaps: (state._chainSnaps || []).length, out: (state._outcomeBuffer || []).length };
+    state._telemetryBuffer = []; state._telemetryLast = {};
+    state._chainSnaps = []; state._volLogged = {}; state._sparseLogged = {}; state._ivMissingLogged = {};
+    state._outcomeBuffer = [];
+    const eod = state._lastEodSave;
+    const eodTxt = eod && eod.day === prev ? `${eod.ok ? "completed" : "FAILED"} at ${eod.at} (${eod.ms}ms)` : "NOT RECORDED — the end-of-day save did not finish";
+    const msg = `[DAY-ROLLOVER] ${prev} -> ${etDay}: cleared stale buffers (telemetry ${n.tel}, chain snaps ${n.snaps}, outcomes ${n.out}). Previous end-of-day save: ${eodTxt}`;
+    state._buffersDay = etDay;
+    try { (state._dailyLogBuffer = state._dailyLogBuffer || []).push({ time: new Date().toISOString(), type: (eod && eod.day === prev && eod.ok) ? "scan" : "warn", msg }); } catch (_) {}
+    console.log(msg);
+    markDirty();
+    return;
+  }
+  state._buffersDay = etDay;
+}
+
 async function saveTelemetryToRedis(isEOD = false) {
+  rolloverBuffers();
   if (!REDIS_URL || !REDIS_TOKEN) return;
   const rows = state._telemetryBuffer || [];
   if (rows.length === 0) return;
@@ -619,6 +647,7 @@ async function saveTelemetryToRedis(isEOD = false) {
 // Outcome-joined table persistence — mirrors saveTelemetryToRedis exactly (merge-on-save,
 // dedup, EOD-flush), keyed argo:outcomes:<date>. Rides the same cadence, so no new timers.
 async function saveOutcomesToRedis(isEOD = false) {
+  rolloverBuffers();
   if (!REDIS_URL || !REDIS_TOKEN) return;
   const rows = state._outcomeBuffer || [];
   if (rows.length === 0) return;
@@ -949,6 +978,6 @@ function auditFreshness() {
 module.exports = { state, markDirty, saveStateNow, flushStateIfDirty, logEvent, dataGatherActive, mrFadeActive, recordStandDown,
                    markFresh, auditFreshness,
                    redisSave, redisLoad, defaultState, saveDailyLogToRedis, saveTelemetryToRedis, saveOutcomesToRedis, fetchRecentOutcomeRows, getETDateStr,
-                   restoreBuffersFromRedis, parseRedisBlob,
+                   restoreBuffersFromRedis, parseRedisBlob, rolloverBuffers,
                    writeJournalEntry, updateJournalExit, loadJournalDay, saveJournalDay, getJournalRange,
                    closeOrphanJournalOpens, paperDataActive };
