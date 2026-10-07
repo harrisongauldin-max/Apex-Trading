@@ -213,6 +213,7 @@ function buildOutcomeRow(pos, o) {
 function recordOutcome(state, pos, o) {
   try {
     if (!state) return;
+    try { require('./state').rolloverBuffers(); } catch (_) {}   // 10/7: never append to a prior day's buffer
     if (!Array.isArray(state._outcomeBuffer)) state._outcomeBuffer = [];
     if (o && o.underlyingExit == null && state._uNow && pos && pos.ticker && state._uNow[pos.ticker] != null) o.underlyingExit = state._uNow[pos.ticker];   // 9/02: real underlying-at-close for uExit
     state._outcomeBuffer.push(buildOutcomeRow(pos, o));
