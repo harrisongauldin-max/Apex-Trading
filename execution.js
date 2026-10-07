@@ -252,6 +252,8 @@ async function findContract(ticker, optionType, targetDelta, targetDTE, vix, sto
           const _csKey = `${ticker}|${optionType}|${targetDTE}`;
           if ((Date.now() - (state._chainSnapLast[_csKey] || 0)) >= 60000) {
             state._chainSnapLast[_csKey] = Date.now();
+            try { require('./state').rolloverBuffers(); } catch (_) {}   // 10/7: never append to a prior day's buffer
+            if (!state._chainSnaps) state._chainSnaps = [];
             state._chainSnaps.push({ ts: Date.now(), ticker, side: optionType, targetDTE, rows: _chainRows });
             if (state._chainSnaps.length > 6000) state._chainSnaps.shift();
           }
@@ -634,6 +636,8 @@ async function executeTrade(stock, price, score, scoreReasons, vix, optionType =
           time_in_force:   "day",
           limit_price:     limitPrice,
           position_intent: "buy_to_open",
+          // 10/6: unique per attempt — makes every order traceable to its attempt in Alpaca's history
+          client_order_id: `apex-${contract.symbol}-${Date.now()}-a${attempt + 1}`.slice(0, 48),
         };
         const orderResp = await alpacaPost("/orders", orderBody);
         if (!orderResp || !orderResp.id) {
@@ -668,6 +672,21 @@ async function executeTrade(stock, price, score, scoreReasons, vix, optionType =
           }
           if (!fillConfirmed) {
             try { await alpacaDelete(`/orders/${alpacaOrderId}`); } catch(e) {}
+            // 10/6 (Harrison): THE CANCEL CAN LOSE THE RACE WITH A FILL. If the order filled between the last poll
+            // and the cancel, the cancel fails silently and the next attempt buys AGAIN -> a duplicate position APEX
+            // never recorded (10/6 SPY 781C: 1 recorded, 2 held). Re-read the order's final state before moving on.
+            try {
+              await new Promise(r => setTimeout(r, 500));
+              const _fin = await alpacaGet(`/orders/${alpacaOrderId}`);
+              const _fq  = _fin ? parseInt(_fin.filled_qty || 0) : 0;
+              if (_fin && _fq > 0 && parseFloat(_fin.filled_avg_price) > 0) {
+                fillConfirmed = true;
+                fillPrice = parseFloat(parseFloat(_fin.filled_avg_price).toFixed(2));
+                if (_fq < contracts) { logEvent("warn", `Order ${alpacaOrderId} partially filled ${_fq}/${contracts} before cancel — keeping ${_fq}`); contracts = _fq; }
+                logEvent("trade", `Order ${alpacaOrderId} FILLED during cancel (${_fin.status}) @ $${fillPrice} — not re-sending (prevents a duplicate fill)`);
+                break;
+              }
+            } catch (_finErr) { logEvent("warn", `Post-cancel order check failed: ${_finErr.message} — the reconciler will catch any extra fill`); }
             logEvent("warn", `Order not filled in ${FILL_TIMEOUT/1000}s at $${limitPrice} — ${attempt < concessionPrices.length-1 ? 'trying concession' : 'all attempts exhausted'}`);
             alpacaOrderId = null;
           }
