@@ -224,6 +224,8 @@ function recordTelemetry(state, rec) {
       rec.orTLo       == null ? "" : rec.orTLo,
     ].map(_csv).join(",");
 
+    try { require('./state').rolloverBuffers(); } catch (_) {}   // 10/7: never append to a prior day's buffer
+    if (!state._telemetryBuffer) state._telemetryBuffer = [];
     state._telemetryBuffer.push(row);
     if (state._telemetryBuffer.length > MAX_ROWS)
       state._telemetryBuffer = state._telemetryBuffer.slice(-MAX_ROWS);
