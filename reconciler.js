@@ -724,6 +724,12 @@ async function syncPositionPnLFromAlpaca() {
       const _avgEntry  = parseFloat(ap.avg_entry_price || 0);
       if (alpacaQty !== pos.contracts) {
         _log('scan', `[ALPACA SYNC] ${pos.ticker} contracts: ${pos.contracts} → ${alpacaQty}`);
+        const _wasQty = pos.contracts || 0;
+        if (alpacaQty > _wasQty) {
+          // 10/6 (Harrison): Alpaca holds MORE than APEX recorded — an order APEX doesn't know about filled
+          // (e.g. a cancel that lost the race with a fill, then a re-sent order). Never let that pass quietly.
+          _log('warn', `[ALPACA SYNC] ⚠ POSSIBLE DUPLICATE FILL — ${pos.ticker} ${pos.contractSymbol || ''}: Alpaca holds ${alpacaQty}, APEX recorded ${_wasQty}. Check Alpaca order history.`);
+        }
         pos.contracts = alpacaQty;
         // fix: on ANY qty change, re-sync cost basis to Alpaca's blended avg —
         // otherwise a scale-in leaves premium at the first fill → wrong P&L at close.
@@ -731,6 +737,10 @@ async function syncPositionPnLFromAlpaca() {
           _log('scan', `[ALPACA SYNC] ${pos.ticker} premium: ${pos.premium} → ${_avgEntry} (blended avg_entry_price)`);
           pos.premium = _avgEntry;
         }
+        // 10/6: COST MUST FOLLOW contracts x premium. It didn't, so the journal's P&L (exit x qty - cost)
+        // charged ONE contract's cost against TWO contracts' proceeds (10/6 SPY 781C: +$710 shown, +$99 real).
+        pos.cost = parseFloat((pos.premium * 100 * pos.contracts).toFixed(2));
+        pos._qtySynced = { from: _wasQty, to: alpacaQty, at: Date.now() };
       }
       if (pos.currentPrice > 0 && pos.premium > 0) {
         pos.unrealizedPnL = parseFloat(((pos.currentPrice - pos.premium) * 100 * pos.contracts).toFixed(2));
