@@ -105,7 +105,7 @@ function simulate(bars, variant, exitSet, P0 = {}) {
     const rolls = Math.floor(days / P.MAX_HOLD_DAYS);   // a roll continues the trade; it only costs another round trip
     const cost = P.COST_RT_PCT * (1 + rolls);
     trades.push({ side: pos.side, entryDate: bars[pos.i].t.slice(0, 10), exitDate: bars[i].t.slice(0, 10), entry: pos.entry, exit: px,
-      ret, retAdj: ret - cost - P.THETA_PCT_PER_DAY * days, days, why, R: ret / pos.stopPct });
+      ret, retAdj: ret - cost - P.THETA_PCT_PER_DAY * days, days, rolls, why, R: ret / pos.stopPct });
     pos = null; lastExitIdx = i;
   };
   const tryEnter = (i, when) => {
@@ -164,15 +164,30 @@ function stats(trades, key = "retAdj") {
 }
 
 // Full study: { SPY: bars[], QQQ: bars[] } -> structured results + a plain-text report.
+// 10/7: re-price a trade list under different cost assumptions (exits don't depend on costs, so the trades are identical)
+function repriced(trades, costRT, thetaDay) {
+  return trades.map(t => ({ ...t, retAdj: t.ret - costRT * (1 + (t.rolls || 0)) - thetaDay * t.days }));
+}
+const SCENARIOS = [
+  { key: "theta05", label: "decay x0.5", theta: 0.5, cost: 1 },
+  { key: "base",    label: "base",       theta: 1,   cost: 1 },
+  { key: "theta2",  label: "decay x2",   theta: 2,   cost: 1 },
+  { key: "cost2",   label: "cost x2",    theta: 1,   cost: 2 },
+  { key: "raw",     label: "no option costs", theta: 0, cost: 0 },
+];
+
 function runStudy(barsByTicker, P0 = {}) {
   const results = [];
+  const PP = { ...DEF, ...P0 };
   for (const exitSet of ["apex", "chandelier"]) for (const v of Object.keys(VARIANTS)) {
     const row = { exitSet, variant: v, byTicker: {}, halves: {} };
     let all = [];
+    row.tickerHalves = {}; row._trades = {};
     for (const [tk, bars] of Object.entries(barsByTicker)) {
       const tr = simulate(bars, v, exitSet, P0); all = all.concat(tr);
-      row.byTicker[tk] = stats(tr);
+      row.byTicker[tk] = stats(tr); row._trades[tk] = tr;
       const mid = bars[Math.floor(bars.length / 2)].t.slice(0, 10);
+      row.tickerHalves[tk] = { H1: stats(tr.filter(t => t.entryDate < mid)), H2: stats(tr.filter(t => t.entryDate >= mid)) };   // 10/7
       for (const [hk, sel] of [["H1", tr.filter(t => t.entryDate < mid)], ["H2", tr.filter(t => t.entryDate >= mid)]]) {
         row.halves[hk] = row.halves[hk] || []; row.halves[hk].push(...sel);
       }
@@ -181,9 +196,18 @@ function runStudy(barsByTicker, P0 = {}) {
     row.all = stats(all); row.allRaw = stats(all, "ret");
     row.H1 = stats(row.halves.H1 || []); row.H2 = stats(row.halves.H2 || []); delete row.halves;
     row.exitMix = all.reduce((m, t) => (m[t.why] = (m[t.why] || 0) + 1, m), {});
+    // 10/7: sensitivity — the same trades under each cost scenario (all / per ticker)
+    row.sensitivity = {};
+    for (const sc of SCENARIOS) {
+      const c = PP.COST_RT_PCT * sc.cost, th = PP.THETA_PCT_PER_DAY * sc.theta, o = {};
+      o.all = stats(repriced(all, c, th));
+      for (const tk of Object.keys(row._trades)) o[tk] = stats(repriced(row._trades[tk], c, th));
+      row.sensitivity[sc.key] = o;
+    }
+    delete row._trades;
     results.push(row);
   }
-  return { params: { ...DEF, ...P0 }, variants: VARIANTS, results, report: textReport(barsByTicker, results) };
+  return { params: { ...DEF, ...P0 }, variants: VARIANTS, scenarios: SCENARIOS, results, report: textReport(barsByTicker, results) };
 }
 
 function textReport(barsByTicker, results) {
@@ -205,6 +229,26 @@ function textReport(barsByTicker, results) {
     }
     for (const r of results.filter(x => x.exitSet === ex)) L.push(`   ${r.variant.padEnd(9)} exits: ${JSON.stringify(r.exitMix)}`);
   }
+  // 10/7: ticker x half — does an edge hold in BOTH halves on EACH ticker?
+  const tks = Object.keys(barsByTicker);
+  for (const ex of ["apex", "chandelier"]) {
+    L.push(""); L.push(`=== BY TICKER x HALF (avg/trade after costs, n) — exits: ${ex === "apex" ? "APEX live" : "chandelier"} ===`);
+    L.push("variant    " + tks.map(t => `${(t + " H1").padEnd(16)}${(t + " H2").padEnd(16)}`).join("") + "consistent?");
+    for (const r of results.filter(x => x.exitSet === ex)) {
+      const cells = tks.flatMap(t => ["H1", "H2"].map(h => r.tickerHalves[t][h]));
+      const allPos = cells.every(c => c.n && c.avg > 0);
+      L.push(`${r.variant.padEnd(10)} ` + cells.map(c => `${f(c.avg, 3).padStart(7)} (${String(c.n || 0).padStart(3)})   `).join("") + (allPos ? "YES — positive in all four" : ""));
+    }
+  }
+  // 10/7: sensitivity — same trades re-priced
+  for (const ex of ["apex", "chandelier"]) {
+    L.push(""); L.push(`=== SENSITIVITY (avg/trade: all | SPY | QQQ) — exits: ${ex === "apex" ? "APEX live" : "chandelier"} ===`);
+    L.push("variant    " + SCENARIOS.map(s => s.label.padEnd(26)).join(""));
+    for (const r of results.filter(x => x.exitSet === ex)) {
+      L.push(`${r.variant.padEnd(10)} ` + SCENARIOS.map(s => { const o = r.sensitivity[s.key];
+        return `${f(o.all.avg, 3)} | ${f((o.SPY || {}).avg, 2)} | ${f((o.QQQ || {}).avg, 2)}`.padEnd(26); }).join(""));
+    }
+  }
   L.push(""); L.push("Variants:"); for (const [k, v] of Object.entries(VARIANTS)) L.push(`  ${k.padEnd(9)} ${v}`);
   L.push(""); L.push("Read it this way: a variant only 'beats' the live rule if it is better in BOTH halves AND on BOTH tickers.");
   L.push("Limits: underlying-level (option P&L approximated by a cost + decay charge); breadth filter not modeled (no history);");
@@ -212,4 +256,4 @@ function textReport(barsByTicker, results) {
   return L.join("\n");
 }
 
-module.exports = { DEF, VARIANTS, indicators, stateAt, entrySignal, simulate, stats, runStudy };
+module.exports = { DEF, VARIANTS, SCENARIOS, repriced, indicators, stateAt, entrySignal, simulate, stats, runStudy };
