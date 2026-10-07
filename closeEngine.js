@@ -318,11 +318,27 @@ async function _doClosePosition(ticker, reason, exitPremium = null, contractSym 
             // existing "state NOT updated — Position preserved" branch below fires and the
             // next scan re-submits at the then-current bid. Self-healing, and no market
             // order on what may be a wide-spread contract.
+            let _cancelErr = null;
+            try { await alpacaDelete(`/orders/${closeResp.id}`); } catch(_ce2) { _cancelErr = _ce2; }
+            // 10/6 (Harrison): THE CANCEL CAN LOSE THE RACE WITH A FILL (same race as entries). If the close filled
+            // between the last poll and the cancel, treating it as unfilled leaves a phantom position that the next
+            // scan tries to sell AGAIN. Re-read the order's final state before deciding.
+            let _finQty = 0;
             try {
-              await alpacaDelete(`/orders/${closeResp.id}`);
-              logEvent("warn", `[CLOSE-UNFILLED] ${closeSym} close order ${closeResp.id} did not fill in ${CLOSE_FILL_TIMEOUT_MS/1000}s — CANCELLED, position preserved and will retry`);
-            } catch(_ce2) {
-              logEvent("error", `[CLOSE-UNFILLED] ${closeSym} could not cancel order ${closeResp.id}: ${_ce2.message} — ORDER MAY STILL BE WORKING, check Alpaca`);
+              await new Promise(r => setTimeout(r, 500));
+              const _fin = await alpacaGet(`/orders/${closeResp.id}`);
+              _finQty = _fin ? parseInt(_fin.filled_qty || 0) : 0;
+              if (_fin && _finQty >= closeQty && parseFloat(_fin.filled_avg_price || 0) > 0) {
+                _closeFilled = true; alpacaCloseOk = true;
+                ep = parseFloat(parseFloat(_fin.filled_avg_price).toFixed(2)); _epSrc = "fill";
+                logEvent("trade", `[CLOSE] ${closeSym} close order ${closeResp.id} FILLED during cancel @ $${ep} — recording the close (no second sell)`);
+              } else if (_finQty > 0) {
+                logEvent("warn", `[CLOSE-PARTIAL] ${closeSym} close order ${closeResp.id} filled ${_finQty}/${closeQty} before cancel — the reconciler will sync the remaining quantity`);
+              }
+            } catch (_finErr) { logEvent("warn", `[CLOSE] post-cancel check failed for ${closeResp.id}: ${_finErr.message}`); }
+            if (!_closeFilled) {
+              if (_cancelErr) logEvent("error", `[CLOSE-UNFILLED] ${closeSym} could not cancel order ${closeResp.id}: ${_cancelErr.message} — ORDER MAY STILL BE WORKING, check Alpaca`);
+              else logEvent("warn", `[CLOSE-UNFILLED] ${closeSym} close order ${closeResp.id} did not fill in ${CLOSE_FILL_TIMEOUT_MS/1000}s — CANCELLED, position preserved and will retry`);
             }
           }
         } else {
@@ -686,9 +702,18 @@ async function _doClosePosition(ticker, reason, exitPremium = null, contractSym 
     _thesisFailure:     pos._thesisFailure || false,
     contractsAtClose:   pos.contracts || contractsToSell,
     pnl_apex:           _pnlApex,
-    pnl_alpaca:         pos.cost > 0
-      ? parseFloat((ep * 100 * (pos.contracts || contractsToSell) - pos.cost).toFixed(2))
-      : _pnlApex,
+    pnl_alpaca:         (() => {
+      // 10/6 (Harrison): cost must match contracts x premium. When the contract count was synced from Alpaca
+      // (or merged) and cost lagged, this charged one contract's cost against two contracts' proceeds.
+      const _q = pos.contracts || contractsToSell, _basisPrem = (pos.premium > 0) ? pos.premium * 100 * _q : 0;
+      const _costOk = pos.cost > 0 && (!_basisPrem || Math.abs(pos.cost - _basisPrem) <= Math.max(1, 0.005 * _basisPrem));
+      const _basis = _costOk ? pos.cost : _basisPrem;
+      return _basis > 0 ? parseFloat((ep * 100 * _q - _basis).toFixed(2)) : _pnlApex;
+    })(),
+    // 10/6: if the position's size changed after the journal's BUY row was written, make the row match what was closed
+    ...(((pos._qtySynced && pos._qtySynced.to > pos._qtySynced.from) || pos._addonMerged) ? {   // only when size went UP after the BUY row entryContracts: pos.contracts || contractsToSell, entryPrice: pos.premium,
+         entryCost: parseFloat(((pos.premium || 0) * 100 * (pos.contracts || contractsToSell)).toFixed(2)),
+         _sizeAdjusted: pos._qtySynced ? { from: pos._qtySynced.from, to: pos._qtySynced.to } : { merged: true } } : {}),
     pnl_pct:            pos.cost > 0 ? parseFloat((_pnlApex / pos.cost * 100).toFixed(1)) : 0,
     hoursHeld:          _hoursHeld,
     isWin:              _pnlApex > 0,
