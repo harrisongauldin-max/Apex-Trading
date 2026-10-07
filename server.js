@@ -378,6 +378,14 @@ async function gracefulShutdown(signal) {
   if (!saved) {
     console.error("[SHUTDOWN] CRITICAL: Could not save state to Redis - positions may be lost on restart");
   }
+  // 10/6 (Harrison): also flush the daily log + telemetry + outcome rows (+ chain snaps). Before this, a deploy lost
+  // everything since the last checkpoint (10/6: three restarts, ~2.2 hours of log/telemetry/outcomes gone).
+  // Time-capped so a slow Redis can't hold the restart hostage.
+  try {
+    const _t0 = Date.now();
+    await Promise.race([saveDailyLogToRedis(false), new Promise(r => setTimeout(r, 7000))]);
+    console.log(`[SHUTDOWN] Daily log/telemetry/outcomes flush finished in ${Date.now() - _t0}ms`);
+  } catch (e) { console.error("[SHUTDOWN] Log flush failed:", e.message); }
   console.log("[SHUTDOWN] Complete - exiting");
   process.exit(0);
 }
@@ -415,7 +423,15 @@ setInterval(async () => {
               pos.currentPrice = alpacaPrice;
               pos._currentPriceUpdatedAt = Date.now();
               if (alpacaPrice > (pos.peakPremium || 0)) pos.peakPremium = alpacaPrice;
-              if (qty !== pos.contracts) pos.contracts = qty;
+              if (qty !== pos.contracts) {
+                // 10/6 (Harrison): keep contracts, premium and cost consistent (this path used to change contracts only).
+                const _wasQty = pos.contracts || 0;
+                if (qty > _wasQty) logEvent("warn", `[ALPACA TRUTH] ⚠ POSSIBLE DUPLICATE FILL — ${pos.ticker} ${sym}: Alpaca holds ${qty}, APEX recorded ${_wasQty}. Check Alpaca order history.`);
+                pos.contracts = qty;
+                if (ap.avgEntry > 0) pos.premium = ap.avgEntry;
+                pos.cost = parseFloat((pos.premium * 100 * pos.contracts).toFixed(2));
+                pos._qtySynced = { from: _wasQty, to: qty, at: Date.now() };
+              }
               priceUpdates++;
             }
           }
@@ -662,19 +678,24 @@ cron.schedule("5 20,21 * * 1-5", async () => {
   const et = getETTime();
   if (et.getHours() === 16 && et.getMinutes() === 5) {
     sendEmail("eod").catch(e => logEvent("error", `[EMAIL] EOD email failed: ${e.message}`));
-    await saveDailyLogToRedis(true);
+    // 10/7: record completion — the next morning's [DAY-ROLLOVER] line reports it (logs after 16:05 aren't emailed)
+    const _eodT0 = Date.now(); let _eodOk = false;
+    try { await saveDailyLogToRedis(true); _eodOk = true; } catch (e) { console.error("[EOD-SAVE] failed:", e.message); }
+    state._lastEodSave = { day: getETDateStr(), at: getETTime().toTimeString().slice(0, 8), ms: Date.now() - _eodT0, ok: _eodOk };
+    console.log(`[EOD-SAVE] ${_eodOk ? "completed" : "FAILED"} in ${Date.now() - _eodT0}ms`);
   }
 });
 
-cron.schedule("30 13-21 * * 1-5", async () => {
+cron.schedule("*/5 13-21 * * 1-5", async () => {   // 10/6: every LOG_CHECKPOINT_MIN min (was hourly at :30)
+  const _ckMin = [5, 10, 15, 20, 30, 60].includes(+require("./constants").LOG_CHECKPOINT_MIN) ? +require("./constants").LOG_CHECKPOINT_MIN : 10;
   const et = getETTime();
   const etH = et.getHours();
   const etM = et.getMinutes();
-  if (etM !== 30 || etH < 9 || etH > 15) return;
+  if (etM % _ckMin !== 0 || etH < 9 || etH > 15 || (etH === 9 && etM < 30)) return;
   if (etH === 16) return;
   const bufLen = (state._dailyLogBuffer || []).length;
   if (bufLen === 0) return;
-  logEvent("scan", `[AUTO-SAVE] Hourly log checkpoint: saving ${bufLen} entries to Redis...`);
+  logEvent("scan", `[AUTO-SAVE] ${_ckMin}-min log checkpoint: saving ${bufLen} entries to Redis...`);
   await saveDailyLogToRedis(false);
 });
 
@@ -1428,6 +1449,43 @@ app.get("/api/logs/download", requireSecret, (req, res) => {
     res.setHeader("Content-Disposition", `attachment; filename="argo-server-log-${new Date().toISOString().slice(0,10)}.txt"`);
     res.setHeader("X-Log-Entries", buf.length);
     res.send(header + lines.join("\n"));
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// 10/6 (Harrison): JOURNAL P&L REPAIR. Before the cost-sync fix, a position whose contract count was synced up from
+// Alpaca kept one contract's cost, so its journal row showed exit x qty - (1 contract's cost) as P&L (10/6 SPY 781C:
+// +$710 shown, ~+$95 real). This finds CLOSED rows where contracts at close > contracts at entry AND the journal's
+// pnl_alpaca disagrees with APEX's premium-based pnl_apex, and resets them. DRY RUN unless ?apply=1. ?days=N (max 60).
+app.post("/api/journal/repair-pnl", requireSecret, async (req, res) => {
+  try {
+    const days = Math.min(60, Math.max(1, parseInt(req.query.days || "30") || 30));
+    const apply = String(req.query.apply || "") === "1";
+    const fixes = [];
+    for (let k = 0; k < days; k++) {
+      const d = new Date(Date.now() - k * 86400000).toISOString().slice(0, 10);
+      const entries = await loadJournalDay(d);
+      if (!Array.isArray(entries) || !entries.length) continue;
+      let changed = false;
+      for (const e of entries) {
+        if (e.status !== "CLOSED" || e._pnlRepaired) continue;
+        const q = +e.contractsAtClose || 0, eq = +e.entryContracts || 1, ex = +e.exitPrice, apex = e.pnl_apex, alp = e.pnl_alpaca;
+        if (!(q > eq) || apex == null || alp == null || !(ex > 0)) continue;
+        if (Math.abs(alp - apex) <= Math.max(25, 0.2 * Math.abs(apex))) continue;
+        const newCost = parseFloat((ex * 100 * q - apex).toFixed(2));
+        fixes.push({ date: d, ticker: e.ticker, symbol: e.contractSymbol, entryContracts: eq, contractsAtClose: q,
+                     pnlShown: alp, pnlCorrected: apex, entryCostWas: e.entryCost ?? null, entryCostNow: newCost });
+        if (apply) {
+          e._pnlRepaired = { at: new Date().toISOString(), pnl_alpaca_was: alp, entryContracts_was: eq, entryCost_was: e.entryCost ?? null, pnl_pct_was: e.pnl_pct ?? null };
+          e.pnl_alpaca = apex; e.entryContracts = q; e.entryCost = newCost;
+          e.entryPrice = parseFloat((newCost / 100 / q).toFixed(4));
+          e.pnl_pct = newCost > 0 ? parseFloat((apex / newCost * 100).toFixed(1)) : e.pnl_pct;
+          changed = true;
+        }
+      }
+      if (changed) await saveJournalDay(d, entries);
+    }
+    if (apply && fixes.length) logEvent("warn", `[JOURNAL-REPAIR] corrected ${fixes.length} row(s): ${fixes.map(f => `${f.date} ${f.ticker} ${f.pnlShown}->${f.pnlCorrected}`).join(", ")}`);
+    res.json({ apply, days, fixes });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
