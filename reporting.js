@@ -580,11 +580,29 @@ function buildEmailHTML(type) {
   const _totalDaily = (state._alpacaTruth && typeof state._alpacaTruth.totalPnL === "number")
     ? state._alpacaTruth.totalPnL
     : (curPortfolio - (state.dayOpenEquity != null ? state.dayOpenEquity : state.dayStartCash));
-  const _unrealizedToday = _totalDaily - _realizedToday;   // open-position repricing = total minus what was realized
+  // 10/6 (Harrison): was (total - realized) — two different bases (Alpaca's day change is vs YESTERDAY's close, APEX
+  // realized is vs ENTRY), so the day a held position closed it showed fiction (10/6: "+$573.60", real +$8). Now:
+  // open positions' P&L since entry, straight from Alpaca; fallback = APEX marks.
+  const _openPos = (state._alpacaTruth && Array.isArray(state._alpacaTruth.openPositions)) ? state._alpacaTruth.openPositions : null;
+  const _unrealizedToday = _openPos
+    ? _openPos.reduce((s, p) => s + (+p.unrealizedPnL || 0), 0)
+    : (state.positions || []).reduce((s, p) => s + ((+p.currentPrice || +p.premium || 0) - (+p.premium || 0)) * 100 * (p.contracts || 1), 0);
   const realizedDay   = _realizedToday.toFixed(2);
   const unrealizedDay = _unrealizedToday.toFixed(2);
   const daily         = _totalDaily.toFixed(2);   // kept for the isGood color + any downstream use
-  const weekly = (curPortfolio - state.weekStartCash).toFixed(2);
+  // 10/7 (Harrison): was (cash + open-position COST) - weekStartCash, so an open position's cost basis read as profit
+  // (10/7: "+$4,866.52"). Now week-to-date and month-to-date REALIZED from closed trades — the daily line's basis.
+  const _etD = (ms) => new Date(ms).toLocaleDateString("en-CA", { timeZone: "America/New_York" });
+  const _todayET = _etD(Date.now());
+  const _dowET = new Date(_todayET + "T12:00:00Z").getUTCDay();             // 0=Sun..6=Sat
+  const _weekStartET = _etD(Date.parse(_todayET + "T12:00:00Z") - ((_dowET + 6) % 7) * 86400000);   // Monday
+  const _monthStartET = _todayET.slice(0, 8) + "01";
+  const _ct = (state.closedTrades || []).filter(t => t.closeTime);
+  const _sumSince = (d0) => _ct.filter(t => _etD(t.closeTime) >= d0).reduce((s, t) => s + (typeof t.pnl === "number" ? t.pnl : 0), 0);
+  const _oldestET = _ct.length ? _etD(Math.min(..._ct.map(t => t.closeTime))) : null;
+  const _maybeCut = (d0) => (_ct.length >= 200 && _oldestET && _oldestET > d0) ? "*" : "";   // list holds the last 200 trades only
+  const weekly = _sumSince(_weekStartET).toFixed(2), weeklyCut = _maybeCut(_weekStartET);
+  const monthly = _sumSince(_monthStartET).toFixed(2), monthlyCut = _maybeCut(_monthStartET);
 
   const posRows = state.positions.map(p => {
     const strikeLabel = p.isSpread ? `$${p.buyStrike}/$${p.sellStrike} ${p.optionType.toUpperCase()} SPRD` : `$${p.strike}${p.optionType === 'put' ? 'P' : 'C'}`;
@@ -612,7 +630,7 @@ function buildEmailHTML(type) {
   <div style="background:#0a1628;border:1px solid #0d3050;border-radius:8px;padding:14px">
     <div style="font-size:10px;color:#336688">REALIZED P&L (today's trades)</div>
     <div style="font-size:18px;font-weight:700;color:${parseFloat(realizedDay)>=0?"#00ff88":"#ff5555"}">${parseFloat(realizedDay)>=0?"+":""}$${realizedDay}</div>
-    <div style="font-size:9px;color:#557799;margin-top:4px">Unrealized (open marks): <span style="color:${parseFloat(unrealizedDay)>=0?"#00c488":"#dd7777"}">${parseFloat(unrealizedDay)>=0?"+":""}$${unrealizedDay}</span></div>
+    <div style="font-size:9px;color:#557799;margin-top:4px">Open positions (since entry): <span style="color:${parseFloat(unrealizedDay)>=0?"#00c488":"#dd7777"}">${parseFloat(unrealizedDay)>=0?"+":""}$${unrealizedDay}</span> · Account change today: <span style="color:${parseFloat(daily)>=0?"#00c488":"#dd7777"}">${parseFloat(daily)>=0?"+":""}$${daily}</span></div>
   </div>
   <div style="background:#0a1628;border:1px solid #0d3050;border-radius:8px;padding:14px">
     <div style="font-size:10px;color:#336688">POSITIONS</div>
@@ -627,9 +645,9 @@ function buildEmailHTML(type) {
 <div style="background:#0a1628;border:1px solid #0d3050;border-radius:8px;padding:14px;margin-bottom:12px">
   <h3 style="color:#336688;font-size:11px;margin:0 0 10px;text-transform:uppercase">Performance</h3>
   <table style="width:100%;font-size:12px;border-collapse:collapse">
-    <tr><td style="color:#336688;padding:3px 0">Total Realized P&L</td><td style="text-align:right;color:${pnl>=0?"#00ff88":"#ff5555"};font-weight:700">${pnl>=0?"+":""}${fmt(pnl)}</td></tr>
-    <tr><td style="color:#336688;padding:3px 0">Weekly P&L</td><td style="text-align:right;color:${parseFloat(weekly)>=0?"#00ff88":"#ff5555"};font-weight:700">${parseFloat(weekly)>=0?"+":""}$${weekly}</td></tr>
-    <tr><td style="color:#336688;padding:3px 0">Monthly Revenue</td><td style="text-align:right;font-weight:700">${fmt(state.totalRevenue)}</td></tr>
+    <tr><td style="color:#336688;padding:3px 0">Realized P&L <span style="font-size:9px">(last ${trades.length} trades)</span></td><td style="text-align:right;color:${pnl>=0?"#00ff88":"#ff5555"};font-weight:700">${pnl>=0?"+":""}${fmt(pnl)}</td></tr>
+    <tr><td style="color:#336688;padding:3px 0">Week-to-date realized <span style="font-size:9px">(since Mon)</span></td><td style="text-align:right;color:${parseFloat(weekly)>=0?"#00ff88":"#ff5555"};font-weight:700">${parseFloat(weekly)>=0?"+":""}$${weekly}${weeklyCut}</td></tr>
+    <tr><td style="color:#336688;padding:3px 0">Month-to-date realized</td><td style="text-align:right;color:${parseFloat(monthly)>=0?"#00ff88":"#ff5555"};font-weight:700">${parseFloat(monthly)>=0?"+":""}$${monthly}${monthlyCut}</td></tr>
     <tr><td style="color:#336688;padding:3px 0">Win Rate</td><td style="text-align:right;font-weight:700">${trades.length?Math.round(wins.length/trades.length*100)+"% ("+wins.length+"/"+trades.length+")":"N/A"}</td></tr>
     <tr><td style="color:#336688;padding:3px 0">VIX</td><td style="text-align:right;font-weight:700;color:${state.vix>25?"#ff9944":"#00ff88"}">${state.vix}</td></tr>
     <tr><td style="color:#336688;padding:3px 0">Circuit Breaker</td><td style="text-align:right;font-weight:700;color:${state.circuitOpen?"#00ff88":"#ff5555"}">${state.circuitOpen?"OPEN":"TRIPPED"}</td></tr>
@@ -708,7 +726,7 @@ RETURNS
   Starting Budget: ${fmt(MONTHLY_BUDGET)}
   Current Cash:    ${fmt(state.cash)}
   Total P&L:       ${pnl>=0?"+":""}${fmt(pnl)}
-  Monthly Revenue: ${fmt(state.totalRevenue)}
+  Gross Wins:      ${fmt(state.totalRevenue)}  (sum of winning trades only — not net P&L)
   Bonus Earned:    ${fmt(state.extraBudget)}
 
 TRADE STATISTICS
