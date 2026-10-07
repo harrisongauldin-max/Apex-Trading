@@ -763,7 +763,10 @@ input[type=text]:focus{border-color:var(--blue)}
 <div id="tab-journal" class="content">
   <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;flex-wrap:wrap;gap:8px">
     <div class="section-title" style="margin:0">Trade Journal — Logic, Entry &amp; Exit Reasoning</div>
-    <button class="btn btn-green" onclick="copyJournal()" id="copy-journal-btn">📋 COPY JOURNAL</button>
+    <span style="display:inline-flex;gap:6px">
+      <button class="btn" onclick="repairJournalPnl()" id="repair-journal-btn" title="Finds closed trades whose size grew after the buy was recorded and whose journal P&amp;L used only the first contract's cost. Shows the list first; changes nothing unless you confirm.">🛠 REPAIR P&amp;L</button>
+      <button class="btn btn-green" onclick="copyJournal()" id="copy-journal-btn">📋 COPY JOURNAL</button>
+    </span>
   </div>
   <div style="display:flex;gap:6px;margin-bottom:12px;flex-wrap:wrap">
     <button class="btn jv-btn active" data-jv="recent"  onclick="setJournalView('recent')">TODAY</button>
@@ -2710,6 +2713,22 @@ function downloadTrendBacktestReport() {
   const url = URL.createObjectURL(new Blob([_tbtLast.report], { type: 'text/plain' }));
   const a = document.createElement('a'); a.href = url; a.download = 'apex-trend-backtest-' + new Date().toISOString().slice(0, 10) + '.txt';
   document.body.appendChild(a); a.click(); a.remove(); URL.revokeObjectURL(url);
+}
+
+// 10/6: journal P&L repair — dry run first, then apply only on confirmation
+async function repairJournalPnl() {
+  const s = sessionStorage.getItem('apexSecret') || prompt('Enter APEX secret:') || '';
+  const call = async (apply) => { const r = await fetch('/api/journal/repair-pnl?days=30' + (apply ? '&apply=1' : ''), { method: 'POST', headers: { 'x-argo-secret': s } });
+    if (!r.ok) throw new Error('HTTP ' + r.status + (r.status === 401 ? ' (bad/missing secret)' : r.status === 404 ? ' (server.js not deployed?)' : '')); return r.json(); };
+  try {
+    const dry = await call(false); if (s) sessionStorage.setItem('apexSecret', s);
+    if (!dry.fixes || !dry.fixes.length) { alert('Journal P&L check: no rows need repair (last 30 days).'); return; }
+    const list = dry.fixes.map(f => `${f.date}  ${f.ticker} ${f.symbol || ''}\n   ${f.entryContracts}→${f.contractsAtClose} contracts · P&L shown ${f.pnlShown >= 0 ? '+' : ''}$${f.pnlShown} → corrected ${f.pnlCorrected >= 0 ? '+' : ''}$${f.pnlCorrected}`).join('\n');
+    if (!confirm(`These ${dry.fixes.length} journal row(s) would be corrected:\n\n${list}\n\nApply? (The originals are kept on each row for reference.)`)) return;
+    const done = await call(true);
+    alert(`Repaired ${done.fixes.length} row(s).`);
+    if (typeof loadJournal === 'function') loadJournal();
+  } catch (e) { alert('Journal repair failed: ' + e.message); }
 }
 
 // 8/28: download the full session log on demand
