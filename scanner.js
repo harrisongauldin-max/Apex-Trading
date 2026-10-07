@@ -2933,9 +2933,27 @@ async function runScan() {
                 const _f = v => (v == null ? "n/a" : v);
                 logEvent("filter", `[ITREND-OR] ${liveStock.ticker} ${_iSide.toUpperCase()} — APEX range w${_f(_ot.w)}% brk${_f(_ot.brk)}% opposite:${_ot.opp == null ? "n/a" : _ot.opp ? "BROKEN" : "intact"} | textbook range w${_f(_ot.tw)}% brk${_f(_ot.tbrk)}%${_ot.tbrk != null && _ot.tbrk <= 0 ? " (NOT a break)" : ""} opposite:${_ot.topp == null ? "n/a" : _ot.topp ? "BROKEN" : "intact"} [measure-only]`);
               } catch (_otErr) { liveStock._iOrTag = null; }
+              try {   // 10/7 (Harrison): META-LABEL features at entry. LABEL ONLY — nothing here gates or sizes the trade.
+                // skipBy = which candidate filters WOULD have skipped this entry; the outcomes file then answers
+                // "how did trades flagged X do vs unflagged?" (e.g. is there an edge anywhere in ADX 25-40?).
+                const _g = (state._gexNow || {})[liveStock.ticker] || null, _o = liveStock._iOrTag || {};
+                const _skip = [];
+                if (_iAdx < ITREND_LATE_ADX_MIN)                      _skip.push("adx<40");
+                if (_o.opp === true)                                  _skip.push("or-opp-broken");
+                if (_o.tbrk != null && _o.tbrk <= 0)                  _skip.push("or-textbook-no-break");
+                if (_o.topp === true)                                 _skip.push("or-textbook-opp-broken");
+                if (_g && _g.regime === "neg")                        _skip.push("gex-neg");
+                if (_g && _g.regimeHeld)                              _skip.push("gex-held");
+                if (_g && typeof _g.distFlipPct === "number" && Math.abs(_g.distFlipPct) < 0.15) _skip.push("near-flip");
+                liveStock._iMeta = { adxTier: _iAdx >= ITREND_LATE_ADX_MIN ? "40+" : "25-40",
+                  gexReg: _g ? _g.regime : null, gexRaw: _g ? (_g.regimeRaw ?? _g.regime) : null,
+                  gexNetM: _g && typeof _g.netGexM === "number" ? Math.round(_g.netGexM) : null,
+                  gexDistFlip: _g && typeof _g.distFlipPct === "number" ? +_g.distFlipPct.toFixed(3) : null, skipBy: _skip };
+                logEvent("filter", `[ITREND-META] ${liveStock.ticker} ${_iSide.toUpperCase()} — ADX ${_iAdx.toFixed(0)} (${liveStock._iMeta.adxTier}) | gamma ${_g ? _g.regime : "n/a"}${_g && _g.regimeHeld ? " (held)" : ""} net ${_g ? Math.round(_g.netGexM) + "M" : "n/a"} flip ${_g && _g.distFlipPct != null ? _g.distFlipPct.toFixed(2) + "%" : "n/a"} | would-skip: ${_skip.length ? _skip.join(", ") : "none"} [label only — entering as normal]`);
+              } catch (_mErr) { liveStock._iMeta = null; }
               state._iTrendLast[_iCoolKey] = Date.now();
               const _iOK = await executeTrade(liveStock, price, 0, [_iReason], state.vix, _iSide, false, 1.0, null, null, `${liveStock.ticker}-${_iSide}-itrend-${Date.now()}`);
-              liveStock._iTrend = null; liveStock._iCvdTag = null; liveStock._iOrTag = null;   // 10/6: don't let tags leak onto a later entry
+              liveStock._iTrend = null; liveStock._iCvdTag = null; liveStock._iOrTag = null; liveStock._iMeta = null;   // 10/6+10/7: don't let tags leak onto a later entry
               if (_iOK) { recordStandDown("itrend", "FIRED"); logEvent("filter", `[INTRADAY-TREND] ${liveStock.ticker} ${_iSide.toUpperCase()} FIRED — ${_iReason}`); continue; }
             } else if (!_iSuppressed) {
               recordStandDown("itrend", !_iSide ? "no aligned intraday trend (need vwap+slope+ORbreak agree)" : _iHave ? "position already open" : "cooldown (recent fire)");
