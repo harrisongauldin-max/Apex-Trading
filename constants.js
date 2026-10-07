@@ -901,10 +901,14 @@ const VIX_ANCHOR_ENABLED   = true;
 // CALM MARKET (16 -> 30) could never trigger the close-all. Replaced by a check on whether the previous reading was a
 // real fetch. true = restore the old <18 rule.
 const VIX_LOWBASE_SUPPRESS = false;
+// 10/6 (Harrison): minutes between in-session log/telemetry/outcome checkpoints to Redis (was hourly). Each checkpoint
+// re-uploads the day's log + telemetry + outcomes + chain snaps, so Redis bandwidth scales with 1/this. 10 = at most
+// ~10 min of data at risk if the process dies without a clean shutdown. Valid: 5, 10, 15, 20, 30, 60.
+const LOG_CHECKPOINT_MIN = 10;
 
 module.exports = {
   ALPACA_KEY, ALPACA_SECRET, ALPACA_BASE, ALPACA_DATA, ALPACA_OPTIONS,
-  VIX_ANCHOR_ENABLED, VIX_LOWBASE_SUPPRESS,
+  VIX_ANCHOR_ENABLED, VIX_LOWBASE_SUPPRESS, LOG_CHECKPOINT_MIN,
   ALPACA_OPT_SNAP, ALPACA_NEWS, OPTION_FEED, GMAIL_USER, RESEND_API_KEY,
   ANTHROPIC_API_KEY, ANTHROPIC_MODEL, REDIS_URL, REDIS_TOKEN, REDIS_KEY,
   REDIS_SAVE_INTERVAL, MARKETAUX_KEY, MONTHLY_BUDGET, DEFAULT_VIX, CAPITAL_FLOOR,
