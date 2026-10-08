@@ -2101,7 +2101,11 @@ async function runScan() {
                 let _pv = 0, _vv = 0;
                 for (const _b of _todayBars) { const v=+_b.v||0; if (!v) continue; _pv += ((+_b.h + +_b.l + +_b.c) / 3) * v; _vv += v; }
                 const _last = +_todayBars[_todayBars.length - 1].c;
-                if (_vv > 0 && _last > 0) { const _vw = _pv / _vv; _da.nV++; if (_last > _vw) _da.vUp++; else if (_last < _vw) _da.vDn++; }
+                if (_vv > 0 && _last > 0) { const _vw = _pv / _vv; _da.nV++; if (_last > _vw) _da.vUp++; else if (_last < _vw) _da.vDn++;
+                  // 10/7: session RMS of the VWAP deviation (one sample per new 1-min bar) -> mr-fade stretch z-score
+                  const _bt = _todayBars[_todayBars.length - 1].t;
+                  if (_bt && _da.zLastT !== _bt) { const _dv = (_last - _vw) / _vw * 100; _da.zLastT = _bt; _da.zN = (_da.zN || 0) + 1; _da.zSS = (_da.zSS || 0) + _dv * _dv; }
+                }
               }
             } catch (_daErr) { /* measurement only — never break the scan */ }
             try { DAYCTX.updateDay(state, _tk, _todayBars); DAYCTX.ensurePriorProfile(state, _tk); } catch (_dcErr) { /* measurement only */ }
@@ -2969,6 +2973,22 @@ async function runScan() {
     // full confluence aligns, reusing executeTrade. Bypasses the momentum-era gates by design — it is
     // a DIFFERENT strategy — but respects the position guard below. Kill switch: MR_FADE_ENABLED.
     // Wrapped so a fault can never disturb the scan.
+    // 10/7 (Harrison): SHADOW INVALIDATION — measure-only. mrStrategy computes an underlying-LEVEL invalidation for every
+    // fade (thesis dead if price extends INVALIDATION_PCT beyond entry), but the exit engine never uses it (fades exit on
+    // premium stop / target / trail / 60-min cap). Record the FIRST time price crosses it, and what the option was worth
+    // then, so we can test whether exiting at invalidation would have beaten the actual exit. Never closes anything.
+    try {
+      for (const _p of (state.positions || [])) {
+        if (!_p._isMrFade || _p.ticker !== liveStock.ticker || _p._mrInvHit || typeof _p._mrInvalidation !== "number" || !(price > 0)) continue;
+        const _crossed = _p.optionType === "call" ? price <= _p._mrInvalidation : price >= _p._mrInvalidation;
+        if (!_crossed) continue;
+        const _held = (Date.now() - new Date(_p.openDate || Date.now()).getTime()) / 60000;
+        const _chg = (_p.currentPrice > 0 && _p.premium > 0) ? (_p.currentPrice / _p.premium - 1) * 100 : null;
+        _p._mrInvHit = { at: Date.now(), min: +_held.toFixed(1), px: price, optChg: _chg != null ? +_chg.toFixed(1) : null };
+        markDirty();
+        logEvent("filter", `[MR-FADE] SHADOW INVALIDATION — ${_p.ticker} ${_p.optionType}: price ${price.toFixed(2)} crossed ${_p._mrInvalidation.toFixed(2)} after ${_held.toFixed(0)} min, option ${_chg != null ? (_chg >= 0 ? "+" : "") + _chg.toFixed(1) + "%" : "n/a"} at that moment [measure-only — position NOT closed]`);
+      }
+    } catch (_sivErr) { /* measurement only */ }
     if (mrFadeActive(MR_FADE_ENABLED) && MRSTRAT && liveStock) {   // runtime kill switch (dashboard toggle)
       try {
         // 9/21 (Harrison): EOD entry cutoff. mr-fade is an intraday sleeve but had NO time gate, so it opened
@@ -3025,10 +3045,28 @@ async function runScan() {
               liveStock._driftVwap = (_da && _da.nV >= 5)  ? +((_isPut ? _da.vUp : _da.vDn) / _da.nV).toFixed(2) : null;
               logEvent("filter", `[MR-FADE] ${liveStock.ticker} drift tag — flow-against ${liveStock._driftFlow ?? "n/a"} | price-beyond-VWAP ${liveStock._driftVwap ?? "n/a"} [measure-only]`);
             }
+            try {   // 10/7 (Harrison): mr-fade MEASUREMENT stamps (Chan z-score, ATR stretch, gamma magnitude, wall distance). Label only.
+              const _da2 = (state._driftAcc || {})[liveStock.ticker];
+              const _rms = (_da2 && _da2.zN >= 15 && _da2.zSS > 0) ? Math.sqrt(_da2.zSS / _da2.zN) : null;
+              const _atr = (state._dailyMA && state._dailyMA[liveStock.ticker] && state._dailyMA[liveStock.ticker].atr) || null;
+              const _vwPx = liveStock.intradayVWAP > 0 ? liveStock.intradayVWAP : null;
+              const _g2 = (state._gexNow || {})[liveStock.ticker] || null;
+              const _wall = _g2 ? (_mrDec.side === "put" ? _g2.callWall : _g2.putWall) : null;
+              liveStock._mrMeta = {
+                stretchZ:   (_rms && _mrVwap != null) ? +(_mrVwap / _rms).toFixed(2) : null,
+                stretchAtr: (_atr && _vwPx) ? +((price - _vwPx) / _atr).toFixed(3) : null,
+                loc: _mrDec.locationSource || null,
+                wallDistPct: (_wall > 0) ? +((price - _wall) / price * 100).toFixed(3) : null,
+                gexReg: _g2 ? _g2.regime : null, gexRaw: _g2 ? (_g2.regimeRaw ?? _g2.regime) : null,
+                gexNetM: _g2 && typeof _g2.netGexM === "number" ? Math.round(_g2.netGexM) : null,
+                gexDistFlip: _g2 && typeof _g2.distFlipPct === "number" ? +_g2.distFlipPct.toFixed(3) : null };
+              const _m = liveStock._mrMeta, _f2 = v => (v == null ? "n/a" : v);
+              logEvent("filter", `[MR-META] ${liveStock.ticker} ${_mrDec.side} — stretch ${_mrVwap != null ? _mrVwap.toFixed(2) : "n/a"}% = z ${_f2(_m.stretchZ)} (session RMS ${_rms ? _rms.toFixed(3) : "n/a"}%) = ${_f2(_m.stretchAtr)} ATR | loc ${_f2(_m.loc)}, wall ${_f2(_m.wallDistPct)}% away | gamma ${_f2(_m.gexReg)} net ${_f2(_m.gexNetM)}M flip ${_f2(_m.gexDistFlip)}% [measure-only]`);
+            } catch (_mmErr) { liveStock._mrMeta = null; }
             const _mrSigId = `${liveStock.ticker}-${_mrDec.side}-mrfade-${Date.now()}`;   // own signalId (the momentum _sigId is defined later — TDZ)
             const _mrScore = 0;
             const _mrOK = await executeTrade(liveStock, price, _mrScore, [_mrDec.reason], state.vix, _mrDec.side, true, 1.0, null, null, _mrSigId);
-            liveStock._mrFade = null; liveStock._driftFlow = null; liveStock._driftVwap = null;
+            liveStock._mrFade = null; liveStock._driftFlow = null; liveStock._driftVwap = null; liveStock._mrMeta = null;
             if (_mrOK) continue;                         // handled by the MR path this scan; skip the momentum entry
           }
           }
