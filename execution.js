@@ -96,6 +96,17 @@ async function getOptionsPrice(symbol) {
 // trade, not two signals. Twin-leg legs differ by EXPIRY so they are unaffected.
 const MIN_STRIKE_DISTINCT = 5;
 
+// 10/7 (Harrison): ONE definition of the delta window an entry will ACCEPT, used by both findContract (selection) and
+// executeTrade (final check). They used to disagree: findContract picked the strike closest to the target from its own
+// wider window, then executeTrade rejected it if it sat a hair outside the acceptance band. mr-fade targets 0.42 = the
+// TOP of its 0.22-0.42 band, so whenever the closest strike was 0.427 the whole trade was discarded (~40% of mr-fade
+// FIRE decisions in recent logs). Now findContract only SELECTS among strikes the entry will accept.
+function _acceptDeltaRange(stock) {
+  const min = (stock && stock._straddle) ? 0.40 : (stock && stock._iTrend) ? ITREND_DELTA_MIN : (stock && stock._isTrend) ? TREND_DELTA_MIN : (stock && stock._structBreak) ? BREAK_DELTA_MIN : TARGET_DELTA_MIN;
+  const max = (stock && stock._straddle) ? 0.60 : (stock && stock._iTrend) ? ITREND_DELTA_MAX : (stock && stock._isTrend) ? TREND_DELTA_MAX : (stock && stock._structBreak) ? BREAK_DELTA_MAX : TARGET_DELTA_MAX;
+  return [min, max];
+}
+
 async function findContract(ticker, optionType, targetDelta, targetDTE, vix, stock, fixedExpiry = null) {
   try {
     const today = getETTime();
@@ -208,7 +219,8 @@ async function findContract(ticker, optionType, targetDelta, targetDTE, vix, sto
         });
       }
       const _dist = Math.abs(delta - targetDelta);
-      if (_dist < _bestDist) {
+      const [_accMin, _accMax] = _acceptDeltaRange(stock);   // 10/7: select only what executeTrade will accept
+      if (delta >= _accMin && delta <= _accMax && _dist < _bestDist) {
         _bestDist = _dist;
         _bestRawIV = _rawIV;
         _best = {
@@ -568,8 +580,8 @@ async function executeTrade(stock, price, score, scoreReasons, vix, optionType =
   }
 
   const delta = parseFloat(contract.greeks.delta || 0);
-  const _dMin = (stock && stock._straddle) ? 0.40 : (stock && stock._iTrend) ? ITREND_DELTA_MIN : (stock && stock._isTrend) ? TREND_DELTA_MIN : (stock && stock._structBreak) ? BREAK_DELTA_MIN : TARGET_DELTA_MIN;
-  const _dMax = (stock && stock._straddle) ? 0.60 : (stock && stock._iTrend) ? ITREND_DELTA_MAX : (stock && stock._isTrend) ? TREND_DELTA_MAX : (stock && stock._structBreak) ? BREAK_DELTA_MAX : TARGET_DELTA_MAX;   // 9/20: straddle legs are ATM 0.50 — the momentum band (0.22-0.42) was rejecting every straddle PUT (delta 0.499 > 0.42) → the real orphan cause
+  const [_dMin, _dMaxShared] = _acceptDeltaRange(stock);   // 10/7: same window findContract selected from
+  const _dMax = _dMaxShared;   // 9/20: straddle legs are ATM 0.50 — the momentum band (0.22-0.42) was rejecting every straddle PUT (delta 0.499 > 0.42) → the real orphan cause
   if (Math.abs(delta) < _dMin || Math.abs(delta) > _dMax) {
     logEvent("filter", `${stock.ticker} - delta ${delta} outside ${stock && stock._structBreak ? "break" : "target"} range`);
     return false;
@@ -774,6 +786,7 @@ async function executeTrade(stock, price, score, scoreReasons, vix, optionType =
     _iCvdTag:       stock._iCvdTag || null,   // 9/28: CVD agree/conflict measurement tag
     _iOrTag:        stock._iOrTag || null,    // 10/6: opening-range context at entry (APEX + textbook range)
     _iMeta:         stock._iMeta || null,     // 10/7: meta-label features at entry (ADX tier, gamma, skipBy)
+    _mrMeta:        stock._mrMeta || null,    // 10/7: mr-fade measurement stamps (z-score, ATR stretch, wall distance, gamma)
     _driftFlow:     (stock._driftFlow != null) ? stock._driftFlow : null,   // 10/5: mr-fade drift-day tag (measure-only)
     _driftVwap:     (stock._driftVwap != null) ? stock._driftVwap : null,
     _ctx:           (() => { try { return require('./dayContext').entryContext(state, stock.ticker, price); } catch (_) { return null; } })(),   // 10/6: day context at entry (measure-only)
@@ -956,7 +969,8 @@ async function executeTrade(stock, price, score, scoreReasons, vix, optionType =
   if (stock._iTrend) { (_openSame || position)._iTrend = true; }
   if (stock._iCvdTag) { (_openSame || position)._iCvdTag = stock._iCvdTag; }
   if (stock._iOrTag && !(_openSame && _openSame._iOrTag)) { (_openSame || position)._iOrTag = stock._iOrTag; }
-  if (stock._iMeta && !(_openSame && _openSame._iMeta)) { (_openSame || position)._iMeta = stock._iMeta; }   // 10/7: keep the FIRST entry's labels   // 10/6: keep the FIRST entry's range context   // 9/28: CVD agree/conflict tag (measure-only) → flows to outcome
+  if (stock._iMeta && !(_openSame && _openSame._iMeta)) { (_openSame || position)._iMeta = stock._iMeta; }   // 10/7: keep the FIRST entry's labels
+  if (stock._mrMeta && !(_openSame && _openSame._mrMeta)) { (_openSame || position)._mrMeta = stock._mrMeta; }   // 10/6: keep the FIRST entry's range context   // 9/28: CVD agree/conflict tag (measure-only) → flows to outcome
   if (stock._driftFlow != null) { (_openSame || position)._driftFlow = stock._driftFlow; }   // 10/5: drift tag -> outcome
   if (stock._driftVwap != null) { (_openSame || position)._driftVwap = stock._driftVwap; }
   (_openSame || position)._entryX = {
