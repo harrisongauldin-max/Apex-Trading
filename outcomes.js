@@ -81,7 +81,8 @@ const OUTCOME_HEADER = [
   "exitBid","exitAsk","exitQuoteAgeS",                             // 10/6: last monitored quote at exit -> real exit spread
   "eVixSrc","eTerm9d","eTerm3m","eIntAdv","eIntVwap","eIntCumTick", // 10/6: VIX source/term structure + internals at entry
   "eOrW","eOrBrk","eOrOpp","eOrTW","eOrTBrk","eOrTOpp",
-  "eAdxTier","eGexReg","eGexRaw","eGexNetM","eGexDistFlip","eSkipBy","eSkipN",   // 10/7: meta-label features (skipBy = "|"-joined)             // 10/6: opening range at entry — APEX range, then textbook range
+  "eAdxTier","eGexReg","eGexRaw","eGexNetM","eGexDistFlip","eSkipBy","eSkipN",   // 10/7: meta-label features (skipBy = "|"-joined)
+  "eMrZ","eMrAtr","eMrLoc","eMrWallDist","mrInvPx","mrInvHit","mrInvHitMin","mrInvHitChg",   // 10/7: mr-fade stamps + shadow invalidation             // 10/6: opening range at entry — APEX range, then textbook range
 ].join(",");
 
 function _csv(s) {
@@ -204,9 +205,13 @@ function buildOutcomeRow(pos, o) {
     ...(() => { const m = pos._mkt || {}; return [m.vixSrc ?? "", m.term9d ?? "", m.term3m ?? "", m.intAdvPct ?? "", m.intVwapPct ?? "", m.intCumTick ?? ""]; })(),   // 10/6
     ...(() => { const o = pos._iOrTag || {}; const b = v => v == null ? "" : (v ? 1 : 0);
                 return [o.w ?? "", o.brk ?? "", b(o.opp), o.tw ?? "", o.tbrk ?? "", b(o.topp)]; })(),   // 10/6: opening-range tag
-    ...(() => { const m = pos._iMeta; if (!m) return ["", "", "", "", "", "", ""];
-                const s = Array.isArray(m.skipBy) ? m.skipBy : [];
-                return [m.adxTier ?? "", m.gexReg ?? "", m.gexRaw ?? "", m.gexNetM ?? "", m.gexDistFlip ?? "", s.join("|"), s.length]; })(),   // 10/7
+    ...(() => { const m = pos._iMeta || pos._mrMeta; if (!m) return ["", "", "", "", "", "", ""];   // gamma fields: itrend OR mr-fade
+                const s = Array.isArray(m.skipBy) ? m.skipBy : null;
+                return [m.adxTier ?? "", m.gexReg ?? "", m.gexRaw ?? "", m.gexNetM ?? "", m.gexDistFlip ?? "", s ? s.join("|") : "", s ? s.length : ""]; })(),   // 10/7
+    ...(() => { const m = pos._mrMeta || {}, h = pos._mrInvHit;
+                const inv = typeof pos._mrInvalidation === "number" ? +pos._mrInvalidation.toFixed(2) : "";
+                return [m.stretchZ ?? "", m.stretchAtr ?? "", m.loc ?? "", m.wallDistPct ?? "", inv,
+                        pos._isMrFade ? (h ? 1 : 0) : "", h ? h.min : "", h && h.optChg != null ? h.optChg : ""]; })(),   // 10/7
   ].map(_csv).join(",");
 
   return row;
