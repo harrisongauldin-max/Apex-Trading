@@ -125,6 +125,7 @@ const {
   GEX_FETCH_ENABLED = true, GEX_FETCH_THROTTLE_MS = 120000,
   TREND_ENABLED = true, TREND_CUTOFF_ET = 15.0, TREND_MA_FAST = 50, TREND_MA_SLOW = 100,   // 9/20: TREND_ENABLED aligned to constants. 9/21 FIX: comment had eaten TREND_MA_FAST + TREND_MA_SLOW
   TREND_RSI_MIN = 50, TREND_RSI_MAX = 72, TREND_OVEREXT_ATR = 4.0, TREND_BREADTH_MIN = 52,
+  TREND_COOLDOWN_DAYS = 5,
   ITREND_NEG_GAMMA_BLOCK = true,
   GEX_REGIME_HYST_M = 250,
   ITREND_LATE_START_ET = 11.0, ITREND_LATE_ADX_MIN = 40,
@@ -304,6 +305,25 @@ async function runScan() {
 
   const now    = Date.now();
   const scanET = getETTime();
+
+  // 10/12 (Harrison): TREND-SWING RE-ENTRY COOLDOWN — stamp the day a ticker's trend-swing position goes away.
+  // Done by diffing the open trend-swing tickers scan to scan, so EVERY exit path counts (close engine, stuck-order
+  // cleanup, reconciler ghost, manual close). Persisted in state, so a restart doesn't reset the cooldown.
+  try {
+    state._trendOpenSeen = state._trendOpenSeen || {};
+    state._trendLastExit = state._trendLastExit || {};
+    const _tOpenNow = new Set((state.positions || []).filter(p => p.entryStrategy === "trend-swing" && !p.closed).map(p => p.ticker));
+    for (const _tk of Object.keys(state._trendOpenSeen)) {
+      if (state._trendOpenSeen[_tk] && !_tOpenNow.has(_tk)) {
+        const _xd = DAYCTX.etDateStr(now);
+        state._trendLastExit[_tk] = { day: _xd, at: now };
+        logEvent("scan", `[TREND-SWING] ${_tk} position closed ${_xd} — re-entry cooldown: no new trend-swing on ${_tk} before ${DAYCTX.addTradingDays(_xd, TREND_COOLDOWN_DAYS + 1)}`);
+        markDirty();
+      }
+    }
+    const _seen = {}; for (const _tk of _tOpenNow) _seen[_tk] = true;
+    if (JSON.stringify(_seen) !== JSON.stringify(state._trendOpenSeen)) { state._trendOpenSeen = _seen; markDirty(); }
+  } catch (_tce) { logEvent("warn", `[TREND-SWING] cooldown bookkeeping failed — ${_tce && _tce.message}`); }
 
   const todayScanDate = scanET.toLocaleDateString("en-US", { timeZone: "America/New_York" });
   if (todayScanDate !== (state._lastScanDate || "")) {
@@ -2871,7 +2891,17 @@ async function runScan() {
               }
             }
 
-            if (_tSide && !_haveTrend && !_cohBlock) {
+            // 10/12: re-entry cooldown (see the bookkeeping at the top of runScan)
+            let _tCool = null;
+            const _lx = (state._trendLastExit || {})[liveStock.ticker];
+            if (_tSide && !_haveTrend && _lx && _lx.day && TREND_COOLDOWN_DAYS > 0) {
+              const _since = DAYCTX.tradingDaysBetween(_lx.day, DAYCTX.etDateStr(Date.now()));
+              if (_since <= TREND_COOLDOWN_DAYS) _tCool = `re-entry cooldown — ${_since} of ${TREND_COOLDOWN_DAYS} trading days since the ${_lx.day} exit (eligible ${DAYCTX.addTradingDays(_lx.day, TREND_COOLDOWN_DAYS + 1)})`;
+            }
+
+            if (_tSide && !_haveTrend && !_cohBlock && _tCool) {
+              recordStandDown("trend", _tCool);
+            } else if (_tSide && !_haveTrend && !_cohBlock) {
               liveStock._isTrend = _tSide;
               const _tSig = `${liveStock.ticker}-${_tSide}-trend-${Date.now()}`;
               const _tOK = await executeTrade(liveStock, price, 0, [_tReason], state.vix, _tSide, false, 1.0, null, null, _tSig);
