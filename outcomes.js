@@ -82,7 +82,8 @@ const OUTCOME_HEADER = [
   "eVixSrc","eTerm9d","eTerm3m","eIntAdv","eIntVwap","eIntCumTick", // 10/6: VIX source/term structure + internals at entry
   "eOrW","eOrBrk","eOrOpp","eOrTW","eOrTBrk","eOrTOpp",
   "eAdxTier","eGexReg","eGexRaw","eGexNetM","eGexDistFlip","eSkipBy","eSkipN",   // 10/7: meta-label features (skipBy = "|"-joined)
-  "eMrZ","eMrAtr","eMrLoc","eMrWallDist","mrInvPx","mrInvHit","mrInvHitMin","mrInvHitChg",   // 10/7: mr-fade stamps + shadow invalidation             // 10/6: opening range at entry — APEX range, then textbook range
+  "eMrZ","eMrAtr","eMrLoc","eMrWallDist","mrInvPx","mrInvHit","mrInvHitMin","mrInvHitChg",
+  "eWinMin",   // 10/12: intraday-trend — minutes since the entry window opened (does a setup that formed before 10:00 lose?)   // 10/7: mr-fade stamps + shadow invalidation             // 10/6: opening range at entry — APEX range, then textbook range
 ].join(",");
 
 function _csv(s) {
@@ -212,6 +213,7 @@ function buildOutcomeRow(pos, o) {
                 const inv = typeof pos._mrInvalidation === "number" ? +pos._mrInvalidation.toFixed(2) : "";
                 return [m.stretchZ ?? "", m.stretchAtr ?? "", m.loc ?? "", m.wallDistPct ?? "", inv,
                         pos._isMrFade ? (h ? 1 : 0) : "", h ? h.min : "", h && h.optChg != null ? h.optChg : ""]; })(),   // 10/7
+    (pos._iMeta && pos._iMeta.winMin != null ? pos._iMeta.winMin : ""),   // 10/12: eWinMin
   ].map(_csv).join(",");
 
   return row;
