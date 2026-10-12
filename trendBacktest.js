@@ -15,6 +15,8 @@
 // = 0.0508 % per 1 % option move. So: stop ceiling -55% option ~ -2.8% underlying; trail arm +10% ~ +0.51%;
 // trail giveback 5 pts ~ 0.25%; stale threshold +5% ~ +0.25%.
 
+const TO = require("./trendOptions");   // 10/12: option pricing (Black-Scholes on VIX/VXN) — see trendOptions.js
+
 const DEF = {
   MA_FAST: 50, MA_SLOW: 100, RSI_MAX: 72, OVEREXT_ATR: 4.0, ATR_N: 14, RSI_N: 14,
   OPT_K: 0.033 / 0.65,                       // underlying % per 1 % option move
@@ -68,11 +70,13 @@ const VARIANTS = {
   fresh:    "filter + FRESH cross trigger (first day the state turns on) — at close",
   strength: "close check + minimum trend strength (50d-100d >= 0.5 ATR, price-50d >= 0.25 ATR)",
   cooldown: "close check + 5-day re-entry cooldown after any exit",
+  opencool: "LIVE RULE (open check) + 5-day re-entry cooldown — what APEX runs from 10/12",
 };
 
 function entrySignal(v, I, i, bars, P, lastExitIdx) {
-  if (v === "current") {                                     // at the open, vs prior-close indicators
+  if (v === "current" || v === "opencool") {                // at the open, vs prior-close indicators
     if (i < 1) return null;
+    if (v === "opencool" && lastExitIdx != null && i - lastExitIdx <= P.COOLDOWN_DAYS) return null;
     const s = stateAt(I, i - 1, +bars[i].o, P); return s ? { side: s, px: +bars[i].o, at: "open" } : null;
   }
   const s = stateAt(I, i, I.c[i], P);
@@ -104,7 +108,7 @@ function simulate(bars, variant, exitSet, P0 = {}) {
     const days = Math.max(0, Math.round((ts(i) - ts(pos.i)) / dayMs));
     const rolls = Math.floor(days / P.MAX_HOLD_DAYS);   // a roll continues the trade; it only costs another round trip
     const cost = P.COST_RT_PCT * (1 + rolls);
-    trades.push({ side: pos.side, entryDate: bars[pos.i].t.slice(0, 10), exitDate: bars[i].t.slice(0, 10), entry: pos.entry, exit: px,
+    trades.push({ side: pos.side, ei: pos.i, xi: i, at: pos.at, entryDate: bars[pos.i].t.slice(0, 10), exitDate: bars[i].t.slice(0, 10), entry: pos.entry, exit: px,
       ret, retAdj: ret - cost - P.THETA_PCT_PER_DAY * days, days, rolls, why, R: ret / pos.stopPct });
     pos = null; lastExitIdx = i;
   };
@@ -114,7 +118,7 @@ function simulate(bars, variant, exitSet, P0 = {}) {
     const k = when === "open" ? i - 1 : i, atr = I.atr[k];
     const ceil = P.STOP_OPT_CEIL * P.OPT_K * 100, floor = P.STOP_OPT_FLOOR * P.OPT_K * 100;
     const stopPct = Math.min(ceil, Math.max(floor, P.STOP_ATR * atr / s.px * 100));
-    pos = { side: s.side, entry: s.px, i, stopPct, peak: 0, hiC: s.px, loC: s.px, atr };
+    pos = { side: s.side, entry: s.px, i, at: s.at, stopPct, peak: 0, hiC: s.px, loC: s.px, atr };
   };
   for (let i = warm; i < bars.length; i++) {
     const o = +bars[i].o, h = +bars[i].h, l = +bars[i].l, c = +bars[i].c;
@@ -128,7 +132,7 @@ function simulate(bars, variant, exitSet, P0 = {}) {
     // --- intraday: stop, then trail (vs the peak through the PRIOR bar), then update the peak ---
     if (pos) {
       const stopPx = L() ? pos.entry * (1 - pos.stopPct / 100) : pos.entry * (1 + pos.stopPct / 100);
-      const sameBar = pos.i === i && variant !== "current" ? true : false;   // close entries don't see today's range
+      const sameBar = pos.i === i && pos.at !== "open";   // close entries don't see today's range (open entries do)
       if (!sameBar) {
         if (L() ? l <= stopPx : h >= stopPx) close(i, L() ? Math.min(o, stopPx) : Math.max(o, stopPx), "stop");
         else if (exitSet === "apex") {
@@ -175,85 +179,206 @@ const SCENARIOS = [
   { key: "cost2",   label: "cost x2",    theta: 1,   cost: 2 },
   { key: "raw",     label: "no option costs", theta: 0, cost: 0 },
 ];
+// 10/12: option-model scenarios — the same trades, the same contracts, re-priced under different model assumptions
+const OPT_SCENARIOS = [
+  { key: "base",  label: "base",           m: {} },
+  { key: "uncal", label: "uncalibrated",   m: { calib: null }, needsCalib: true },
+  { key: "iv08",  label: "IV x0.8",        m: { ivScale: 0.8 } },
+  { key: "iv12",  label: "IV x1.2",        m: { ivScale: 1.2 } },
+  { key: "flat",  label: "no skew",        m: { skew: 0 } },
+  { key: "cost2", label: "cost x2",        m: { costPct: 2 * TO.OPT.COST_RT_PCT } },
+  { key: "mid",   label: "no costs (mid)", m: { costPct: 0 } },
+];
 
-function runStudy(barsByTicker, P0 = {}) {
-  const results = [];
-  const PP = { ...DEF, ...P0 };
-  for (const exitSet of ["apex", "chandelier"]) for (const v of Object.keys(VARIANTS)) {
-    const row = { exitSet, variant: v, byTicker: {}, halves: {} };
-    let all = [];
-    row.tickerHalves = {}; row._trades = {};
-    for (const [tk, bars] of Object.entries(barsByTicker)) {
-      const tr = simulate(bars, v, exitSet, P0); all = all.concat(tr);
-      row.byTicker[tk] = stats(tr); row._trades[tk] = tr;
-      const mid = bars[Math.floor(bars.length / 2)].t.slice(0, 10);
-      row.tickerHalves[tk] = { H1: stats(tr.filter(t => t.entryDate < mid)), H2: stats(tr.filter(t => t.entryDate >= mid)) };   // 10/7
-      for (const [hk, sel] of [["H1", tr.filter(t => t.entryDate < mid)], ["H2", tr.filter(t => t.entryDate >= mid)]]) {
-        row.halves[hk] = row.halves[hk] || []; row.halves[hk].push(...sel);
-      }
-      row.mid = mid;
-    }
-    row.all = stats(all); row.allRaw = stats(all, "ret");
-    row.H1 = stats(row.halves.H1 || []); row.H2 = stats(row.halves.H2 || []); delete row.halves;
-    row.exitMix = all.reduce((m, t) => (m[t.why] = (m[t.why] || 0) + 1, m), {});
-    // 10/7: sensitivity — the same trades under each cost scenario (all / per ticker)
-    row.sensitivity = {};
-    for (const sc of SCENARIOS) {
-      const c = PP.COST_RT_PCT * sc.cost, th = PP.THETA_PCT_PER_DAY * sc.theta, o = {};
-      o.all = stats(repriced(all, c, th));
-      for (const tk of Object.keys(row._trades)) o[tk] = stats(repriced(row._trades[tk], c, th));
-      row.sensitivity[sc.key] = o;
-    }
-    delete row._trades;
-    results.push(row);
-  }
-  return { params: { ...DEF, ...P0 }, variants: VARIANTS, scenarios: SCENARIOS, results, report: textReport(barsByTicker, results) };
+// ticker x half cells, and how a row compares with the live rule cell by cell
+const TKS = ["SPY", "QQQ"];
+const cellsOf = (blk) => TKS.flatMap(t => ["H1", "H2"].map(h => ((blk.tickerHalves || {})[t] || {})[h] || { n: 0 }));
+function consistency(blk, liveBlk) {
+  const cs = cellsOf(blk), lv = liveBlk ? cellsOf(liveBlk) : null;
+  const positive = cs.filter(c => c.n && c.avg > 0).length;
+  const beats = lv ? cs.filter((c, k) => c.n && lv[k].n && c.avg > lv[k].avg).length : null;
+  return { positive, beats };
 }
 
-function textReport(barsByTicker, results) {
+// all the per-row blocks are built the same way from a { ticker: trades[] } map and a metric key
+function block(byTk, key, mid, midKey) {
+  const all = Object.values(byTk).flat();
+  const b = { all: stats(all, key), byTicker: {}, tickerHalves: {} };
+  if (midKey) b.allMid = stats(all, midKey);
+  b.H1 = stats(all.filter(t => t.entryDate < mid), key); b.H2 = stats(all.filter(t => t.entryDate >= mid), key);
+  for (const [tk, tr] of Object.entries(byTk)) {
+    b.byTicker[tk] = stats(tr, key);
+    b.tickerHalves[tk] = { H1: stats(tr.filter(t => t.entryDate < mid), key), H2: stats(tr.filter(t => t.entryDate >= mid), key) };
+  }
+  return b;
+}
+
+// price every row's trades as options under model M
+function priceRows(rows, ctx, M) {
+  return rows.map(row => {
+    const o = {};
+    for (const [tk, tr] of Object.entries(row._trades)) o[tk] = tr.map(t => ({ ...t, ...TO.priceTrade(ctx, tk, t, M) }));
+    return o;
+  });
+}
+
+function simulateAll(barsByTicker, P0) {
+  const rows = [];
+  for (const exitSet of ["apex", "chandelier"]) for (const v of Object.keys(VARIANTS)) {
+    const row = { exitSet, variant: v, _trades: {} };
+    for (const [tk, bars] of Object.entries(barsByTicker)) { row._trades[tk] = simulate(bars, v, exitSet, P0); row.mid = bars[Math.floor(bars.length / 2)].t.slice(0, 10); }
+    rows.push(row);
+  }
+  return rows;
+}
+
+// 10/12: which option contracts (and dates) to fetch real bars for — the uncalibrated model's picks, 2024+
+// opts: { raw: {SPY: bars}, series: {VIX, VIX3M, VXN, DTB3} }
+function optionPlan(barsByTicker, P0 = {}, opts = {}) {
+  const rows = simulateAll(barsByTicker, P0);
+  const ctx = TO.buildContext(barsByTicker, opts.raw || null, opts.series || {});
+  const priced = priceRows(rows, ctx, TO.BASE_MODEL()), flat = {};
+  priced.forEach((o, i) => { for (const [tk, tr] of Object.entries(o)) flat[`${i}/${tk}`] = tr; });
+  return TO.plan(flat);
+}
+
+// opts: { raw, series, optionBars: { SYMBOL: { "YYYY-MM-DD": bar } }, optionFetch: { ...notes } }
+function runStudy(barsByTicker, P0 = {}, opts = {}) {
+  const PP = { ...DEF, ...P0 };
+  const rows = simulateAll(barsByTicker, P0);
+  const results = [];
+  // ---- underlying-level (the original study; kept for comparison) ----
+  for (const row of rows) {
+    const r = { exitSet: row.exitSet, variant: row.variant, mid: row.mid };
+    Object.assign(r, block(row._trades, "retAdj", row.mid));
+    r.allRaw = stats(Object.values(row._trades).flat(), "ret");
+    r.exitMix = Object.values(row._trades).flat().reduce((m, t) => (m[t.why] = (m[t.why] || 0) + 1, m), {});
+    r.sensitivity = {};
+    for (const sc of SCENARIOS) {
+      const c = PP.COST_RT_PCT * sc.cost, th = PP.THETA_PCT_PER_DAY * sc.theta, o = {};
+      const all = Object.values(row._trades).flat();
+      o.all = stats(repriced(all, c, th));
+      for (const tk of Object.keys(row._trades)) o[tk] = stats(repriced(row._trades[tk], c, th));
+      r.sensitivity[sc.key] = o;
+    }
+    results.push(r);
+  }
+  // ---- option-priced (10/12) ----
+  const ctx = TO.buildContext(barsByTicker, opts.raw || null, opts.series || {});
+  const base = TO.BASE_MODEL();
+  const pricedBase = priceRows(rows, ctx, base);
+  let validation = null, calib = null;
+  if (opts.optionBars) {
+    validation = TO.validate(rows.map((row, i) => ({ exitSet: row.exitSet, variant: row.variant, trades: Object.values(pricedBase[i]).flat() })), opts.optionBars, base.costPct);
+    validation.fetch = opts.optionFetch || null;
+    if (validation.points >= TO.OPT.CALIB_MIN_N) calib = validation.calib;
+  }
+  const mainM = { ...base, calib };
+  const pricedMain = calib ? priceRows(rows, ctx, mainM) : pricedBase;
+  const scen = OPT_SCENARIOS.filter(sc => !sc.needsCalib || calib);
+  const pricedScen = {};
+  for (const sc of scen) pricedScen[sc.key] = sc.key === "base" ? pricedMain : (sc.key === "uncal" ? pricedBase : priceRows(rows, ctx, { ...mainM, ...sc.m }));
+  rows.forEach((row, i) => {
+    const r = results[i];
+    r.opt = block(pricedMain[i], "optPct", row.mid, "optMid");
+    r.opt.sensitivity = {};
+    for (const sc of scen) {
+      const o = {}, by = pricedScen[sc.key][i];
+      o.all = stats(Object.values(by).flat(), "optPct");
+      for (const tk of Object.keys(by)) o[tk] = stats(by[tk], "optPct");
+      r.opt.sensitivity[sc.key] = o;
+    }
+  });
+  // consistency vs the live rule, cell by cell
+  for (const ex of ["apex", "chandelier"]) {
+    const live = results.find(r => r.exitSet === ex && r.variant === "current");
+    for (const r of results.filter(x => x.exitSet === ex)) {
+      r.consistency = consistency(r, r === live ? null : live);
+      r.opt.consistency = consistency(r.opt, r === live ? null : live.opt);
+    }
+  }
+  const option = { model: { ...TO.OPT, calib }, sources: ctx.sources, scenarios: scen.map(s => ({ key: s.key, label: s.label })), validation };
+  return { params: PP, variants: VARIANTS, scenarios: SCENARIOS, option, results, report: textReport(barsByTicker, results, option) };
+}
+
+function textReport(barsByTicker, results, option) {
   const f = (x, d = 2) => (x == null ? "  -  " : (x >= 0 ? "+" : "") + Number(x).toFixed(d));
   const span = Object.entries(barsByTicker).map(([tk, b]) => `${tk} ${b[0].t.slice(0, 10)}..${b[b.length - 1].t.slice(0, 10)} (${b.length} bars)`).join(" | ");
+  const tks = Object.keys(barsByTicker);
+  const consTxt = (c) => (c.beats == null ? "LIVE          " : `beats live ${c.beats}/4`) + ` · positive ${c.positive}/4` + (c.beats === 4 ? "  <== BEATS LIVE EVERYWHERE" : "");
   const L = [];
-  L.push("APEX TREND-SWING ENTRY STUDY — underlying-level, daily bars");
-  L.push(span);
-  L.push("All figures are % of the UNDERLYING per trade, after costs (round trip + daily time-decay charge) unless marked raw.");
-  L.push("Same exits for every entry variant. 'H1'/'H2' = first/second half of the period (out-of-sample check).");
-  for (const ex of ["apex", "chandelier"]) {
-    L.push(""); L.push(ex === "apex" ? "=== EXITS: APEX live rules (stop 3.5 ATR capped, tight trail, 14-day stale; rolls charged) ==="
-                                      : "=== EXITS: Clenow-style chandelier (3 ATR trail from highest close), rolls charged ===");
-    L.push("variant    trades  WR%  avg/trade  total   PF   avgWin  avgLoss  maxDD  days | H1 avg (n)     H2 avg (n)     | SPY avg  QQQ avg | raw avg");
+  const exitTitle = (ex) => ex === "apex" ? "APEX live exits (stop 3.5 ATR capped, tight trail, 14-day stale)" : "Clenow-style chandelier (3 ATR trail from highest close)";
+  const mainTable = (ex, get, unit) => {
+    L.push(""); L.push(`=== ${unit} — EXITS: ${exitTitle(ex)} ===`);
+    L.push("variant    trades  WR%  avg/trade  total     PF   avgWin  avgLoss   maxDD  days | H1 avg (n)      H2 avg (n)      | SPY avg  QQQ avg | before costs");
     for (const r of results.filter(x => x.exitSet === ex)) {
-      const a = r.all, tk = r.byTicker;
-      L.push(`${r.variant.padEnd(10)} ${String(a.n || 0).padStart(5)}  ${String(a.wr ?? "-").padStart(3)}  ${f(a.avg, 3).padStart(8)}  ${f(a.total, 1).padStart(7)} ${String(a.pf ?? "-").padStart(5)} ${f(a.avgWin, 2).padStart(7)} ${f(a.avgLoss, 2).padStart(8)} ${f(a.maxDD, 1).padStart(6)} ${String(a.avgDays ?? "-").padStart(5)} | ` +
-             `${f(r.H1.avg, 3).padStart(7)} (${String(r.H1.n || 0).padStart(3)})  ${f(r.H2.avg, 3).padStart(7)} (${String(r.H2.n || 0).padStart(3)}) | ${f(tk.SPY && tk.SPY.avg, 3).padStart(7)} ${f(tk.QQQ && tk.QQQ.avg, 3).padStart(8)} | ${f(r.allRaw.avg, 3)}`);
+      const b = get(r), a = b.all, tk = b.byTicker, raw = b.allMid || r.allRaw;
+      L.push(`${r.variant.padEnd(10)} ${String(a.n || 0).padStart(5)}  ${String(a.wr ?? "-").padStart(3)}  ${f(a.avg, 3).padStart(8)}  ${f(a.total, 1).padStart(8)} ${String(a.pf ?? "-").padStart(5)} ${f(a.avgWin, 2).padStart(7)} ${f(a.avgLoss, 2).padStart(8)} ${f(a.maxDD, 1).padStart(7)} ${String(a.avgDays ?? "-").padStart(5)} | ` +
+             `${f(b.H1.avg, 3).padStart(8)} (${String(b.H1.n || 0).padStart(3)})  ${f(b.H2.avg, 3).padStart(8)} (${String(b.H2.n || 0).padStart(3)}) | ${f(tk.SPY && tk.SPY.avg, 3).padStart(7)} ${f(tk.QQQ && tk.QQQ.avg, 3).padStart(8)} | ${f(raw.avg, 3)}`);
     }
+  };
+  const halfTable = (ex, get, unit) => {
+    L.push(""); L.push(`=== ${unit} — BY TICKER x HALF (avg/trade, n) — exits: ${ex === "apex" ? "APEX live" : "chandelier"} ===`);
+    L.push("variant    " + tks.map(t => `${(t + " H1").padEnd(17)}${(t + " H2").padEnd(17)}`).join("") + "vs the live rule, cell by cell");
+    for (const r of results.filter(x => x.exitSet === ex)) {
+      const b = get(r);
+      L.push(`${r.variant.padEnd(10)} ` + cellsOf(b).map(c => `${f(c.avg, 3).padStart(8)} (${String(c.n || 0).padStart(3)})   `).join("") + consTxt(b.consistency));
+    }
+  };
+  const sensTable = (ex, get, scen, unit) => {
+    L.push(""); L.push(`=== ${unit} — SENSITIVITY (avg/trade: all | SPY | QQQ) — exits: ${ex === "apex" ? "APEX live" : "chandelier"} ===`);
+    L.push("variant    " + scen.map(s => s.label.padEnd(27)).join(""));
+    for (const r of results.filter(x => x.exitSet === ex)) {
+      const sv = get(r);
+      L.push(`${r.variant.padEnd(10)} ` + scen.map(s => { const o = sv[s.key] || {};
+        return `${f((o.all || {}).avg, 2)} | ${f((o.SPY || {}).avg, 1)} | ${f((o.QQQ || {}).avg, 1)}`.padEnd(27); }).join(""));
+    }
+  };
+
+  L.push("APEX TREND-SWING ENTRY STUDY — daily bars");
+  L.push(span);
+  L.push("");
+  L.push("PART 1 — OPTION-PRICED (10/12). Every trade re-priced as the contract APEX buys: 0.65-delta, ~60 DTE, listed $1 strike,");
+  L.push("Black-Scholes marks with that day's implied vol, rolled at 21 DTE, cost charged on every leg.");
+  L.push("Figures are % of the INITIAL PREMIUM per trade (what one contract's capital did). Trades are identical to Part 2.");
+  L.push("'total' and 'maxDD' add up the per-trade % (as if one premium were risked on every trade) — compare them between rows, not as account %.");
+  const M = option.model, src = option.sources || {};
+  L.push(`Implied vol: SPY ${src.SPY || "-"} | QQQ ${src.QQQ || "-"} | skew ${M.SKEW} | rates: ${src.rate || "-"} | prices: ${src.SPY_prices || "-"}`);
+  L.push(`Cost: ${M.COST_RT_PCT}% of premium per round trip. ` + (M.calib ? `IV calibrated to real option prices (real/model vol): ${TKS.map(t => M.calib[t] ? `${t} call x${M.calib[t].call} put x${M.calib[t].put}` : "").filter(Boolean).join(", ")}.` : "IV NOT calibrated (no real option prices available) — see the validation section."));
+  for (const ex of ["apex", "chandelier"]) mainTable(ex, r => r.opt, "OPTION % OF PREMIUM");
+  for (const ex of ["apex", "chandelier"]) halfTable(ex, r => r.opt, "OPTION % OF PREMIUM");
+  for (const ex of ["apex", "chandelier"]) sensTable(ex, r => r.opt.sensitivity, option.scenarios, "OPTION % OF PREMIUM");
+
+  // validation
+  L.push(""); L.push("=== VALIDATION — model vs REAL option prices (Alpaca daily option bars, " + TO.OPT.VALIDATE_FROM + " on) ===");
+  const v = option.validation;
+  if (!v) L.push("Not run (no real option bars supplied).");
+  else {
+    if (v.fetch) L.push(`Fetched: ${v.fetch.symbolsWithBars ?? "?"} of ${v.fetch.symbolsRequested ?? "?"} contracts returned bars${v.fetch.note ? " — " + v.fetch.note : ""}.`);
+    L.push(`Price points compared (open/close valuations): ${v.points}. Error = (model - real) / real.`);
+    L.push("group          n     median |error|  median error  after calibration |error|   real/model vol");
+    for (const [k, g] of Object.entries(v.prices)) L.push(`${k.padEnd(12)} ${String(g.n).padStart(5)}   ${(g.medAbsErr == null ? "-" : g.medAbsErr + "%").padStart(10)}   ${(g.medErr == null ? "-" : f(g.medErr, 1) + "%").padStart(11)}   ${(g.medAbsErrCal == null ? "-" : g.medAbsErrCal + "%").padStart(14)}          ${g.ivRatio ?? "-"}`);
+    L.push("");
+    L.push("Trades re-scored on REAL prices (every leg priced from real bars; the model column is UNcalibrated, same contracts):");
+    L.push("exits       variant      n   model avg   real avg   model WR  real WR  same sign");
+    for (const t of v.trades) L.push(`${t.exitSet.padEnd(11)} ${t.variant.padEnd(10)} ${String(t.n).padStart(4)}   ${t.n ? f(t.modelAvg, 2).padStart(8) + "%" : "      -  "}  ${t.n ? f(t.realAvg, 2).padStart(8) + "%" : "      -  "}   ${t.n ? String(t.modelWR).padStart(5) + "%" : "    -"}  ${t.n ? String(t.realWR).padStart(5) + "%" : "    -"}   ${t.n ? String(t.signAgreePct).padStart(5) + "%" : "    -"}`);
+  }
+
+  L.push(""); L.push("PART 2 — UNDERLYING-LEVEL (the original study; option P&L approximated by a cost + flat decay charge). Kept for comparison.");
+  L.push("Figures are % of the UNDERLYING per trade.");
+  for (const ex of ["apex", "chandelier"]) {
+    mainTable(ex, r => r, "UNDERLYING %");
     for (const r of results.filter(x => x.exitSet === ex)) L.push(`   ${r.variant.padEnd(9)} exits: ${JSON.stringify(r.exitMix)}`);
   }
-  // 10/7: ticker x half — does an edge hold in BOTH halves on EACH ticker?
-  const tks = Object.keys(barsByTicker);
-  for (const ex of ["apex", "chandelier"]) {
-    L.push(""); L.push(`=== BY TICKER x HALF (avg/trade after costs, n) — exits: ${ex === "apex" ? "APEX live" : "chandelier"} ===`);
-    L.push("variant    " + tks.map(t => `${(t + " H1").padEnd(16)}${(t + " H2").padEnd(16)}`).join("") + "consistent?");
-    for (const r of results.filter(x => x.exitSet === ex)) {
-      const cells = tks.flatMap(t => ["H1", "H2"].map(h => r.tickerHalves[t][h]));
-      const allPos = cells.every(c => c.n && c.avg > 0);
-      L.push(`${r.variant.padEnd(10)} ` + cells.map(c => `${f(c.avg, 3).padStart(7)} (${String(c.n || 0).padStart(3)})   `).join("") + (allPos ? "YES — positive in all four" : ""));
-    }
-  }
-  // 10/7: sensitivity — same trades re-priced
-  for (const ex of ["apex", "chandelier"]) {
-    L.push(""); L.push(`=== SENSITIVITY (avg/trade: all | SPY | QQQ) — exits: ${ex === "apex" ? "APEX live" : "chandelier"} ===`);
-    L.push("variant    " + SCENARIOS.map(s => s.label.padEnd(26)).join(""));
-    for (const r of results.filter(x => x.exitSet === ex)) {
-      L.push(`${r.variant.padEnd(10)} ` + SCENARIOS.map(s => { const o = r.sensitivity[s.key];
-        return `${f(o.all.avg, 3)} | ${f((o.SPY || {}).avg, 2)} | ${f((o.QQQ || {}).avg, 2)}`.padEnd(26); }).join(""));
-    }
-  }
-  L.push(""); L.push("Variants:"); for (const [k, v] of Object.entries(VARIANTS)) L.push(`  ${k.padEnd(9)} ${v}`);
-  L.push(""); L.push("Read it this way: a variant only 'beats' the live rule if it is better in BOTH halves AND on BOTH tickers.");
-  L.push("Limits: underlying-level (option P&L approximated by a cost + decay charge); breadth filter not modeled (no history);");
-  L.push("one position per ticker; SPY and QQQ run independently (the live correlation rule is not modeled).");
+  for (const ex of ["apex", "chandelier"]) halfTable(ex, r => r, "UNDERLYING %");
+  for (const ex of ["apex", "chandelier"]) sensTable(ex, r => r.sensitivity, SCENARIOS, "UNDERLYING %");
+
+  L.push(""); L.push("Variants:"); for (const [k, v2] of Object.entries(VARIANTS)) L.push(`  ${k.padEnd(9)} ${v2}`);
+  L.push(""); L.push("Read it this way: a variant only 'beats' the live rule if it is better in all four ticker x half cells (beats live 4/4).");
+  L.push("Limits: exits are decided on the underlying (APEX's option-% exits translated at a fixed ratio); breadth filter not modeled");
+  L.push("(no history); one position per ticker; SPY and QQQ run independently (the live correlation rule is not modeled); option prices");
+  L.push("are a model — the validation section says how far off it was where real prices exist; intraday exits use the day's closing vol.");
   return L.join("\n");
 }
 
-module.exports = { DEF, VARIANTS, SCENARIOS, repriced, indicators, stateAt, entrySignal, simulate, stats, runStudy };
+module.exports = { DEF, VARIANTS, SCENARIOS, OPT_SCENARIOS, repriced, indicators, stateAt, entrySignal, simulate, stats, runStudy, optionPlan, consistency };
