@@ -49,10 +49,11 @@ const {
   MR_SCALP_TRAIL_ARM = 0.10, MR_SCALP_TRAIL_GIVE = 0.04, MR_SCALP_TP = 0.20,
   CP1_CRASH_ENABLED = true, CP1_CRASH_PCT = -5,   // 9/20: aligned to constants (was false — silent-OFF would disable the crash rail)
   TREND_STOP_PCT = 0.125, TREND_ATR_STOP_MULT = 3.5, TREND_USTOP_FLOOR = 0.20, TREND_USTOP_CEIL = 0.55, TREND_STALE_DAYS = 14, TREND_STALE_PEAK = 0.05, TREND_TRAIL_ARM_PCT = 0.10, TREND_TRAIL_GIVEBACK_PCT = 0.05, TREND_ROLL_DTE = 21,
+  TREND_TICKERS = ["QQQ"], TREND_EXIT_MODE = "chandelier", TREND_CHANDELIER_ATR = 3.0, TREND_CHANDELIER_CHECK_ET = 15.83,
   ITREND_STOP_PCT = 0.30, ITREND_MAX_HOLD_MIN = 60, ITREND_NOARM_MIN = 20, ladderFloor,
   UNIVERSAL_NOARM_ENABLED = true, UNIVERSAL_NOARM_MIN = 25,   // 9/20: aligned to constants (was false — silent-OFF would disable the no-arm cut)
   STRADDLE_TP_PCT = 0.35, STRADDLE_MAX_HOLD_MIN = 75,
-  MR_FADE_TP = 0.30, MR_FADE_MAX_HOLD_MIN = 60, MR_FADE_STOP_PCT = 0.18,
+  MR_FADE_TP = 0.30, MR_FADE_MAX_HOLD_MIN = 60, MR_FADE_STOP_PCT = 0.18, MR_FADE_STOP_COOLDOWN_MIN = 15,
   BREAK_MAX_HOLD_MIN = 120, BREAK_TRAIL_ARM_PCT = 0.25, BREAK_TRAIL_GIVEBACK_PCT = 0.15,
   FASTCUT_ENABLED = false, FASTCUT_MIN = 6, FASTCUT_PEAK_SHORT = 0.03, FASTCUT_PEAK_MID = 0.02,
   FASTCUT_PEAK_LONG = 0.012,
@@ -166,6 +167,50 @@ const _posBarCache = new Map();
 // ─── Main exit decision function ─────────────────────────────────────────────
 // Returns: ExitDecision[] = [{pi, ticker, action, reason, exitPremium, contractSym}]
 // Never mutates state. Never calls closePosition. Pure decision function.
+// 10/12 (Harrison): one chandelier step for a trend-swing position. Returns { reason } / { noUnderlying }.
+//   stop:       a fixed underlying level set once at entry (3.5 x ATR, clamped — the same distance the option-% stop used),
+//               checked every scan. Carries over through rolls.
+//   chandelier: once a day at/after TREND_CHANDELIER_CHECK_ET, using the live price as the close: exit if it is
+//               TREND_CHANDELIER_ATR x ATR below the highest close since entry (calls; mirror for puts). Then the
+//               high-water mark takes today's close. Never loosens.
+function _chandelierStep(pos, stopPct, delta, prem, atr) {
+  const isCall = pos.optionType !== "put";
+  const u = state._uNow && state._uNow[pos.ticker];
+  const uTs = state._uNowTs && state._uNowTs[pos.ticker];
+  const fresh = u > 0 && (!uTs || Date.now() - uTs < 5 * 60000);
+  if (!pos._ch) {
+    const entryU = (pos._entryX && pos._entryX.underlying) || (fresh ? u : null);
+    if (!(entryU > 0)) return { noUnderlying: true };
+    const dist = (delta > 0 && prem > 0) ? stopPct * prem / delta : entryU * 0.028;   // option-% stop -> underlying $
+    const hw = fresh ? (isCall ? Math.max(entryU, u) : Math.min(entryU, u)) : entryU;
+    pos._ch = { side: isCall ? "call" : "put", entryU: +entryU.toFixed(2), stopPx: +(isCall ? entryU - dist : entryU + dist).toFixed(2),
+                hi: +(isCall ? hw : entryU).toFixed(2), lo: +(isCall ? entryU : hw).toFixed(2), lastDay: null, rolls: 0 };
+    markDirty();
+    logEvent("scan", `[TREND-CHANDELIER] ${pos.ticker} ${pos._ch.side} armed — entry $${pos._ch.entryU}, stop $${pos._ch.stopPx}, ` +
+      `exit if a close is ${TREND_CHANDELIER_ATR}xATR ${isCall ? "below the highest" : "above the lowest"} close (checked ${Math.floor(TREND_CHANDELIER_CHECK_ET)}:${String(Math.round((TREND_CHANDELIER_CHECK_ET % 1) * 60)).padStart(2, "0")} ET)`);
+  }
+  const ch = pos._ch;
+  if (!fresh) return { noUnderlying: true };
+  if (isCall ? u <= ch.stopPx : u >= ch.stopPx) {
+    logEvent("scan", `[TREND-STOP] ${pos.ticker} $${u.toFixed(2)} through the underlying stop $${ch.stopPx}`);
+    return { reason: "trend-stop" };
+  }
+  const et = getETTime(), h = et.getHours() + et.getMinutes() / 60;
+  const today = et.toLocaleDateString("en-CA");
+  if (h >= TREND_CHANDELIER_CHECK_ET && ch.lastDay !== today && atr > 0) {
+    const level = isCall ? ch.hi - TREND_CHANDELIER_ATR * atr : ch.lo + TREND_CHANDELIER_ATR * atr;
+    if (isCall ? u <= level : u >= level) {
+      logEvent("scan", `[TREND-CHANDELIER] ${pos.ticker} close-check $${u.toFixed(2)} ${isCall ? "<=" : ">="} level $${level.toFixed(2)} (${isCall ? "high" : "low"} $${isCall ? ch.hi : ch.lo} ${isCall ? "-" : "+"} ${TREND_CHANDELIER_ATR}x ATR $${atr}) — trend broken, exiting`);
+      return { reason: "trend-chandelier" };
+    }
+    if (isCall) ch.hi = +Math.max(ch.hi, u).toFixed(2); else ch.lo = +Math.min(ch.lo, u).toFixed(2);
+    ch.lastDay = today; markDirty();
+    const next = isCall ? ch.hi - TREND_CHANDELIER_ATR * atr : ch.lo + TREND_CHANDELIER_ATR * atr;
+    logEvent("scan", `[TREND-CHANDELIER] ${pos.ticker} close-check $${u.toFixed(2)} — holding. ${isCall ? "High" : "Low"} close now $${isCall ? ch.hi : ch.lo}; exit level $${next.toFixed(2)} (stop $${ch.stopPx})`);
+  }
+  return {};
+}
+
 async function checkExits(positions, posSnapshots, posQuotes, posNewsCache, ctx) {
   const {
     dryRunMode = false,
@@ -384,6 +429,11 @@ async function checkExits(positions, posSnapshots, posQuotes, posNewsCache, ctx)
       if (_mfReason && !_closedThisCycle.has(pi)) {
         _closedThisCycle.add(pi);
         logEvent("scan", `[MR-FADE] ${pos.ticker} exit — ${_mfReason} (held ${_mfHeld.toFixed(0)}min, chg ${(chg*100).toFixed(1)}%)`);
+        if (_mfReason === "mr-fade-stop" && MR_FADE_STOP_COOLDOWN_MIN > 0) {   // 10/12: the level failed — no re-fade here for a while
+          if (!state._mrStopAt) state._mrStopAt = {};
+          state._mrStopAt[pos.ticker] = Date.now(); markDirty();
+          logEvent("scan", `[MR-FADE] ${pos.ticker} stopped out — no new mr-fade on ${pos.ticker} for ${MR_FADE_STOP_COOLDOWN_MIN} min`);
+        }
         decisions.push({ pi, ticker: pos.ticker, action: 'close', reason: _mfReason, exitPremium: null, contractSym: pos.contractSymbol || null });
       } else {
         // HOLD: the end-of-loop HOLD bookkeeping is bypassed by the continue below, so persist the live
@@ -506,7 +556,21 @@ async function checkExits(positions, posSnapshots, posQuotes, posNewsCache, ctx)
         }
       }
       let _tReason = null;
-      if (chg <= -_tStopPct)                                                                                  _tReason = "trend-stop";
+      // 10/12 (Harrison): CHANDELIER MODE (QQQ). Stop + chandelier are judged on the UNDERLYING (as in the backtest),
+      // trail and stale are off, and a 21-DTE roll re-buys at once carrying this trade's stop + high-water mark.
+      const _chMode = TREND_EXIT_MODE === "chandelier" && (TREND_TICKERS || []).includes(pos.ticker);
+      if (_chMode) {
+        const _ch = _chandelierStep(pos, _tStopPct, _tDelta, _tPrem, _tAtr);
+        if (_ch.reason) _tReason = _ch.reason;
+        else if (_ch.noUnderlying && chg <= -_tStopPct) _tReason = "trend-stop";   // no fresh QQQ price: fall back to the option-% stop
+        else if (_tDTE <= TREND_ROLL_DTE) {
+          _tReason = "trend-roll";
+          if (!state._trendRollCarry) state._trendRollCarry = {};
+          state._trendRollCarry[pos.ticker] = { side: pos.optionType, ch: { ...pos._ch }, at: Date.now(), from: pos.contractSymbol || null };
+          logEvent("scan", `[TREND-ROLL] ${pos.ticker} ${_tDTE}DTE — closing ${pos.contractSymbol || ""} and re-buying a fresh ~60-DTE contract; stop $${pos._ch.stopPx} and high-water $${pos._ch.side === "call" ? pos._ch.hi : pos._ch.lo} carry over`);
+        }
+      }
+      else if (chg <= -_tStopPct)                                                                             _tReason = "trend-stop";
       else if (pos._trendPeakChg >= TREND_TRAIL_ARM_PCT && chg <= pos._trendPeakChg - TREND_TRAIL_GIVEBACK_PCT) _tReason = "trend-trail";
       else if (_tDTE <= TREND_ROLL_DTE)                                                                        _tReason = "trend-roll";
       else {
