@@ -325,11 +325,8 @@ function logEvent(type, message) {
   // full day" export then serves under a "today" header (9/29 under 9/30). Clear it on the first log of a
   // new ET day so the buffer is always TODAY-only. (Prior day's log is already durable in Redis from EOD.)
   const _etDay = getETDateStr();
-  rolloverBuffers(_etDay);   // 10/7: telemetry / chain-snap / outcome buffers get the same day guard as the log
-  if (state._dailyLogDay && state._dailyLogDay !== _etDay && state._dailyLogBuffer.length) {
-    state._dailyLogBuffer = [];
-  }
-  state._dailyLogDay = _etDay;
+  _rollLogBuffer(_etDay);    // 10/12: clear a prior day's log FIRST ...
+  rolloverBuffers(_etDay);   // ... then the data buffers, so the [DAY-ROLLOVER] line lands in TODAY's log (was erased)
   state._dailyLogBuffer.push(entry);
   if (state._dailyLogBuffer.length > 30000)
     state._dailyLogBuffer = state._dailyLogBuffer.slice(-30000);
@@ -580,6 +577,14 @@ async function saveChainSnapsToRedis(isEOD = false) {
 // Called from every write AND save path (the 9:30 checkpoint runs before the day's first telemetry row exists).
 // Prior-day rows are already durable in Redis from that day's checkpoints. The first call after a deploy only stamps
 // the day (never clears), so deploying mid-session can't wipe the current day's buffers.
+// 10/12: the log buffer's day guard, shared by logEvent and rolloverBuffers (a save path can trigger the data
+// rollover before the day's first log line — the old log must be cleared before the rollover line is written).
+function _rollLogBuffer(etDay) {
+  if (!state._dailyLogBuffer) state._dailyLogBuffer = [];
+  if (state._dailyLogDay && state._dailyLogDay !== etDay && state._dailyLogBuffer.length) state._dailyLogBuffer = [];
+  state._dailyLogDay = etDay;
+}
+
 function rolloverBuffers(etDay = getETDateStr()) {
   const prev = state._buffersDay;
   if (prev && prev !== etDay) {
@@ -591,7 +596,7 @@ function rolloverBuffers(etDay = getETDateStr()) {
     const eodTxt = eod && eod.day === prev ? `${eod.ok ? "completed" : "FAILED"} at ${eod.at} (${eod.ms}ms)` : "NOT RECORDED — the end-of-day save did not finish";
     const msg = `[DAY-ROLLOVER] ${prev} -> ${etDay}: cleared stale buffers (telemetry ${n.tel}, chain snaps ${n.snaps}, outcomes ${n.out}). Previous end-of-day save: ${eodTxt}`;
     state._buffersDay = etDay;
-    try { (state._dailyLogBuffer = state._dailyLogBuffer || []).push({ time: new Date().toISOString(), type: (eod && eod.day === prev && eod.ok) ? "scan" : "warn", msg }); } catch (_) {}
+    try { _rollLogBuffer(etDay); state._dailyLogBuffer.push({ time: new Date().toISOString(), type: (eod && eod.day === prev && eod.ok) ? "scan" : "warn", msg }); } catch (_) {}
     console.log(msg);
     markDirty();
     return;
