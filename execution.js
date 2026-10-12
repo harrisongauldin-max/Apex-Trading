@@ -1056,6 +1056,12 @@ async function executeTrade(stock, price, score, scoreReasons, vix, optionType =
         at: Date.now(), px: price, score,
         volPace: (stock.hasIntraday && typeof stock.volPaceRatio === "number") ? parseFloat(stock.volPaceRatio.toFixed(3)) : null,
         fwdPct: null, fwdMins: null,
+        // 10/12 (Harrison): mr-fade POST-EXIT SHADOW. The fade's own invalidation level and its reversion target (session
+        // VWAP) are tracked for MR_SHADOW_TRACK_MIN after ENTRY, regardless of when the position exits — the in-position
+        // shadow could never fire because the -18% premium stop exits first (~0.2% underlying on 3-4 DTE). Measure-only.
+        ...((stock._mrFade && typeof stock._mrFade.invalidationPx === "number") ? {
+          mrInv: stock._mrFade.invalidationPx, mrTgt0: (stock.intradayVWAP > 0 ? stock.intradayVWAP : null),
+          mrInvMin: null, mrTgtMin: null, mrMfe: 0, mrMae: 0, mr60: null, mrTrack: 0, mrDone: false } : {}),
       });
       while (state._entryFwd.length > 500) state._entryFwd.shift();   // bounded: it now rides the Redis payload
     }
