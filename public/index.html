@@ -694,23 +694,25 @@ input[type=text]:focus{border-color:var(--blue)}
   <div class="card" style="margin-bottom:12px;padding:12px 16px">
     <div style="font-size:11px;font-weight:700;letter-spacing:1px;color:var(--blue);margin-bottom:6px">TREND-SWING ENTRY STUDY</div>
     <div style="font-size:12px;color:var(--text);line-height:1.6">
-      Tests the trend-swing <b>entry</b> logic on years of daily SPY and QQQ bars: the live rule versus five alternative entries,
+      Tests the trend-swing <b>entry</b> logic on years of daily SPY and QQQ bars: the live rule versus six alternative entries,
       each under the <b>same exits</b>, so differences come from the entry alone. Two exit sets are shown: APEX's current rules and a
-      Clenow-style 3-ATR trail. Figures are % of the underlying per trade, after a round-trip cost and a daily time-decay charge.
+      Clenow-style 3-ATR trail. Every trade is priced as the <b>option APEX buys</b> (0.65-delta, ~60 days, Black-Scholes on that day's
+      VIX / VXN, rolled at 21 days) and checked against <b>real option prices</b> where Alpaca has them (2024 on).
     </div>
     <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:10px">
       <span style="font-size:11px;color:var(--muted)">START</span>
       <input type="date" id="tbt-start" value="2015-01-01" style="background:var(--panel);border:1px solid var(--border);color:var(--text);padding:4px 6px;border-radius:4px;font-family:inherit">
       <button class="btn btn-green" id="tbt-run" onclick="runTrendBacktestTab()">▶ RUN STUDY</button>
       <button class="btn" id="tbt-dl" onclick="downloadTrendBacktestReport()" disabled style="opacity:.5">⬇ DOWNLOAD REPORT</button>
-      <span id="tbt-status" style="font-size:11px;color:var(--muted)">Not run yet — takes about 10-30 seconds.</span>
+      <span id="tbt-status" style="font-size:11px;color:var(--muted)">Not run yet — takes about 1-3 minutes (it fetches real option prices).</span>
     </div>
   </div>
   <div id="tbt-results"></div>
   <div class="card" style="padding:10px 16px;font-size:11px;color:var(--muted);line-height:1.6">
     <b style="color:var(--text)">How to read it.</b> The live rule is highlighted. A <span style="color:var(--green)">✓</span> marks a variant that beats it
-    in <b>both halves</b> of the period <b>and</b> on <b>both tickers</b> — anything less can be chance.
-    <b style="color:var(--text)">Limits:</b> underlying-level (option P&amp;L approximated, not repriced); breadth not modeled; SPY and QQQ run independently
+    in <b>all four</b> ticker × half cells (SPY and QQQ, first and second half) — anything less can be chance.
+    Option figures are % of the premium paid per trade. The validation card says how far the option model was from real prices.
+    <b style="color:var(--text)">Limits:</b> exits are decided on the underlying; breadth not modeled; SPY and QQQ run independently
     (the live correlation rule isn't modeled). Read-only — running it never places a trade.
   </div>
 </div>
@@ -2653,77 +2655,121 @@ async function trendProbe(){
 let _tbtLast = null;
 const _tbtF = (x, d = 3) => (x == null || isNaN(x) ? '–' : (x >= 0 ? '+' : '') + Number(x).toFixed(d));
 const _tbtCol = (x) => (x == null ? 'var(--muted)' : x > 0 ? 'var(--green)' : x < 0 ? 'var(--red)' : 'var(--text)');
-function _tbtBeats(r, cur) {        // better than the live rule in BOTH halves and on BOTH tickers
-  if (!r || !cur || r.variant === 'current') return false;
-  const g = (a, b) => a != null && b != null && a > b;
-  return g(r.H1.avg, cur.H1.avg) && g(r.H2.avg, cur.H2.avg) &&
-         g((r.byTicker.SPY || {}).avg, (cur.byTicker.SPY || {}).avg) && g((r.byTicker.QQQ || {}).avg, (cur.byTicker.QQQ || {}).avg);
+// 10/12: a view = { variant, all, allRaw, H1, H2, byTicker, tickerHalves, sensitivity, exitMix, consistency } for one row,
+// either option-priced (r.opt) or underlying-level (r itself). Same tables for both.
+const _tbtOptView = (r) => ({ variant: r.variant, exitSet: r.exitSet, all: r.opt.all, allRaw: r.opt.allMid, H1: r.opt.H1, H2: r.opt.H2,
+  byTicker: r.opt.byTicker, tickerHalves: r.opt.tickerHalves, sensitivity: r.opt.sensitivity, exitMix: r.exitMix, consistency: r.opt.consistency });
+const _tbtExitTitle = (ex) => ex === 'apex'
+  ? 'EXITS: APEX LIVE RULES <span style="color:var(--muted);font-weight:400">— stop 3.5 ATR (capped), tight trail, 14-day stale exit</span>'
+  : 'EXITS: CLENOW-STYLE 3-ATR TRAIL <span style="color:var(--muted);font-weight:400">— from the highest close</span>';
+function _tbtMainTable(views, unit) {
+  const th = (t, tip) => `<th style="padding:6px 8px;text-align:right;font-size:9px;color:var(--muted);font-weight:600;white-space:nowrap"${tip ? ` title="${tip}"` : ''}>${t}</th>`;
+  const td = (v, col, bold) => `<td style="padding:5px 8px;text-align:right;color:${col || 'var(--text)'};${bold ? 'font-weight:700;' : ''}white-space:nowrap">${v}</td>`;
+  let h = '<div style="overflow-x:auto"><table style="width:100%;border-collapse:collapse;font-size:11px"><thead><tr>' +
+    '<th style="padding:6px 8px;text-align:left;font-size:9px;color:var(--muted);font-weight:600">VARIANT</th>' +
+    th('TRADES') + th('WIN %') + th('AVG / TRADE', 'Average ' + unit + ' per trade, after costs') + th('TOTAL', 'Sum of the per-trade figures — compare between rows') +
+    th('PF', 'Profit factor: gross wins / gross losses') + th('AVG WIN') + th('AVG LOSS') + th('MAX DD', 'Worst peak-to-trough of the summed per-trade figures') + th('DAYS', 'Average days held') +
+    th('1ST HALF', 'Average per trade, trades entered in the first half of the period (n)') + th('2ND HALF', 'Second half (n)') + th('SPY') + th('QQQ') + th('BEFORE COSTS', 'Average before costs') +
+    '</tr></thead><tbody>';
+  for (const r of views) {
+    const a = r.all || {}, isCur = r.variant === 'current', beats = r.consistency && r.consistency.beats === 4;
+    const dp = unit === 'premium' ? 2 : 3;
+    h += `<tr style="border-top:1px solid var(--border);${isCur ? 'background:rgba(0,196,255,.07)' : ''}">` +
+      `<td style="padding:5px 8px;white-space:nowrap" title="${(_tbtLast && _tbtLast.variants || {})[r.variant] || ''}"><b>${r.variant}</b>${isCur ? ' <span style="font-size:9px;color:var(--blue)">LIVE</span>' : ''}${r.variant === 'opencool' ? ' <span style="font-size:9px;color:var(--gold)">LIVE FROM 10/12</span>' : ''}${beats ? ' <span style="color:var(--green);font-weight:700" title="Beats the live rule in all four ticker x half cells">✓</span>' : ''}</td>` +
+      td(a.n ?? 0) + td(a.wr ?? '–') + td(_tbtF(a.avg, dp), _tbtCol(a.avg), true) + td(_tbtF(a.total, 1), _tbtCol(a.total)) + td(a.pf ?? '–', a.pf == null ? null : a.pf >= 1 ? 'var(--green)' : 'var(--red)') +
+      td(_tbtF(a.avgWin, 2), 'var(--green)') + td(_tbtF(a.avgLoss, 2), 'var(--red)') + td(_tbtF(a.maxDD, 1), 'var(--red)') + td(a.avgDays ?? '–') +
+      td(`${_tbtF((r.H1 || {}).avg, dp)} <span style="color:var(--muted)">(${(r.H1 || {}).n || 0})</span>`, _tbtCol((r.H1 || {}).avg)) +
+      td(`${_tbtF((r.H2 || {}).avg, dp)} <span style="color:var(--muted)">(${(r.H2 || {}).n || 0})</span>`, _tbtCol((r.H2 || {}).avg)) +
+      td(_tbtF((r.byTicker.SPY || {}).avg, dp), _tbtCol((r.byTicker.SPY || {}).avg)) + td(_tbtF((r.byTicker.QQQ || {}).avg, dp), _tbtCol((r.byTicker.QQQ || {}).avg)) +
+      td(_tbtF((r.allRaw || {}).avg, dp), _tbtCol((r.allRaw || {}).avg)) + '</tr>';
+  }
+  return h + '</tbody></table></div>';
 }
 function renderTrendBacktest(d) {
   const wrap = document.getElementById('tbt-results'); if (!wrap || !d || !Array.isArray(d.results)) return;
-  const th = (t, tip) => `<th style="padding:6px 8px;text-align:right;font-size:9px;color:var(--muted);font-weight:600;white-space:nowrap"${tip ? ` title="${tip}"` : ''}>${t}</th>`;
-  const td = (v, col, bold) => `<td style="padding:5px 8px;text-align:right;color:${col || 'var(--text)'};${bold ? 'font-weight:700;' : ''}white-space:nowrap">${v}</td>`;
+  const card = (title, body) => `<div class="card" style="margin-bottom:12px;padding:12px 16px"><div style="font-size:11px;font-weight:700;letter-spacing:1px;color:var(--blue);margin-bottom:8px">${title}</div>${body}</div>`;
+  const opt = d.option || {}, M = opt.model || {}, src = opt.sources || {}, hasOpt = d.results.every(r => r.opt);
   let html = '';
-  for (const ex of ['apex', 'chandelier']) {
-    const rows = d.results.filter(r => r.exitSet === ex), cur = rows.find(r => r.variant === 'current');
-    html += `<div class="card" style="margin-bottom:12px;padding:12px 16px"><div style="font-size:11px;font-weight:700;letter-spacing:1px;color:var(--blue);margin-bottom:8px">` +
-      (ex === 'apex' ? 'EXITS: APEX LIVE RULES <span style="color:var(--muted);font-weight:400">— stop 3.5 ATR (capped), tight trail, 14-day stale exit</span>'
-                     : 'EXITS: CLENOW-STYLE 3-ATR TRAIL <span style="color:var(--muted);font-weight:400">— from the highest close; rolls charged</span>') + '</div>';
-    html += '<div style="overflow-x:auto"><table style="width:100%;border-collapse:collapse;font-size:11px"><thead><tr>' +
-      '<th style="padding:6px 8px;text-align:left;font-size:9px;color:var(--muted);font-weight:600">VARIANT</th>' +
-      th('TRADES') + th('WIN %') + th('AVG / TRADE', 'Average % of the underlying per trade, after costs') + th('TOTAL') + th('PF', 'Profit factor: gross wins / gross losses') +
-      th('AVG WIN') + th('AVG LOSS') + th('MAX DD', 'Worst peak-to-trough of the summed trade returns') + th('DAYS', 'Average days held') +
-      th('1ST HALF', 'Average per trade, trades entered in the first half of the period (n)') + th('2ND HALF', 'Second half (n)') + th('SPY') + th('QQQ') + th('RAW', 'Average before costs') +
-      '</tr></thead><tbody>';
-    for (const r of rows) {
-      const a = r.all || {}, isCur = r.variant === 'current', beats = _tbtBeats(r, cur);
-      html += `<tr style="border-top:1px solid var(--border);${isCur ? 'background:rgba(0,196,255,.07)' : ''}">` +
-        `<td style="padding:5px 8px;white-space:nowrap" title="${(d.variants || {})[r.variant] || ''}"><b>${r.variant}</b>${isCur ? ' <span style="font-size:9px;color:var(--blue)">LIVE</span>' : ''}${beats ? ' <span style="color:var(--green);font-weight:700" title="Beats the live rule in both halves and on both tickers">✓</span>' : ''}</td>` +
-        td(a.n ?? 0) + td(a.wr ?? '–') + td(_tbtF(a.avg), _tbtCol(a.avg), true) + td(_tbtF(a.total, 1), _tbtCol(a.total)) + td(a.pf ?? '–', a.pf == null ? null : a.pf >= 1 ? 'var(--green)' : 'var(--red)') +
-        td(_tbtF(a.avgWin, 2), 'var(--green)') + td(_tbtF(a.avgLoss, 2), 'var(--red)') + td(_tbtF(a.maxDD, 1), 'var(--red)') + td(a.avgDays ?? '–') +
-        td(`${_tbtF(r.H1.avg)} <span style="color:var(--muted)">(${r.H1.n || 0})</span>`, _tbtCol(r.H1.avg)) +
-        td(`${_tbtF(r.H2.avg)} <span style="color:var(--muted)">(${r.H2.n || 0})</span>`, _tbtCol(r.H2.avg)) +
-        td(_tbtF((r.byTicker.SPY || {}).avg), _tbtCol((r.byTicker.SPY || {}).avg)) + td(_tbtF((r.byTicker.QQQ || {}).avg), _tbtCol((r.byTicker.QQQ || {}).avg)) +
-        td(_tbtF((r.allRaw || {}).avg), _tbtCol((r.allRaw || {}).avg)) + '</tr>';
+  if (hasOpt) {
+    const cal = M.calib ? ['SPY', 'QQQ'].filter(t => M.calib[t]).map(t => `${t} calls ×${M.calib[t].call} · puts ×${M.calib[t].put}`).join(' &nbsp;|&nbsp; ') : null;
+    html += `<div class="card" style="margin-bottom:12px;padding:10px 16px;font-size:11px;line-height:1.7;color:var(--muted)">` +
+      `<b style="color:var(--text)">Option model.</b> Implied vol — SPY: ${src.SPY || '–'} · QQQ: ${src.QQQ || '–'} · skew ${M.SKEW ?? '–'} · rates: ${src.rate || '–'} · ${src.SPY_prices || ''}<br>` +
+      `Cost ${M.COST_RT_PCT ?? '–'}% of premium per round trip. ` +
+      (cal ? `<span style="color:var(--text)">Vol calibrated to real option prices:</span> ${cal}` : `<span style="color:var(--gold)">Not calibrated — no real option prices came back (see validation).</span>`) + `</div>`;
+    for (const ex of ['apex', 'chandelier']) {
+      const views = d.results.filter(r => r.exitSet === ex).map(_tbtOptView);
+      html += card('OPTION-PRICED · ' + _tbtExitTitle(ex) + ' <span style="color:var(--muted);font-weight:400">· % of premium per trade</span>',
+        _tbtMainTable(views, 'premium') + _tbtExtraTables(views, opt.scenarios || [], 'SENSITIVITY — same trades and contracts, re-priced under other model assumptions'));
     }
-    html += '</tbody></table></div><div style="margin-top:8px;font-size:10px;color:var(--muted);line-height:1.6">' +
-      rows.map(r => `<b>${r.variant}</b> exits: ${Object.entries(r.exitMix || {}).map(([k, v]) => k + ' ' + v).join(' · ') || '–'}`).join('<br>') + '</div>' +
-      _tbtExtraTables(d, rows) + '</div>';
+    html += _tbtValidationCard(opt.validation);
   }
+  let old = '';
+  for (const ex of ['apex', 'chandelier']) {
+    const views = d.results.filter(r => r.exitSet === ex);
+    old += card('UNDERLYING-LEVEL · ' + _tbtExitTitle(ex) + ' <span style="color:var(--muted);font-weight:400">· % of the underlying per trade</span>',
+      _tbtMainTable(views, 'underlying') + `<div style="margin-top:8px;font-size:10px;color:var(--muted);line-height:1.6">` +
+      views.map(r => `<b>${r.variant}</b> exits: ${Object.entries(r.exitMix || {}).map(([k, v]) => k + ' ' + v).join(' · ') || '–'}`).join('<br>') + '</div>' +
+      _tbtExtraTables(views, d.scenarios || [], 'COST SENSITIVITY — same trades re-priced (avg/trade: all, with SPY · QQQ beneath)'));
+  }
+  html += hasOpt ? `<details style="margin-bottom:12px"><summary style="cursor:pointer;font-size:11px;color:var(--muted);padding:6px 2px">Underlying-level results (the original study: flat cost + decay charge) — for comparison</summary>${old}</details>` : old;
   html += `<div style="font-size:10px;color:var(--muted);margin:-4px 0 12px 2px">Data ${d.start || '?'} → ${d.end || '?'} · halves split at ${((d.results[0] || {}).mid) || '?'}</div>`;
   wrap.innerHTML = html;
 }
+function _tbtValidationCard(v) {
+  const title = 'VALIDATION · MODEL VS REAL OPTION PRICES <span style="color:var(--muted);font-weight:400">— Alpaca daily option bars, 2024 on</span>';
+  const wrapC = (b) => `<div class="card" style="margin-bottom:12px;padding:12px 16px"><div style="font-size:11px;font-weight:700;letter-spacing:1px;color:var(--blue);margin-bottom:8px">${title}</div>${b}</div>`;
+  if (!v) return wrapC('<div style="font-size:11px;color:var(--muted)">Not run — no real option prices were fetched.</div>');
+  const th = (t, tip) => `<th style="padding:5px 8px;text-align:right;font-size:9px;color:var(--muted);font-weight:600;white-space:nowrap"${tip ? ` title="${tip}"` : ''}>${t}</th>`;
+  const td = (x, col) => `<td style="padding:4px 8px;text-align:right;white-space:nowrap;color:${col || 'var(--text)'}">${x}</td>`;
+  const f = v.fetch || {};
+  let b = `<div style="font-size:11px;color:var(--muted);margin-bottom:8px">${f.symbolsWithBars ?? '?'} of ${f.symbolsRequested ?? '?'} contracts returned real bars${f.seconds != null ? ' in ' + f.seconds + 's' : ''}${f.note ? ' — <span style="color:var(--gold)">' + f.note + '</span>' : ''}. ${v.points} open/close prices compared.</div>`;
+  b += '<div style="overflow-x:auto"><table style="width:100%;border-collapse:collapse;font-size:11px"><thead><tr><th style="padding:5px 8px;text-align:left;font-size:9px;color:var(--muted);font-weight:600">CONTRACTS</th>' +
+    th('PRICES') + th('TYPICAL MISS', 'Median |model - real| / real') + th('BIAS', 'Median (model - real) / real: negative = model too cheap') + th('MISS AFTER CALIBRATION') + th('REAL / MODEL VOL') + '</tr></thead><tbody>';
+  for (const [k, g] of Object.entries(v.prices || {})) {
+    b += `<tr style="border-top:1px solid var(--border)"><td style="padding:4px 8px"><b>${k}</b></td>` + td(g.n) + td(g.medAbsErr == null ? '–' : Number(g.medAbsErr).toFixed(1) + '%') +
+      td(g.medErr == null ? '–' : _tbtF(g.medErr, 1) + '%', _tbtCol(g.medErr == null ? null : -Math.abs(g.medErr))) + td(g.medAbsErrCal == null ? '–' : Number(g.medAbsErrCal).toFixed(1) + '%') + td(g.ivRatio ?? '–') + '</tr>';
+  }
+  b += '</tbody></table></div>';
+  b += `<div style="font-size:10px;font-weight:700;letter-spacing:1px;color:var(--muted);margin:14px 0 6px">TRADES RE-SCORED ON REAL PRICES <span style="font-weight:400">— same contracts; model column uncalibrated</span></div>`;
+  b += '<div style="overflow-x:auto"><table style="width:100%;border-collapse:collapse;font-size:11px"><thead><tr><th style="padding:5px 8px;text-align:left;font-size:9px;color:var(--muted);font-weight:600">EXITS · VARIANT</th>' +
+    th('TRADES') + th('MODEL AVG') + th('REAL AVG') + th('MODEL WIN %') + th('REAL WIN %') + th('SAME SIGN', 'Share of trades where model and real agree on win vs loss') + '</tr></thead><tbody>';
+  for (const t of (v.trades || [])) {
+    b += `<tr style="border-top:1px solid var(--border)${t.variant === 'current' ? ';background:rgba(0,196,255,.07)' : ''}"><td style="padding:4px 8px;white-space:nowrap">${t.exitSet === 'apex' ? 'APEX' : 'Chandelier'} · <b>${t.variant}</b></td>` +
+      td(t.n) + (t.n ? td(_tbtF(t.modelAvg, 2) + '%', _tbtCol(t.modelAvg)) + td(_tbtF(t.realAvg, 2) + '%', _tbtCol(t.realAvg)) + td(t.modelWR + '%') + td(t.realWR + '%') + td(t.signAgreePct + '%')
+                         : td('–') + td('–') + td('–') + td('–') + td('–')) + '</tr>';
+  }
+  return wrapC(b + '</tbody></table></div>');
+}
 
-// 10/7: ticker x half + cost-sensitivity tables (rendered under each exit set's main table)
-function _tbtExtraTables(d, rows) {
+// ticker x half (with the cell-by-cell comparison to the live rule) + sensitivity, for one exit set's views
+function _tbtExtraTables(views, sc, sensTitle) {
   const tks = ['SPY', 'QQQ'];
   const sub = (t) => `<div style="font-size:10px;font-weight:700;letter-spacing:1px;color:var(--muted);margin:14px 0 6px">${t}</div>`;
   const th = (t, tip) => `<th style="padding:5px 8px;text-align:right;font-size:9px;color:var(--muted);font-weight:600;white-space:nowrap"${tip ? ` title="${tip}"` : ''}>${t}</th>`;
-  const cell = (s, extra) => `<td style="padding:4px 8px;text-align:right;white-space:nowrap;color:${_tbtCol(s && s.avg)}">${s && s.n ? _tbtF(s.avg) : '–'}${extra != null ? ` <span style="color:var(--muted)">(${extra})</span>` : ''}</td>`;
+  const cell = (s, extra) => `<td style="padding:4px 8px;text-align:right;white-space:nowrap;color:${_tbtCol(s && s.avg)}">${s && s.n ? _tbtF(s.avg, 2) : '–'}${extra != null ? ` <span style="color:var(--muted)">(${extra})</span>` : ''}</td>`;
   let out = '';
-  if (rows.some(r => r.tickerHalves)) {
+  if (views.some(r => r.tickerHalves)) {
     out += sub('BY TICKER × HALF') + '<div style="overflow-x:auto"><table style="width:100%;border-collapse:collapse;font-size:11px"><thead><tr>' +
       '<th style="padding:5px 8px;text-align:left;font-size:9px;color:var(--muted);font-weight:600">VARIANT</th>' +
-      tks.map(t => th(t + ' 1ST HALF') + th(t + ' 2ND HALF')).join('') + th('ALL FOUR +', 'Positive after costs in both halves on both tickers') + '</tr></thead><tbody>';
-    for (const r of rows) {
+      tks.map(t => th(t + ' 1ST HALF') + th(t + ' 2ND HALF')).join('') + th('BEATS LIVE', 'Cells (of 4) where this variant beats the live rule') + th('POSITIVE', 'Cells (of 4) positive after costs') + '</tr></thead><tbody>';
+    for (const r of views) {
       const cs = tks.flatMap(t => ['H1', 'H2'].map(k => ((r.tickerHalves || {})[t] || {})[k]));
-      const allPos = cs.every(c => c && c.n && c.avg > 0);
+      const c = r.consistency || {};
       out += `<tr style="border-top:1px solid var(--border)${r.variant === 'current' ? ';background:rgba(0,196,255,.07)' : ''}"><td style="padding:4px 8px"><b>${r.variant}</b></td>` +
-        cs.map(c => cell(c, c ? (c.n || 0) : 0)).join('') +
-        `<td style="padding:4px 8px;text-align:right;font-weight:700;color:${allPos ? 'var(--green)' : 'var(--muted)'}">${allPos ? '✓ YES' : '–'}</td></tr>`;
+        cs.map(x => cell(x, x ? (x.n || 0) : 0)).join('') +
+        `<td style="padding:4px 8px;text-align:right;font-weight:700;color:${c.beats === 4 ? 'var(--green)' : 'var(--muted)'}">${c.beats == null ? 'LIVE' : c.beats + '/4' + (c.beats === 4 ? ' ✓' : '')}</td>` +
+        `<td style="padding:4px 8px;text-align:right;color:${c.positive === 4 ? 'var(--green)' : 'var(--muted)'}">${c.positive ?? '–'}/4</td></tr>`;
     }
     out += '</tbody></table></div>';
   }
-  const sc = d.scenarios || [];
-  if (sc.length && rows.some(r => r.sensitivity)) {
-    out += sub('COST SENSITIVITY — same trades re-priced (avg/trade: all, with SPY · QQQ beneath)') +
-      '<div style="overflow-x:auto"><table style="width:100%;border-collapse:collapse;font-size:11px"><thead><tr>' +
+  if (sc.length && views.some(r => r.sensitivity)) {
+    out += sub(sensTitle) + '<div style="overflow-x:auto"><table style="width:100%;border-collapse:collapse;font-size:11px"><thead><tr>' +
       '<th style="padding:5px 8px;text-align:left;font-size:9px;color:var(--muted);font-weight:600">VARIANT</th>' +
-      sc.map(s => th(s.label.toUpperCase(), s.key === 'base' ? 'The assumptions used in the main table' : s.key === 'raw' ? 'No round-trip cost and no time-decay charge' : '')).join('') + '</tr></thead><tbody>';
-    for (const r of rows) {
+      sc.map(s => th(s.label.toUpperCase(), s.key === 'base' ? 'The assumptions used in the main table' : '')).join('') + '</tr></thead><tbody>';
+    for (const r of views) {
       out += `<tr style="border-top:1px solid var(--border)${r.variant === 'current' ? ';background:rgba(0,196,255,.07)' : ''}"><td style="padding:4px 8px"><b>${r.variant}</b></td>` +
         sc.map(s => { const o = (r.sensitivity || {})[s.key] || {};
-          return `<td style="padding:4px 8px;text-align:right;white-space:nowrap"><span style="font-weight:700;color:${_tbtCol((o.all || {}).avg)}">${_tbtF((o.all || {}).avg)}</span>` +
+          return `<td style="padding:4px 8px;text-align:right;white-space:nowrap"><span style="font-weight:700;color:${_tbtCol((o.all || {}).avg)}">${_tbtF((o.all || {}).avg, 2)}</span>` +
             `<div style="font-size:9px;color:var(--muted)">${_tbtF((o.SPY || {}).avg, 2)} · ${_tbtF((o.QQQ || {}).avg, 2)}</div></td>`; }).join('') + '</tr>';
     }
     out += '</tbody></table></div>';
@@ -2736,6 +2782,7 @@ async function runTrendBacktestTab() {
   const s = sessionStorage.getItem('apexSecret') || prompt('Enter APEX secret:') || '';
   btn.disabled = true; btn.textContent = '⏳ RUNNING…'; st.textContent = 'Fetching daily history and running the study…'; st.style.color = 'var(--muted)';
   try {
+    st.textContent = 'Fetching daily history, implied-vol history and real option prices, then running the study… (1-3 min)';
     const r = await fetch('/api/trend-backtest?format=json&start=' + encodeURIComponent(start), { headers: { 'x-argo-secret': s } });
     if (!r.ok) { const t = await r.text(); st.textContent = 'Failed: HTTP ' + r.status + (r.status === 401 ? ' (bad/missing secret)' : r.status === 404 ? ' (server.js / trendBacktest.js not deployed?)' : '') + ' ' + t.slice(0, 120); st.style.color = 'var(--red)'; return; }
     if (s) sessionStorage.setItem('apexSecret', s);
@@ -3184,7 +3231,8 @@ function renderMarketState(d) {
   _ms$('ms-gates').innerHTML =
     row('Intraday-trend', it.open, `${it.window || ''}${it.open ? ' · ADX ≥ ' + it.adxMinNow : ''}${blk.length ? ' · blocked (neg γ): ' + blk.join(', ') : ''}${it.sizeUpAtAdx ? ' · 2× at ADX ' + it.sizeUpAtAdx + '+' : ''}`) +
     row('MR-fade', (g.mrFade || {}).open, 'until ' + ((g.mrFade || {}).cutoff || '--')) +
-    row('Trend-swing', (g.trendSwing || {}).open, 'until ' + ((g.trendSwing || {}).cutoff || '--'));
+    row('Trend-swing', (g.trendSwing || {}).open, 'until ' + ((g.trendSwing || {}).cutoff || '--') +
+      Object.entries((g.trendSwing || {}).cooldown || {}).map(([tk, d]) => ` · ${tk} cooling down until ${d.slice(5).replace('-', '/')}`).join(''));
   // Tickers
   for (const tk of ['SPY', 'QQQ']) {
     const box = _ms$('ms-' + tk); if (!box) continue;
