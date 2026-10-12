@@ -43,8 +43,23 @@ async function getAlpacaTruth() {
 
     const currentCash   = parseFloat(acct.cash || 0);
     const currentEquity = parseFloat(acct.equity || acct.portfolio_value || currentCash);
-    const dayOpenEquity = parseFloat(acct.last_equity || acct.last_portfolio_value || currentEquity);
+    const alpacaLastEquity = parseFloat(acct.last_equity || acct.last_portfolio_value || currentEquity);
+    // 10/12 (Harrison): DAY BASELINE = APEX's own after-close equity snapshot from the prior day, not Alpaca's last_equity.
+    // Alpaca re-marks the prior close overnight (10/9: last_equity $87,917 vs $86,765 read at 16:03 on 10/8), so
+    // "today's change" mixed two marking bases and showed -$548 on a ~+$604 day. Fallback = Alpaca's figure, labeled.
+    const _snap = state._eodEquitySnap;
+    const _useSnap = !!(_snap && _snap.day && _snap.day < todayStr && _snap.equity > 0);
+    const dayOpenEquity = _useSnap ? _snap.equity : alpacaLastEquity;
+    const dayBaselineSource = _useSnap ? `apex-snapshot ${_snap.day} ${_snap.at || ""}`.trim() : "alpaca-last-equity";
     const equityDelta   = parseFloat((currentEquity - dayOpenEquity).toFixed(2));
+    const alpacaDayChange = parseFloat((currentEquity - alpacaLastEquity).toFixed(2));
+    try {   // after the close (ET >= 16:00, weekdays): record today's equity as tomorrow's baseline (latest read wins)
+      const _et = getETTime(), _dow = _et.getDay();
+      if (_et.getHours() >= 16 && _dow >= 1 && _dow <= 5 && currentEquity > 0) {
+        state._eodEquitySnap = { day: todayStr, equity: currentEquity, at: _et.toTimeString().slice(0, 5) + " ET" };
+        markDirty();
+      }
+    } catch (_snErr) { /* baseline snapshot is best-effort */ }
     const unrealizedPnL = Array.isArray(positions)
       ? positions.reduce((sum, p) => sum + parseFloat(p.unrealized_pl || 0), 0)
       : 0;
@@ -81,13 +96,16 @@ async function getAlpacaTruth() {
       `[ALPACA TRUTH] realized:$${realizedPnL.toFixed(0)} ` +
       `unrealized:$${unrealizedPnL.toFixed(0)} ` +
       `total:$${totalPnL.toFixed(0)} ` +
-      `| lastEquity:$${dayOpenEquity.toFixed(0)} currentEquity:$${currentEquity.toFixed(0)}`
+      `| baseline:$${dayOpenEquity.toFixed(0)} (${dayBaselineSource}) currentEquity:$${currentEquity.toFixed(0)} | alpaca last_equity:$${alpacaLastEquity.toFixed(0)} (alpaca day change $${alpacaDayChange.toFixed(0)})`
     );
 
     return {
       currentCash,
       currentEquity,
       dayOpenEquity,
+      dayBaselineSource,          // 10/12
+      alpacaLastEquity,
+      alpacaDayChange,
       realizedPnL,
       unrealizedPnL:   parseFloat(unrealizedPnL.toFixed(2)),
       totalPnL,
