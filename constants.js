@@ -25,7 +25,10 @@ const ANTHROPIC_MODEL   = 'claude-sonnet-4-6';  // FIX (6/16): was retired snaps
 const REDIS_URL         = process.env.UPSTASH_REDIS_REST_URL  || '';
 const REDIS_TOKEN       = process.env.UPSTASH_REDIS_REST_TOKEN || '';
 const REDIS_KEY         = 'spt1:state';
-const REDIS_SAVE_INTERVAL = 30 * 1000;
+const REDIS_SAVE_INTERVAL = 120 * 1000;   // 10/12: was 30 s. Fills/closes/shutdown still save at once (saveStateNow); this is the routine
+                                           // flush. 4x fewer full-state uploads — Upstash free plan = 10 GB/month bandwidth.
+const REDIS_COMPRESS      = true;         // 10/12: gzip values in Upstash (redisIO.js). Set false ONLY before rolling back to pre-10/12 code.
+const REDIS_CHAINSNAP_SAVE_MIN = 60;      // 10/12: option-chain snapshots persist hourly + at the close (was every checkpoint, ~3 min throttle)
 const MARKETAUX_KEY     = process.env.MARKETAUX_API_KEY || process.env.MARKETAUX_KEY || '';  // 7/1 fix: accept either name (market.js read MARKETAUX_KEY; constants read MARKETAUX_API_KEY — a keyless path failed silently)
 
 // ─── Capital / risk ──────────────────────────────────────────────
@@ -921,7 +924,7 @@ module.exports = {
   ALPACA_KEY, ALPACA_SECRET, ALPACA_BASE, ALPACA_DATA, ALPACA_OPTIONS,
   VIX_ANCHOR_ENABLED, VIX_LOWBASE_SUPPRESS, LOG_CHECKPOINT_MIN,
   ALPACA_OPT_SNAP, ALPACA_NEWS, OPTION_FEED, GMAIL_USER, RESEND_API_KEY,
-  ANTHROPIC_API_KEY, ANTHROPIC_MODEL, REDIS_URL, REDIS_TOKEN, REDIS_KEY,
+  ANTHROPIC_API_KEY, ANTHROPIC_MODEL, REDIS_URL, REDIS_TOKEN, REDIS_KEY, REDIS_COMPRESS, REDIS_CHAINSNAP_SAVE_MIN,
   REDIS_SAVE_INTERVAL, MARKETAUX_KEY, MONTHLY_BUDGET, DEFAULT_VIX, CAPITAL_FLOOR,
   REVENUE_THRESHOLD, BONUS_AMOUNT, MAX_HEAT, MAX_SECTOR_PCT, DATA_GATHER_MODE,
   STOP_LOSS_PCT, FAST_STOP_PCT, FAST_STOP_HOURS, TAKE_PROFIT_PCT,
