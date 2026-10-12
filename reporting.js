@@ -18,6 +18,7 @@ const { withTimeout ,
 } = require('./broker');
 const { state, logEvent, saveStateNow, markDirty, fetchRecentOutcomeRows } = require('./state');
 const { telemetryCSV } = require('./telemetry');
+const { redisFetch, usageSummary } = require('./redisIO');   // 10/12
 const { outcomesCSV, OUTCOME_HEADER }  = require('./outcomes');
 const { LOG_ATTACH_MAX_BYTES } = require('./constants');
 // 8/12: DEFENSIVE REQUIRE. vol.js is OPTIONAL instrumentation — realized vol, IV-RV, surface,
@@ -60,7 +61,7 @@ async function _retainToRedis(name, dateStr, csv) {
   const nChunks = Math.ceil(data.length / CHUNK);
   const _set = async (key, val) => {
     try {
-      const r = await fetch(`${REDIS_URL}/pipeline`, {
+      const r = await redisFetch(`${REDIS_URL}/pipeline`, {
         method: "POST",
         headers: { Authorization: `Bearer ${REDIS_TOKEN}`, "Content-Type": "application/json" },
         body: JSON.stringify([["set", key, val, "EX", 7776000]]),
@@ -401,6 +402,7 @@ async function sendEmail(type) {
     // email body rather than blocking it.
     let bodyHtml = buildEmailHTML(type);
     if (type !== "morning") {
+      try { bodyHtml += buildRedisUsageLine(); } catch (_) {}   // 10/12: Upstash bandwidth (free plan = 10 GB/month)
       try { bodyHtml += await buildRecordCheckSection(_eodSnap); }   // 10/12: Alpaca fills vs outcome rows — runs on its own
       catch (_rcErr) { logEvent("warn", `[RECORD-CHECK] skipped — ${_rcErr.message}`); bodyHtml += `<div style="font-size:10px;color:#aa8844;margin:10px 0">Record check skipped — ${_rcErr.message}</div>`; }
       try {
@@ -461,6 +463,19 @@ function checkFillsAgainstOutcomes(fills, outcomeRows, openPositions) {
   return { closedAtBroker: Object.keys(sells).length, rowsToday: (outcomeRows || []).length, missing, noSale, boughtLost,
            ok: !missing.length && !noSale.length && !boughtLost.length };
 }
+// 10/12: one line on Upstash bandwidth — today by data type, month-to-date against the free plan's 10 GB.
+function buildRedisUsageLine() {
+  const u = usageSummary(state);
+  if (!u) return "";
+  const cap = 10240, et = new Date(new Date().toLocaleString("en-US", { timeZone: "America/New_York" }));
+  const dim = new Date(et.getFullYear(), et.getMonth() + 1, 0).getDate(), left = dim - et.getDate();
+  const proj = u.monthMB + u.avgDayMB * left * (5 / 7);   // remaining weekdays at the average day so far
+  const col = proj > cap * 0.9 ? "#ff7777" : proj > cap * 0.6 ? "#ddaa44" : "#557799";
+  const top = u.families.slice(0, 4).map(f => `${f.family.replace(/^argo:|^spt1:/, "")} ${f.mb} MB`).join(" · ");
+  logEvent("scan", `[REDIS-USAGE] today ${u.todayMB} MB (${top}) | month ${u.monthMB} MB of ${cap} MB free, ${u.monthReq} requests | projected ${Math.round(proj)} MB`);
+  return `<div style="font-size:10px;color:${col};margin:10px 0">Upstash today: ${u.todayMB} MB (${top}) · month to date ${u.monthMB} MB of ${cap.toLocaleString()} MB free · projected month ${Math.round(proj).toLocaleString()} MB</div>`;
+}
+
 async function buildRecordCheckSection(snap) {
   const today = new Date().toLocaleDateString("en-CA", { timeZone: "America/New_York" });
   const fills = []; let token = null;
@@ -1433,5 +1448,5 @@ module.exports = {
   sendEmail, sendResendEmail, buildEmailHTML, getBenchmarkComparison,
   buildMonthlyReport, sendMorningBriefing, premarketAssessment,
   updateAfterHoursContext, initReporting, setReportingContext,
-  buildJournalBreakdown, checkFillsAgainstOutcomes, buildRecordCheckSection,
+  buildJournalBreakdown, checkFillsAgainstOutcomes, buildRecordCheckSection, buildRedisUsageLine,
 };
