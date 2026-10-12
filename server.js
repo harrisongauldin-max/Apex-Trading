@@ -3,6 +3,7 @@
 'use strict';
 
 const express = require('express');
+const { redisFetch } = require('./redisIO');   // 10/12: compressed + metered Upstash calls
 const cron    = require('node-cron');
 const path    = require('path');
 const fs      = require('fs');
@@ -1298,12 +1299,12 @@ app.get("/api/analytics/history", async (req, res) => {
     const { date } = req.query;
     if (date) {
       const key  = `argo:analytics:${date}`;
-      const resp = await fetch(`${REDIS_URL}/get/${key}`, { headers: { Authorization: `Bearer ${REDIS_TOKEN}` } });
+      const resp = await redisFetch(`${REDIS_URL}/get/${key}`, { headers: { Authorization: `Bearer ${REDIS_TOKEN}` } });
       const data = await resp.json();
       if (!data.result) return res.status(404).json({ error: `No analytics snapshot for ${date}` });
       return res.json(parseRedisBlob(data.result));
     } else {
-      const resp  = await fetch(`${REDIS_URL}/keys/argo:analytics:*`, { headers: { Authorization: `Bearer ${REDIS_TOKEN}` } });
+      const resp  = await redisFetch(`${REDIS_URL}/keys/argo:analytics:*`, { headers: { Authorization: `Bearer ${REDIS_TOKEN}` } });
       const data  = await resp.json();
       const dates = (data.result || []).map(k => k.replace('argo:analytics:', '')).sort().reverse();
       return res.json({ available: dates, count: dates.length });
@@ -1317,7 +1318,7 @@ app.get("/api/logs/history", async (req, res) => {
     const date = req.query.date;
     if (date) {
       const logKey = `argo:logs:${date}`;
-      const resp   = await fetch(`${REDIS_URL}/get/${logKey}`, { headers: { Authorization: `Bearer ${REDIS_TOKEN}` } });
+      const resp   = await redisFetch(`${REDIS_URL}/get/${logKey}`, { headers: { Authorization: `Bearer ${REDIS_TOKEN}` } });
       const data = await resp.json();
       let entries, summary, source;
       const parsed       = parseRedisBlob(data.result);
@@ -1350,7 +1351,7 @@ app.get("/api/logs/history", async (req, res) => {
       if (types) entries = entries.filter(e => types.includes(e.type));
       res.json({ date, entries: entries.slice(0, limit), summary, source });
     } else {
-      const resp = await fetch(`${REDIS_URL}/keys/argo:logs:*`, { headers: { Authorization: `Bearer ${REDIS_TOKEN}` } });
+      const resp = await redisFetch(`${REDIS_URL}/keys/argo:logs:*`, { headers: { Authorization: `Bearer ${REDIS_TOKEN}` } });
       const data  = await resp.json();
       const dates = (data.result || []).map(k => k.replace("argo:logs:", "")).sort().reverse();
       res.json({ available: dates, count: dates.length });
@@ -1376,14 +1377,14 @@ app.get("/api/telemetry", async (req, res) => {
   try {
     const date = req.query.date;
     if (!date || date === "dates") {
-      const resp = await fetch(`${REDIS_URL}/keys/argo:telemetry:*`, { headers: { Authorization: `Bearer ${REDIS_TOKEN}` } });
+      const resp = await redisFetch(`${REDIS_URL}/keys/argo:telemetry:*`, { headers: { Authorization: `Bearer ${REDIS_TOKEN}` } });
       const data  = await resp.json();
       const dates = (data.result || []).map(k => k.replace("argo:telemetry:", "")).sort().reverse();
       return res.json({ available: dates, count: dates.length });
     }
     let header = "time,tkr,px,iRSI,dRSI,call,put,isMR,curl,vwap%,blocker,drivers";
     let rows = [], source = "redis";
-    const resp = await fetch(`${REDIS_URL}/get/argo:telemetry:${date}`, { headers: { Authorization: `Bearer ${REDIS_TOKEN}` } });
+    const resp = await redisFetch(`${REDIS_URL}/get/argo:telemetry:${date}`, { headers: { Authorization: `Bearer ${REDIS_TOKEN}` } });
     const data = await resp.json();
     if (!data.result) {
       const todayStr = getETDateStr();
@@ -1412,14 +1413,14 @@ app.get("/api/outcomes", async (req, res) => {
     const { OUTCOME_HEADER } = require('./outcomes');
     const date = req.query.date;
     if (!date || date === "dates") {
-      const resp = await fetch(`${REDIS_URL}/keys/argo:outcomes:*`, { headers: { Authorization: `Bearer ${REDIS_TOKEN}` } });
+      const resp = await redisFetch(`${REDIS_URL}/keys/argo:outcomes:*`, { headers: { Authorization: `Bearer ${REDIS_TOKEN}` } });
       const data  = await resp.json();
       const dates = (data.result || []).map(k => k.replace("argo:outcomes:", "")).sort().reverse();
       return res.json({ available: dates, count: dates.length });
     }
     let header = OUTCOME_HEADER;
     let rows = [], source = "redis";
-    const resp = await fetch(`${REDIS_URL}/get/argo:outcomes:${date}`, { headers: { Authorization: `Bearer ${REDIS_TOKEN}` } });
+    const resp = await redisFetch(`${REDIS_URL}/get/argo:outcomes:${date}`, { headers: { Authorization: `Bearer ${REDIS_TOKEN}` } });
     const data = await resp.json();
     if (!data.result) {
       const todayStr = getETDateStr();
