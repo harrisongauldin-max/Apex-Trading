@@ -1927,6 +1927,29 @@ async function runScan() {
       } catch (_efsErr) { /* observational */ }
     }
 
+    // 10/12 (Harrison): mr-fade POST-EXIT SHADOW — for 60 min after each fade ENTRY (independent of its exit): first
+    // minute the invalidation level was crossed, first minute price reached session VWAP (the reversion target),
+    // best/worst move in the fade's favor, and the move at 60 min. Answers "did the stop save money, or cut a fade
+    // that would have reverted?" Measure-only.
+    if (price > 0 && Array.isArray(state._entryFwd)) {
+      try {
+        const _MRS = 60;
+        for (const _ef of state._entryFwd) {
+          if (typeof _ef.mrInv !== "number" || _ef.mrDone || _ef.ticker !== stock.ticker || !(_ef.px > 0)) continue;
+          const _age = (Date.now() - _ef.at) / 60000;
+          if (_age < 0) continue;
+          const _dir = _ef.side === "call" ? 1 : -1;
+          const _fav = _dir * (price - _ef.px) / _ef.px * 100;
+          _ef.mrMfe = Math.max(_ef.mrMfe || 0, +_fav.toFixed(3));
+          _ef.mrMae = Math.min(_ef.mrMae || 0, +_fav.toFixed(3));
+          if (_ef.mrInvMin == null && (_dir > 0 ? price <= _ef.mrInv : price >= _ef.mrInv)) _ef.mrInvMin = +_age.toFixed(1);
+          if (_ef.mrTgtMin == null && vwap > 0 && (_dir > 0 ? price >= vwap : price <= vwap)) _ef.mrTgtMin = +_age.toFixed(1);
+          _ef.mrTrack = +Math.min(_age, _MRS).toFixed(1);
+          if (_age >= _MRS) { _ef.mr60 = +_fav.toFixed(3); _ef.mrDone = true; }
+        }
+      } catch (_mrsErr) { /* observational */ }
+    }
+
     // 8/24: VF-SKIP forward-move stamp — same loop, for signals the vf arm declined (state._vfSkip).
     if (price > 0 && Array.isArray(state._vfSkip)) {
       try {
