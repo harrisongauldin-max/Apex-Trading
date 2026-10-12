@@ -480,12 +480,12 @@ async function _doClosePosition(ticker, reason, exitPremium = null, contractSym 
     state._weeklyRealizedPnL = (state._weeklyRealizedPnL || 0) + tradeOutcome.pnl;
     if (!state._weeklyLossLockActive && state._weeklyRealizedPnL <= WEEKLY_LOSS_LIMIT) {
       state._weeklyLossLockActive = true;
-      logEvent("circuit", `[C1-G] Weekly loss lock TRIGGERED — weeklyRealizedPnL $${state._weeklyRealizedPnL.toFixed(0)} <= $${WEEKLY_LOSS_LIMIT} — all entries halted`);
+      logEvent("circuit", `[C1-G] Weekly loss lock TRIGGERED — weeklyRealizedPnL $${state._weeklyRealizedPnL.toFixed(0)} <= $${WEEKLY_LOSS_LIMIT} — ` + (require('./state').paperDataActive(state) ? "NOT enforced: paper data mode lifts loss locks (entries continue)" : "all entries halted"));   // 10/12: the old text said 'halted' even in paper data mode
     }
     // C1-G: Monthly accumulator (use monthlyProfit which is already tracked)
     if (!state._monthlyLossLockActive && (state.monthlyProfit || 0) <= MONTHLY_LOSS_LIMIT) {
       state._monthlyLossLockActive = true;
-      logEvent("circuit", `[C1-G] Monthly loss lock TRIGGERED — monthlyProfit $${(state.monthlyProfit||0).toFixed(0)} <= $${MONTHLY_LOSS_LIMIT} — all entries halted`);
+      logEvent("circuit", `[C1-G] Monthly loss lock TRIGGERED — monthlyProfit $${(state.monthlyProfit||0).toFixed(0)} <= $${MONTHLY_LOSS_LIMIT} — ` + (require('./state').paperDataActive(state) ? "NOT enforced: paper data mode lifts loss locks (entries continue)" : "all entries halted"));   // 10/12: the old text said 'halted' even in paper data mode
     }
   }
 
