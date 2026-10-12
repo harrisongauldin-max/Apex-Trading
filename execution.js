@@ -966,6 +966,10 @@ async function executeTrade(stock, price, score, scoreReasons, vix, optionType =
   if (stock._straddle) { (_openSame || position)._isStraddle = true; }
   if (stock._structBreak) { (_openSame || position)._isStructBreak = true; }
   if (stock._isTrend) { (_openSame || position)._isTrend = true; }
+  // 10/12: a 21-DTE roll continues the same trade — carry the chandelier state (stop level, high-water mark) over
+  if (stock._isTrend && stock._trendCarry && stock._trendCarry.ch) {
+    (_openSame || position)._ch = { ...stock._trendCarry.ch, rolls: (stock._trendCarry.ch.rolls || 0) + 1, rolledFrom: stock._trendCarry.from || null };
+  }
   if (stock._iTrend) { (_openSame || position)._iTrend = true; }
   if (stock._iCvdTag) { (_openSame || position)._iCvdTag = stock._iCvdTag; }
   if (stock._iOrTag && !(_openSame && _openSame._iOrTag)) { (_openSame || position)._iOrTag = stock._iOrTag; }
