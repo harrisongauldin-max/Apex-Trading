@@ -120,12 +120,12 @@ const {
   FEASIBILITY_MAX_RATIO = 1.0, FEASIBILITY_HOLD_MIN = 20, SPREAD_COST_LOG = false,
   MACRO_MAX_AGE_MIN = 240, NEARMISS_LEDGER_ENABLED = false,
   VOLPACE_ARM_ENABLED = false, VOLPACE_ARM_MIN = 0, VOLPACE_ARM_PCTILE = 50, VOLPACE_ARM_WINDOW = 300, VOLPACE_ARM_WARMUP = 20,
-  MR_FADE_ENABLED = true, MR_FADE_CUTOFF_ET = 15.25,   // 9/20: aligned to constants. 9/21: 3:15 hard entry cutoff
+  MR_FADE_ENABLED = true, MR_FADE_CUTOFF_ET = 15.25, MR_FADE_STOP_COOLDOWN_MIN = 15,   // 9/20: aligned to constants. 9/21: 3:15 hard entry cutoff
   BREAK_TRIGGER_ENABLED = false, BREAK_TRIGGER_ENFORCE = false, BREAK_TRIGGER_ALLOW_MRSCALP = true,
   GEX_FETCH_ENABLED = true, GEX_FETCH_THROTTLE_MS = 120000,
   TREND_ENABLED = true, TREND_CUTOFF_ET = 15.0, TREND_MA_FAST = 50, TREND_MA_SLOW = 100,   // 9/20: TREND_ENABLED aligned to constants. 9/21 FIX: comment had eaten TREND_MA_FAST + TREND_MA_SLOW
   TREND_RSI_MIN = 50, TREND_RSI_MAX = 72, TREND_OVEREXT_ATR = 4.0, TREND_BREADTH_MIN = 52,
-  TREND_COOLDOWN_DAYS = 5,
+  TREND_COOLDOWN_DAYS = 5, TREND_TICKERS = ["QQQ"],
   ITREND_NEG_GAMMA_BLOCK = true,
   GEX_REGIME_HYST_M = 250,
   ITREND_LATE_START_ET = 11.0, ITREND_LATE_ADX_MIN = 40,
@@ -315,9 +315,20 @@ async function runScan() {
     const _tOpenNow = new Set((state.positions || []).filter(p => p.entryStrategy === "trend-swing" && !p.closed).map(p => p.ticker));
     for (const _tk of Object.keys(state._trendOpenSeen)) {
       if (state._trendOpenSeen[_tk] && !_tOpenNow.has(_tk)) {
+        if ((state._trendRollCarry || {})[_tk]) continue;   // a 21-DTE roll, not an exit: the re-buy below continues the trade
         const _xd = DAYCTX.etDateStr(now);
         state._trendLastExit[_tk] = { day: _xd, at: now };
         logEvent("scan", `[TREND-SWING] ${_tk} position closed ${_xd} — re-entry cooldown: no new trend-swing on ${_tk} before ${DAYCTX.addTradingDays(_xd, TREND_COOLDOWN_DAYS + 1)}`);
+        markDirty();
+      }
+    }
+    // a roll whose re-buy never happened (no contract / no cash for 2 hours) has ended the trade: count it as the exit
+    for (const [_tk, _c] of Object.entries(state._trendRollCarry || {})) {
+      if (_c && now - _c.at > 2 * 3600000 && !_tOpenNow.has(_tk)) {
+        delete state._trendRollCarry[_tk];
+        const _xd = DAYCTX.etDateStr(_c.at);
+        state._trendLastExit[_tk] = { day: _xd, at: _c.at };
+        logEvent("warn", `[TREND-ROLL] ${_tk} re-buy never filled within 2h of the roll — trade ended; re-entry cooldown from ${_xd}`);
         markDirty();
       }
     }
@@ -1535,7 +1546,7 @@ async function runScan() {
   logEvent("scan", `Prefetch complete in ${((Date.now()-prefetchStart)/1000).toFixed(1)}s`);
 
   for (const { stock, price, bars, intradayBars, sectorResult, preMarket, newsArticles, analystData, eqScore } of stockData) {
-    if (stock && stock.ticker && price > 0) { if (!state._uNow) state._uNow = {}; state._uNow[stock.ticker] = price; }   // 9/02: live underlying per ticker — feeds outcome uExit (was stale = uEntry)
+    if (stock && stock.ticker && price > 0) { if (!state._uNow) state._uNow = {}; state._uNow[stock.ticker] = price; if (!state._uNowTs) state._uNowTs = {}; state._uNowTs[stock.ticker] = Date.now(); }   // 9/02: live underlying per ticker — feeds outcome uExit (was stale = uEntry)
     // 8/26: DEDICATED GEX CHAIN FETCH — throttled per ticker. Populates _gexChain[ticker] with BOTH
     // sides at the same near expiry so the regime gate (enforce + MR-fade) can actually resolve, instead
     // of running blind on the incidental one-side findContract stash. Kill switch: GEX_FETCH_ENABLED.
@@ -2831,7 +2842,23 @@ async function runScan() {
     if (heatPct() < effectiveHeatCap() && state.cash > CAPITAL_FLOOR) {
     // 8/27: TREND-SWING sleeve (daily-momentum, multi-day hold). Own path — bypasses the score/enforce gate
     // like mr-fade. Daily thesis: price vs 50/100d MA + daily RSI/MACD + breadth, not overextended.
-    if (TREND_ENABLED && liveStock && price > 0) {
+    // 10/12 (Harrison): trend-swing trades TREND_TICKERS only (QQQ). A 21-DTE roll re-buys at once, ahead of every
+    // entry gate — it is the same trade continuing (the backtest rolls), not a new signal.
+    const _tCarry = (state._trendRollCarry || {})[liveStock && liveStock.ticker];
+    if (TREND_ENABLED && liveStock && price > 0 && _tCarry && !(state.positions || []).some(p => p.ticker === liveStock.ticker && p.entryStrategy === "trend-swing" && !p.closed)) {
+      try {
+        liveStock._isTrend = _tCarry.side; liveStock._trendCarry = _tCarry;
+        const _rSig = `${liveStock.ticker}-${_tCarry.side}-trendroll-${Date.now()}`;
+        const _rOK = await executeTrade(liveStock, price, 0, [`roll of ${_tCarry.from || "trend-swing"} (21 DTE) — same trade, stop $${_tCarry.ch && _tCarry.ch.stopPx} carries over`], state.vix, _tCarry.side, false, 1.0, null, null, _rSig);
+        liveStock._isTrend = null; liveStock._trendCarry = null;
+        if (_rOK) { delete state._trendRollCarry[liveStock.ticker]; markDirty(); recordStandDown("trend", "ROLLED"); logEvent("scan", `[TREND-ROLL] ${liveStock.ticker} ${_tCarry.side.toUpperCase()} re-bought — trade continues`); continue; }
+        logEvent("warn", `[TREND-ROLL] ${liveStock.ticker} re-buy did not fill — retrying next scan`);
+      } catch (_re) { liveStock._isTrend = null; liveStock._trendCarry = null; logEvent("warn", `[TREND-ROLL] ${liveStock.ticker} re-buy failed — ${_re && _re.message}`); }
+    }
+    else if (TREND_ENABLED && liveStock && price > 0 && !(TREND_TICKERS || []).includes(liveStock.ticker)) {
+      recordStandDown("trend", `${liveStock.ticker} not traded — trend-swing is ${(TREND_TICKERS || []).join("/")} only (10/12)`);
+    }
+    else if (TREND_ENABLED && liveStock && price > 0) {
       try {
         const _etH = (() => { const d = getETTime(); return d.getHours() + d.getMinutes() / 60; })();
         if (_etH < TREND_CUTOFF_ET) {
@@ -3005,8 +3032,9 @@ async function runScan() {
                 liveStock._iMeta = { adxTier: _iAdx >= ITREND_LATE_ADX_MIN ? "40+" : "25-40",
                   gexReg: _g ? _g.regime : null, gexRaw: _g ? (_g.regimeRaw ?? _g.regime) : null,
                   gexNetM: _g && typeof _g.netGexM === "number" ? Math.round(_g.netGexM) : null,
-                  gexDistFlip: _g && typeof _g.distFlipPct === "number" ? +_g.distFlipPct.toFixed(3) : null, skipBy: _skip };
-                logEvent("filter", `[ITREND-META] ${liveStock.ticker} ${_iSide.toUpperCase()} — ADX ${_iAdx.toFixed(0)} (${liveStock._iMeta.adxTier}) | gamma ${_g ? _g.regime : "n/a"}${_g && _g.regimeHeld ? " (held)" : ""} net ${_g ? Math.round(_g.netGexM) + "M" : "n/a"} flip ${_g && _g.distFlipPct != null ? _g.distFlipPct.toFixed(2) + "%" : "n/a"} | would-skip: ${_skip.length ? _skip.join(", ") : "none"} [label only — entering as normal]`);
+                  gexDistFlip: _g && typeof _g.distFlipPct === "number" ? +_g.distFlipPct.toFixed(3) : null, skipBy: _skip,
+                  winMin: Math.max(0, Math.round((_iH - ITREND_START_ET) * 60)) };   // 10/12: minutes since the 10:00 window opened (stale-setup test)
+                logEvent("filter", `[ITREND-META] ${liveStock.ticker} ${_iSide.toUpperCase()} — ADX ${_iAdx.toFixed(0)} (${liveStock._iMeta.adxTier}) | gamma ${_g ? _g.regime : "n/a"}${_g && _g.regimeHeld ? " (held)" : ""} net ${_g ? Math.round(_g.netGexM) + "M" : "n/a"} flip ${_g && _g.distFlipPct != null ? _g.distFlipPct.toFixed(2) + "%" : "n/a"} | would-skip: ${_skip.length ? _skip.join(", ") : "none"} | ${liveStock._iMeta.winMin} min into the window [label only — entering as normal]`);
               } catch (_mErr) { liveStock._iMeta = null; }
               state._iTrendLast[_iCoolKey] = Date.now();
               const _iOK = await executeTrade(liveStock, price, 0, [_iReason], state.vix, _iSide, false, 1.0, null, null, `${liveStock.ticker}-${_iSide}-itrend-${Date.now()}`);
@@ -3084,9 +3112,13 @@ async function runScan() {
             logEvent("filter", `[MR-FADE] ${liveStock.ticker} ${_mrDec.side} BLOCKED — fading against the daily trend (px vs 50d/100d); vwapSlope ${_vwTag}`);
           } else {
           const _hasPos = (state.positions || []).some(p => p.ticker === liveStock.ticker && p.optionType === _mrDec.side && !p.closed);
+          const _mrStopAge = ((state._mrStopAt || {})[liveStock.ticker]) ? (Date.now() - state._mrStopAt[liveStock.ticker]) / 60000 : null;   // 10/12
           if (_hasPos) {
             recordStandDown("mrf", "position already open");
             logEvent("filter", `[MR-FADE] ${liveStock.ticker} ${_mrDec.side} setup, but a ${_mrDec.side} position is already open — standing down`);
+          } else if (_mrStopAge != null && _mrStopAge < MR_FADE_STOP_COOLDOWN_MIN) {
+            recordStandDown("mrf", `cooldown after a stop (${MR_FADE_STOP_COOLDOWN_MIN} min)`);
+            logEvent("filter", `[MR-FADE] ${liveStock.ticker} ${_mrDec.side} setup, but stopped out ${_mrStopAge.toFixed(1)} min ago — cooldown ${MR_FADE_STOP_COOLDOWN_MIN} min, standing down`);
           } else {
             recordStandDown("mrf", "FIRED");
             logEvent("filter", `[MR-FADE] ${liveStock.ticker} FIRE — ${_mrDec.reason} | loc:${_mrDec.locationSource||"?"} | vwapSlope ${_vwTag} (${_vwWith} fade)`);   // 9/22: log locationSource (wall=strong 43% / vwap-band=weak 22%) for measuring before REQUIRE_WALL
