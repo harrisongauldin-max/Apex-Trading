@@ -246,7 +246,8 @@ async function sendEmail(type) {
         const dateStr = new Date().toLocaleDateString("en-CA", { timeZone: "America/New_York" });
         const ef = (_eodSnap.entryFwd || []).filter(r => new Date(r.at).toLocaleDateString("en-CA", { timeZone: "America/New_York" }) === dateStr);  // item-1: _entryFwd persists in Redis, so filter to today's rows only
         if (ef.length) {
-          const head = ["entryET","signalId","ticker","side","score","pxEntry","volPace","fwdPct","fwdMins"].join(",");
+          const head = ["entryET","signalId","ticker","side","score","pxEntry","volPace","fwdPct","fwdMins",
+            "mrInvPx","mrTgtPx0","mrInvHitMin","mrTgtHitMin","mrFirst","mrMfePct","mrMaePct","mr60Pct","mrTrackMin"].join(",");   // 10/12: mr-fade post-exit shadow
           const lines = [head];
           for (const r of ef) {
             lines.push([
@@ -255,6 +256,12 @@ async function sendEmail(type) {
               (r.px != null ? r.px.toFixed(2) : ""),
               (r.volPace != null ? r.volPace : ""),
               (r.fwdPct != null ? r.fwdPct : ""), (r.fwdMins != null ? r.fwdMins : ""),
+              ...(typeof r.mrInv === "number" ? [
+                r.mrInv.toFixed(2), (r.mrTgt0 > 0 ? r.mrTgt0.toFixed(2) : ""),
+                (r.mrInvMin != null ? r.mrInvMin : ""), (r.mrTgtMin != null ? r.mrTgtMin : ""),
+                (r.mrInvMin == null && r.mrTgtMin == null) ? "none" : (r.mrTgtMin == null || (r.mrInvMin != null && r.mrInvMin <= r.mrTgtMin)) ? "invalidation" : "target",
+                (r.mrMfe != null ? r.mrMfe : ""), (r.mrMae != null ? r.mrMae : ""), (r.mr60 != null ? r.mr60 : ""), (r.mrTrack != null ? r.mrTrack : "")
+              ] : ["", "", "", "", "", "", "", "", ""]),   // 10/12: mr-fade post-exit shadow (blank for other sleeves)
             ].join(","));
           }
           const _stamped = ef.filter(r => r.fwdPct != null).length;
@@ -606,7 +613,7 @@ function buildEmailHTML(type) {
 
   const posRows = state.positions.map(p => {
     const strikeLabel = p.isSpread ? `$${p.buyStrike}/$${p.sellStrike} ${p.optionType.toUpperCase()} SPRD` : `$${p.strike}${p.optionType === 'put' ? 'P' : 'C'}`;
-    return `<tr><td>${p.ticker}</td><td>${strikeLabel}</td><td>${p.expDate}</td><td>${p.contracts}x</td><td>$${p.premium}</td><td>${p.score||"?"}/100</td></tr>`;
+    return `<tr><td>${p.ticker}</td><td>${strikeLabel}</td><td>${p.expDate}</td><td>${p.contracts}x</td><td>$${p.premium}</td><td>${({"intraday-trend":"Intraday-trend","mr-fade-lit":"MR-fade","trend-swing":"Trend-swing","break":"Breakout","vol-straddle":"Straddle"})[p.entryStrategy] || p.entryStrategy || "—"}</td></tr>`;   // 10/12: sleeve (entry score is retired)
   }).join("") || "<tr><td colspan='6' style='color:#666'>No open positions</td></tr>";
 
   const recentTrades = trades.slice(-5).reverse().map(t =>
@@ -630,7 +637,7 @@ function buildEmailHTML(type) {
   <div style="background:#0a1628;border:1px solid #0d3050;border-radius:8px;padding:14px">
     <div style="font-size:10px;color:#336688">REALIZED P&L (today's trades)</div>
     <div style="font-size:18px;font-weight:700;color:${parseFloat(realizedDay)>=0?"#00ff88":"#ff5555"}">${parseFloat(realizedDay)>=0?"+":""}$${realizedDay}</div>
-    <div style="font-size:9px;color:#557799;margin-top:4px">Open positions (since entry): <span style="color:${parseFloat(unrealizedDay)>=0?"#00c488":"#dd7777"}">${parseFloat(unrealizedDay)>=0?"+":""}$${unrealizedDay}</span> · Account change today: <span style="color:${parseFloat(daily)>=0?"#00c488":"#dd7777"}">${parseFloat(daily)>=0?"+":""}$${daily}</span></div>
+    <div style="font-size:9px;color:#557799;margin-top:4px">Open positions (since entry): <span style="color:${parseFloat(unrealizedDay)>=0?"#00c488":"#dd7777"}">${parseFloat(unrealizedDay)>=0?"+":""}$${unrealizedDay}</span> · Account change today${(state._alpacaTruth && /^alpaca/.test(state._alpacaTruth.dayBaselineSource || "")) ? " <span style=\"font-size:8px\">(vs Alpaca's prior close)</span>" : ""}: <span style="color:${parseFloat(daily)>=0?"#00c488":"#dd7777"}">${parseFloat(daily)>=0?"+":""}$${daily}</span></div>
   </div>
   <div style="background:#0a1628;border:1px solid #0d3050;border-radius:8px;padding:14px">
     <div style="font-size:10px;color:#336688">POSITIONS</div>
@@ -657,7 +664,7 @@ function buildEmailHTML(type) {
 <div style="background:#0a1628;border:1px solid #0d3050;border-radius:8px;padding:14px;margin-bottom:12px">
   <h3 style="color:#336688;font-size:11px;margin:0 0 10px;text-transform:uppercase">Open Positions</h3>
   <table style="width:100%;font-size:11px;border-collapse:collapse">
-    <tr style="color:#336688"><th style="text-align:left">Ticker</th><th>Strike</th><th>Expiry</th><th>Qty</th><th>Entry</th><th>Score</th></tr>
+    <tr style="color:#336688"><th style="text-align:left">Ticker</th><th>Strike</th><th>Expiry</th><th>Qty</th><th>Entry</th><th>Sleeve</th></tr>
     ${posRows}
   </table>
 </div>
@@ -680,7 +687,7 @@ ${type === "morning" ? `
   <p style="font-size:12px;color:#cce8ff;margin:0">Market closed. ${state.todayTrades} trade${state.todayTrades!==1?"s":""} executed today. Daily P&L: ${parseFloat(daily)>=0?"+":""}$${daily}. APEX resumes scanning tomorrow at 10:00 AM ET.</p>
 </div>`}
 
-<p style="font-size:10px;color:#336688;text-align:center;margin-top:16px">APEX SPY Spread Trader - Paper Trading - Not financial advice</p>
+<p style="font-size:10px;color:#336688;text-align:center;margin-top:16px">APEX · autonomous SPY/QQQ options · paper trading · not financial advice</p>
 </body></html>`;
 }
 
