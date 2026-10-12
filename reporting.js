@@ -401,6 +401,8 @@ async function sendEmail(type) {
     // email body rather than blocking it.
     let bodyHtml = buildEmailHTML(type);
     if (type !== "morning") {
+      try { bodyHtml += await buildRecordCheckSection(_eodSnap); }   // 10/12: Alpaca fills vs outcome rows — runs on its own
+      catch (_rcErr) { logEvent("warn", `[RECORD-CHECK] skipped — ${_rcErr.message}`); bodyHtml += `<div style="font-size:10px;color:#aa8844;margin:10px 0">Record check skipped — ${_rcErr.message}</div>`; }
       try {
         const { header, rows, days } = await fetchRecentOutcomeRows(20);
         const report = buildEfficacyReport(parseOutcomeRows(header, rows), { days });
@@ -423,6 +425,67 @@ async function sendEmail(type) {
 // Turns a quiet day into a diagnosis: for breaks and MR fades, how many times each ALMOST fired and
 // which gate stopped it. Regime-dominated declines = tape wasn't tradeable (accept). Gate-dominated
 // declines on real setups (not-at-a-level, ADX-too-low, not-extreme) = a knob may be too tight (tune).
+// 10/12 (Harrison, panel): END-OF-DAY RECORD CHECK — every option position Alpaca closed today must have an outcome row.
+// On 10/6 two closed intraday-trend trades never reached the outcomes file (restarts before the save fix) and only a
+// manual log audit found them. This compares Alpaca's own FILL activity for the day with the outcome rows and the
+// positions still open, and says so in the EOD email (and the log) when anything doesn't line up.
+const _OCC_RE = /^[A-Z]{1,6}\d{6}[CP]\d{8}$/;
+function _csvFields(line) {   // minimal RFC-4180 split (quoted fields may hold commas)
+  const out = []; let cur = "", q = false;
+  for (let i = 0; i < line.length; i++) {
+    const c = line[i];
+    if (q) { if (c === '"') { if (line[i + 1] === '"') { cur += '"'; i++; } else q = false; } else cur += c; }
+    else if (c === '"') q = true; else if (c === ",") { out.push(cur); cur = ""; } else cur += c;
+  }
+  out.push(cur); return out;
+}
+function checkFillsAgainstOutcomes(fills, outcomeRows, openPositions) {
+  const si = OUTCOME_HEADER.split(",").indexOf("contractSym");
+  const recorded = new Map();
+  for (const r of (outcomeRows || [])) { const sym = _csvFields(String(r))[si]; if (sym) recorded.set(sym, (recorded.get(sym) || 0) + 1); }
+  const open = new Set();
+  for (const p of (openPositions || [])) for (const k of ["contractSymbol", "buySymbol", "sellSymbol"]) if (p && p[k]) open.add(p[k]);
+  const sells = {}, buys = {};
+  for (const f of (fills || [])) {
+    if (!f || (f.activity_type && f.activity_type !== "FILL") || !_OCC_RE.test(f.symbol || "")) continue;
+    const book = f.side === "sell" ? sells : f.side === "buy" ? buys : null; if (!book) continue;
+    const b = book[f.symbol] = book[f.symbol] || { qty: 0, orders: new Set(), first: f.transaction_time, last: f.transaction_time };
+    b.qty += Math.abs(parseFloat(f.qty || 0)); b.orders.add(f.order_id || f.id);
+    if (f.transaction_time > b.last) b.last = f.transaction_time;
+  }
+  const et = (t) => { try { return new Date(t).toLocaleTimeString("en-US", { timeZone: "America/New_York", hour12: false }); } catch (_) { return "?"; } };
+  const missing = [], noSale = [], boughtLost = [];
+  for (const [sym, b] of Object.entries(sells)) if (!recorded.has(sym) && !open.has(sym)) missing.push({ sym, qty: b.qty, at: et(b.last) });
+  for (const sym of recorded.keys()) if (!sells[sym]) noSale.push({ sym });
+  for (const [sym, b] of Object.entries(buys)) if (!sells[sym] && !open.has(sym) && !recorded.has(sym)) boughtLost.push({ sym, qty: b.qty, at: et(b.first) });
+  return { closedAtBroker: Object.keys(sells).length, rowsToday: (outcomeRows || []).length, missing, noSale, boughtLost,
+           ok: !missing.length && !noSale.length && !boughtLost.length };
+}
+async function buildRecordCheckSection(snap) {
+  const today = new Date().toLocaleDateString("en-CA", { timeZone: "America/New_York" });
+  const fills = []; let token = null;
+  for (let p = 0; p < 20; p++) {
+    const page = await alpacaGet(`/account/activities?activity_types=FILL&date=${today}&direction=asc&page_size=100` + (token ? `&page_token=${encodeURIComponent(token)}` : ""));
+    const arr = Array.isArray(page) ? page : (page && Array.isArray(page.activities) ? page.activities : null);
+    if (!arr) { if (p === 0) throw new Error("no fill data from Alpaca"); break; }
+    fills.push(...arr);
+    if (arr.length < 100) break; token = arr[arr.length - 1].id; if (!token) break;
+  }
+  const c = checkFillsAgainstOutcomes(fills, snap.outcomeBuffer, state.positions);
+  const box = (col, inner) => `<div style="margin:14px 0;padding:10px 12px;border:1px solid ${col};border-radius:6px;font-size:11px;line-height:1.6">${inner}</div>`;
+  if (c.ok) {
+    logEvent("scan", `[RECORD-CHECK] ${c.closedAtBroker} contract(s) closed at Alpaca today — every one has an outcome row`);
+    return `<div style="font-size:10px;color:#557799;margin:10px 0">Record check: ${c.closedAtBroker} contract(s) closed at Alpaca today, all recorded in the outcomes file ✓</div>`;
+  }
+  const li = (arr, f) => arr.map(x => `<li>${f(x)}</li>`).join("");
+  let h = `<b style="color:#ff7777">RECORD CHECK — Alpaca and the outcomes file disagree</b><br>`;
+  if (c.missing.length) h += `Closed at Alpaca but <b>no outcome row</b> (the trade is missing from the data):<ul style="margin:4px 0">${li(c.missing, x => `${x.sym} — ${x.qty} sold, last fill ${x.at} ET`)}</ul>`;
+  if (c.noSale.length) h += `Outcome row but <b>no sale at Alpaca today</b> (APEX recorded a close the broker may not have made — check positions):<ul style="margin:4px 0">${li(c.noSale, x => x.sym)}</ul>`;
+  if (c.boughtLost.length) h += `Bought today but <b>neither open nor recorded</b>:<ul style="margin:4px 0">${li(c.boughtLost, x => `${x.sym} — ${x.qty} bought ${x.at} ET`)}</ul>`;
+  logEvent("warn", `[RECORD-CHECK] mismatch — missing rows: ${c.missing.map(x => x.sym).join(", ") || "none"} | rows with no sale: ${c.noSale.map(x => x.sym).join(", ") || "none"} | bought, unaccounted: ${c.boughtLost.map(x => x.sym).join(", ") || "none"}`);
+  return box("#aa3333", h);
+}
+
 function buildStandDownSection(snap) {
   try {
     const t = (snap && snap.standDownTally) ? snap.standDownTally
@@ -1370,5 +1433,5 @@ module.exports = {
   sendEmail, sendResendEmail, buildEmailHTML, getBenchmarkComparison,
   buildMonthlyReport, sendMorningBriefing, premarketAssessment,
   updateAfterHoursContext, initReporting, setReportingContext,
-  buildJournalBreakdown,
+  buildJournalBreakdown, checkFillsAgainstOutcomes, buildRecordCheckSection,
 };
