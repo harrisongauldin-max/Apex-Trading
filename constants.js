@@ -697,6 +697,13 @@ const TREND_TARGET_DTE    = 60;     // ~60 DTE: slow linear theta, respects the 
 const TREND_DTE_MIN       = 45;
 const TREND_DTE_MAX       = 75;
 const TREND_ROLL_DTE      = 21;     // exit/roll before the theta cliff
+// 10/12 (Harrison): trend-swing on QQQ ONLY, with a Clenow/LeBeau chandelier exit. Option-priced 10-yr backtest (10/12):
+// SPY trend-swing negative after costs under every exit; QQQ + chandelier positive in both halves and under every model
+// stress (IV +-20%, uncalibrated, no skew, 2x cost). Paper experiment — judge it on months (~33% win rate, ~38-day holds).
+const TREND_TICKERS             = ["QQQ"];
+const TREND_EXIT_MODE           = "chandelier";   // "chandelier" | "legacy" (legacy = tight trail + 14-day stale)
+const TREND_CHANDELIER_ATR      = 3.0;            // exit when the daily close is 3 x ATR14 below the highest close since entry (calls)
+const TREND_CHANDELIER_CHECK_ET = 15.83;          // 15:50 ET — the backtest decides on the daily CLOSE, so check once, near it
 const TREND_COOLDOWN_DAYS = 5;      // 10/12 (Harrison): no new trend-swing on a ticker until the 6th trading day after its last trend-swing exit.
                                     // 10-yr backtest (10/12): beat the live immediate re-entry in all 4 ticker x half cells and under every cost assumption.
 const TREND_MA_FAST       = 50;     // daily trend: price > 50d, 50d > 100d
@@ -840,6 +847,8 @@ const MR_SCALP_VIX_MIN                = 17;    // 8/11: 20 -> 17. The scalp neve
                                                // 17-20 band where this regime actually trades.
 const MR_SCALP_SESSION_MIN_MIN  = 30;     // VWAP unreliable before this many session minutes
 const MR_SCALP_CUTOFF_ET        = 14.5;   // no NEW mr-scalp entry after 2:30pm ET (needs ~14min to work + exit before 3:15 flatten)
+const MR_FADE_STOP_COOLDOWN_MIN = 15;   // 10/12 (Harrison, panel unanimous): no new mr-fade on a ticker for 15 min after an mr-fade-stop there.
+                                        // A stop means the level failed; 10/8 re-entered 4-6 s after stops three times (-$113).
 const MR_FADE_CUTOFF_ET         = 15.25;  // 9/21: no NEW mr-fade entry after 3:15pm ET (the flatten time) — was ungated → opened a 3:18pm put that sat overnight
 const MR_SCALP_MIN_SCORE        = 78;     // floor the setup clears (also clears slot-2's 75); the CONDITIONS are the edge, not the score
 // ── instrument / size ──
@@ -970,7 +979,7 @@ module.exports = {
   BREAK_CALL_CUTOFF_ET, BREAK_MIN_SESSION_MIN,
   MR_SCALP_ENABLED, MR_SCALP_SESSLOW_RSI_MAX, MR_SCALP_FLUSH_DD_MIN, MR_SCALP_VWAP_EXT_MIN,
   MR_SCALP_LIFTOFF_PTS, MR_SCALP_LOW_AGE_MIN_MIN, MR_SCALP_LOW_AGE_MAX_MIN, MR_SCALP_RANGE_MIN_PCT,
-  MR_SCALP_VIX_MIN, MR_SCALP_SESSION_MIN_MIN, MR_SCALP_CUTOFF_ET, MR_FADE_CUTOFF_ET, MR_SCALP_MIN_SCORE,
+  MR_SCALP_VIX_MIN, MR_SCALP_SESSION_MIN_MIN, MR_SCALP_CUTOFF_ET, MR_FADE_CUTOFF_ET, MR_FADE_STOP_COOLDOWN_MIN, MR_SCALP_MIN_SCORE,
   MR_SCALP_TARGET_DTE, MR_SCALP_DELTA, MR_SCALP_SIZE_MOD,
   BREAK_DELTA, BREAK_DELTA_MIN, BREAK_DELTA_MAX, BREAK_TARGET_DTE, BREAK_MAX_HOLD_MIN, BREAK_TRAIL_ARM_PCT, BREAK_TRAIL_GIVEBACK_PCT,
   GEX_FETCH_ENABLED, GEX_FETCH_THROTTLE_MS,
@@ -978,7 +987,7 @@ module.exports = {
   GEX_V2_INCLUDE_MONTHLY, GEX_REGIME_HYST_M,
   STRATEGY_CLASS, strategyClass, isFlattenExempt, LOCK_LADDER, LOCK_LADDER_TRAIL, ladderFloor,
   TREND_ENABLED, TREND_DELTA, TREND_DELTA_MIN, TREND_DELTA_MAX, TREND_TARGET_DTE, TREND_DTE_MIN, TREND_DTE_MAX,
-  TREND_ROLL_DTE, TREND_COOLDOWN_DAYS, TREND_MA_FAST, TREND_MA_SLOW, TREND_RSI_MIN, TREND_RSI_MAX, TREND_OVEREXT_ATR, TREND_BREADTH_MIN,
+  TREND_ROLL_DTE, TREND_COOLDOWN_DAYS, TREND_TICKERS, TREND_EXIT_MODE, TREND_CHANDELIER_ATR, TREND_CHANDELIER_CHECK_ET, TREND_MA_FAST, TREND_MA_SLOW, TREND_RSI_MIN, TREND_RSI_MAX, TREND_OVEREXT_ATR, TREND_BREADTH_MIN,
   TREND_CUTOFF_ET, TREND_RISK_BUDGET, TREND_TRAIL_ARM_PCT, TREND_STOP_UNDL_PCT, TREND_STOP_PCT, TREND_ATR_STOP_MULT, TREND_USTOP_FLOOR, TREND_USTOP_CEIL, TREND_STALE_DAYS, TREND_STALE_PEAK, TREND_TRAIL_GIVEBACK_PCT,
   ITREND_ENABLED, ITREND_DELTA, ITREND_DELTA_MIN, ITREND_DELTA_MAX, ITREND_TARGET_DTE, ITREND_DTE_MIN, ITREND_DTE_MAX,
   ITREND_ADX_MIN, ITREND_VWAP_MIN, ITREND_BREADTH_STRONG, ITREND_START_ET, ITREND_END_ET, ITREND_NEG_GAMMA_BLOCK,
