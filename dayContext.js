@@ -72,6 +72,27 @@ function _nyOffsetMin(ms) {
   if (off < -720) off += 1440;
   return off;                                 // -240 in EDT, -300 in EST
 }
+// 10/12: trading-day helpers (weekends + the NYSE holiday list above). Years without a list count weekdays only.
+function isTradingDay(dateStr) {
+  const dow = new Date(dateStr + "T12:00:00Z").getUTCDay();
+  if (dow === 0 || dow === 6) return false;
+  const c = CAL[+dateStr.slice(0, 4)];
+  return !(c && c.HOLIDAYS && c.HOLIDAYS.includes(dateStr));
+}
+function _nextDay(dateStr) { return new Date(Date.parse(dateStr + "T12:00:00Z") + 86400000).toISOString().slice(0, 10); }
+// trading days strictly AFTER fromDay, up to and including toDay
+function tradingDaysBetween(fromDay, toDay) {
+  let n = 0, d = fromDay, guard = 0;
+  while (d < toDay && guard++ < 400) { d = _nextDay(d); if (isTradingDay(d)) n++; }
+  return n;
+}
+// the date that is the n-th trading day after fromDay
+function addTradingDays(fromDay, n) {
+  let d = fromDay, k = 0, guard = 0;
+  while (k < n && guard++ < 400) { d = _nextDay(d); if (isTradingDay(d)) k++; }
+  return d;
+}
+
 function etDateStr(ms = Date.now()) { return new Date(ms).toLocaleDateString("en-CA", { timeZone: "America/New_York" }); }
 
 const OPEN_MIN = 570, O15_END = 585, IB_END = 630, CLOSE_MIN = 960;
@@ -253,5 +274,5 @@ function entryContext(state, tk, price) {
   return { openType: f.openType, ibExt: f.ibExt, gapTrue: f.gapTrue, posVsPd: f.posVsPd, evt: f.evt, rngVsIB: f.rngVsIB };
 }
 
-module.exports = { eventTags, monthlyOpex, etDateStr, setSessionRef, updateDay, computeProfile, ensurePriorProfile,
+module.exports = { eventTags, monthlyOpex, etDateStr, isTradingDay, tradingDaysBetween, addTradingDays, setSessionRef, updateDay, computeProfile, ensurePriorProfile,
                    telemetryFields, entryContext, orEntryTag, CAL };
