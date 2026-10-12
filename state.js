@@ -19,6 +19,8 @@ const _noKeepAliveHttp  = new http.Agent({ keepAlive: false });
 const _noKeepAliveHttps = new https.Agent({ keepAlive: false });
 const _agentFor = (parsedURL) => parsedURL.protocol === 'http:' ? _noKeepAliveHttp : _noKeepAliveHttps;
 const fetch = (url, opts = {}) => _nodeFetch(url, { agent: _agentFor, ...opts });
+const REDISIO = require('./redisIO');   // 10/12: compression + metering under every Upstash call
+const redisFetch = REDISIO.redisFetch;
 const { TELEMETRY_HEADER } = require('./telemetry');
 const { OUTCOME_HEADER } = require('./outcomes');
 const { REDIS_URL, REDIS_TOKEN, REDIS_KEY, REDIS_SAVE_INTERVAL, STATE_FILE, MONTHLY_BUDGET,
@@ -27,6 +29,11 @@ const { REDIS_URL, REDIS_TOKEN, REDIS_KEY, REDIS_SAVE_INTERVAL, STATE_FILE, MONT
 
 let lastRedisSave = 0;
 let stateDirty    = false;
+let _lastStateSig = null, _lastStateSigAt = 0;   // 10/12: last uploaded state record (skip identical uploads)
+// 10/12: day keys this process has already merged with Redis. After that first merge the in-memory buffer holds the
+// whole day, so later checkpoints upload without re-downloading. Cleared when an end-of-day save empties a buffer
+// (a thin buffer must merge again, never overwrite the day).
+const _mergedThisProc = new Set();
 function markDirty() { stateDirty = true; }
 
 function defaultState() {
@@ -168,6 +175,10 @@ async function redisSave(data) {
 
   try {
     const serialized = JSON.stringify(slim);
+    // 10/12: nothing changed since the last upload (markDirty is called liberally) -> don't re-send it. The meter
+    // (_redisUsage) changes on every request, so it's left out of the comparison. Forced through every 30 min.
+    const _sig = require('crypto').createHash('md5').update(JSON.stringify({ ...slim, _redisUsage: null })).digest('hex');
+    if (_sig === _lastStateSig && Date.now() - _lastStateSigAt < 30 * 60000) return;
     const sizeKB = Math.round(serialized.length / 1024);
     if (sizeKB > 8000) {
       console.error(`[REDIS] WARNING: Payload ${sizeKB}KB approaching 10MB limit`);
@@ -176,7 +187,7 @@ async function redisSave(data) {
     const _redisTimeout = setTimeout(() => _redisController.abort(), 5000);
     let res;
     try {
-      res = await fetch(`${REDIS_URL}/pipeline`, {
+      res = await redisFetch(`${REDIS_URL}/pipeline`, {
         method: "POST",
         headers: {
           Authorization: `Bearer ${REDIS_TOKEN}`,
@@ -190,7 +201,8 @@ async function redisSave(data) {
     if (result[0] && result[0].error) {
       console.error("[REDIS] Save error:", result[0].error);
     } else {
-      console.log(`[REDIS] Saved OK (${sizeKB}KB)`);
+      console.log(`[REDIS] Saved OK (${sizeKB}KB raw)`);
+      _lastStateSig = _sig; _lastStateSigAt = Date.now();
     }
   } catch(e) { console.error("[REDIS] Save error:", e.message); }
 }
@@ -210,7 +222,7 @@ async function redisLoad() {
       const _loadTimer = setTimeout(() => _loadCtrl.abort(), 5000);
       let res;
       try {
-        res = await fetch(`${REDIS_URL}/pipeline`, {
+        res = await redisFetch(`${REDIS_URL}/pipeline`, {
           method: "POST",
           headers: {
             Authorization: `Bearer ${REDIS_TOKEN}`,
@@ -366,12 +378,18 @@ async function saveDailyLogToRedis(isEOD = false) {
     // The in-memory buffer is wiped on every restart/redeploy and cleared at EOD, so a
     // blind SET (esp. from save-now after the buffer empties) would clobber the real day.
     // Read the existing key, union with the buffer, dedup by time|type|message, write the superset.
-    let existing = [];
-    try {
-      const gr = await fetch(`${REDIS_URL}/get/${logKey}`, { headers: { Authorization: `Bearer ${REDIS_TOKEN}` } });
+    let existing = [], _merged = _mergedThisProc.has(logKey) && !isEOD;
+    if (!_merged) try {
+      const gr = await redisFetch(`${REDIS_URL}/get/${logKey}`, { headers: { Authorization: `Bearer ${REDIS_TOKEN}` } });
       const gd = await gr.json();
       if (gd && gd.result) { const p = parseRedisBlob(gd.result); if (p && Array.isArray(p.entries)) existing = p.entries; }
+      _merged = true;
     } catch(_) { /* if the read fails, fall through and write the buffer rather than lose this save */ }
+    if (_merged && existing.length) {   // fold anything only Redis had into the live buffer (in place, no await) so later saves needn't re-read
+      const _have = new Set((state._dailyLogBuffer || []).map(e => `${e.time}|${e.type}|${e.message}`));
+      const _miss = existing.filter(e => !_have.has(`${e.time}|${e.type}|${e.message}`));
+      if (_miss.length && Array.isArray(state._dailyLogBuffer)) state._dailyLogBuffer.unshift(..._miss);
+    }
 
     const seen = new Set();
     let merged = [];
@@ -396,15 +414,17 @@ async function saveDailyLogToRedis(isEOD = false) {
         positionsEOD: state.positions.length,
       }
     });
-    const res = await fetch(`${REDIS_URL}/pipeline`, {
+    const res = await redisFetch(`${REDIS_URL}/pipeline`, {
       method:  "POST",
       headers: { Authorization: `Bearer ${REDIS_TOKEN}`, "Content-Type": "application/json" },
       body:    JSON.stringify([["set", logKey, logData, "EX", 7776000]]),
     });
     if (res.ok) {
       logEvent("scan", `[EOD LOG] Daily log saved to Redis: ${logKey} | ${merged.length} entries (buffer ${buffer.length} + existing ${existing.length})`);
+      if (_merged) _mergedThisProc.add(logKey);
       if (isEOD) {
         state._dailyLogBuffer = [];
+        _mergedThisProc.delete(logKey);
         markDirty();
       }
     } else {
@@ -498,7 +518,7 @@ async function saveDailyLogToRedis(isEOD = false) {
       })),
     });
 
-    const aRes = await fetch(`${REDIS_URL}/pipeline`, {
+    const aRes = await redisFetch(`${REDIS_URL}/pipeline`, {
       method:  "POST",
       headers: { Authorization: `Bearer ${REDIS_TOKEN}`, "Content-Type": "application/json" },
       body:    JSON.stringify([["set", analyticsKey, analyticsData, "EX", 15552000]]),
@@ -548,7 +568,8 @@ async function saveChainSnapsToRedis(isEOD = false) {
   const snaps = state._chainSnaps || [];
   if (snaps.length === 0) return;
   const now = Date.now();
-  if (!isEOD && state._chainSnapsSaveLast && (now - state._chainSnapsSaveLast) < 180000) return;  // ~3min throttle
+  const _csMin = (() => { try { return +require('./constants').REDIS_CHAINSNAP_SAVE_MIN || 60; } catch (_) { return 60; } })();
+  if (!isEOD && state._chainSnapsSaveLast && (now - state._chainSnapsSaveLast) < _csMin * 60000) return;  // 10/12: hourly (was ~3 min) — the biggest blob
   state._chainSnapsSaveLast = now;
   try {
     const dateStr = getETDateStr();
@@ -557,10 +578,10 @@ async function saveChainSnapsToRedis(isEOD = false) {
     const nChunks = Math.ceil(snaps.length / CH);
     const _set = async (key, val) => {
       try {
-        const r = await fetch(`${REDIS_URL}/pipeline`, {
+        const r = await redisFetch(`${REDIS_URL}/pipeline`, {
           method: "POST",
           headers: { Authorization: `Bearer ${REDIS_TOKEN}`, "Content-Type": "application/json" },
-          body: JSON.stringify([["set", key, val, "EX", 7776000]]),
+          body: JSON.stringify([["set", key, val, "EX", 604800]]),   // 10/12: 7 days (was 90) — restart recovery only
         });
         return r.ok;
       } catch (_) { return false; }
@@ -616,12 +637,13 @@ async function saveTelemetryToRedis(isEOD = false) {
     // A restart wipes the buffer; without merging, the next checkpoint would overwrite
     // the key with only post-restart rows and lose the morning. existing+buffer preserves
     // chronological order (existing = earlier saves, buffer = since).
-    let existing = [];
-    try {
-      const gr = await fetch(`${REDIS_URL}/get/${key}`, { headers: { Authorization: `Bearer ${REDIS_TOKEN}` } });
+    let existing = [], _merged = _mergedThisProc.has(key) && !isEOD;   // 10/12: merge once per process
+    if (!_merged) try {
+      const gr = await redisFetch(`${REDIS_URL}/get/${key}`, { headers: { Authorization: `Bearer ${REDIS_TOKEN}` } });
       const gd = await gr.json();
       if (gd && gd.result) { const p = parseRedisBlob(gd.result); if (p && Array.isArray(p.rows)) existing = p.rows; }
-    } catch(_) { /* read failure: fall through and write the buffer rather than lose this save */ }
+      _merged = true;
+    } catch(_) { /* read failure: write the buffer rather than lose this save */ }
     // 8/24 (panel): drop retained rows whose width != the current header. On a schema-change deploy
     // (we add telemetry columns often), same-day pre-deploy rows are narrower; merging them under the
     // new header produced a RAGGED tape. Better to lose the pre-deploy hours of that one day than to
@@ -632,15 +654,20 @@ async function saveTelemetryToRedis(isEOD = false) {
     let merged = [];
     for (const r of existing.concat(rows)) { if (seen.has(r)) continue; seen.add(r); merged.push(r); }
     if (merged.length > 6000) merged = merged.slice(-6000);
+    if (existing.length && Array.isArray(state._telemetryBuffer)) {   // 10/12: fold Redis-only rows into the live buffer (in place)
+      const _have = new Set(state._telemetryBuffer); const _miss = existing.filter(r => !_have.has(r));
+      if (_miss.length) state._telemetryBuffer.unshift(..._miss);
+    }
     const payload = JSON.stringify({ date: dateStr, header: TELEMETRY_HEADER, rows: merged });
-    const res = await fetch(`${REDIS_URL}/pipeline`, {
+    const res = await redisFetch(`${REDIS_URL}/pipeline`, {
       method:  "POST",
       headers: { Authorization: `Bearer ${REDIS_TOKEN}`, "Content-Type": "application/json" },
       body:    JSON.stringify([["set", key, payload, "EX", 7776000]]),
     });
     if (res.ok) {
       logEvent("scan", `[TELEMETRY] Saved ${merged.length} rows → ${key} (buffer ${rows.length} + existing ${existing.length})`);
-      if (isEOD) { state._telemetryBuffer = []; state._telemetryLast = {}; markDirty(); }
+      if (_merged) _mergedThisProc.add(key);
+      if (isEOD) { state._telemetryBuffer = []; state._telemetryLast = {}; _mergedThisProc.delete(key); markDirty(); }
     } else {
       console.error("[TELEMETRY] Redis save failed:", res.status);
     }
@@ -659,11 +686,12 @@ async function saveOutcomesToRedis(isEOD = false) {
   try {
     const dateStr = getETDateStr();
     const key     = `argo:outcomes:${dateStr}`;
-    let existing = [];
-    try {
-      const gr = await fetch(`${REDIS_URL}/get/${key}`, { headers: { Authorization: `Bearer ${REDIS_TOKEN}` } });
+    let existing = [], _merged = _mergedThisProc.has(key) && !isEOD;   // 10/12: merge once per process
+    if (!_merged) try {
+      const gr = await redisFetch(`${REDIS_URL}/get/${key}`, { headers: { Authorization: `Bearer ${REDIS_TOKEN}` } });
       const gd = await gr.json();
       if (gd && gd.result) { const p = parseRedisBlob(gd.result); if (p && Array.isArray(p.rows)) existing = p.rows; }
+      _merged = true;
     } catch(_) { /* read failure: write the buffer rather than lose this save */ }
     const _ocCols = OUTCOME_HEADER.split(",").length;   // 8/24 (panel): same ragged-merge guard as telemetry — drop old-schema-width rows
     existing = existing.filter(r => typeof r === "string" && r.split(",").length === _ocCols);
@@ -671,15 +699,20 @@ async function saveOutcomesToRedis(isEOD = false) {
     let merged = [];
     for (const r of existing.concat(rows)) { if (seen.has(r)) continue; seen.add(r); merged.push(r); }
     if (merged.length > 4000) merged = merged.slice(-4000);
+    if (existing.length && Array.isArray(state._outcomeBuffer)) {   // 10/12: fold Redis-only rows into the live buffer (in place)
+      const _have = new Set(state._outcomeBuffer); const _miss = existing.filter(r => !_have.has(r));
+      if (_miss.length) state._outcomeBuffer.unshift(..._miss);
+    }
     const payload = JSON.stringify({ date: dateStr, header: OUTCOME_HEADER, rows: merged });
-    const res = await fetch(`${REDIS_URL}/pipeline`, {
+    const res = await redisFetch(`${REDIS_URL}/pipeline`, {
       method:  "POST",
       headers: { Authorization: `Bearer ${REDIS_TOKEN}`, "Content-Type": "application/json" },
       body:    JSON.stringify([["set", key, payload, "EX", 7776000]]),
     });
     if (res.ok) {
       logEvent("scan", `[OUTCOMES] Saved ${merged.length} trade rows → ${key} (buffer ${rows.length} + existing ${existing.length})`);
-      if (isEOD) { state._outcomeBuffer = []; markDirty(); }
+      if (_merged) _mergedThisProc.add(key);
+      if (isEOD) { state._outcomeBuffer = []; _mergedThisProc.delete(key); markDirty(); }
     } else {
       console.error("[OUTCOMES] Redis save failed:", res.status);
     }
@@ -697,12 +730,12 @@ async function fetchRecentOutcomeRows(days = 20) {
   const addBuffer = () => { for (const r of (state._outcomeBuffer || [])) { if (!seen.has(r)) { seen.add(r); out.rows.push(r); } } };
   if (!REDIS_URL || !REDIS_TOKEN) { addBuffer(); out.days = out.rows.length ? 1 : 0; return out; }
   try {
-    const kr = await fetch(`${REDIS_URL}/keys/argo:outcomes:*`, { headers: { Authorization: `Bearer ${REDIS_TOKEN}` } });
+    const kr = await redisFetch(`${REDIS_URL}/keys/argo:outcomes:*`, { headers: { Authorization: `Bearer ${REDIS_TOKEN}` } });
     const kd = await kr.json();
     const keys = (kd.result || []).sort().reverse().slice(0, Math.max(1, days));   // newest N keys
     for (const key of keys.slice().reverse()) {                                    // fetch oldest-first so rows stay chronological
       try {
-        const gr = await fetch(`${REDIS_URL}/get/${key}`, { headers: { Authorization: `Bearer ${REDIS_TOKEN}` } });
+        const gr = await redisFetch(`${REDIS_URL}/get/${key}`, { headers: { Authorization: `Bearer ${REDIS_TOKEN}` } });
         const gd = await gr.json();
         if (!gd || !gd.result) continue;
         const p = parseRedisBlob(gd.result);
@@ -716,11 +749,12 @@ async function fetchRecentOutcomeRows(days = 20) {
 
 
 const state = defaultState();
+try { const _C = require('./constants'); REDISIO.attach(state, { compress: _C.REDIS_COMPRESS !== false, fetch }); } catch (_) { REDISIO.attach(state, { fetch }); }
 
 async function loadJournalDay(dateStr) {
   if (!REDIS_URL || !REDIS_TOKEN) return [];
   try {
-    const res = await fetch(`${REDIS_URL}/pipeline`, {
+    const res = await redisFetch(`${REDIS_URL}/pipeline`, {
       method: 'POST',
       headers: { Authorization: `Bearer ${REDIS_TOKEN}`, 'Content-Type': 'application/json' },
       body: JSON.stringify([['get', `argo:journal:${dateStr}`]]),
@@ -745,7 +779,7 @@ async function saveJournalDay(dateStr, entries) {
   try {
     const serialized = JSON.stringify(entries);
     const TTL = 90 * 24 * 3600;
-    const res = await fetch(`${REDIS_URL}/pipeline`, {
+    const res = await redisFetch(`${REDIS_URL}/pipeline`, {
       method: 'POST',
       headers: { Authorization: `Bearer ${REDIS_TOKEN}`, 'Content-Type': 'application/json' },
       body: JSON.stringify([['set', `argo:journal:${dateStr}`, serialized, 'EX', TTL]]),
@@ -853,7 +887,7 @@ async function restoreBuffersFromRedis() {
   const dateStr = getETDateStr();
   try {
     if (!state._dailyLogBuffer || state._dailyLogBuffer.length === 0) {
-      const gr = await fetch(`${REDIS_URL}/get/argo:logs:${dateStr}`, { headers: { Authorization: `Bearer ${REDIS_TOKEN}` } });
+      const gr = await redisFetch(`${REDIS_URL}/get/argo:logs:${dateStr}`, { headers: { Authorization: `Bearer ${REDIS_TOKEN}` } });
       const gd = await gr.json();
       if (gd && gd.result) {
         const p = parseRedisBlob(gd.result);
@@ -866,7 +900,7 @@ async function restoreBuffersFromRedis() {
   } catch(e) { console.error("[BOOT] daily-log restore failed:", e.message); }
   try {
     if (!state._telemetryBuffer || state._telemetryBuffer.length === 0) {
-      const gr = await fetch(`${REDIS_URL}/get/argo:telemetry:${dateStr}`, { headers: { Authorization: `Bearer ${REDIS_TOKEN}` } });
+      const gr = await redisFetch(`${REDIS_URL}/get/argo:telemetry:${dateStr}`, { headers: { Authorization: `Bearer ${REDIS_TOKEN}` } });
       const gd = await gr.json();
       if (gd && gd.result) {
         const p = parseRedisBlob(gd.result);
@@ -882,13 +916,13 @@ async function restoreBuffersFromRedis() {
     // surface, not just the post-restart tail.
     if (!state._chainSnaps || state._chainSnaps.length === 0) {
       const base = `argo:chainsnaps:${dateStr}`;
-      const mr = await fetch(`${REDIS_URL}/get/${base}`, { headers: { Authorization: `Bearer ${REDIS_TOKEN}` } });
+      const mr = await redisFetch(`${REDIS_URL}/get/${base}`, { headers: { Authorization: `Bearer ${REDIS_TOKEN}` } });
       const md = await mr.json();
       const man = (md && md.result) ? parseRedisBlob(md.result) : null;
       if (man && man.chunks > 0) {
         const restored = [];
         for (let i = 0; i < man.chunks; i++) {
-          const cr = await fetch(`${REDIS_URL}/get/${base}:${i}`, { headers: { Authorization: `Bearer ${REDIS_TOKEN}` } });
+          const cr = await redisFetch(`${REDIS_URL}/get/${base}:${i}`, { headers: { Authorization: `Bearer ${REDIS_TOKEN}` } });
           const cd = await cr.json();
           const chunk = (cd && cd.result) ? parseRedisBlob(cd.result) : null;
           if (Array.isArray(chunk)) restored.push(...chunk);
@@ -899,7 +933,7 @@ async function restoreBuffersFromRedis() {
   } catch(e) { console.error("[BOOT] chainsnaps restore failed:", e.message); }
   try {
     if (!state._outcomeBuffer || state._outcomeBuffer.length === 0) {
-      const gr = await fetch(`${REDIS_URL}/get/argo:outcomes:${dateStr}`, { headers: { Authorization: `Bearer ${REDIS_TOKEN}` } });
+      const gr = await redisFetch(`${REDIS_URL}/get/argo:outcomes:${dateStr}`, { headers: { Authorization: `Bearer ${REDIS_TOKEN}` } });
       const gd = await gr.json();
       if (gd && gd.result) {
         const p = parseRedisBlob(gd.result);
