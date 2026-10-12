@@ -3232,6 +3232,9 @@ function renderMarketState(d) {
     row('Intraday-trend', it.open, `${it.window || ''}${it.open ? ' · ADX ≥ ' + it.adxMinNow : ''}${blk.length ? ' · blocked (neg γ): ' + blk.join(', ') : ''}${it.sizeUpAtAdx ? ' · 2× at ADX ' + it.sizeUpAtAdx + '+' : ''}`) +
     row('MR-fade', (g.mrFade || {}).open, 'until ' + ((g.mrFade || {}).cutoff || '--')) +
     row('Trend-swing', (g.trendSwing || {}).open, 'until ' + ((g.trendSwing || {}).cutoff || '--') +
+      ((g.trendSwing || {}).tickers ? ' · ' + g.trendSwing.tickers.join('/') + ' only' : '') +
+      ((g.trendSwing || {}).exitMode === 'chandelier' ? ' · 3-ATR chandelier exit' : '') +
+      (((g.trendSwing || {}).rollPending || []).length ? ' · rolling: ' + g.trendSwing.rollPending.join(', ') : '') +
       Object.entries((g.trendSwing || {}).cooldown || {}).map(([tk, d]) => ` · ${tk} cooling down until ${d.slice(5).replace('-', '/')}`).join(''));
   // Tickers
   for (const tk of ['SPY', 'QQQ']) {
