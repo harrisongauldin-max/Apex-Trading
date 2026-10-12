@@ -926,7 +926,13 @@ app.get("/api/market-state", (req, res) => {
                   adxMinNow: h >= (C.ITREND_LATE_START_ET ?? 99) ? Math.max(C.ITREND_ADX_MIN, C.ITREND_LATE_ADX_MIN ?? 0) : C.ITREND_ADX_MIN,
                   negGammaBlocked: negBlocked, sizeUpAtAdx: C.ITREND_ADX_SIZE_ENABLED ? C.ITREND_ADX_SIZE_MIN : null },
         mrFade:     { cutoff: `${hhmm(C.MR_FADE_CUTOFF_ET)} ET`, open: open && h < C.MR_FADE_CUTOFF_ET },
-        trendSwing: { cutoff: `${hhmm(C.TREND_CUTOFF_ET)} ET`, open: open && h < C.TREND_CUTOFF_ET },
+        trendSwing: { cutoff: `${hhmm(C.TREND_CUTOFF_ET)} ET`, open: open && h < C.TREND_CUTOFF_ET,
+                      // 10/12: tickers still inside the re-entry cooldown -> { SPY: "2026-10-19" } (first eligible day)
+                      cooldown: (() => { const o = {}, cd = C.TREND_COOLDOWN_DAYS ?? 5;
+                        for (const [tk, x] of Object.entries(state._trendLastExit || {})) {
+                          if (!x || !x.day) continue;
+                          if (DC.tradingDaysBetween(x.day, today) <= cd) o[tk] = DC.addTradingDays(x.day, cd + 1);
+                        } return o; })() },
         observeOnly: open && h >= 15.25,
       },
       sleeves,
@@ -1517,11 +1523,11 @@ app.get("/api/trend-backtest", requireSecret, async (req, res) => {
     const TB = require("./trendBacktest");
     const start = /^\d{4}-\d{2}-\d{2}$/.test(String(req.query.start || "")) ? req.query.start : "2015-01-01";
     const end = new Date(Date.now() - 86400000).toISOString().slice(0, 10);
-    const fetchDaily = async (tk) => {
+    const fetchDaily = async (tk, adjustment = "all") => {
       for (const feed of ["sip", "iex"]) {
         const out = []; let token = null, pages = 0;
         do {
-          const url = `/stocks/${tk}/bars?timeframe=1Day&start=${start}&end=${end}&adjustment=all&feed=${feed}&limit=10000` + (token ? `&page_token=${encodeURIComponent(token)}` : "");
+          const url = `/stocks/${tk}/bars?timeframe=1Day&start=${start}&end=${end}&adjustment=${adjustment}&feed=${feed}&limit=10000` + (token ? `&page_token=${encodeURIComponent(token)}` : "");
           const d = await alpacaGet(url, ALPACA_DATA);
           if (!d || d === ALPACA_CONN_DROP || !Array.isArray(d.bars)) break;
           out.push(...d.bars); token = d.next_page_token || null; pages++;
@@ -1535,8 +1541,68 @@ app.get("/api/trend-backtest", requireSecret, async (req, res) => {
       data[tk] = await fetchDaily(tk);
       if (data[tk].length < 250) return res.status(502).type("text/plain").send(`Not enough daily history for ${tk} (${data[tk].length} bars) — Alpaca fetch failed or start date too recent.`);
     }
-    const study = TB.runStudy(data);
-    logEvent("scan", `[TREND-BACKTEST] ran on SPY ${data.SPY.length} / QQQ ${data.QQQ.length} daily bars since ${start}`);
+    // 10/12 (Harrison): OPTION PRICING inputs — raw (unadjusted) prices for real strikes, Cboe implied-vol history
+    // (VIX, VIX3M, VXN), 3-month T-bill. Any that fail -> the model falls back and the report says which.
+    const TO = require("./trendOptions");
+    const { ALPACA_OPT_SNAP } = require("./constants");
+    const { alpacaHeaders, withTimeout } = require("./broker");
+    const nf = require("node-fetch");
+    const getText = async (url) => { try { const r = await withTimeout(nf(url), 20000); return (r && r.ok) ? await r.text() : null; } catch (_) { return null; } };
+    const raw = {};
+    for (const tk of ["SPY", "QQQ"]) { const rb = await fetchDaily(tk, "raw"); if (rb.length >= 250) raw[tk] = rb; }
+    const CB = "https://cdn.cboe.com/api/global/us_indices/daily_prices/";
+    const [vixT, vix3mT, vxnT, dtbT] = await Promise.all([getText(CB + "VIX_History.csv"), getText(CB + "VIX3M_History.csv"),
+      getText(CB + "VXN_History.csv"), getText("https://fred.stlouisfed.org/graph/fredgraph.csv?id=DTB3")]);
+    const series = { VIX: TO.parseSeriesCsv(vixT), VIX3M: TO.parseSeriesCsv(vix3mT), VXN: TO.parseSeriesCsv(vxnT), DTB3: TO.parseSeriesCsv(dtbT) };
+    const opts = { raw: (raw.SPY && raw.QQQ) ? raw : null, series };
+
+    // Real option bars for validation (Alpaca keeps them from early 2024). Uses its OWN fetch, not alpacaGet, so a
+    // failed batch here can never count toward the live Alpaca circuit breaker that pauses entries. 2-minute budget.
+    let optionBars = null, optionFetch = null;
+    if (req.query.validate !== "0") {
+      const need = TB.optionPlan(data, {}, opts);
+      const syms = Object.keys(need).sort((a, b) => (need[a][0] < need[b][0] ? -1 : need[a][0] > need[b][0] ? 1 : 0));
+      const bars = {}, t0 = Date.now(), queue = [];
+      for (let k = 0; k < syms.length; k += 50) queue.push(syms.slice(k, k + 50));
+      let calls = 0, errors = 0, rejected = 0, lastErr = null, note = null;
+      const nextDay = (d) => new Date(Date.parse(d + "T12:00:00Z") + 86400000).toISOString().slice(0, 10);
+      while (queue.length) {
+        if (Date.now() - t0 > 120000) { note = `stopped early (2-minute budget), ${queue.reduce((n, b) => n + b.length, 0)} contracts not fetched`; break; }
+        const batch = queue.shift();
+        const from = batch.reduce((m, sy) => (need[sy][0] < m ? need[sy][0] : m), "9999-12-31");
+        const to = nextDay(batch.reduce((m, sy) => (need[sy][need[sy].length - 1] > m ? need[sy][need[sy].length - 1] : m), "0000-01-01"));
+        let token = null, pages = 0, retried = false;
+        for (;;) {
+          const url = `${ALPACA_OPT_SNAP}/options/bars?symbols=${batch.join(",")}&timeframe=1Day&start=${from}&end=${to}&limit=10000` + (token ? `&page_token=${encodeURIComponent(token)}` : "");
+          let d = null, status = null;
+          try { const r = await withTimeout(nf(url, { headers: alpacaHeaders() }), 20000); calls++; status = r.status; d = r.ok ? await r.json() : null; }
+          catch (e) { errors++; lastErr = e.message; }
+          if (status === 429 && !retried) { retried = true; await new Promise(r => setTimeout(r, 1500)); continue; }
+          if (status && status !== 200) {
+            if (status === 400 || status === 422) {   // a contract Alpaca rejects: split the batch down, skip just that one
+              rejected++;
+              if (batch.length > 1) queue.unshift(batch.slice(0, batch.length >> 1), batch.slice(batch.length >> 1));
+              break;
+            }
+            errors++; lastErr = `HTTP ${status}`;
+            if (status === 401 || status === 403) { note = `option data not authorized (HTTP ${status})`; queue.length = 0; }
+            break;
+          }
+          if (!d || !d.bars) break;
+          for (const [sy, arr] of Object.entries(d.bars)) { const m = bars[sy] = bars[sy] || {}; for (const b of (arr || [])) m[String(b.t).slice(0, 10)] = b; }
+          token = d.next_page_token || null; pages++;
+          if (!token || pages >= 20) break;
+        }
+        if (errors >= 25) { note = `stopped after ${errors} errors (last: ${lastErr})`; break; }
+      }
+      optionBars = bars;
+      optionFetch = { symbolsRequested: syms.length, symbolsWithBars: Object.keys(bars).length, calls, errors, rejected, lastErr,
+        note: note || (errors ? `${errors} request error(s), last: ${lastErr}` : null), seconds: Math.round((Date.now() - t0) / 1000) };
+    }
+    const study = TB.runStudy(data, {}, { ...opts, optionBars, optionFetch });
+    const _n = (o) => Object.keys(o || {}).length;
+    logEvent("scan", `[TREND-BACKTEST] ran on SPY ${data.SPY.length} / QQQ ${data.QQQ.length} daily bars since ${start} | option model: raw ${opts.raw ? "yes" : "NO"}, VIX ${_n(series.VIX)} / VIX3M ${_n(series.VIX3M)} / VXN ${_n(series.VXN)} / T-bill ${_n(series.DTB3)} rows` +
+      (optionFetch ? ` | validation: ${optionFetch.symbolsWithBars}/${optionFetch.symbolsRequested} contracts with real bars in ${optionFetch.seconds}s${optionFetch.note ? " (" + optionFetch.note + ")" : ""}` : ""));
     if (req.query.format === "json") return res.json({ start, end, ...study });
     res.type("text/plain").send(study.report);
   } catch (e) { res.status(500).type("text/plain").send("trend-backtest error: " + e.message); }
