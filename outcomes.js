@@ -83,7 +83,8 @@ const OUTCOME_HEADER = [
   "eOrW","eOrBrk","eOrOpp","eOrTW","eOrTBrk","eOrTOpp",
   "eAdxTier","eGexReg","eGexRaw","eGexNetM","eGexDistFlip","eSkipBy","eSkipN",   // 10/7: meta-label features (skipBy = "|"-joined)
   "eMrZ","eMrAtr","eMrLoc","eMrWallDist","mrInvPx","mrInvHit","mrInvHitMin","mrInvHitChg",
-  "eWinMin",   // 10/12: intraday-trend — minutes since the entry window opened (does a setup that formed before 10:00 lose?)   // 10/7: mr-fade stamps + shadow invalidation             // 10/6: opening range at entry — APEX range, then textbook range
+  "eWinMin",   // 10/12: intraday-trend — minutes since the entry window opened (does a setup that formed before 10:00 lose?)
+  "eDTrend",   // 10/14: intraday-trend — with | against | none vs the daily trend (price vs 50d vs 100d)   // 10/7: mr-fade stamps + shadow invalidation             // 10/6: opening range at entry — APEX range, then textbook range
 ].join(",");
 
 function _csv(s) {
@@ -214,6 +215,7 @@ function buildOutcomeRow(pos, o) {
                 return [m.stretchZ ?? "", m.stretchAtr ?? "", m.loc ?? "", m.wallDistPct ?? "", inv,
                         pos._isMrFade ? (h ? 1 : 0) : "", h ? h.min : "", h && h.optChg != null ? h.optChg : ""]; })(),   // 10/7
     (pos._iMeta && pos._iMeta.winMin != null ? pos._iMeta.winMin : ""),   // 10/12: eWinMin
+    (pos._iMeta && pos._iMeta.dTrend ? pos._iMeta.dTrend : ""),   // 10/14: eDTrend
   ].map(_csv).join(",");
 
   return row;
