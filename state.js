@@ -550,6 +550,7 @@ async function saveDailyLogToRedis(isEOD = false) {
     state._entryFwd = [];
     state._standDownTally = { brk: {}, mrf: {}, trend: {}, itrend: {} };   // 8/25 reset daily; 8/27 +trend; 8/28 +itrend
     state._vfSkip = [];
+    state._gateShadow = [];   // 10/14
     state._vetoBlocks = [];
     markDirty();
   }
