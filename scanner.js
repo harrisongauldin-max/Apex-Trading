@@ -3017,6 +3017,9 @@ async function runScan() {
                 const _f = v => (v == null ? "n/a" : v);
                 logEvent("filter", `[ITREND-OR] ${liveStock.ticker} ${_iSide.toUpperCase()} — APEX range w${_f(_ot.w)}% brk${_f(_ot.brk)}% opposite:${_ot.opp == null ? "n/a" : _ot.opp ? "BROKEN" : "intact"} | textbook range w${_f(_ot.tw)}% brk${_f(_ot.tbrk)}%${_ot.tbrk != null && _ot.tbrk <= 0 ? " (NOT a break)" : ""} opposite:${_ot.topp == null ? "n/a" : _ot.topp ? "BROKEN" : "intact"} [measure-only]`);
               } catch (_otErr) { liveStock._iOrTag = null; }
+              // 10/14 (Harrison): daily trend for the alignment label (cached per day; SPY no longer loads it in the
+              // trend-swing block since that went QQQ-only, so fetch it here).
+              let _iDT = null; try { _iDT = await ensureDailyTrend(liveStock.ticker); } catch (_) { _iDT = null; }
               try {   // 10/7 (Harrison): META-LABEL features at entry. LABEL ONLY — nothing here gates or sizes the trade.
                 // skipBy = which candidate filters WOULD have skipped this entry; the outcomes file then answers
                 // "how did trades flagged X do vs unflagged?" (e.g. is there an edge anywhere in ADX 25-40?).
@@ -3029,12 +3032,19 @@ async function runScan() {
                 if (_g && _g.regime === "neg")                        _skip.push("gex-neg");
                 if (_g && _g.regimeHeld)                              _skip.push("gex-held");
                 if (_g && typeof _g.distFlipPct === "number" && Math.abs(_g.distFlipPct) < 0.15) _skip.push("near-flip");
+                // 10/14: with / against the DAILY trend (same definition as trend-swing: price vs 50d vs 100d).
+                // 10/5-10/13: intraday-trend puts against a daily uptrend went 1-for-9 — measure it before any rule (§0).
+                const _dOk = !!(_iDT && _iDT.ma50 && _iDT.ma100);
+                const _dUp = _dOk && price > _iDT.ma50 && _iDT.ma50 > _iDT.ma100, _dDn = _dOk && price < _iDT.ma50 && _iDT.ma50 < _iDT.ma100;
+                const _dAlign = !_dOk ? null : _dUp ? (_iSide === "call" ? "with" : "against") : _dDn ? (_iSide === "put" ? "with" : "against") : "none";
+                if (_dAlign === "against")                            _skip.push("vs-daily-trend");
                 liveStock._iMeta = { adxTier: _iAdx >= ITREND_LATE_ADX_MIN ? "40+" : "25-40",
                   gexReg: _g ? _g.regime : null, gexRaw: _g ? (_g.regimeRaw ?? _g.regime) : null,
                   gexNetM: _g && typeof _g.netGexM === "number" ? Math.round(_g.netGexM) : null,
                   gexDistFlip: _g && typeof _g.distFlipPct === "number" ? +_g.distFlipPct.toFixed(3) : null, skipBy: _skip,
-                  winMin: Math.max(0, Math.round((_iH - ITREND_START_ET) * 60)) };   // 10/12: minutes since the 10:00 window opened (stale-setup test)
-                logEvent("filter", `[ITREND-META] ${liveStock.ticker} ${_iSide.toUpperCase()} — ADX ${_iAdx.toFixed(0)} (${liveStock._iMeta.adxTier}) | gamma ${_g ? _g.regime : "n/a"}${_g && _g.regimeHeld ? " (held)" : ""} net ${_g ? Math.round(_g.netGexM) + "M" : "n/a"} flip ${_g && _g.distFlipPct != null ? _g.distFlipPct.toFixed(2) + "%" : "n/a"} | would-skip: ${_skip.length ? _skip.join(", ") : "none"} | ${liveStock._iMeta.winMin} min into the window [label only — entering as normal]`);
+                  winMin: Math.max(0, Math.round((_iH - ITREND_START_ET) * 60)),   // 10/12: minutes since the 10:00 window opened (stale-setup test)
+                  dTrend: _dAlign };                                                 // 10/14: with | against | none (daily trend flat/mixed)
+                logEvent("filter", `[ITREND-META] ${liveStock.ticker} ${_iSide.toUpperCase()} — ADX ${_iAdx.toFixed(0)} (${liveStock._iMeta.adxTier}) | gamma ${_g ? _g.regime : "n/a"}${_g && _g.regimeHeld ? " (held)" : ""} net ${_g ? Math.round(_g.netGexM) + "M" : "n/a"} flip ${_g && _g.distFlipPct != null ? _g.distFlipPct.toFixed(2) + "%" : "n/a"} | would-skip: ${_skip.length ? _skip.join(", ") : "none"} | ${liveStock._iMeta.winMin} min into the window | daily trend: ${_dAlign || "n/a"} [label only — entering as normal]`);
               } catch (_mErr) { liveStock._iMeta = null; }
               state._iTrendLast[_iCoolKey] = Date.now();
               const _iOK = await executeTrade(liveStock, price, 0, [_iReason], state.vix, _iSide, false, 1.0, null, null, `${liveStock.ticker}-${_iSide}-itrend-${Date.now()}`);
