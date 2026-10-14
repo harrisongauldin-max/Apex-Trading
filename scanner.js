@@ -4043,10 +4043,11 @@ async function runScan() {
   _lastScanTelemetryAt = scanNow;
   state.lastScan    = new Date().toISOString();
   state._scanFailures = 0;
-  await Promise.race([
-    saveStateNow(),
-    new Promise(r => setTimeout(r, 3000)),
-  ]).catch(() => { markDirty(); });
+  // 10/14 (Harrison): was `await saveStateNow()` here — a FULL state upload at the end of EVERY scan (~every 11 s,
+  // ~2,000/day). Upstash meter 10/13: 215 MB/day for the state record alone (and the cause of the 9 GB by 10/12).
+  // Mark it changed instead; the flush timer uploads at most every REDIS_SAVE_INTERVAL (2 min). Fills, closes and
+  // shutdown still save immediately.
+  markDirty();
   } catch(e) {
     logEvent("error", `runScan crashed: ${e.message} | stack: ${e.stack?.split("\n")[1]?.trim() || "unknown"}`);
     state._scanFailures = (state._scanFailures || 0) + 1;
