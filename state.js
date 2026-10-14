@@ -617,7 +617,7 @@ function rolloverBuffers(etDay = getETDateStr()) {
     const eodTxt = eod && eod.day === prev ? `${eod.ok ? "completed" : "FAILED"} at ${eod.at} (${eod.ms}ms)` : "NOT RECORDED — the end-of-day save did not finish";
     const msg = `[DAY-ROLLOVER] ${prev} -> ${etDay}: cleared stale buffers (telemetry ${n.tel}, chain snaps ${n.snaps}, outcomes ${n.out}). Previous end-of-day save: ${eodTxt}`;
     state._buffersDay = etDay;
-    try { _rollLogBuffer(etDay); state._dailyLogBuffer.push({ time: new Date().toISOString(), type: (eod && eod.day === prev && eod.ok) ? "scan" : "warn", msg }); } catch (_) {}
+    try { _rollLogBuffer(etDay); state._dailyLogBuffer.push({ time: new Date().toISOString(), type: (eod && eod.day === prev && eod.ok) ? "scan" : "warn", message: msg }); } catch (_) {}   // 10/14 FIX: was `msg` (printed "undefined")
     console.log(msg);
     markDirty();
     return;
