@@ -159,6 +159,7 @@ async function sendEmail(type) {
       nearMiss:      (state._nearMiss      || []).slice(),
       entryFwd:      (state._entryFwd      || []).slice(),
       vfSkip:        (state._vfSkip        || []).slice(),
+      gateShadow:    JSON.parse(JSON.stringify(state._gateShadow || [])),   // 10/14
       vetoBlocks:    (state._vetoBlocks    || []).slice(),
       dailyLog:      (state._dailyLogBuffer || []).slice(),
       standDownTally: JSON.parse(JSON.stringify(state._standDownTally || { brk:{}, mrf:{}, trend:{}, itrend:{} })),  // 9/09: snapshot before EOD reset wipes it
@@ -297,6 +298,16 @@ async function sendEmail(type) {
         }
       } catch (_vfCsvErr) { /* vf-skip attachment is best-effort — never block the email */ }
 
+      // 10/14: GATE-SHADOW CSV — signals a rule blocked, and where price went next (direction-signed % of underlying)
+      try {
+        const csv = gateShadowCSV(_eodSnap.gateShadow);
+        if (csv) {
+          const dateStr = new Date().toLocaleDateString("en-CA", { timeZone: "America/New_York" });
+          attachments.push({ filename: `argo-gateshadow-${dateStr}.csv`, content: Buffer.from(csv, "utf8").toString("base64") });
+          _retainToRedis("gateshadow", dateStr, csv).catch(() => {});
+        }
+      } catch (_gsCsvErr) { /* best-effort */ }
+
       // 8/24: FALLING-KNIFE VETO LEDGER CSV — the oversold dips APEX refused to buy, with where the
       // underlying went next. fwdPct > 0 (bounced) = the mean-reversion side is the edge, veto backwards.
       try {
@@ -415,6 +426,7 @@ async function sendEmail(type) {
       catch (_viErr) { logEvent("warn", `[VOL-INFRA] EOD section skipped: ${_viErr.message}`); }
       try { bodyHtml += buildMomoSection(_eodSnap); }
       catch (_mbErr2) { logEvent("warn", `[CALL-MOMO] EOD section skipped: ${_mbErr2.message}`); }
+      try { bodyHtml += buildGateShadowSection(_eodSnap); } catch (_gsErr) { logEvent("warn", `[GATE-SHADOW] EOD section skipped: ${_gsErr.message}`); }   // 10/14
       try { bodyHtml += buildStandDownSection(_eodSnap); }
       catch (_sdErr) { logEvent("warn", `[STAND-DOWN] EOD section skipped: ${_sdErr.message}`); }
     }
@@ -463,6 +475,32 @@ function checkFillsAgainstOutcomes(fills, outcomeRows, openPositions) {
   return { closedAtBroker: Object.keys(sells).length, rowsToday: (outcomeRows || []).length, missing, noSale, boughtLost,
            ok: !missing.length && !noSale.length && !boughtLost.length };
 }
+// 10/14: gate-shadow export + EOD summary (what each blocking rule kept APEX out of)
+function gateShadowCSV(rows) {
+  const dateStr = new Date().toLocaleDateString("en-CA", { timeZone: "America/New_York" });
+  const rs = (rows || []).filter(r => new Date(r.at).toLocaleDateString("en-CA", { timeZone: "America/New_York" }) === dateStr);
+  if (!rs.length) return null;
+  const f = (v) => (v == null ? "" : v);
+  const lines = [["blockedET", "gate", "sleeve", "ticker", "side", "px", "fav10", "fav20", "fav30", "best30", "worst30", "context"].join(",")];
+  for (const r of rs) lines.push([new Date(r.at).toLocaleTimeString("en-US", { timeZone: "America/New_York", hour12: false }), r.gate, r.sleeve, r.ticker, r.side, r.px,
+    f(r.f10), f(r.f20), f(r.f30), r.done ? r.mfe : "", r.done ? r.mae : "",
+    r.ctx ? Object.entries(r.ctx).map(([k, v]) => `${k}=${v}`).join("|") : ""].join(","));
+  return lines.join("\n");
+}
+function buildGateShadowSection(snap) {
+  const today = new Date().toLocaleDateString("en-CA", { timeZone: "America/New_York" });
+  const rs = (snap.gateShadow || []).filter(r => r.done && new Date(r.at).toLocaleDateString("en-CA", { timeZone: "America/New_York" }) === today);
+  if (!rs.length) return "";
+  const by = {}; for (const r of rs) (by[r.gate] = by[r.gate] || []).push(r);
+  const rowsH = Object.entries(by).map(([g, a]) => {
+    const avg = a.reduce((s, r) => s + (r.f30 || 0), 0) / a.length, arm = a.filter(r => r.mfe >= 0.10).length;
+    return `<tr><td style="padding:2px 10px 2px 0">${g}</td><td style="text-align:right;padding:2px 10px">${a.length}</td><td style="text-align:right;padding:2px 10px">${avg >= 0 ? "+" : ""}${avg.toFixed(3)}%</td><td style="text-align:right;padding:2px 10px">${Math.round(arm / a.length * 100)}%</td></tr>`;
+  }).join("");
+  return `<h3 style="font-family:system-ui,sans-serif;margin:18px 0 6px">Blocked signals — what the rules kept APEX out of</h3>` +
+    `<table style="font-family:system-ui,sans-serif;font-size:12px;border-collapse:collapse"><tr style="color:#888"><td>rule</td><td style="text-align:right;padding:2px 10px">blocked</td><td style="text-align:right;padding:2px 10px">avg 30-min move (trade's way)</td><td style="text-align:right;padding:2px 10px">reached +0.10%</td></tr>${rowsH}</table>` +
+    `<div style="font-family:system-ui,sans-serif;font-size:11px;color:#888;margin-top:4px">Positive = the blocked trade would have moved the right way. ~+0.10% is roughly what an option needs to reach its first profit lock. Measurement only.</div>`;
+}
+
 // 10/12: one line on Upstash bandwidth — today by data type, month-to-date against the free plan's 10 GB.
 function buildRedisUsageLine() {
   const u = usageSummary(state);
@@ -1448,5 +1486,5 @@ module.exports = {
   sendEmail, sendResendEmail, buildEmailHTML, getBenchmarkComparison,
   buildMonthlyReport, sendMorningBriefing, premarketAssessment,
   updateAfterHoursContext, initReporting, setReportingContext,
-  buildJournalBreakdown, checkFillsAgainstOutcomes, buildRecordCheckSection, buildRedisUsageLine,
+  buildJournalBreakdown, checkFillsAgainstOutcomes, buildRecordCheckSection, buildRedisUsageLine, gateShadowCSV, buildGateShadowSection,
 };
