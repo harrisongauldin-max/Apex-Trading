@@ -183,6 +183,21 @@ let marketContext = {
 // because index up-moves grind while down-moves are fast.
 // Fails CLOSED on every bad input: a null/short/foreign-day bar array, a missing or unlocked
 // opening range, NaN adx/slope, or a zero price all return {side:null} with a stated reason.
+// 10/14 (Harrison): GATE-SHADOW LEDGER — a signal a rule BLOCKED, with where price went next in the trade's direction
+// (10/20/30-min marks + best/worst within 30 min). Lets a blocking rule be judged on data instead of opinion: a rule
+// that blocks entirely otherwise produces no evidence for or against itself. Measurement only — never trades.
+function recordGateShadow(gate, sleeve, ticker, side, px, ctx) {
+  try {
+    if (!(px > 0) || (side !== "call" && side !== "put")) return;
+    if (!Array.isArray(state._gateShadow)) state._gateShadow = [];
+    const now = Date.now();
+    if (state._gateShadow.some(r => r.gate === gate && r.ticker === ticker && r.side === side && now - r.at < 15 * 60000)) return;   // one per 15 min
+    state._gateShadow.push({ gate, sleeve, ticker, side, at: now, px: +px.toFixed(2), ctx: ctx || null, mfe: 0, mae: 0, f10: null, f20: null, f30: null, done: false });
+    while (state._gateShadow.length > 300) state._gateShadow.shift();
+    markDirty();
+  } catch (_) { /* measurement only */ }
+}
+
 // 8/27: daily trend inputs (50/100d MA + ATR14) for the trend-swing sleeve. Cached per ticker per day.
 async function ensureDailyTrend(ticker) {
   try {
@@ -1981,6 +1996,19 @@ async function runScan() {
       } catch (_mrsErr) { /* observational */ }
     }
 
+    // 10/14: GATE-SHADOW forward stamps (direction-signed, % of underlying)
+    if (price > 0 && Array.isArray(state._gateShadow)) {
+      try {
+        for (const _gs of state._gateShadow) {
+          if (_gs.done || _gs.ticker !== stock.ticker || !(_gs.px > 0)) continue;
+          const _gAge = (Date.now() - _gs.at) / 60000, _gFav = (_gs.side === "put" ? -1 : 1) * (price - _gs.px) / _gs.px * 100;
+          if (_gAge <= 30.5) { if (_gFav > _gs.mfe) _gs.mfe = +_gFav.toFixed(3); if (_gFav < _gs.mae) _gs.mae = +_gFav.toFixed(3); }
+          for (const _k of [10, 20, 30]) if (_gs["f" + _k] == null && _gAge >= _k) _gs["f" + _k] = +_gFav.toFixed(3);
+          if (_gAge >= 30) _gs.done = true;
+        }
+      } catch (_gsErr) { /* observational */ }
+    }
+
     // 8/24: VF-SKIP forward-move stamp — same loop, for signals the vf arm declined (state._vfSkip).
     if (price > 0 && Array.isArray(state._vfSkip)) {
       try {
@@ -2979,6 +3007,9 @@ async function runScan() {
               const _iGamma = (state._gexRegime || {})[liveStock.ticker] || null;
               // 9/30 (Harrison): full stand-aside in negative gamma (see ITREND_NEG_GAMMA_BLOCK in constants).
               if (ITREND_NEG_GAMMA_BLOCK && _iGamma === "neg") {
+                const _gx = (state._gexNow || {})[liveStock.ticker] || {};
+                recordGateShadow("itrend-neg-gamma", "intraday-trend", liveStock.ticker, _iSide, price,
+                  { adx: +(+_iAdx || 0).toFixed(1), gexNetM: typeof _gx.netGexM === "number" ? Math.round(_gx.netGexM) : null });   // 10/14
                 recordStandDown("itrend", "neg-gamma regime — itrend stands aside");
                 logEvent("filter", `[INTRADAY-TREND] ${liveStock.ticker} ${_iSide.toUpperCase()} blocked — negative gamma (momentum reverses here; itrend stands aside)`);
                 _iSide = null; _iSuppressed = true;
@@ -3109,6 +3140,9 @@ async function runScan() {
             const _dDn = price < _dt.ma50 && _dt.ma50 < _dt.ma100;
             if (_mrDec.side === "put"  && _dUp) _fadeVsTrend = true;
             if (_mrDec.side === "call" && _dDn) _fadeVsTrend = true;
+          } else if (_isNegFade) {
+            // 10/14: was logged as "daily-trend check unavailable (no MA)" — misleading; this is the deliberate exemption
+            logEvent("filter", `[MR-FADE] ${liveStock.ticker} negative-gamma fade — exempt from the daily-trend check by design (CVD-exhaustion guard applies instead)`);
           } else {
             // fail-open (don't block on missing data) but LOG it so the protection gap is visible
             logEvent("filter", `[MR-FADE] ${liveStock.ticker} daily-trend check unavailable (no MA) — fade NOT gated this scan`);
@@ -3118,15 +3152,20 @@ async function runScan() {
           const _vwTag = _vwSlope > 0.0001 ? "up" : (_vwSlope < -0.0001 ? "down" : "flat");
           const _vwWith = (_vwTag === (_mrDec.side === "put" ? "down" : "up")) ? "with" : (_vwTag === "flat" ? "flat" : "against");
           if (_fadeVsTrend) {
+            recordGateShadow("mr-fade-vs-daily-trend", "mr-fade", liveStock.ticker, _mrDec.side, price, { loc: _mrDec.locationSource || null });   // 10/14
             recordStandDown("mrf", "fade vs daily trend");
             logEvent("filter", `[MR-FADE] ${liveStock.ticker} ${_mrDec.side} BLOCKED — fading against the daily trend (px vs 50d/100d); vwapSlope ${_vwTag}`);
           } else {
-          const _hasPos = (state.positions || []).some(p => p.ticker === liveStock.ticker && p.optionType === _mrDec.side && !p.closed);
+          // 10/14 (Harrison): only an open MR-FADE position blocks a new fade. It counted ANY same-ticker/side position,
+          // so the SPY 768C trend-swing (opened 10/6) silently blocked every SPY call fade for a week. Trend-swing is a
+          // multi-day sleeve with its own exits; a fade buys a different (short-dated) contract, so nothing merges.
+          const _hasPos = (state.positions || []).some(p => p.ticker === liveStock.ticker && p.optionType === _mrDec.side && !p.closed && (p._isMrFade || p.entryStrategy === "mr-fade-lit"));
           const _mrStopAge = ((state._mrStopAt || {})[liveStock.ticker]) ? (Date.now() - state._mrStopAt[liveStock.ticker]) / 60000 : null;   // 10/12
           if (_hasPos) {
             recordStandDown("mrf", "position already open");
             logEvent("filter", `[MR-FADE] ${liveStock.ticker} ${_mrDec.side} setup, but a ${_mrDec.side} position is already open — standing down`);
           } else if (_mrStopAge != null && _mrStopAge < MR_FADE_STOP_COOLDOWN_MIN) {
+            recordGateShadow("mr-fade-stop-cooldown", "mr-fade", liveStock.ticker, _mrDec.side, price, { minSinceStop: +_mrStopAge.toFixed(1) });   // 10/14
             recordStandDown("mrf", `cooldown after a stop (${MR_FADE_STOP_COOLDOWN_MIN} min)`);
             logEvent("filter", `[MR-FADE] ${liveStock.ticker} ${_mrDec.side} setup, but stopped out ${_mrStopAge.toFixed(1)} min ago — cooldown ${MR_FADE_STOP_COOLDOWN_MIN} min, standing down`);
           } else {
