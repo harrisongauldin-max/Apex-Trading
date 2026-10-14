@@ -377,7 +377,7 @@ async function sendEmail(type) {
       // further 33%; log text compresses ~10x, which keeps the attachment well inside mail limits.
       // zlib is a Node built-in — no dependency added.
       try {
-        const _lg = _eodSnap.dailyLog;
+        const _lg = (_eodSnap.dailyLog || []).slice().sort((a, b) => new Date(a.time) - new Date(b.time));   // 10/14: restored entries land after a restart's own lines — attach in time order
         if (_lg.length) {
           const zlib = require('zlib');
           const dateStr = new Date().toLocaleDateString("en-CA", { timeZone: "America/New_York" });
