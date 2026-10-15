@@ -160,6 +160,7 @@ async function sendEmail(type) {
       entryFwd:      (state._entryFwd      || []).slice(),
       vfSkip:        (state._vfSkip        || []).slice(),
       gateShadow:    JSON.parse(JSON.stringify(state._gateShadow || [])),   // 10/14
+      holdShadow:    JSON.parse(JSON.stringify(state._holdShadow || [])),   // 10/15: intraday-trend hold-to-close shadow
       trendShadow:   (() => { try { return require('./trendShadow').summary(); } catch (_) { return null; } })(),   // 10/14: trend-swing shadow book
       vetoBlocks:    (state._vetoBlocks    || []).slice(),
       dailyLog:      (state._dailyLogBuffer || []).slice(),
@@ -309,6 +310,16 @@ async function sendEmail(type) {
         }
       } catch (_gsCsvErr) { /* best-effort */ }
 
+      // 10/15: HOLD-SHADOW CSV — each live intraday-trend trade vs the same contract held with a VWAP trail / to 3:55
+      try {
+        const csv = require('./holdShadow').csv(_eodSnap.holdShadow, _eodSnap.outcomeBuffer, require('./outcomes').OUTCOME_HEADER);
+        if (csv) {
+          const dateStr = new Date().toLocaleDateString("en-CA", { timeZone: "America/New_York" });
+          attachments.push({ filename: `argo-holdshadow-${dateStr}.csv`, content: Buffer.from(csv, "utf8").toString("base64") });
+          _retainToRedis("holdshadow", dateStr, csv).catch(() => {});
+        }
+      } catch (_hsCsvErr) { /* best-effort */ }
+
       // 8/24: FALLING-KNIFE VETO LEDGER CSV — the oversold dips APEX refused to buy, with where the
       // underlying went next. fwdPct > 0 (bounced) = the mean-reversion side is the edge, veto backwards.
       try {
@@ -429,6 +440,7 @@ async function sendEmail(type) {
       catch (_mbErr2) { logEvent("warn", `[CALL-MOMO] EOD section skipped: ${_mbErr2.message}`); }
       try { bodyHtml += buildGateShadowSection(_eodSnap); } catch (_gsErr) { logEvent("warn", `[GATE-SHADOW] EOD section skipped: ${_gsErr.message}`); }   // 10/14
       try { bodyHtml += buildTrendShadowSection(_eodSnap); } catch (_tsErr) { logEvent("warn", `[TREND-SHADOW] EOD section skipped: ${_tsErr.message}`); }   // 10/14
+      try { bodyHtml += require('./holdShadow').section(_eodSnap.holdShadow, _eodSnap.outcomeBuffer, require('./outcomes').OUTCOME_HEADER); } catch (_hsErr) { logEvent("warn", `[HOLD-SHADOW] EOD section skipped: ${_hsErr.message}`); }   // 10/15
       try { bodyHtml += buildStandDownSection(_eodSnap); }
       catch (_sdErr) { logEvent("warn", `[STAND-DOWN] EOD section skipped: ${_sdErr.message}`); }
     }
@@ -483,9 +495,9 @@ function gateShadowCSV(rows) {
   const rs = (rows || []).filter(r => new Date(r.at).toLocaleDateString("en-CA", { timeZone: "America/New_York" }) === dateStr);
   if (!rs.length) return null;
   const f = (v) => (v == null ? "" : v);
-  const lines = [["blockedET", "gate", "sleeve", "ticker", "side", "px", "fav10", "fav20", "fav30", "best30", "worst30", "context"].join(",")];
+  const lines = [["blockedET", "gate", "sleeve", "ticker", "side", "px", "fav10", "fav20", "fav30", "best30", "worst30", "favClose", "vwapTrail", "vwapTrailMin", "context"].join(",")];
   for (const r of rs) lines.push([new Date(r.at).toLocaleTimeString("en-US", { timeZone: "America/New_York", hour12: false }), r.gate, r.sleeve, r.ticker, r.side, r.px,
-    f(r.f10), f(r.f20), f(r.f30), r.done ? r.mfe : "", r.done ? r.mae : "",
+    f(r.f10), f(r.f20), f(r.f30), r.done ? r.mfe : "", r.done ? r.mae : "", f(r.fClose), f(r.vTrail), f(r.vTrailMin),   // 10/15: hold-to-close marks
     r.ctx ? Object.entries(r.ctx).map(([k, v]) => `${k}=${v}`).join("|") : ""].join(","));
   return lines.join("\n");
 }
@@ -496,11 +508,13 @@ function buildGateShadowSection(snap) {
   const by = {}; for (const r of rs) (by[r.gate] = by[r.gate] || []).push(r);
   const rowsH = Object.entries(by).map(([g, a]) => {
     const avg = a.reduce((s, r) => s + (r.f30 || 0), 0) / a.length, arm = a.filter(r => r.mfe >= 0.10).length;
-    return `<tr><td style="padding:2px 10px 2px 0">${g}</td><td style="text-align:right;padding:2px 10px">${a.length}</td><td style="text-align:right;padding:2px 10px">${avg >= 0 ? "+" : ""}${avg.toFixed(3)}%</td><td style="text-align:right;padding:2px 10px">${Math.round(arm / a.length * 100)}%</td></tr>`;
+    const cl = a.filter(r => r.fClose != null), vt = a.filter(r => r.vTrail != null);   // 10/15: hold-to-close
+    const pct = (xs, k) => xs.length ? ((v) => `${v >= 0 ? "+" : ""}${v.toFixed(3)}%`)(xs.reduce((s, r) => s + r[k], 0) / xs.length) : "—";
+    return `<tr><td style="padding:2px 10px 2px 0">${g}</td><td style="text-align:right;padding:2px 10px">${a.length}</td><td style="text-align:right;padding:2px 10px">${avg >= 0 ? "+" : ""}${avg.toFixed(3)}%</td><td style="text-align:right;padding:2px 10px">${Math.round(arm / a.length * 100)}%</td><td style="text-align:right;padding:2px 10px">${pct(cl, "fClose")}</td><td style="text-align:right;padding:2px 10px">${pct(vt, "vTrail")}</td></tr>`;
   }).join("");
   return `<h3 style="font-family:system-ui,sans-serif;margin:18px 0 6px">Blocked signals — what the rules kept APEX out of</h3>` +
-    `<table style="font-family:system-ui,sans-serif;font-size:12px;border-collapse:collapse"><tr style="color:#888"><td>rule</td><td style="text-align:right;padding:2px 10px">blocked</td><td style="text-align:right;padding:2px 10px">avg 30-min move (trade's way)</td><td style="text-align:right;padding:2px 10px">reached +0.10%</td></tr>${rowsH}</table>` +
-    `<div style="font-family:system-ui,sans-serif;font-size:11px;color:#888;margin-top:4px">Positive = the blocked trade would have moved the right way. ~+0.10% is roughly what an option needs to reach its first profit lock. Measurement only.</div>`;
+    `<table style="font-family:system-ui,sans-serif;font-size:12px;border-collapse:collapse"><tr style="color:#888"><td>rule</td><td style="text-align:right;padding:2px 10px">blocked</td><td style="text-align:right;padding:2px 10px">avg 30-min move (trade's way)</td><td style="text-align:right;padding:2px 10px">reached +0.10%</td><td style="text-align:right;padding:2px 10px">held to 3:55</td><td style="text-align:right;padding:2px 10px">VWAP-trail exit</td></tr>${rowsH}</table>` +
+    `<div style="font-family:system-ui,sans-serif;font-size:11px;color:#888;margin-top:4px">Positive = the blocked trade would have moved the right way. ~+0.10% is roughly what an option needs to reach its first profit lock. "Held to 3:55" and "VWAP-trail exit" (intraday-trend only: out on the first cross of VWAP against the trade) judge the rule on the literature's hold-to-close horizon. Measurement only.</div>`;
 }
 
 // 10/14 (Harrison): trend-swing is shadow-only. Open shadow trades (marked at the 15:50 check) and every closed one.
@@ -817,7 +831,7 @@ ${type === "morning" ? `
 </div>` : `
 <div style="background:rgba(0,196,255,0.05);border:1px solid rgba(0,196,255,0.15);border-radius:8px;padding:14px">
   <h3 style="color:#00c4ff;font-size:11px;margin:0 0 6px">END OF DAY SUMMARY</h3>
-  <p style="font-size:12px;color:#cce8ff;margin:0">Market closed. ${state.todayTrades} trade${state.todayTrades!==1?"s":""} executed today. Daily P&L: ${parseFloat(daily)>=0?"+":""}$${daily}. APEX resumes scanning tomorrow at 10:00 AM ET.</p>
+  <p style="font-size:12px;color:#cce8ff;margin:0">Market closed. ${state.todayTrades} trade${state.todayTrades!==1?"s":""} executed today. Realized today: ${parseFloat(realizedDay)>=0?"+":""}$${realizedDay} · account change (incl. open positions): ${parseFloat(daily)>=0?"+":""}$${daily}. APEX resumes scanning tomorrow at 10:00 AM ET.</p>
 </div>`}
 
 <p style="font-size:10px;color:#336688;text-align:center;margin-top:16px">APEX · autonomous SPY/QQQ options · paper trading · not financial advice</p>
