@@ -148,4 +148,32 @@ function applyRegimeHysteresis(state, ticker, g, thresholdM) {
   return g;
 }
 
-module.exports = { computeGEX, applyRegimeHysteresis };
+// 10/15 (Harrison): WALL HYSTERESIS. When two strikes carry nearly the same gamma x OI, the "wall" jumped between them
+// with each chain refresh (10/14: SPY call wall changed 12 times — 770/775/780/785 — QQQ 8), and MR-fade uses the wall
+// as an entry condition. A new strike becomes the wall only after it has been the raw winner continuously for holdMin
+// minutes; otherwise the previous wall is kept. Resets each ET day. Distances are recomputed against the held wall.
+// Records the unadjusted strikes as g.callWallRaw / g.putWallRaw. Mutates and returns g.
+function applyWallHysteresis(state, ticker, g, spot, holdMin) {
+  if (!g || !state || !(spot > 0)) return g;
+  g.callWallRaw = g.callWall; g.putWallRaw = g.putWall;
+  if (!(holdMin > 0)) return g;
+  if (!state._gexWallHyst) state._gexWallHyst = {};
+  const day = new Date().toLocaleDateString("en-CA", { timeZone: "America/New_York" }), now = Date.now();
+  let h = state._gexWallHyst[ticker];
+  if (!h || h.day !== day) h = state._gexWallHyst[ticker] = { day, call: null, put: null };
+  for (const side of ["call", "put"]) {
+    const raw = g[side + "Wall"];
+    if (!(raw > 0)) continue;
+    let w = h[side];
+    if (!w) { h[side] = { held: raw, cand: null, since: 0 }; continue; }
+    if (raw === w.held) { w.cand = null; w.since = 0; }
+    else if (raw !== w.cand) { w.cand = raw; w.since = now; }
+    else if (now - w.since >= holdMin * 60000) { w.held = raw; w.cand = null; w.since = 0; }
+    if (w.held !== raw) { g[side + "Wall"] = w.held; g[side + "WallHeld"] = true; }
+  }
+  if (g.callWall > 0) g.distCallWallPct = parseFloat((((g.callWall - spot) / spot) * 100).toFixed(3));
+  if (g.putWall > 0)  g.distPutWallPct  = parseFloat((((g.putWall  - spot) / spot) * 100).toFixed(3));
+  return g;
+}
+
+module.exports = { computeGEX, applyRegimeHysteresis, applyWallHysteresis };
