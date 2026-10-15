@@ -31,6 +31,7 @@ const MR = {
   RSI_OVERBOUGHT:         65,     // 9/14 (Harrison): loosened 70->65. Put-fade (overbought->buy put) in POS gamma is the validated edge; at 65-70 it still reached +0.4% fav ~49% (vs 57% strict) — more fires, thinner edge. Call side (OVERSOLD) left STRICT — fade-up is weak on this tape.
   VWAP_STRETCH_PCT:       0.19,   // must be stretched at least this far from VWAP (mean)
   WALL_PROXIMITY_PCT:     0.30,   // 9/22 (Harrison): tightened 0.35→0.30. DATA: fades ≤0.30% from the wall reverted 43% vs 22% mid-range (n=87 vs 74). The wall IS the fade signal (dealers defend it) — proven on tape, not just literature.
+  WALL_REQUIRE_INTACT:    true,   // 10/14 (Harrison): the wall must still be on the near side — a put wall BELOW price for a call fade, a call wall ABOVE price for a put fade. Was Math.abs(), so price already 0.3% THROUGH the wall counted as "at the wall". Telemetry 10/1-10/14 (Gate-2 setups): intact n=18, +0.12% at 30m, 83% right way; broken n=23, -0.12%, 17%. Same sign in both halves of the sample. Support only holds from the side it supports.
   REQUIRE_WALL:           false,  // 9/22: when true, ONLY fade at a wall (drop the vwap-band fallback = the weak 22% mid-range group). Default false = still take band-fades but TAGGED (locationSource) so we can measure wall vs band separately, THEN flip true if band-fades confirm weak. Governing principle: measure before restricting.
   ALLOW_VWAP_BAND:        true,   // if no wall nearby, a deep VWAP-band stretch also counts as a location
   VWAP_BAND_PCT:          0.40,   // the VWAP-band distance that qualifies as a location on its own
@@ -88,7 +89,15 @@ function evaluateMRFade(signals = {}, gex, px, cfg = MR) {
     const wallDist = side === "call" ? gex.distPutWallPct : gex.distCallWallPct;   // fade-up buys support at the PUT wall
     const wall     = side === "call" ? gex.putWall        : gex.callWall;
     if (wall != null && wallDist != null && Math.abs(wallDist) <= cfg.WALL_PROXIMITY_PCT) {
-      location = `${side === "call" ? "put" : "call"}-wall@${wall} (${wallDist.toFixed(2)}%)`;
+      // distPutWallPct = (putWall - px)/px: <= 0 means the put wall is still below price (intact) for a call fade;
+      // distCallWallPct = (callWall - px)/px: >= 0 means the call wall is still above price for a put fade.
+      const _intact = side === "call" ? wallDist <= 0 : wallDist >= 0;
+      if (_intact || !cfg.WALL_REQUIRE_INTACT) {
+        location = `${side === "call" ? "put" : "call"}-wall@${wall} (${wallDist.toFixed(2)}%)`;
+      } else {
+        // 10/14: price is already through the wall — the support/resistance failed. No wall fade, and no band fallback either.
+        return { fire: false, reason: `wall already broken — price ${Math.abs(wallDist).toFixed(2)}% through the ${side === "call" ? "put" : "call"} wall @${wall}`, regimeSource, side };
+      }
     }
   }
   let locationSource = location ? "wall" : null;
