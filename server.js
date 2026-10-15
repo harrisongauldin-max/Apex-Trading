@@ -1617,6 +1617,61 @@ app.get("/api/trend-backtest", requireSecret, async (req, res) => {
   } catch (e) { res.status(500).type("text/plain").send("trend-backtest error: " + e.message); }
 });
 
+// 10/15 (Harrison): FLOW HARNESS — pre-registered tests of the published intraday edges APEX doesn't use (flowBacktest.js).
+// SPY/QQQ 5-minute bars from Alpaca (raw), Cboe VIX/VXN for option pricing and the volatility split. Read-only.
+// Uses its OWN fetch (not alpacaGet) so a slow or failed page can never trip the live circuit breaker. Refuses to run
+// during market hours unless ?force=1, so it never competes with the live scanner for the API.
+app.get("/api/flow-backtest", requireSecret, async (req, res) => {
+  try {
+    const et = getETTime(), h = et.getHours() + et.getMinutes() / 60, wd = et.getDay() >= 1 && et.getDay() <= 5;
+    if (wd && h >= 9.25 && h < 16.25 && req.query.force !== "1")
+      return res.status(409).type("text/plain").send("The flow harness runs outside market hours (it pulls ~10 years of 5-minute bars). Run it after 4:15 PM ET, or add &force=1.");
+    const FB = require("./flowBacktest"), TO = require("./trendOptions");
+    const { ALPACA_DATA } = require("./constants");
+    const { alpacaHeaders, withTimeout } = require("./broker");
+    const nf = require("node-fetch");
+    const start = /^\d{4}-\d{2}-\d{2}$/.test(String(req.query.start || "")) ? req.query.start : "2016-01-01";
+    const end = new Date(Date.now() - 20 * 60000).toISOString();
+    const t0 = Date.now(), sources = {};
+    const fetchBars = async (tk) => {
+      const out = []; let token = null, pages = 0, tries = 0;
+      for (;;) {
+        if (Date.now() - t0 > 240000) { sources[tk + " note"] = "stopped at the 4-minute budget"; break; }
+        const url = `${ALPACA_DATA}/stocks/${tk}/bars?timeframe=5Min&start=${start}T00:00:00Z&end=${end}&adjustment=raw&feed=sip&limit=10000` + (token ? `&page_token=${encodeURIComponent(token)}` : "");
+        let r = null; try { r = await withTimeout(nf(url, { headers: alpacaHeaders() }), 30000); } catch (_) { r = null; }
+        if (r && r.status === 429 && tries < 5) { tries++; await new Promise(z => setTimeout(z, 3000 * tries)); continue; }
+        if (!r || !r.ok) { sources[tk + " note"] = `fetch stopped (HTTP ${r ? r.status : "timeout"}) after ${pages} pages`; break; }
+        const d = await r.json(); tries = 0;
+        if (Array.isArray(d.bars)) for (const b of d.bars) { const p = FB.etParts(b.t); if (p.m >= 570 && p.m < 960) out.push({ t: b.t, o: b.o, h: b.h, l: b.l, c: b.c, v: b.v }); }   // regular hours only (memory)
+        token = d.next_page_token || null; pages++;
+        if (!token || pages > 400) break;
+      }
+      sources[tk] = `${out.length} five-minute bars (${pages} pages)`;
+      return out;
+    };
+    const bars = {};
+    for (const tk of ["SPY", "QQQ"]) {
+      bars[tk] = await fetchBars(tk);
+      if (bars[tk].length < 20000) return res.status(502).type("text/plain").send(`Not enough 5-minute history for ${tk} (${bars[tk].length} bars). ${sources[tk + " note"] || ""}`);
+    }
+    const getText = async (url) => { try { const r = await withTimeout(nf(url), 20000); return (r && r.ok) ? await r.text() : null; } catch (_) { return null; } };
+    const CB = "https://cdn.cboe.com/api/global/us_indices/daily_prices/";
+    const [vixT, vxnT] = await Promise.all([getText(CB + "VIX_History.csv"), getText(CB + "VXN_History.csv")]);
+    const VIX = TO.parseSeriesCsv(vixT), VXN = TO.parseSeriesCsv(vxnT);
+    sources.VIX = Object.keys(VIX).length ? "Cboe VIX history" : "unavailable"; sources.VXN = Object.keys(VXN).length ? "Cboe VXN history" : "unavailable";
+    // the PRIOR day's close (known before the trade), as a decimal
+    const prevOf = (series) => { const L = TO.lookup(series, 10); return (date) => { const d0 = new Date(Date.parse(date + "T12:00:00Z") - 86400000).toISOString().slice(0, 10); const v = L(d0); return v > 0 ? v : null; }; };
+    const vixPrev = Object.keys(VIX).length ? prevOf(VIX) : null, vxnPrev = Object.keys(VXN).length ? prevOf(VXN) : null;
+    const iv = { SPY: vixPrev ? (d) => { const v = vixPrev(d); return v ? v / 100 : null; } : null,
+                 QQQ: vxnPrev ? (d) => { const v = vxnPrev(d); return v ? v / 100 : null; } : (vixPrev ? (d) => { const v = vixPrev(d); return v ? v * 1.2 / 100 : null; } : null) };
+    const result = FB.run(bars, iv, vixPrev);
+    const report = FB.textReport(result, sources);
+    logEvent("scan", `[FLOW-HARNESS] ran in ${((Date.now() - t0) / 1000).toFixed(0)}s — ${Object.entries(result.tickers).map(([tk, r]) => `${tk}: T1 ${r.T1.pass ? "PASS" : "fail"}, T2 ${r.T2.pass ? "PASS" : "fail"}, T3 ${r.T3.pass ? "PASS" : "fail"}, T5 ${r.T5.pass ? "PASS" : "fail"}, T6 ${r.T6.pd.pass ? "PASS" : "fail"}/${r.T6.round.pass ? "PASS" : "fail"}`).join(" | ")}`);
+    if (req.query.format === "json") return res.json({ start, sources, result, report });
+    res.type("text/plain").send(report);
+  } catch (e) { res.status(500).type("text/plain").send("flow-backtest error: " + e.message); }
+});
+
 app.get("/api/trend-probe", requireSecret, async (req, res) => {
   try {
     const { state } = require('./state');
