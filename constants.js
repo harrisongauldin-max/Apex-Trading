@@ -707,6 +707,12 @@ const TREND_TICKERS             = ["QQQ"];
 const TREND_EXIT_MODE           = "chandelier";   // "chandelier" | "legacy" (legacy = tight trail + 14-day stale)
 const TREND_CHANDELIER_ATR      = 3.0;            // exit when the daily close is 3 x ATR14 below the highest close since entry (calls)
 const TREND_CHANDELIER_CHECK_ET = 15.83;          // 15:50 ET — the backtest decides on the daily CLOSE, so check once, near it
+// 10/14 (Harrison): TREND-SWING IS SHADOW-ONLY. Live record: 8 trades, -$4,231 — about 90% of all realized losses —
+// while it produced almost no data (8 trades in 7 weeks). The signal, chandelier exit, 21-DTE roll and cooldown still
+// run, but against a ledger (trendShadow.js), priced from real Alpaca quotes. No orders. "live" restores real trading.
+const TREND_MODE              = "shadow";   // "shadow" | "live"
+const TREND_RETIRE_LIVE       = true;       // in shadow mode, close any live trend-swing position still open...
+const TREND_RETIRE_AFTER_ET   = 9.583;      // ...at the first exit check from 9:35 ET (5 min after the open, once quotes settle)
 const TREND_COOLDOWN_DAYS = 5;      // 10/12 (Harrison): no new trend-swing on a ticker until the 6th trading day after its last trend-swing exit.
                                     // 10-yr backtest (10/12): beat the live immediate re-entry in all 4 ticker x half cells and under every cost assumption.
 const TREND_MA_FAST       = 50;     // daily trend: price > 50d, 50d > 100d
@@ -990,7 +996,7 @@ module.exports = {
   GEX_V2_INCLUDE_MONTHLY, GEX_REGIME_HYST_M,
   STRATEGY_CLASS, strategyClass, isFlattenExempt, LOCK_LADDER, LOCK_LADDER_TRAIL, ladderFloor,
   TREND_ENABLED, TREND_DELTA, TREND_DELTA_MIN, TREND_DELTA_MAX, TREND_TARGET_DTE, TREND_DTE_MIN, TREND_DTE_MAX,
-  TREND_ROLL_DTE, TREND_COOLDOWN_DAYS, TREND_TICKERS, TREND_EXIT_MODE, TREND_CHANDELIER_ATR, TREND_CHANDELIER_CHECK_ET, TREND_MA_FAST, TREND_MA_SLOW, TREND_RSI_MIN, TREND_RSI_MAX, TREND_OVEREXT_ATR, TREND_BREADTH_MIN,
+  TREND_ROLL_DTE, TREND_COOLDOWN_DAYS, TREND_MODE, TREND_RETIRE_LIVE, TREND_RETIRE_AFTER_ET, TREND_TICKERS, TREND_EXIT_MODE, TREND_CHANDELIER_ATR, TREND_CHANDELIER_CHECK_ET, TREND_MA_FAST, TREND_MA_SLOW, TREND_RSI_MIN, TREND_RSI_MAX, TREND_OVEREXT_ATR, TREND_BREADTH_MIN,
   TREND_CUTOFF_ET, TREND_RISK_BUDGET, TREND_TRAIL_ARM_PCT, TREND_STOP_UNDL_PCT, TREND_STOP_PCT, TREND_ATR_STOP_MULT, TREND_USTOP_FLOOR, TREND_USTOP_CEIL, TREND_STALE_DAYS, TREND_STALE_PEAK, TREND_TRAIL_GIVEBACK_PCT,
   ITREND_ENABLED, ITREND_DELTA, ITREND_DELTA_MIN, ITREND_DELTA_MAX, ITREND_TARGET_DTE, ITREND_DTE_MIN, ITREND_DTE_MAX,
   ITREND_ADX_MIN, ITREND_VWAP_MIN, ITREND_BREADTH_STRONG, ITREND_START_ET, ITREND_END_ET, ITREND_NEG_GAMMA_BLOCK,
