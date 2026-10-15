@@ -9,6 +9,7 @@ const {
 } = require('./broker');
 const DAYCTX = require('./dayContext');   // 10/6: day-type / calendar / prior-day context (measurement only)
 const INTERNALS = require('./marketInternals');   // 10/6: 50-stock internals proxy (measurement only)
+const TSHADOW = require('./trendShadow');   // 10/14: trend-swing shadow book (no orders)
 
 const { state, logEvent, markDirty, saveStateNow, flushStateIfDirty, paperDataActive, dataGatherActive, mrFadeActive, recordStandDown , markFresh, auditFreshness } = require('./state');
 const STRADDLESTRAT = require('./straddleStrategy');
@@ -125,7 +126,7 @@ const {
   GEX_FETCH_ENABLED = true, GEX_FETCH_THROTTLE_MS = 120000,
   TREND_ENABLED = true, TREND_CUTOFF_ET = 15.0, TREND_MA_FAST = 50, TREND_MA_SLOW = 100,   // 9/20: TREND_ENABLED aligned to constants. 9/21 FIX: comment had eaten TREND_MA_FAST + TREND_MA_SLOW
   TREND_RSI_MIN = 50, TREND_RSI_MAX = 72, TREND_OVEREXT_ATR = 4.0, TREND_BREADTH_MIN = 52,
-  TREND_COOLDOWN_DAYS = 5, TREND_TICKERS = ["QQQ"],
+  TREND_COOLDOWN_DAYS = 5, TREND_TICKERS = ["QQQ"], TREND_MODE = "shadow",   // 10/14: shadow = no trend-swing orders
   ITREND_NEG_GAMMA_BLOCK = true,
   GEX_REGIME_HYST_M = 250,
   ITREND_LATE_START_ET = 11.0, ITREND_LATE_ADX_MIN = 40,
@@ -2867,13 +2868,22 @@ async function runScan() {
     // Self-dedup + own side, so they run before the momentum guards; still subordinate to drawdown/
     // circuit (those continue earlier). Heat/capital via this if (was the scored-loop break). stock->
     // liveStock: in this loop `stock` is the RAW object; enriched fields live on liveStock.
+    // 10/14 (Harrison): TREND-SWING SHADOW — manage open shadow trades every scan (stop, 15:50 chandelier, 21-DTE roll).
+    // Outside the heat/cash gate on purpose: a shadow trade has no capital, and its exits must run regardless.
+    if (TREND_ENABLED && TREND_MODE === "shadow" && liveStock && price > 0 && (TREND_TICKERS || []).includes(liveStock.ticker) && TSHADOW.hasOpen(liveStock.ticker)) {
+      try {
+        const _sdm = state._dailyMA && state._dailyMA[liveStock.ticker];
+        await TSHADOW.step(liveStock.ticker, price, { findContract, vix: state.vix, stock: liveStock, atr: _sdm && _sdm.atr });
+      } catch (_tse) { logEvent("warn", `[TREND-SHADOW] ${liveStock.ticker} step failed — ${_tse && _tse.message}`); }
+    }
     if (heatPct() < effectiveHeatCap() && state.cash > CAPITAL_FLOOR) {
     // 8/27: TREND-SWING sleeve (daily-momentum, multi-day hold). Own path — bypasses the score/enforce gate
     // like mr-fade. Daily thesis: price vs 50/100d MA + daily RSI/MACD + breadth, not overextended.
     // 10/12 (Harrison): trend-swing trades TREND_TICKERS only (QQQ). A 21-DTE roll re-buys at once, ahead of every
     // entry gate — it is the same trade continuing (the backtest rolls), not a new signal.
     const _tCarry = (state._trendRollCarry || {})[liveStock && liveStock.ticker];
-    if (TREND_ENABLED && liveStock && price > 0 && _tCarry && !(state.positions || []).some(p => p.ticker === liveStock.ticker && p.entryStrategy === "trend-swing" && !p.closed)) {
+    if (TREND_MODE === "shadow" && _tCarry) { delete state._trendRollCarry[liveStock.ticker]; markDirty(); }   // 10/14: shadow mode never re-buys a live roll
+    if (TREND_ENABLED && TREND_MODE !== "shadow" && liveStock && price > 0 && _tCarry && !(state.positions || []).some(p => p.ticker === liveStock.ticker && p.entryStrategy === "trend-swing" && !p.closed)) {
       try {
         liveStock._isTrend = _tCarry.side; liveStock._trendCarry = _tCarry;
         const _rSig = `${liveStock.ticker}-${_tCarry.side}-trendroll-${Date.now()}`;
@@ -2912,7 +2922,9 @@ async function runScan() {
             } else if (_downTrend && !_overExt && !_rsiOversold && !_brdthAgainstPut) {
               _tSide = "put";  _tReason = `daily downtrend $${price.toFixed(2)}<50d$${_tm.ma50}<100d$${_tm.ma100} dRSI${_drsi.toFixed(0)} brdth${_brdth}% [lit: price-vs-MA]`;
             }
-            const _haveTrend = (state.positions || []).some(p => p.ticker === liveStock.ticker && p.entryStrategy === "trend-swing" && p.optionType === _tSide && !p.closed);
+            const _haveTrend = TREND_MODE === "shadow"
+              ? TSHADOW.hasOpen(liveStock.ticker)   // 10/14: shadow — one shadow trade per ticker at a time
+              : (state.positions || []).some(p => p.ticker === liveStock.ticker && p.entryStrategy === "trend-swing" && p.optionType === _tSide && !p.closed);
 
             // 9/21 (Harrison): CORRELATION COHERENCE (Clenow — group correlated instruments as ONE trend unit).
             // SPY & QQQ are ~0.95 correlated. Holding opposite-direction trend-swings on them is not two trend
@@ -2949,19 +2961,26 @@ async function runScan() {
             // 10/12: re-entry cooldown (see the bookkeeping at the top of runScan)
             let _tCool = null;
             const _lx = (state._trendLastExit || {})[liveStock.ticker];
-            if (_tSide && !_haveTrend && _lx && _lx.day && TREND_COOLDOWN_DAYS > 0) {
+            if (TREND_MODE === "shadow") { if (_tSide && !_haveTrend) _tCool = TSHADOW.cooldown(liveStock.ticker); }   // 10/14: cooldown from the shadow book's own exits
+            else if (_tSide && !_haveTrend && _lx && _lx.day && TREND_COOLDOWN_DAYS > 0) {
               const _since = DAYCTX.tradingDaysBetween(_lx.day, DAYCTX.etDateStr(Date.now()));
               if (_since <= TREND_COOLDOWN_DAYS) _tCool = `re-entry cooldown — ${_since} of ${TREND_COOLDOWN_DAYS} trading days since the ${_lx.day} exit (eligible ${DAYCTX.addTradingDays(_lx.day, TREND_COOLDOWN_DAYS + 1)})`;
             }
 
             if (_tSide && !_haveTrend && !_cohBlock && _tCool) {
               recordStandDown("trend", _tCool);
+            } else if (_tSide && !_haveTrend && !_cohBlock && TREND_MODE === "shadow") {
+              // 10/14 (Harrison): SHADOW ENTRY — same signal, no order. Priced from a real quote in trendShadow.js.
+              const _so = await TSHADOW.open(liveStock.ticker, _tSide, price, { findContract, vix: state.vix, stock: liveStock, atr: _tm.atr, reason: _tReason });
+              recordStandDown("trend", _so.opened ? "SHADOW ENTRY (no order)" : `shadow entry not taken — ${_so.why}`);
             } else if (_tSide && !_haveTrend && !_cohBlock) {
               liveStock._isTrend = _tSide;
               const _tSig = `${liveStock.ticker}-${_tSide}-trend-${Date.now()}`;
               const _tOK = await executeTrade(liveStock, price, 0, [_tReason], state.vix, _tSide, false, 1.0, null, null, _tSig);
               liveStock._isTrend = null;
               if (_tOK) { recordStandDown("trend", "FIRED"); logEvent("scan", `[TREND-SWING] ${liveStock.ticker} ${_tSide.toUpperCase()} FIRED — ${_tReason}`); continue; }
+            } else if (_tSide && _haveTrend) {
+              recordStandDown("trend", TREND_MODE === "shadow" ? "shadow trade already open" : "position already open");   // 10/14: was mis-tallied as "momentum/breadth gate"
             } else if (_cohBlock) {
               recordStandDown("trend", _cohBlock);
               logEvent("scan", `[TREND-SWING] ${liveStock.ticker} ${_tSide.toUpperCase()} STOOD DOWN (correlation coherence) — ${_cohBlock}`);
