@@ -20,7 +20,7 @@ const SCORE_DELTA  = 3;               // |score| move that counts as material
 const MAX_ROWS     = 6000;            // safety cap on a runaway day
 const BLOCKER_MAX  = 60;              // truncate the headline blocker text
 
-const TELEMETRY_HEADER = "time,tkr,px,iRSI,dRSI,call,put,isMR,curl,vwap%,blocker,drivers,shadow,adx,gate,pgate,isC,isP,volPace,breadth,gexRegime,netGexM,callWall,putWall,distCW,distPW,cumVolDelta,cvdSlope,gexNear,netGexNearM,flipLvl,distFlip,sessOpen,prevClose,gapTrue,openType,o15Ret,ibHi,ibLo,ibRngPct,ibExt,rngVsIB,pdH,pdL,pdVW,pdPOC,dPOC,posVsPd,evt,vixEst,vixSrc,vixyRaw,vixPrev,vix9dPrev,vix3mPrev,term9d,term3m,intN,intAdvPct,intVwapPct,intUpMinPct,intCumTick,gexRaw,orHi,orLo,orTHi,orTLo";
+const TELEMETRY_HEADER = "time,tkr,px,iRSI,dRSI,call,put,isMR,curl,vwap%,blocker,drivers,shadow,adx,gate,pgate,isC,isP,volPace,breadth,gexRegime,netGexM,callWall,putWall,distCW,distPW,cumVolDelta,cvdSlope,gexNear,netGexNearM,flipLvl,distFlip,sessOpen,prevClose,gapTrue,openType,o15Ret,ibHi,ibLo,ibRngPct,ibExt,rngVsIB,pdH,pdL,pdVW,pdPOC,dPOC,posVsPd,evt,vixEst,vixSrc,vixyRaw,vixPrev,vix9dPrev,vix3mPrev,term9d,term3m,intN,intAdvPct,intVwapPct,intUpMinPct,intCumTick,gexRaw,orHi,orLo,orTHi,orTLo,rROD,hedgeFlow,rebalDir,pinStrike,distPin,toME,fromMS,tom,cwRaw,pwRaw";
 
 // intraday-RSI tier — a crossing is "material" so dips/spikes always log a row
 function _rsiTier(r) {
@@ -222,6 +222,17 @@ function recordTelemetry(state, rec) {
       rec.orLo        == null ? "" : rec.orLo,
       rec.orTHi       == null ? "" : rec.orTHi,          // 10/6: textbook opening range (9:30-9:44 bar highs/lows)
       rec.orTLo       == null ? "" : rec.orTLo,
+      // 10/15: flow state (flows.js) — measurement only
+      rec.rROD        == null ? "" : rec.rROD,          // % from the prior close (Baltussen et al. predictor)
+      rec.hedgeFlow   == null ? "" : rec.hedgeFlow,     // with-move (dealers short gamma) | against-move
+      rec.rebalDir    == null ? "" : rec.rebalDir,      // end-of-day rebalancing direction: buy | sell | flat
+      rec.pinStrike   == null ? "" : rec.pinStrike,     // nearest-expiry max-OI strike within 2%
+      rec.distPin     == null ? "" : rec.distPin,       // % from price to the pin strike
+      rec.toME        == null ? "" : rec.toME,          // trading days to month end (0 = last trading day)
+      rec.fromMS      == null ? "" : rec.fromMS,        // trading day of month (1 = first)
+      rec.tom         == null ? "" : rec.tom,           // turn of month (last day or first three)
+      rec.cwRaw       == null ? "" : rec.cwRaw,         // call wall before hysteresis
+      rec.pwRaw       == null ? "" : rec.pwRaw,         // put wall before hysteresis
     ].map(_csv).join(",");
 
     try { require('./state').rolloverBuffers(); } catch (_) {}   // 10/7: never append to a prior day's buffer
@@ -240,7 +251,13 @@ function recordTelemetry(state, rec) {
 }
 
 function telemetryCSV(rows) {
-  return TELEMETRY_HEADER + "\n" + (Array.isArray(rows) ? rows.join("\n") : "");
+  // 10/15: time-sorted. Rows merged back after a restart used to land out of order (10/14: two 11:14 rows first).
+  // Stable sort on the leading HH:MM:SS field; rows without one keep their place at the end.
+  const sorted = Array.isArray(rows) ? rows.slice().sort((a, b) => {
+    const ta = /^\d\d:\d\d:\d\d/.test(a) ? a.slice(0, 8) : "99", tb = /^\d\d:\d\d:\d\d/.test(b) ? b.slice(0, 8) : "99";
+    return ta < tb ? -1 : ta > tb ? 1 : 0;
+  }) : [];
+  return TELEMETRY_HEADER + "\n" + sorted.join("\n");
 }
 
 module.exports = { recordTelemetry, telemetryCSV, topDrivers, TELEMETRY_HEADER };
