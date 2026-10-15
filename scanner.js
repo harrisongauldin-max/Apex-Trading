@@ -10,6 +10,15 @@ const {
 const DAYCTX = require('./dayContext');   // 10/6: day-type / calendar / prior-day context (measurement only)
 const INTERNALS = require('./marketInternals');   // 10/6: 50-stock internals proxy (measurement only)
 const TSHADOW = require('./trendShadow');   // 10/14: trend-swing shadow book (no orders)
+const FLOWS = require('./flows');
+const HOLD = require('./holdShadow');   // 10/15: hold-to-close shadow exit for intraday-trend (measurement only)   // 10/15: flow state (dealer hedging, rebalancing direction, pin, calendar) — measurement only
+// 10/15: status lines ([GAP], [VWAP], [GEX]) were 66% of the session log (10/14: 6,177 of 9,309 lines), the same
+// state repeated every 10 s. Log a status line only when its state changes, or once per `everyMs` as a heartbeat.
+const _logSig = new Map();
+function logOnChange(key, sig, type, msg, everyMs = 15 * 60000) {
+  const p = _logSig.get(key), now = Date.now();
+  if (!p || p.sig !== sig || now - p.at >= everyMs) { _logSig.set(key, { sig, at: now }); logEvent(type, msg); }
+}
 
 const { state, logEvent, markDirty, saveStateNow, flushStateIfDirty, paperDataActive, dataGatherActive, mrFadeActive, recordStandDown , markFresh, auditFreshness } = require('./state');
 const STRADDLESTRAT = require('./straddleStrategy');
@@ -126,9 +135,10 @@ const {
   GEX_FETCH_ENABLED = true, GEX_FETCH_THROTTLE_MS = 120000,
   TREND_ENABLED = true, TREND_CUTOFF_ET = 15.0, TREND_MA_FAST = 50, TREND_MA_SLOW = 100,   // 9/20: TREND_ENABLED aligned to constants. 9/21 FIX: comment had eaten TREND_MA_FAST + TREND_MA_SLOW
   TREND_RSI_MIN = 50, TREND_RSI_MAX = 72, TREND_OVEREXT_ATR = 4.0, TREND_BREADTH_MIN = 52,
-  TREND_COOLDOWN_DAYS = 5, TREND_TICKERS = ["QQQ"], TREND_MODE = "shadow",   // 10/14: shadow = no trend-swing orders
+  TREND_COOLDOWN_DAYS = 5, TREND_TICKERS = ["QQQ"], TREND_MODE = "shadow",
+  AGENT_ENABLED = false,   // 10/15: silence the disabled news agent's staleness warnings   // 10/14: shadow = no trend-swing orders
   ITREND_NEG_GAMMA_BLOCK = true,
-  GEX_REGIME_HYST_M = 250,
+  GEX_REGIME_HYST_M = 250, GEX_WALL_HOLD_MIN = 6,   // 10/15: wall hysteresis (minutes a new strike must win before it becomes the wall)
   ITREND_LATE_START_ET = 11.0, ITREND_LATE_ADX_MIN = 40,
   ITREND_ENABLED = true, ITREND_ADX_MIN = 25, ITREND_VWAP_MIN = 0.05, ITREND_BREADTH_STRONG = 55,   // 9/20: ITREND_ENABLED aligned to constants=true (kill via constants, not this default). 9/21 FIX: comment had eaten ITREND_VWAP_MIN + ITREND_BREADTH_STRONG off this line → itrend crashed all 9/21
   ITREND_START_ET = 10.0, ITREND_END_ET = 12.0, ITREND_COOLDOWN_MIN = 30,
@@ -193,7 +203,11 @@ function recordGateShadow(gate, sleeve, ticker, side, px, ctx) {
     if (!Array.isArray(state._gateShadow)) state._gateShadow = [];
     const now = Date.now();
     if (state._gateShadow.some(r => r.gate === gate && r.ticker === ticker && r.side === side && now - r.at < 15 * 60000)) return;   // one per 15 min
-    state._gateShadow.push({ gate, sleeve, ticker, side, at: now, px: +px.toFixed(2), ctx: ctx || null, mfe: 0, mae: 0, f10: null, f20: null, f30: null, done: false });
+    // 10/15: + flow state at the block, and hold-to-close marks (fClose = move to 15:55; vTrail = intraday-trend exit on the first
+    // VWAP cross against it, else 15:55 — the Zarattini & Aziz exit). The negative-gamma rule is judged on the literature's horizon.
+    let _fl = null; try { const f = FLOWS.snapshot(state, ticker); if (f) _fl = { rROD: f.rROD, hedge: f.hedgeFlow, tom: f.tom ? "Y" : "N" }; } catch (_) {}
+    state._gateShadow.push({ gate, sleeve, ticker, side, at: now, px: +px.toFixed(2), ctx: (ctx || _fl) ? { ...(ctx || {}), ...(_fl || {}) } : null,
+      mfe: 0, mae: 0, f10: null, f20: null, f30: null, done: false, fClose: null, vTrail: null, vTrailMin: null, closeDone: false });
     while (state._gateShadow.length > 300) state._gateShadow.shift();
     markDirty();
   } catch (_) { /* measurement only */ }
@@ -681,7 +695,7 @@ async function runScan() {
         agentLastUpdated: agentMacroForAuth.timestamp,
         triggers:      agentMacroForAuth.catalysts || [],
       };
-      if (agentAuthAge > 30 && !dryRunMode) {
+      if (agentAuthAge > 30 && !dryRunMode && AGENT_ENABLED) {   // 10/15: silent while the agent is switched off
         if (!state._macroStaleLoggedAt || Date.now() - state._macroStaleLoggedAt > 30*60*1000) {
           state._macroStaleLoggedAt = Date.now();
           logEvent("warn", `[MACRO] Agent signal is ${agentAuthAge.toFixed(0)}min old (news agent not running — external; throttled to 30min)`);
@@ -1547,10 +1561,16 @@ async function runScan() {
     // use the bar close. This corrects BOTH scoring and strike selection deterministically, and unlike a
     // skip it keeps the real price in play. Root cure is keepAlive:false in broker.js (no socket reuse →
     // no stale responses); this is the net that holds even if a desynced response slips through. 0.0075 tunable.
+    // 10/15: the fallback reference must be TODAY's bar. Before today's first intraday bars exist (~9:30-9:35) the
+    // fallback was the last DAILY bar = yesterday's close, so on a gap day the check threw out the correct live quote
+    // and used yesterday's close instead (10/14: QQQ quote $737.75 replaced by $743.57, 16 times). No today bar -> no check.
+    const _todayET = DAYCTX.etDateStr(Date.now());
     for (const _r of results) {
+      const _dLast = _r.bars && _r.bars.length ? _r.bars[_r.bars.length-1] : null;
+      const _dIsToday = !!(_dLast && _dLast.t && DAYCTX.etDateStr(Date.parse(_dLast.t)) === _todayET);
       const _ref = (_r.intradayBars && _r.intradayBars.length && _r.intradayBars[_r.intradayBars.length-1]?.c > 0)
                      ? _r.intradayBars[_r.intradayBars.length-1].c
-                     : (_r.bars && _r.bars.length && _r.bars[_r.bars.length-1]?.c > 0 ? _r.bars[_r.bars.length-1].c : 0);
+                     : (_dIsToday && _dLast.c > 0 ? _dLast.c : 0);
       if (_ref > 0 && _r.price > 0 && Math.abs(_r.price - _ref) / _ref > 0.0075) {
         logEvent("filter", `${_r.stock.ticker} PRICE-SANITY: quote $${_r.price.toFixed(2)} is ${(((_r.price-_ref)/_ref)*100).toFixed(1)}% off own bar $${_ref.toFixed(2)} — distrusting quote, using bar price`);
         _r.price = parseFloat(_ref.toFixed(2));
@@ -1678,7 +1698,9 @@ async function runScan() {
     }
     const signals = await getDynamicSignals(stock.ticker, bars, intradayBars, stock._realIV || null);
 
-    const vwap = signals.intradayVWAP > 0 ? signals.intradayVWAP : calcVWAP(bars.slice(-5));
+    // 10/15: before 5 intraday bars exist, VWAP fell back to calcVWAP(last 5 DAILY bars) — a multi-day number (10/14 QQQ
+    // "VWAP $748.89" at 9:30 with QQQ at $738). No intraday VWAP yet -> treat price as at VWAP (every VWAP rule stays neutral).
+    const vwap = signals.intradayVWAP > 0 ? signals.intradayVWAP : price;
     let _carveGapState = "flat";   // #3: present-tense gap state, set by classifier below if vwap valid
     // 7/31: computed HERE, not inside the gap classifier below. This is a pure price/VWAP
     // ratio that needs no daily bars, but it used to be assigned only inside the bars block —
@@ -1690,7 +1712,7 @@ async function runScan() {
       const vwapBias = price < vwap ? "below_vwap" : "above_vwap";
       const vwapPct  = ((price - vwap) / vwap * 100).toFixed(1);
       if (Math.abs(price - vwap) / vwap > 0.005) {
-        logEvent("scan", `[VWAP] ${stock.ticker} $${price.toFixed(2)} vs VWAP $${vwap.toFixed(2)} (${vwapPct}%) - ${vwapBias}`);
+        logOnChange(`vwap:${stock.ticker}`, `${vwapBias}|${Math.round(parseFloat(vwapPct) * 4)}`, "scan", `[VWAP] ${stock.ticker} $${price.toFixed(2)} vs VWAP $${vwap.toFixed(2)} (${vwapPct}%) - ${vwapBias}`);   // 10/15: on change (0.25% steps) or every 15 min
       }
       // [GAP] classifier (6/26, LOGGED-ONLY — no scoring effect). gapPct off today's regular
       // open vs prior regular close; gapState combines gapType with the live VWAP relationship.
@@ -1753,7 +1775,7 @@ async function runScan() {
           try { DAYCTX.setSessionRef(state, stock.ticker, { open: _gapOpen, prevC: _gapPrevC, gapPct: _gapPct, prevBar: _lastBarIsToday ? bars[bars.length - 2] : bars[bars.length - 1] }); } catch (_dcErr) { /* measurement only */ }
           // _carveVwapRatio is set above, outside this bars-dependent block (7/31) — do not
           // reassign it here; that is what tied the live VWAP read to the daily bar fetch.
-          logEvent("scan",
+          logOnChange(`gap:${stock.ticker}`, _gapState, "scan",   // 10/15: on change of gap state or every 15 min
             `[GAP] ${stock.ticker} gapPct ${(_gapPct*100).toFixed(2)}% (${_gapType}) | ` +
             `open ${_gapOpen.toFixed(2)} prevC ${_gapPrevC.toFixed(2)} | px ${price.toFixed(2)} ` +
             `${_aboveVwap ? "≥" : "<"} vwap ${vwap.toFixed(2)} → ${_gapState}`
@@ -2001,13 +2023,30 @@ async function runScan() {
     if (price > 0 && Array.isArray(state._gateShadow)) {
       try {
         for (const _gs of state._gateShadow) {
-          if (_gs.done || _gs.ticker !== stock.ticker || !(_gs.px > 0)) continue;
+          if (_gs.ticker !== stock.ticker || !(_gs.px > 0)) continue;
+          if (_gs.done && (_gs.closeDone || _gs.closeDone === undefined)) continue;   // undefined = a row from before 10/15
           const _gAge = (Date.now() - _gs.at) / 60000, _gFav = (_gs.side === "put" ? -1 : 1) * (price - _gs.px) / _gs.px * 100;
-          if (_gAge <= 30.5) { if (_gFav > _gs.mfe) _gs.mfe = +_gFav.toFixed(3); if (_gFav < _gs.mae) _gs.mae = +_gFav.toFixed(3); }
-          for (const _k of [10, 20, 30]) if (_gs["f" + _k] == null && _gAge >= _k) _gs["f" + _k] = +_gFav.toFixed(3);
-          if (_gAge >= 30) _gs.done = true;
+          if (!_gs.done) {
+            if (_gAge <= 30.5) { if (_gFav > _gs.mfe) _gs.mfe = +_gFav.toFixed(3); if (_gFav < _gs.mae) _gs.mae = +_gFav.toFixed(3); }
+            for (const _k of [10, 20, 30]) if (_gs["f" + _k] == null && _gAge >= _k) _gs["f" + _k] = +_gFav.toFixed(3);
+            if (_gAge >= 30) _gs.done = true;
+          }
+          if (_gs.closeDone === false) {   // 10/15: hold-to-close marks
+            if (_gs.sleeve === "intraday-trend" && _gs.vTrail == null && vwap > 0 && vwap !== price && _gAge >= 1 &&
+                (_gs.side === "call" ? price < vwap : price > vwap)) { _gs.vTrail = +_gFav.toFixed(3); _gs.vTrailMin = Math.round(_gAge); }
+            if (etHourNow >= 15.917) {
+              _gs.fClose = +_gFav.toFixed(3);
+              if (_gs.sleeve === "intraday-trend" && _gs.vTrail == null) { _gs.vTrail = _gs.fClose; _gs.vTrailMin = Math.round(_gAge); }
+              _gs.closeDone = true;
+            }
+          }
         }
       } catch (_gsErr) { /* observational */ }
+    }
+
+    // 10/15: hold-to-close shadow exits for live intraday-trend entries (quotes only at the exit moments)
+    if (price > 0 && Array.isArray(state._holdShadow) && state._holdShadow.length) {
+      try { await HOLD.step(stock.ticker, price, vwap, etHourNow); } catch (_hsErr) { /* observational */ }
     }
 
     // 8/24: VF-SKIP forward-move stamp — same loop, for signals the vf arm declined (state._vfSkip).
@@ -2842,7 +2881,7 @@ async function runScan() {
         const _gc = state._gexChain && state._gexChain[liveStock.ticker];
         if (GEX && _gc && _gc.call && _gc.put && _gc.call.dte === _gc.put.dte &&
             (Date.now() - Math.min(_gc.call.ts || 0, _gc.put.ts || 0) < 300000)) {
-          const _g = GEX.applyRegimeHysteresis(state, liveStock.ticker, GEX.computeGEX(_gc.call.rows, _gc.put.rows, price), GEX_REGIME_HYST_M);   // 10/6: hysteresis
+          const _g = GEX.applyWallHysteresis(state, liveStock.ticker, GEX.applyRegimeHysteresis(state, liveStock.ticker, GEX.computeGEX(_gc.call.rows, _gc.put.rows, price), GEX_REGIME_HYST_M), price, GEX_WALL_HOLD_MIN);   // 10/6: regime hysteresis; 10/15: wall hysteresis
           if (_g) { if (!state._gexRegime) state._gexRegime = {}; state._gexRegime[liveStock.ticker] = _g.regime; }   // 9/01: expose regime per-ticker for the intraday-trend direction gate
           if (_g) { if (!state._gexFresh) state._gexFresh = {}; state._gexFresh[liveStock.ticker] = _g; }   // 9/14: FRESH full gex obj (this-scan, no lag) for the vol-straddle gate — avoids the stale _gexNow (written 300+ lines later)
           // 8/26: LIVE GEX STAMP (per ticker — SPY and QQQ each). Prints raw netGEX + netGexM + regime
@@ -2851,8 +2890,10 @@ async function runScan() {
           if (_g) {
             try {
               if (!state._gexLogLast) state._gexLogLast = {};
-              if ((Date.now() - (state._gexLogLast[liveStock.ticker] || 0)) >= 60000) {
-                state._gexLogLast[liveStock.ticker] = Date.now();
+              const _gxSig = `${_g.regime}|${_g.regimeNear}|${Math.round((_g.netGexM || 0) / 250)}|${_g.callWall}|${_g.putWall}`;   // 10/15: on change or every 15 min
+              const _gxPrev = state._gexLogLast[liveStock.ticker];
+              if (!_gxPrev || typeof _gxPrev !== "object" || _gxPrev.sig !== _gxSig || (Date.now() - _gxPrev.at) >= 15 * 60000) {
+                state._gexLogLast[liveStock.ticker] = { sig: _gxSig, at: Date.now() };
                 const _coi = _gc.call.rows.reduce((s, r) => s + (r.oi || 0), 0);
                 const _poi = _gc.put.rows.reduce((s, r) => s + (r.oi || 0), 0);
                 logEvent("scan", `[GEX] ${liveStock.ticker} netGEX=${_g.netGEX} (${_g.netGexM}M) regime=${_g.regime} | near=${_g.regimeNear}(${_g.netGexNearM}M) flip=${_g.flipLevel ?? _g.flipNote}${_g.distFlipPct != null ? ` (${_g.distFlipPct}%)` : ""} ${_g.nExpiries}exp | ${_gc.call.rows.length}c/${_gc.put.rows.length}p oi=${_coi}c/${_poi}p ${_gc.call.dte}${_gc.farDte != null ? `-${_gc.farDte}` : ""}DTE`);
@@ -3099,7 +3140,13 @@ async function runScan() {
               state._iTrendLast[_iCoolKey] = Date.now();
               const _iOK = await executeTrade(liveStock, price, 0, [_iReason], state.vix, _iSide, false, 1.0, null, null, `${liveStock.ticker}-${_iSide}-itrend-${Date.now()}`);
               liveStock._iTrend = null; liveStock._iCvdTag = null; liveStock._iOrTag = null; liveStock._iMeta = null;   // 10/6+10/7: don't let tags leak onto a later entry
-              if (_iOK) { recordStandDown("itrend", "FIRED"); logEvent("filter", `[INTRADAY-TREND] ${liveStock.ticker} ${_iSide.toUpperCase()} FIRED — ${_iReason}`); continue; }
+              if (_iOK) {
+                try {   // 10/15: start the hold-to-close shadow on the contract just bought
+                  const _ip = (state.positions || []).filter(p => p.ticker === liveStock.ticker && p._iTrend && !p.closed).sort((a, b) => new Date(b.openDate) - new Date(a.openDate))[0];
+                  HOLD.open(_ip, price);
+                } catch (_hse) {}
+                recordStandDown("itrend", "FIRED"); logEvent("filter", `[INTRADAY-TREND] ${liveStock.ticker} ${_iSide.toUpperCase()} FIRED — ${_iReason}`); continue;
+              }
             } else if (!_iSuppressed) {
               recordStandDown("itrend", !_iSide ? "no aligned intraday trend (need vwap+slope+ORbreak agree)" : _iHave ? "position already open" : "cooldown (recent fire)");
             }
@@ -3371,9 +3418,10 @@ async function runScan() {
         const _gc = state._gexChain && state._gexChain[stock.ticker];
         if (GEX && _gc && _gc.call && _gc.put && _gc.call.dte === _gc.put.dte &&
             (Date.now() - Math.min(_gc.call.ts || 0, _gc.put.ts || 0) < 300000))
-          return GEX.applyRegimeHysteresis(state, stock.ticker, GEX.computeGEX(_gc.call.rows, _gc.put.rows, price), GEX_REGIME_HYST_M);   // 9/30 v2 full book; 10/6 hysteresis
+          return GEX.applyWallHysteresis(state, stock.ticker, GEX.applyRegimeHysteresis(state, stock.ticker, GEX.computeGEX(_gc.call.rows, _gc.put.rows, price), GEX_REGIME_HYST_M), price, GEX_WALL_HOLD_MIN);   // 9/30 v2 full book; 10/6 regime + 10/15 wall hysteresis
       } catch (_gxe) {} return null; })();
       if (_gexRec) { if (!state._gexNow) state._gexNow = {}; state._gexNow[stock.ticker] = _gexRec; }   // 8/24: expose regime to the MR fade
+      let _flow = null; try { _flow = FLOWS.compute(state, stock.ticker, price, Date.now(), _gexRec); } catch (_fe) {}   // 10/15: flow state, measurement only
       recordTelemetry(state, {
           tkr: stock.ticker, px: price, adx: signals.adx,
           iRSI: signals.rsi, dRSI: signals.dailyRsi,
@@ -3396,6 +3444,11 @@ async function runScan() {
           orHi: (state._openRange && state._openRange[stock.ticker] && state._openRange[stock.ticker].locked) ? state._openRange[stock.ticker].high : null,   // 10/6: APEX range
           orLo: (state._openRange && state._openRange[stock.ticker] && state._openRange[stock.ticker].locked) ? state._openRange[stock.ticker].low : null,   // 9/30: GEX v2 comparison fields
           flipLvl: _gexRec ? _gexRec.flipLevel : null, distFlip: _gexRec ? _gexRec.distFlipPct : null,
+          // 10/15: flow state + the raw (pre-hysteresis) walls
+          rROD: _flow ? _flow.rROD : null, hedgeFlow: _flow ? _flow.hedgeFlow : null, rebalDir: _flow ? _flow.rebalDir : null,
+          pinStrike: _flow ? _flow.pinStrike : null, distPin: _flow ? _flow.distPinPct : null,
+          toME: _flow ? _flow.toME : null, fromMS: _flow ? _flow.fromMS : null, tom: _flow ? (_flow.tom ? "Y" : "N") : null,
+          cwRaw: _gexRec ? (_gexRec.callWallRaw ?? null) : null, pwRaw: _gexRec ? (_gexRec.putWallRaw ?? null) : null,
           ...(() => { try { return DAYCTX.telemetryFields(state, stock.ticker, price); } catch (_) { return {}; } })(),   // 10/6: day context
           ...(() => { try { return { ...require('./market').getVixFields(), ...INTERNALS.fields(state) }; } catch (_) { return {}; } })(),   // 10/6: VIX anchor/term + internals
         });
@@ -3431,7 +3484,7 @@ async function runScan() {
 
     const effectiveMinScore = MIN_SCORE;
 
-    if (agentStale && !dryRunMode) {
+    if (agentStale && !dryRunMode && AGENT_ENABLED) {   // 10/15: silent while the agent is switched off
       const agentStaleMins = agentLastRun ? ((Date.now() - new Date(agentLastRun).getTime()) / 60000) : 999;
       if (agentStaleMins > 90 && isMarketHours()) {
         if (!state._lastAgentStaleWarn || Date.now() - state._lastAgentStaleWarn > 15 * 60 * 1000) {
