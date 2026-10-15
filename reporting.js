@@ -160,6 +160,7 @@ async function sendEmail(type) {
       entryFwd:      (state._entryFwd      || []).slice(),
       vfSkip:        (state._vfSkip        || []).slice(),
       gateShadow:    JSON.parse(JSON.stringify(state._gateShadow || [])),   // 10/14
+      trendShadow:   (() => { try { return require('./trendShadow').summary(); } catch (_) { return null; } })(),   // 10/14: trend-swing shadow book
       vetoBlocks:    (state._vetoBlocks    || []).slice(),
       dailyLog:      (state._dailyLogBuffer || []).slice(),
       standDownTally: JSON.parse(JSON.stringify(state._standDownTally || { brk:{}, mrf:{}, trend:{}, itrend:{} })),  // 9/09: snapshot before EOD reset wipes it
@@ -427,6 +428,7 @@ async function sendEmail(type) {
       try { bodyHtml += buildMomoSection(_eodSnap); }
       catch (_mbErr2) { logEvent("warn", `[CALL-MOMO] EOD section skipped: ${_mbErr2.message}`); }
       try { bodyHtml += buildGateShadowSection(_eodSnap); } catch (_gsErr) { logEvent("warn", `[GATE-SHADOW] EOD section skipped: ${_gsErr.message}`); }   // 10/14
+      try { bodyHtml += buildTrendShadowSection(_eodSnap); } catch (_tsErr) { logEvent("warn", `[TREND-SHADOW] EOD section skipped: ${_tsErr.message}`); }   // 10/14
       try { bodyHtml += buildStandDownSection(_eodSnap); }
       catch (_sdErr) { logEvent("warn", `[STAND-DOWN] EOD section skipped: ${_sdErr.message}`); }
     }
@@ -499,6 +501,21 @@ function buildGateShadowSection(snap) {
   return `<h3 style="font-family:system-ui,sans-serif;margin:18px 0 6px">Blocked signals — what the rules kept APEX out of</h3>` +
     `<table style="font-family:system-ui,sans-serif;font-size:12px;border-collapse:collapse"><tr style="color:#888"><td>rule</td><td style="text-align:right;padding:2px 10px">blocked</td><td style="text-align:right;padding:2px 10px">avg 30-min move (trade's way)</td><td style="text-align:right;padding:2px 10px">reached +0.10%</td></tr>${rowsH}</table>` +
     `<div style="font-family:system-ui,sans-serif;font-size:11px;color:#888;margin-top:4px">Positive = the blocked trade would have moved the right way. ~+0.10% is roughly what an option needs to reach its first profit lock. Measurement only.</div>`;
+}
+
+// 10/14 (Harrison): trend-swing is shadow-only. Open shadow trades (marked at the 15:50 check) and every closed one.
+function buildTrendShadowSection(snap) {
+  const ts = snap && snap.trendShadow;
+  if (!ts || (!ts.open.length && !ts.closed.length)) return "";
+  const f = (x) => x == null ? "—" : `${x < 0 ? "-" : x > 0 ? "+" : ""}$${Math.abs(x).toFixed(0)}`;
+  const td = (x, r) => `<td style="padding:2px 10px 2px 0;${r ? "text-align:right" : ""}">${x}</td>`;
+  const openH = ts.open.map(t => `<tr>${td(`${t.ticker} ${t.side}`)}${td(t.openDay)}${td(t.symbol)}${td(`$${t.entryMid} → ${t.markMid != null ? "$" + t.markMid : "—"}`, 1)}${td(`stop $${t.stopPx}`, 1)}${td(f(t.openPnl), 1)}</tr>`).join("");
+  const closedH = ts.closed.slice(-10).reverse().map(t => `<tr>${td(`${t.ticker} ${t.side}`)}${td(`${t.openDay} → ${t.exitDay}`)}${td(t.exitReason)}${td(`$${t.uEntry} → $${t.uExit}`, 1)}${td(t.legs > 1 ? `${t.legs} legs` : "", 1)}${td(f(t.pnl), 1)}</tr>`).join("");
+  return `<h3 style="font-family:system-ui,sans-serif;margin:18px 0 6px">Trend-swing shadow (no orders)</h3>` +
+    `<div style="font-family:system-ui,sans-serif;font-size:12px">${ts.totals.n} closed · ${ts.totals.wins} won · ${f(ts.totals.pnl)} per contract at the mid</div>` +
+    (openH ? `<table style="font-family:system-ui,sans-serif;font-size:12px;border-collapse:collapse;margin-top:6px"><tr style="color:#888">${td("open")}${td("since")}${td("contract")}${td("entry → mark", 1)}${td("", 1)}${td("P&L / ct", 1)}</tr>${openH}</table>` : "") +
+    (closedH ? `<table style="font-family:system-ui,sans-serif;font-size:12px;border-collapse:collapse;margin-top:6px"><tr style="color:#888">${td("closed")}${td("dates")}${td("exit")}${td("underlying", 1)}${td("", 1)}${td("P&L / ct", 1)}</tr>${closedH}</table>` : "") +
+    `<div style="font-family:system-ui,sans-serif;font-size:11px;color:#888;margin-top:4px">Same signal and exits as the live sleeve had (QQQ, 3-ATR chandelier, 21-DTE roll), priced from real Alpaca quotes. Per 1 contract.</div>`;
 }
 
 // 10/12: one line on Upstash bandwidth — today by data type, month-to-date against the free plan's 10 GB.
@@ -1486,5 +1503,5 @@ module.exports = {
   sendEmail, sendResendEmail, buildEmailHTML, getBenchmarkComparison,
   buildMonthlyReport, sendMorningBriefing, premarketAssessment,
   updateAfterHoursContext, initReporting, setReportingContext,
-  buildJournalBreakdown, checkFillsAgainstOutcomes, buildRecordCheckSection, buildRedisUsageLine, gateShadowCSV, buildGateShadowSection,
+  buildJournalBreakdown, checkFillsAgainstOutcomes, buildRecordCheckSection, buildRedisUsageLine, gateShadowCSV, buildGateShadowSection, buildTrendShadowSection,
 };
