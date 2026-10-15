@@ -107,6 +107,14 @@ function _acceptDeltaRange(stock) {
   return [min, max];
 }
 
+// 10/15: a successful GEX fetch (every ~2 min per ticker) is logged only when its shape changes, or every 15 min.
+// Failures still log every time.
+const _gexFetchSig = new Map();
+function _gexFetchLog(ticker, sig, msg) {
+  const p = _gexFetchSig.get(ticker), now = Date.now();
+  if (!p || p.sig !== sig || now - p.at >= 15 * 60000) { _gexFetchSig.set(ticker, { sig, at: now }); logEvent("scan", msg); }
+}
+
 async function findContract(ticker, optionType, targetDelta, targetDTE, vix, stock, fixedExpiry = null) {
   try {
     const today = getETTime();
@@ -790,6 +798,7 @@ async function executeTrade(stock, price, score, scoreReasons, vix, optionType =
     _driftFlow:     (stock._driftFlow != null) ? stock._driftFlow : null,   // 10/5: mr-fade drift-day tag (measure-only)
     _driftVwap:     (stock._driftVwap != null) ? stock._driftVwap : null,
     _ctx:           (() => { try { return require('./dayContext').entryContext(state, stock.ticker, price); } catch (_) { return null; } })(),   // 10/6: day context at entry (measure-only)
+    _flow:          (() => { try { return require('./flows').snapshot(state, stock.ticker); } catch (_) { return null; } })(),   // 10/15: flow state at entry (measurement)
     _mkt:           (() => { try { const v = require('./market').getVixFields(), i = require('./marketInternals').fields(state); return { vixSrc: v.vixSrc, term9d: v.term9d, term3m: v.term3m, intAdvPct: i.intAdvPct, intVwapPct: i.intVwapPct, intCumTick: i.intCumTick }; } catch (_) { return null; } })(),   // 10/6: VIX source/term + internals at entry
     ticker:         stock.ticker,
     sector:         stock.sector,
@@ -1322,7 +1331,7 @@ async function _fetchGexChainV2(ticker, spot) {
       put:  { rows: putRows,  dte, spot, ts },
       v2: true, exps, farDte,
     };
-    logEvent("scan", `[GEX-FETCH] ${ticker} v2 ${exps.length} exp (${dte}-${farDte}DTE) strikes ±${(GEX_V2_STRIKE_BAND*100).toFixed(0)}%: ${callRows.length}c/${putRows.length}p rows in ${Date.now() - _t0}ms`);
+    _gexFetchLog(ticker, `v2|${exps.length}|${dte}-${farDte}`, `[GEX-FETCH] ${ticker} v2 ${exps.length} exp (${dte}-${farDte}DTE) strikes ±${(GEX_V2_STRIKE_BAND*100).toFixed(0)}%: ${callRows.length}c/${putRows.length}p rows in ${Date.now() - _t0}ms`);
     return true;
   } catch (e) {
     logEvent("scan", `[GEX-FETCH] ${ticker} v2 failed — ${e && e.message}`);
@@ -1383,7 +1392,7 @@ async function _fetchGexChainV1(ticker, spot) {
       call: { rows: callRows, dte: _dte, spot: spot || 0, ts: _ts },
       put:  { rows: putRows,  dte: _dte, spot: spot || 0, ts: _ts },
     };
-    logEvent("scan", `[GEX-FETCH] ${ticker} ${_nearExp} (${_dte}DTE): ${callRows.length}c/${putRows.length}p`);
+    _gexFetchLog(ticker, `v1|${_nearExp}`, `[GEX-FETCH] ${ticker} ${_nearExp} (${_dte}DTE): ${callRows.length}c/${putRows.length}p`);
     return true;
   } catch (e) { logEvent("scan", `[GEX-FETCH] ${ticker} failed — ${e && e.message}`); return false; }
 }
