@@ -804,6 +804,7 @@ const GEX_V2_INCLUDE_MONTHLY      = true;
 // weaker opposite readings keep the previous label. 10/1 QQQ flipped 6x on readings between -149M and +240M;
 // typical |net GEX| is 900M-4,000M (10th-90th pct of v2 readings). 0 = no hysteresis.
 const GEX_REGIME_HYST_M           = 250;  // per-ticker: refetch the gamma chain at most every 2 min
+const GEX_WALL_HOLD_MIN       = 6;      // 10/15 (Harrison): a new strike becomes the call/put wall only after winning for 6 min straight (10/14: SPY call wall flipped 12x)
 const BREAK_ENTRY_SCORE           = 80;      // fixed stamp a break entry carries; clears MIN_SCORE(70)+slot2(75), NOT slot3(85). NOT a quality measure.
 const BREAK_CONFIRM_BARS          = 1;       // bars after the break bar that must not reclaim the level
 const BREAK_MAX_AGE_MIN           = 10;      // signal is stale after this many minutes
@@ -993,7 +994,7 @@ module.exports = {
   BREAK_DELTA, BREAK_DELTA_MIN, BREAK_DELTA_MAX, BREAK_TARGET_DTE, BREAK_MAX_HOLD_MIN, BREAK_TRAIL_ARM_PCT, BREAK_TRAIL_GIVEBACK_PCT,
   GEX_FETCH_ENABLED, GEX_FETCH_THROTTLE_MS,
   GEX_V2_ENABLED, GEX_V2_MAX_EXPIRIES, GEX_V2_MAX_DAYS, GEX_V2_STRIKE_BAND, GEX_V2_SNAP_CONCURRENCY,
-  GEX_V2_INCLUDE_MONTHLY, GEX_REGIME_HYST_M,
+  GEX_V2_INCLUDE_MONTHLY, GEX_REGIME_HYST_M, GEX_WALL_HOLD_MIN,
   STRATEGY_CLASS, strategyClass, isFlattenExempt, LOCK_LADDER, LOCK_LADDER_TRAIL, ladderFloor,
   TREND_ENABLED, TREND_DELTA, TREND_DELTA_MIN, TREND_DELTA_MAX, TREND_TARGET_DTE, TREND_DTE_MIN, TREND_DTE_MAX,
   TREND_ROLL_DTE, TREND_COOLDOWN_DAYS, TREND_MODE, TREND_RETIRE_LIVE, TREND_RETIRE_AFTER_ET, TREND_TICKERS, TREND_EXIT_MODE, TREND_CHANDELIER_ATR, TREND_CHANDELIER_CHECK_ET, TREND_MA_FAST, TREND_MA_SLOW, TREND_RSI_MIN, TREND_RSI_MAX, TREND_OVEREXT_ATR, TREND_BREADTH_MIN,
