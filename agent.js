@@ -793,6 +793,7 @@ Respond with ONLY the JSON object. No words before or after.`;
   _log("scan", `[AGENT] Macro call - useTools:false (pre-injected data sufficient)`);
   const raw = await callClaudeAgent(systemPrompt, userPrompt, 1200, false, 30000); // useTools=false - single round-trip
   if (!raw) {
+    if (!AGENT_ENABLED) return null;   // 10/15: switched off by design — not a timeout; don't count it or warn
     state._agentHealth.timeouts++;
     _log("warn", `[AGENT HEALTH] Timeout/null - ${state._agentHealth.timeouts} timeouts of ${state._agentHealth.calls} calls`);
     return null;
