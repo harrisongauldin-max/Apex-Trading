@@ -41,7 +41,9 @@ const MR = {
   // (SpotGamma: fade the overshoot AT the wall; Sinclair: only after flow EXHAUSTS) + expert panel + data
   // all converge. So: ALSO fade in neg gamma, but ONLY when at-wall AND CVD shows exhaustion (flow stalling/
   // turning against the push). Pos-gamma path unchanged. Measure-first via a flag, then confirm live.
-  NEG_GAMMA_FADE:         true,   // allow neg-gamma fades (under the strict conditions below)
+  NEG_GAMMA_FADE:         false,  // 10/15 (Harrison): OFF. Contradicts the literature this module is built on (gate 1 above; Baltussen,
+                                  // Da, Lammers & Martens 2021: intraday momentum is concentrated on negative-gamma days). Backed only by
+                                  // APEX data (n=56, 9/29); live it went 0/2 on 10/14. Set true only with new evidence.
   NEG_REQUIRE_WALL:       true,   // neg-gamma fade REQUIRES at-wall (the 47% vs 35% split); no vwap-band fallback in neg
   NEG_REQUIRE_CVD_EXHAUST:true,   // neg-gamma fade REQUIRES CVD exhaustion at the level (the 51% vs 36% split; stacked = 64%)
 };
