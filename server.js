@@ -376,6 +376,11 @@ async function gracefulShutdown(signal) {
   if (isShuttingDown) return;
   isShuttingDown = true;
   console.log(`[SHUTDOWN] ${signal} received - saving state before exit`);
+  // 10/15: also into the SESSION log (console lines never reach it), so a restart reads as a deploy, not a crash.
+  try {
+    state._lastShutdown = { signal, at: Date.now(), deploy: process.env.RAILWAY_DEPLOYMENT_ID || null };
+    logEvent("scan", `[SHUTDOWN] ${signal} — clean shutdown (deploy ${(process.env.RAILWAY_DEPLOYMENT_ID || "local").slice(0, 8)}, up ${(process.uptime() / 60).toFixed(0)} min) — saving state, log and telemetry`);
+  } catch (_) {}
   let saved = false;
   for (let i = 1; i <= 3; i++) {
     try {
@@ -2244,12 +2249,42 @@ function calcAutocorrelation() {
 process.on("SIGTERM", () => gracefulShutdown("SIGTERM"));
 process.on("SIGINT",  () => gracefulShutdown("SIGINT"));
 process.on("SIGHUP",  () => gracefulShutdown("SIGHUP"));
+let _lastRejLogAt = 0;
 process.on("unhandledRejection", (reason, promise) => {
   console.error("[ERROR] Unhandled rejection:", reason?.message || reason);
+  // 10/15: also into the session log, at most once a minute
+  if (Date.now() - _lastRejLogAt > 60000) { _lastRejLogAt = Date.now(); try { logEvent("warn", `[ERROR] Unhandled promise rejection: ${String(reason && reason.message || reason).slice(0, 200)}`); } catch (_) {} }
+});
+// 10/15: an uncaught exception used to kill the process with nothing in the session log. Record it, try to save
+// (capped at 6 s), then exit non-zero so Railway restarts it — the same outcome as before, but now visible.
+let _crashing = false;
+process.on("uncaughtException", async (err) => {
+  console.error("[CRASH] Uncaught exception:", err && err.stack || err);
+  if (_crashing) return; _crashing = true;
+  try {
+    state._lastCrash = { at: Date.now(), msg: String(err && err.message || err).slice(0, 300) };
+    logEvent("error", `[CRASH] Uncaught exception — ${String(err && err.stack || err).split("\n").slice(0, 3).join(" | ").slice(0, 400)} — saving and exiting`);
+    await Promise.race([Promise.all([redisSave(state).catch(() => {}), saveDailyLogToRedis(false).catch(() => {})]), new Promise(r => setTimeout(r, 6000))]);
+  } catch (_) {}
+  process.exit(1);
 });
 
 initState().then(async () => {
   await restoreBuffersFromRedis();   // repopulate today's log + telemetry buffers after a restart
+  // 10/15: BOOT line in the session log. The deploy id tells a deploy (new id) from a restart of the same build (same id).
+  // The previous process's own [SHUTDOWN] / [CRASH] line (if it got one) sits just before this in the time-sorted log;
+  // neither one there means it was killed without warning (out of memory, or a platform restart).
+  try {
+    const _dep = (process.env.RAILWAY_DEPLOYMENT_ID || "local").slice(0, 8), _sha = (process.env.RAILWAY_GIT_COMMIT_SHA || "").slice(0, 7);
+    const _prevDep = state._bootInfo && state._bootInfo.deploy;
+    const _fmt = (ms) => ms ? new Date(ms).toLocaleTimeString("en-US", { timeZone: "America/New_York", hour12: false }) + " ET" : "never";
+    const _ls = state._lastShutdown, _lc = state._lastCrash, _alive = state.lastScan ? Date.parse(state.lastScan) : 0;
+    const _prev = (_lc && _lc.at >= (_alive || 0) - 5000) ? `previous process CRASHED at ${_fmt(_lc.at)} (${_lc.msg})`
+                : (_ls && _ls.at >= (_alive || 0) - 5000) ? `previous process shut down cleanly (${_ls.signal} at ${_fmt(_ls.at)})`
+                : `previous process last scanned at ${_fmt(_alive)}; its shutdown may still be in progress (deploy overlap) — look for its [SHUTDOWN] line`;
+    logEvent("scan", `[BOOT] APEX started — deploy ${_dep}${_sha ? " commit " + _sha : ""}${_prevDep ? (_prevDep === _dep ? " (SAME deploy as before: a restart, not a deploy)" : " (NEW deploy)") : ""} | pid ${process.pid} | ${_prev}`);
+    state._bootInfo = { deploy: _dep, sha: _sha, at: Date.now(), pid: process.pid };
+  } catch (_be) { console.error("[BOOT] line failed:", _be && _be.message); }
   initAgent({
     logFn:               logEvent,
     markDirty:           markDirty,
