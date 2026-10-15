@@ -50,6 +50,7 @@ const {
   CP1_CRASH_ENABLED = true, CP1_CRASH_PCT = -5,   // 9/20: aligned to constants (was false — silent-OFF would disable the crash rail)
   TREND_STOP_PCT = 0.125, TREND_ATR_STOP_MULT = 3.5, TREND_USTOP_FLOOR = 0.20, TREND_USTOP_CEIL = 0.55, TREND_STALE_DAYS = 14, TREND_STALE_PEAK = 0.05, TREND_TRAIL_ARM_PCT = 0.10, TREND_TRAIL_GIVEBACK_PCT = 0.05, TREND_ROLL_DTE = 21,
   TREND_TICKERS = ["QQQ"], TREND_EXIT_MODE = "chandelier", TREND_CHANDELIER_ATR = 3.0, TREND_CHANDELIER_CHECK_ET = 15.83,
+  TREND_MODE = "shadow", TREND_RETIRE_LIVE = true, TREND_RETIRE_AFTER_ET = 9.583,   // 10/14: retire live trend-swing positions
   ITREND_STOP_PCT = 0.30, ITREND_MAX_HOLD_MIN = 60, ITREND_NOARM_MIN = 20, ladderFloor,
   UNIVERSAL_NOARM_ENABLED = true, UNIVERSAL_NOARM_MIN = 25,   // 9/20: aligned to constants (was false — silent-OFF would disable the no-arm cut)
   STRADDLE_TP_PCT = 0.35, STRADDLE_MAX_HOLD_MIN = 75,
@@ -537,6 +538,19 @@ async function checkExits(positions, posSnapshots, posQuotes, posNewsCache, ctx)
     // time-cut/max-hold — this holds overnight (exempt from the 3:15 flatten in server.js; the exit
     // engine resumes managing it at next open). Unconditional continue, like the other sleeve blocks.
     if (pos._isTrend) {
+      // 10/14 (Harrison): TREND-SWING RETIRED TO SHADOW. Any live trend-swing position still open is closed at the
+      // first exit check from 9:35 ET (market hours only). No roll carry is written, so nothing is re-bought.
+      if (TREND_MODE === "shadow" && TREND_RETIRE_LIVE) {
+        const _rEt = getETTime(), _rH = _rEt.getHours() + _rEt.getMinutes() / 60;
+        if (_rH >= TREND_RETIRE_AFTER_ET && isMarketHours()) {
+          if (!_closedThisCycle.has(pi)) {
+            _closedThisCycle.add(pi);
+            logEvent("scan", `[TREND] ${pos.ticker} exit — trend-retired (trend-swing is shadow-only from 10/14; chg ${(chg*100).toFixed(1)}%, ${dte}DTE)`);
+            decisions.push({ pi, ticker: pos.ticker, action: 'close', reason: 'trend-retired', exitPremium: null, contractSym: pos.contractSymbol || null });
+          }
+          continue;
+        }
+      }
       pos._trendPeakChg = Math.max(typeof pos._trendPeakChg === "number" ? pos._trendPeakChg : -Infinity, chg);
       const _tDTE = dte;   // 8/27: LIVE dte (line ~198, from expDate) — decrements daily so trend-roll actually fires
       // 9/09 (Harrison): ATR-BASED UNDERLYING STOP. Flat -12.5% premium = ~0.85% underlying on a 0.65-delta call —
