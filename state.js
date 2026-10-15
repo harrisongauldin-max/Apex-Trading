@@ -551,6 +551,7 @@ async function saveDailyLogToRedis(isEOD = false) {
     state._standDownTally = { brk: {}, mrf: {}, trend: {}, itrend: {} };   // 8/25 reset daily; 8/27 +trend; 8/28 +itrend
     state._vfSkip = [];
     state._gateShadow = [];   // 10/14
+    state._holdShadow = [];   // 10/15
     state._vetoBlocks = [];
     markDirty();
   }
@@ -1001,7 +1002,9 @@ function auditFreshness() {
     const now = Date.now();
     if (now - _lastFreshnessWarnAt < 5 * 60 * 1000) return;   // at most one report per 5 min
     const bad = [];
+    let _agentOn = true; try { _agentOn = require('./constants').AGENT_ENABLED !== false; } catch (_) {}
     for (const [k, cfg] of Object.entries(FRESHNESS_EXPECT)) {
+      if (k === "_agentMacro" && !_agentOn) continue;   // 10/15: the agent is switched off — its output is expected to be old
       if (state[k] === undefined || state[k] === null) continue;   // never set — not stale
       const ts = (state._freshness || {})[k];
       if (!ts) { bad.push(`${k}=UNSTAMPED`); continue; }
