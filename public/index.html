@@ -176,6 +176,7 @@ input[type=text]:focus{border-color:var(--blue)}
   <div class="tab" onclick="switchTab('theta')">RISK &amp; HEALTH</div>
   <div class="tab" onclick="switchTab('attribution')">ATTRIBUTION</div>
   <div class="tab" onclick="switchTab('trendbt')">TREND BACKTEST</div>
+  <div class="tab" onclick="switchTab('flowbt')">FLOW HARNESS</div>
   <div class="tab" onclick="switchTab('journal')">JOURNAL</div>
   <div class="tab" onclick="switchTab('report')">REPORT</div>
   <div class="tab" onclick="switchTab('log')">SERVER LOG</div>
@@ -714,6 +715,31 @@ input[type=text]:focus{border-color:var(--blue)}
     Option figures are % of the premium paid per trade. The validation card says how far the option model was from real prices.
     <b style="color:var(--text)">Limits:</b> exits are decided on the underlying; breadth not modeled; SPY and QQQ run independently
     (the live correlation rule isn't modeled). Read-only — running it never places a trade.
+  </div>
+</div>
+
+<!-- ═══════════════ FLOW HARNESS TAB (10/15) ═══════════════ -->
+<div id="tab-flowbt" class="content">
+  <div class="card" style="margin-bottom:12px;padding:12px 16px">
+    <div style="font-size:11px;font-weight:700;letter-spacing:1px;color:var(--blue);margin-bottom:6px">FLOW HARNESS — PUBLISHED INTRADAY EDGES, TESTED BEFORE THEY TRADE</div>
+    <div style="font-size:12px;color:var(--text);line-height:1.6">
+      Runs the pre-registered tests on SPY and QQQ 5-minute bars from 2016: end-of-day momentum (Baltussen et al. 2021; Gao et al. 2018),
+      noise-area momentum held to a trailing stop or the close vs. a 60-minute cap (Zarattini &amp; Aziz 2024), turn of the month
+      (McConnell &amp; Xu 2008), volatility picking trend vs. fade, and continuation after a level breaks (Osler). The pass lines were
+      written before the first run and are printed with the results. Every trial is shown, pass or fail.
+    </div>
+    <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:10px">
+      <span style="font-size:11px;color:var(--muted)">START</span>
+      <input type="date" id="fbt-start" value="2016-01-01" style="background:var(--panel);border:1px solid var(--border);color:var(--text);padding:4px 6px;border-radius:4px;font-family:inherit">
+      <button class="btn btn-green" id="fbt-run" onclick="runFlowHarnessTab()">▶ RUN HARNESS</button>
+      <button class="btn" id="fbt-dl" onclick="downloadFlowHarnessReport()" disabled style="opacity:.5">⬇ DOWNLOAD REPORT</button>
+      <span id="fbt-status" style="font-size:11px;color:var(--muted)">Not run yet — runs after 4:15 PM ET only (it pulls ~10 years of 5-minute bars, about 1-4 minutes).</span>
+    </div>
+  </div>
+  <div id="fbt-results"></div>
+  <div class="card" style="padding:10px 16px;font-size:11px;color:var(--muted);line-height:1.6">
+    <b style="color:var(--text)">Limits.</b> The noise-area test approximates the published rules; options are Black-Scholes on the daily VIX/VXN;
+    dealer gamma, expiration pinning and macro days can't be tested here (no history) — gamma is being collected live. Read-only — running it never places a trade.
   </div>
 </div>
 
@@ -2797,6 +2823,43 @@ function downloadTrendBacktestReport() {
   if (!_tbtLast || !_tbtLast.report) return;
   const url = URL.createObjectURL(new Blob([_tbtLast.report], { type: 'text/plain' }));
   const a = document.createElement('a'); a.href = url; a.download = 'apex-trend-backtest-' + new Date().toISOString().slice(0, 10) + '.txt';
+  document.body.appendChild(a); a.click(); a.remove(); URL.revokeObjectURL(url);
+}
+
+// 10/15: FLOW HARNESS tab — /api/flow-backtest?format=json; verdict grid + the full text report
+let _fbtLast = null;
+function _fbtVerdicts(res) {
+  const rows = [['T1 End-of-day momentum (shares)', r => r.T1.pass], ['T1 as 0DTE options', r => r.T1.optPass.dte0], ['T1 as 2DTE options', r => r.T1.optPass.dte2],
+    ['T2 Noise-area momentum, hold to trail/close', r => r.T2.pass], ['T2 holding beats a 60-min cap', r => r.T2.holdBeatsCap], ['T3 Turn of the month', r => r.T3.pass],
+    ['T5 Volatility picks the sleeve', r => r.T5.pass], ['T6 Break continuation: prior-day high/low', r => r.T6.pd.pass], ['T6 Break continuation: $5 round numbers', r => r.T6.round.pass]];
+  const tks = Object.keys(res.tickers || {});
+  let h = '<div class="card" style="padding:10px 16px;margin-bottom:12px"><table style="width:100%;font-size:12px;border-collapse:collapse"><thead><tr style="color:var(--muted)"><th style="text-align:left;padding:4px 8px">Test</th>' +
+    tks.map(t => `<th style="padding:4px 8px">${t}</th>`).join('') + '</tr></thead><tbody>';
+  for (const [name, f] of rows) h += `<tr style="border-top:1px solid var(--border)"><td style="padding:4px 8px">${name}</td>` +
+    tks.map(t => { let ok = false; try { ok = !!f(res.tickers[t]); } catch (_) {} return `<td style="padding:4px 8px;text-align:center;font-weight:700;color:${ok ? 'var(--green)' : 'var(--red)'}">${ok ? 'PASS' : 'fail'}</td>`; }).join('') + '</tr>';
+  return h + '</tbody></table></div>';
+}
+async function runFlowHarnessTab() {
+  const btn = document.getElementById('fbt-run'), st = document.getElementById('fbt-status'), dl = document.getElementById('fbt-dl'), out = document.getElementById('fbt-results');
+  const start = (document.getElementById('fbt-start') || {}).value || '2016-01-01';
+  const s = sessionStorage.getItem('apexSecret') || prompt('Enter APEX secret:') || '';
+  btn.disabled = true; btn.textContent = '⏳ RUNNING…'; st.textContent = 'Fetching 5-minute history and running the tests… (1-4 min)'; st.style.color = 'var(--muted)';
+  try {
+    const r = await fetch('/api/flow-backtest?format=json&start=' + encodeURIComponent(start), { headers: { 'x-argo-secret': s } });
+    if (!r.ok) { const t = await r.text(); st.textContent = 'Failed: HTTP ' + r.status + (r.status === 401 ? ' (bad/missing secret)' : r.status === 404 ? ' (server.js / flowBacktest.js not deployed?)' : '') + ' ' + t.slice(0, 200); st.style.color = 'var(--red)'; return; }
+    if (s) sessionStorage.setItem('apexSecret', s);
+    _fbtLast = await r.json();
+    const esc = (x) => String(x).replace(/[&<>]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]));
+    out.innerHTML = _fbtVerdicts(_fbtLast.result) + `<div class="card" style="padding:10px 16px"><pre style="white-space:pre-wrap;font-size:11px;line-height:1.5;margin:0">${esc(_fbtLast.report)}</pre></div>`;
+    st.textContent = `Done — ${new Date().toLocaleTimeString()}`; st.style.color = 'var(--green)';
+    dl.disabled = false; dl.style.opacity = '1';
+  } catch (e) { st.textContent = 'Error: ' + e.message; st.style.color = 'var(--red)'; }
+  finally { btn.disabled = false; btn.textContent = '▶ RUN HARNESS'; }
+}
+function downloadFlowHarnessReport() {
+  if (!_fbtLast || !_fbtLast.report) return;
+  const url = URL.createObjectURL(new Blob([_fbtLast.report], { type: 'text/plain' }));
+  const a = document.createElement('a'); a.href = url; a.download = 'apex-flow-harness-' + new Date().toISOString().slice(0, 10) + '.txt';
   document.body.appendChild(a); a.click(); a.remove(); URL.revokeObjectURL(url);
 }
 
