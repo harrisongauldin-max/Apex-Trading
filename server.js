@@ -929,6 +929,8 @@ app.get("/api/market-state", (req, res) => {
         mrFade:     { cutoff: `${hhmm(C.MR_FADE_CUTOFF_ET)} ET`, open: open && h < C.MR_FADE_CUTOFF_ET },
         trendSwing: { cutoff: `${hhmm(C.TREND_CUTOFF_ET)} ET`, open: open && h < C.TREND_CUTOFF_ET,
                       tickers: C.TREND_TICKERS || null, exitMode: C.TREND_EXIT_MODE || "legacy", rollPending: Object.keys(state._trendRollCarry || {}),
+                      mode: C.TREND_MODE || "live",   // 10/14: "shadow" = no orders
+                      shadowOpen: ((state._trendShadow && state._trendShadow.open) || []).map(t => `${t.ticker} ${t.side} since ${t.openDay}`),
                       // 10/12: tickers still inside the re-entry cooldown -> { SPY: "2026-10-19" } (first eligible day)
                       cooldown: (() => { const o = {}, cd = C.TREND_COOLDOWN_DAYS ?? 5;
                         for (const [tk, x] of Object.entries(state._trendLastExit || {})) {
