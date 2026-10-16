@@ -18,6 +18,11 @@
 //   T5  Volatility picks the sleeve — T2 by VIX tercile (trend should be best when VIX is high), and a plain VWAP-band
 //       fade baseline by VIX tercile (fading should be best when VIX is low). Gao et al.; Zarattini & Aziz.
 //   T6  Continuation after a level breaks (Osler 2000/2003) — prior-day high/low and $5 round numbers.
+//   T2-opt (v1.1, pre-registered 10/15 BEFORE its first run) — T2's entries and exits priced as ~0.50-delta options
+//       with >= 2 days to expiry. Holding an option to the close pays theta the share version doesn't.
+//   Concentration (v1.1, diagnostic, added AFTER seeing QQQ 2018 carry T2) — each year's share of total P&L.
+// v1.1 grading: a test reports INCOMPLETE (never PASS) when either half has < 250 days, a VIX tercile cell has < 60 days,
+// or the ticker's data ends more than 10 days before the run date (10/15: QQQ stopped at 2021 on a shared fetch budget).
 // Not testable here (no history in Alpaca): dealer gamma (needs historical open interest), expiration pinning (same),
 // macro-announcement days (dayContext only holds the 2026 calendar). Gamma conditioning is being collected live.
 'use strict';
@@ -31,7 +36,12 @@ const PASS = {
   T3:  'Turn-of-month minus other days, mean close-to-close return > 0 with t >= 2.0, AND positive in both halves — per ticker.',
   T5:  'T2 Sharpe in the high-VIX tercile > low-VIX tercile, AND fade-baseline Sharpe in the low-VIX tercile > high-VIX tercile — both halves, per ticker.',
   T6:  'Mean 30-minute continuation after a break > 0 with t >= 2.0 AND positive in both halves — per ticker, separately for prior-day high/low and for $5 round numbers.',
+  // v1.1 — written 10/15 after the first run, BEFORE T2-opt was ever computed
+  T2opt: 'T2 entries/exits priced as options (strike at the entry price ≈ 0.50 delta, 2 trading days + the rest of the session to expiry, Black-Scholes on the prior-day VIX/VXN, $0.02 round-trip spread): mean return on premium per trade > 0 with t >= 2.0, AND positive in both halves — per ticker.',
+  CONC:  'Diagnostic, added AFTER seeing the first run: each calendar year\'s share of total T2 / T2-opt P&L. No sleeve is built if one year is more than half of the total.',
+  GRADE: 'INCOMPLETE instead of PASS/fail when either half has < 250 days, a VIX tercile cell has < 60 days, or the data ends > 10 days before the run.',
 };
+const MIN_HALF_DAYS = 250, MIN_CELL_DAYS = 60, MAX_STALE_DAYS = 10;
 const COST_BP = 1;           // per side, shares
 const OPT_SPREAD = 0.02;     // $ per contract-share, round trip (0DTE/2DTE ATM SPY/QQQ are typically 1-2 cents wide)
 const SPLIT = '2021-01-01';  // halves
@@ -78,6 +88,18 @@ function summ(xs) {
 const sharpe = (daily) => { const s = summ(daily); return s.sd > 0 ? s.mean / s.sd * Math.sqrt(252) : null; };
 const byYear = (rows, f) => { const g = {}; for (const r of rows) (g[r.date.slice(0, 4)] = g[r.date.slice(0, 4)] || []).push(f(r)); return Object.fromEntries(Object.entries(g).map(([y, xs]) => [y, summ(xs)])); };
 const halves = (rows, f) => ({ h1: summ(rows.filter(r => r.date < SPLIT).map(f)), h2: summ(rows.filter(r => r.date >= SPLIT).map(f)) });
+// v1.1 grading: { pass, grade } — pass is only ever true on complete data
+const grade = (ok, complete) => ({ pass: !!(complete && ok), grade: complete ? (ok ? 'PASS' : 'fail') : 'INCOMPLETE' });
+const halvesOk = (h) => h.h1.n >= MIN_HALF_DAYS && h.h2.n >= MIN_HALF_DAYS;
+const daysOk = (rows) => rows.filter(r => r.date < SPLIT).length >= MIN_HALF_DAYS && rows.filter(r => r.date >= SPLIT).length >= MIN_HALF_DAYS;
+// v1.1 diagnostic: the largest calendar year's share of total P&L (null when the total isn't positive)
+function concentration(rows, f) {
+  const g = {}; let tot = 0;
+  for (const r of rows) { const v = f(r); if (v == null || !isFinite(v)) continue; g[r.date.slice(0, 4)] = (g[r.date.slice(0, 4)] || 0) + v; tot += v; }
+  if (!(tot > 0)) return { total: tot, topYear: null, topShare: null, tooConcentrated: null };
+  const [y, v] = Object.entries(g).sort((a, b) => b[1] - a[1])[0];
+  return { total: tot, topYear: y, topShare: v / tot, tooConcentrated: v / tot > 0.5 };
+}
 
 // ── T1: end-of-day momentum ─────────────────────────────────────────────────────────────────────────────────────
 // iv(date) -> annualised implied vol (VIX/100 for SPY, VXN/100 for QQQ) or null
@@ -106,11 +128,13 @@ function t1(days, iv) {
   const yrs = byYear(rows, r => r.sharesBp);
   const recent = Object.keys(yrs).sort().slice(-3);
   const full = summ(rows.map(r => r.sharesBp));
-  const pass = full.mean > 0 && full.t >= 2 && recent.filter(y => yrs[y].mean > 0).length >= 2;
+  const complete = daysOk(rows);
+  const g1 = grade(full.mean > 0 && full.t >= 2 && recent.filter(y => yrs[y].mean > 0).length >= 2, complete);
   const gao = summ(rows.filter(r => r.rFH != null).map(r => Math.sign(r.rFH) * r.rLH * 1e4 - 2 * COST_BP));
   const o0 = summ(rows.map(r => r.opt0)), o2 = summ(rows.map(r => r.opt2));
   return { n: rows.length, full, byYear: yrs, recentYears: recent, halves: halves(rows, r => r.sharesBp), gao,
-           opt0DTE: o0, opt2DTE: o2, pass, optPass: { dte0: o0.mean > 0 && o0.t >= 2, dte2: o2.mean > 0 && o2.t >= 2 } };
+           opt0DTE: o0, opt2DTE: o2, ...g1, optPass: { dte0: complete && o0.mean > 0 && o0.t >= 2, dte2: complete && o2.mean > 0 && o2.t >= 2 },
+           optGrade: { dte0: grade(o0.mean > 0 && o0.t >= 2, complete).grade, dte2: grade(o2.mean > 0 && o2.t >= 2, complete).grade } };
 }
 
 // ── T2: noise-area momentum (Zarattini & Aziz approximation) ────────────────────────────────────────────────────
@@ -129,23 +153,24 @@ function t2Day(days, i) {
   for (const m of CHECKS) {
     const b = pxAt(d, m); if (!b || sig[m] == null) continue;
     const UB = up * (1 + sig[m]), LB = dn * (1 - sig[m]);
-    if (pos > 0 && b.c < Math.max(UB, b.vwap)) { trades.push({ dir: 1, r: b.c / entry - 1, from: entryM, to: m }); pos = 0; }
-    else if (pos < 0 && b.c > Math.min(LB, b.vwap)) { trades.push({ dir: -1, r: 1 - b.c / entry, from: entryM, to: m }); pos = 0; }
+    if (pos > 0 && b.c < Math.max(UB, b.vwap)) { trades.push({ dir: 1, r: b.c / entry - 1, from: entryM, to: m, e0: entry, e1: b.c }); pos = 0; }
+    else if (pos < 0 && b.c > Math.min(LB, b.vwap)) { trades.push({ dir: -1, r: 1 - b.c / entry, from: entryM, to: m, e0: entry, e1: b.c }); pos = 0; }
     if (pos === 0 && m < 930) {
       if (b.c > UB) { pos = 1; entry = b.c; entryM = m; }
       else if (b.c < LB) { pos = -1; entry = b.c; entryM = m; }
     }
   }
   const z = d.bars[d.bars.length - 1];
-  if (pos) trades.push({ dir: pos, r: pos > 0 ? z.c / entry - 1 : 1 - z.c / entry, from: entryM, to: z.m + 5 });
+  if (pos) trades.push({ dir: pos, r: pos > 0 ? z.c / entry - 1 : 1 - z.c / entry, from: entryM, to: z.m + 5, e0: entry, e1: z.c });
   // same entries, APEX-style cap: out 60 minutes after entry (or at the trail/close if sooner)
   for (const tr of trades) {
     const capM = Math.min(tr.to, tr.from + 60), b = pxAt(d, capM) || z, e = pxAt(d, tr.from);
     capTrades.push(tr.dir * (b.c / e.c - 1));
+    tr.capM = Math.min(capM, 960); tr.capPx = b.c;
   }
   const cost = 2 * COST_BP / 1e4;
   return { date: d.date, ret: trades.reduce((s, t) => s + t.r - cost, 0), capRet: capTrades.reduce((s, r) => s + r - cost, 0), n: trades.length,
-           holds: trades.map(t => t.to - t.from) };
+           holds: trades.map(t => t.to - t.from), trades };
 }
 function t2(days) {
   const rows = []; for (let i = 0; i < days.length; i++) { const r = t2Day(days, i); if (r) rows.push(r); }
@@ -156,7 +181,9 @@ function t2(days) {
   return { days: rows.length, trades, sharpe: sh, sharpeH1: sh1, sharpeH2: sh2, daily: summ(rows.map(r => r.ret * 1e4)),
            capDaily: summ(rows.map(r => r.capRet * 1e4)), capSharpe: sharpe(rows.map(r => r.capRet)), byYear: byYear(rows, r => r.ret * 1e4),
            medianHoldMin: holds.length ? holds.sort((a, b) => a - b)[holds.length >> 1] : null,
-           pass: sh >= 0.5 && h.h1.mean > 0 && h.h2.mean > 0, holdBeatsCap, rows };
+           ...grade(sh >= 0.5 && h.h1.mean > 0 && h.h2.mean > 0, halvesOk(h)), holdBeatsCap: halvesOk(h) && holdBeatsCap,
+           holdGrade: halvesOk(h) ? (holdBeatsCap ? 'PASS' : 'fail') : 'INCOMPLETE',
+           conc: concentration(rows, r => r.ret), rows };
 }
 
 // ── T3: turn of the month ───────────────────────────────────────────────────────────────────────────────────────
@@ -167,7 +194,7 @@ function t3(days) {
   const diff = (rs, k) => { const a = summ(rs.filter(r => r.tom).map(r => r[k])), b = summ(rs.filter(r => !r.tom).map(r => r[k]));
     const se = Math.sqrt((a.sd ** 2) / (a.n || 1) + (b.sd ** 2) / (b.n || 1)); return { tom: a, other: b, diff: a.mean - b.mean, t: se > 0 ? (a.mean - b.mean) / se : null }; };
   const full = diff(rows, 'cc'), h1 = diff(rows.filter(r => r.date < SPLIT), 'cc'), h2 = diff(rows.filter(r => r.date >= SPLIT), 'cc');
-  return { closeToClose: full, h1, h2, openToClose: diff(rows, 'oc'), pass: full.diff > 0 && full.t >= 2 && h1.diff > 0 && h2.diff > 0 };
+  return { closeToClose: full, h1, h2, openToClose: diff(rows, 'oc'), ...grade(full.diff > 0 && full.t >= 2 && h1.diff > 0 && h2.diff > 0, daysOk(rows)) };
 }
 
 // ── T5: volatility picks the sleeve ─────────────────────────────────────────────────────────────────────────────
@@ -191,14 +218,18 @@ function t5(days, t2res, vix) {
   const q1 = vals[Math.floor(vals.length / 3)], q2 = vals[Math.floor(2 * vals.length / 3)];
   const terc = (dt) => v[dt] == null ? null : v[dt] <= q1 ? 'low' : v[dt] <= q2 ? 'mid' : 'high';
   const fades = days.map(d => ({ date: d.date, ret: fadeDay(d) }));
-  const cell = (rows, half) => {
+  const cellN = {};
+  const cell = (rows, half, tag) => {
     const rs = rows.filter(r => half === 'h1' ? r.date < SPLIT : half === 'h2' ? r.date >= SPLIT : true);
-    const o = {}; for (const t of ['low', 'mid', 'high']) o[t] = sharpe(rs.filter(r => terc(r.date) === t).map(r => r.ret)); return o;
+    const o = {}; for (const t of ['low', 'mid', 'high']) { const xs = rs.filter(r => terc(r.date) === t); o[t] = sharpe(xs.map(r => r.ret)); cellN[`${tag}.${half}.${t}`] = xs.length; } return o;
   };
-  const trend = { all: cell(t2res.rows, 'all'), h1: cell(t2res.rows, 'h1'), h2: cell(t2res.rows, 'h2') };
-  const fade = { all: cell(fades, 'all'), h1: cell(fades, 'h1'), h2: cell(fades, 'h2') };
-  const pass = trend.h1.high > trend.h1.low && trend.h2.high > trend.h2.low && fade.h1.low > fade.h1.high && fade.h2.low > fade.h2.high;
-  return { vixTerciles: [q1, q2], trend, fade, fadeSharpeAll: sharpe(fades.map(r => r.ret)), pass };
+  const trend = { all: cell(t2res.rows, 'all', 'trend'), h1: cell(t2res.rows, 'h1', 'trend'), h2: cell(t2res.rows, 'h2', 'trend') };
+  const fade = { all: cell(fades, 'all', 'fade'), h1: cell(fades, 'h1', 'fade'), h2: cell(fades, 'h2', 'fade') };
+  // v1.1: every graded cell must exist with >= MIN_CELL_DAYS days — an empty cell is no longer compared as zero
+  const used = ['h1', 'h2'].flatMap(h => ['low', 'high'].flatMap(t => [[trend, 'trend', h, t], [fade, 'fade', h, t]]));
+  const complete = used.every(([o, tag, h, t]) => o[h][t] != null && cellN[`${tag}.${h}.${t}`] >= MIN_CELL_DAYS);
+  const ok = trend.h1.high > trend.h1.low && trend.h2.high > trend.h2.low && fade.h1.low > fade.h1.high && fade.h2.low > fade.h2.high;
+  return { vixTerciles: [q1, q2], trend, fade, cellN, fadeSharpeAll: sharpe(fades.map(r => r.ret)), ...grade(ok, complete) };
 }
 
 // ── T6: continuation after a level breaks ───────────────────────────────────────────────────────────────────────
@@ -225,26 +256,66 @@ function t6(days) {
   }
   const res = {};
   for (const k of ['pd', 'round']) { const full = summ(ev[k].map(e => e.r)), h = halves(ev[k], e => e.r);
-    res[k] = { full, h1: h.h1, h2: h.h2, pass: full.mean > 0 && full.t >= 2 && h.h1.mean > 0 && h.h2.mean > 0 }; }
+    res[k] = { full, h1: h.h1, h2: h.h2, ...grade(full.mean > 0 && full.t >= 2 && h.h1.mean > 0 && h.h2.mean > 0, daysOk(days)) }; }
   return res;
 }
 
-// ── run + report ────────────────────────────────────────────────────────────────────────────────────────────────
-function run(barsByTicker, ivByTicker = {}, vixFn = null) {
-  const out = { pass: PASS, tickers: {} };
-  for (const tk of Object.keys(barsByTicker)) {
-    const days = groupDays(barsByTicker[tk]);
-    const r2 = t2(days);
-    out.tickers[tk] = { days: days.length, from: days[0] && days[0].date, to: days[days.length - 1] && days[days.length - 1].date,
-      T1: t1(days, ivByTicker[tk] || null), T2: { ...r2, rows: undefined }, T3: t3(days), T5: t5(days, r2, vixFn), T6: t6(days) };
+// ── T2-opt: the same T2 trades priced as options (v1.1, pre-registered before its first run) ─────────────────────
+// Strike at the entry price (≈ 0.50 delta); 2 trading days + the rest of the session to expiry; Black-Scholes on the
+// prior-day VIX/VXN; $0.02 round-trip spread. Return on premium per trade. The 60-min-cap version is reported, not graded.
+function t2opt(t2res, iv) {
+  if (!iv) return { note: 'no implied-vol history', pass: false, grade: 'INCOMPLETE' };
+  const yr = 252, tleft = (m) => Math.max(0, 960 - m) / 390;
+  const px = (S, K, m, sig, type) => TO.bs(S, K, (2 + tleft(m)) / yr, 0, 0, sig, type);
+  const tr = [], cap = [];
+  for (const row of t2res.rows || []) {
+    const sig = iv(row.date); if (!(sig > 0)) continue;
+    for (const t of row.trades || []) {
+      if (!(t.e0 > 0) || !(t.e1 > 0)) continue;
+      const type = t.dir > 0 ? 'call' : 'put', K = t.e0, p0 = px(t.e0, K, t.from, sig, type);
+      if (!(p0 > 0.05)) continue;
+      tr.push({ date: row.date, r: (px(t.e1, K, t.to, sig, type) - p0 - OPT_SPREAD) / p0 });
+      if (t.capPx > 0) cap.push({ date: row.date, r: (px(t.capPx, K, t.capM, sig, type) - p0 - OPT_SPREAD) / p0 });
+    }
   }
-  out.trials = Object.keys(out.tickers).length * 9;   // T1 shares + 2 option variants, T2 + hold-vs-cap, T3, T5, T6 x2
+  const full = summ(tr.map(x => x.r)), h = halves(tr, x => x.r), capFull = summ(cap.map(x => x.r));
+  const complete = daysOk(t2res.rows || []);
+  return { full, h1: h.h1, h2: h.h2, cap: capFull, byYear: byYear(tr, x => x.r), conc: concentration(tr, x => x.r),
+           ...grade(full.mean > 0 && full.t >= 2 && h.h1.mean > 0 && h.h2.mean > 0, complete) };
+}
+
+// ── run + report ────────────────────────────────────────────────────────────────────────────────────────────────
+function run(barsByTicker, ivByTicker = {}, vixFn = null, opts = {}) {
+  const out = { pass: PASS, tickers: {} };
+  const grouped = {}; for (const tk of Object.keys(barsByTicker)) grouped[tk] = groupDays(barsByTicker[tk]);
+  // v1.1: data must reach (close to) the run date, or every test on that ticker is INCOMPLETE
+  const lasts = Object.values(grouped).map(d => d.length ? d[d.length - 1].date : '').filter(Boolean).sort();
+  const asOf = opts.asOf || lasts[lasts.length - 1] || null;
+  for (const tk of Object.keys(grouped)) {
+    const days = grouped[tk], to = days[days.length - 1] && days[days.length - 1].date;
+    const staleDays = asOf && to ? Math.round((Date.parse(asOf) - Date.parse(to)) / 864e5) : null;
+    const current = staleDays != null && staleDays <= MAX_STALE_DAYS;
+    const r2 = t2(days);
+    const r = { days: days.length, from: days[0] && days[0].date, to, staleDays, current,
+      T1: t1(days, ivByTicker[tk] || null), T2: { ...r2, rows: undefined }, T2opt: t2opt(r2, ivByTicker[tk] || null), T3: t3(days), T5: t5(days, r2, vixFn), T6: t6(days) };
+    if (!current) {   // stale data: nothing on this ticker can PASS
+      const inc = (o) => { if (o && typeof o === 'object' && 'grade' in o) { o.pass = false; o.grade = 'INCOMPLETE'; } };
+      [r.T1, r.T2, r.T2opt, r.T3, r.T5, r.T6.pd, r.T6.round].forEach(inc);
+      r.T1.optPass = { dte0: false, dte2: false }; r.T1.optGrade = { dte0: 'INCOMPLETE', dte2: 'INCOMPLETE' };
+      r.T2.holdBeatsCap = false; r.T2.holdGrade = 'INCOMPLETE';
+    }
+    out.tickers[tk] = r;
+  }
+  out.asOf = asOf;
+  out.trials = Object.keys(out.tickers).length * 10;   // T1 shares + 2 option variants, T2 + hold-vs-cap, T2-opt, T3, T5, T6 x2
   return out;
 }
 
 const f2 = (x, d = 2) => x == null || !isFinite(x) ? '—' : (x >= 0 ? '+' : '') + x.toFixed(d);
 const fs = (s, unit = 'bp') => s && s.n ? `${f2(s.mean)} ${unit} (t ${f2(s.t)}, hit ${(s.hit * 100).toFixed(0)}%, n ${s.n})` : 'n/a';
 const pf = (b) => b ? 'PASS' : 'fail';
+const gr = (o) => (o && o.grade) || pf(o && o.pass);
+const fc = (c) => !c || c.topYear == null ? 'n/a (total not positive)' : `largest year ${c.topYear} = ${(c.topShare * 100).toFixed(0)}% of total${c.tooConcentrated ? ' → TOO CONCENTRATED (> 50%)' : ''}`;
 
 function textReport(res, sources = {}) {
   const L = [];
@@ -254,31 +325,44 @@ function textReport(res, sources = {}) {
   L.push('');
   for (const [tk, r] of Object.entries(res.tickers)) {
     L.push(`════════ ${tk}  (${r.days} days, ${r.from} → ${r.to}) ════════`);
-    L.push(`T1 End-of-day momentum (Baltussen et al.): ${pf(r.T1.pass)}`);
+    if (r.current === false) L.push(`   ⚠ data ends ${r.staleDays} days before the run date (${res.asOf}) — every test on ${tk} is INCOMPLETE; rerun ${tk} on its own`);
+    L.push(`T1 End-of-day momentum (Baltussen et al.): ${gr(r.T1)}`);
     L.push(`   follow the day's sign, 15:30→close, shares net: ${fs(r.T1.full)}`);
     L.push(`   halves: 2016-20 ${fs(r.T1.halves.h1)} | 2021-on ${fs(r.T1.halves.h2)}`);
     L.push(`   by year: ${Object.entries(r.T1.byYear).map(([y, s]) => `${y} ${f2(s.mean, 1)}`).join('  ')}`);
     L.push(`   first-half-hour predictor (Gao et al.): ${fs(r.T1.gao)}`);
-    L.push(`   as options (return on premium): 0DTE ${fs(r.T1.opt0DTE, '')} ${pf(r.T1.optPass.dte0)} | 2DTE ${fs(r.T1.opt2DTE, '')} ${pf(r.T1.optPass.dte2)}`);
-    L.push(`T2 Noise-area momentum held to trail/close (Zarattini & Aziz approx.): ${pf(r.T2.pass)}`);
+    L.push(`   as options (return on premium): 0DTE ${fs(r.T1.opt0DTE, '')} ${(r.T1.optGrade || {}).dte0 || pf(r.T1.optPass.dte0)} | 2DTE ${fs(r.T1.opt2DTE, '')} ${(r.T1.optGrade || {}).dte2 || pf(r.T1.optPass.dte2)}`);
+    L.push(`T2 Noise-area momentum held to trail/close (Zarattini & Aziz approx.): ${gr(r.T2)}`);
     L.push(`   Sharpe ${f2(r.T2.sharpe)} (2016-20 ${f2(r.T2.sharpeH1)}, 2021-on ${f2(r.T2.sharpeH2)}) · ${r.T2.trades} trades on ${r.T2.days} days · median hold ${r.T2.medianHoldMin} min`);
     L.push(`   daily ${fs(r.T2.daily)}`);
-    L.push(`   SAME entries with a 60-min cap (APEX-style): Sharpe ${f2(r.T2.capSharpe)} · daily ${fs(r.T2.capDaily)} → holding beats the cap in both halves: ${r.T2.holdBeatsCap ? 'YES' : 'no'}`);
+    L.push(`   SAME entries with a 60-min cap (APEX-style): Sharpe ${f2(r.T2.capSharpe)} · daily ${fs(r.T2.capDaily)} → holding beats the cap in both halves: ${r.T2.holdGrade === 'INCOMPLETE' ? 'INCOMPLETE' : r.T2.holdBeatsCap ? 'YES' : 'no'}`);
     L.push(`   by year (bp/day): ${Object.entries(r.T2.byYear).map(([y, s]) => `${y} ${f2(s.mean, 1)}`).join('  ')}`);
-    L.push(`T3 Turn of the month (McConnell & Xu): ${pf(r.T3.pass)}`);
+    L.push(`   concentration (diagnostic): ${fc(r.T2.conc)}`);
+    if (r.T2opt) {
+      if (r.T2opt.note) L.push(`T2-opt Same trades as ~0.50-delta options (≥ 2 DTE): not run — ${r.T2opt.note}`);
+      else {
+        L.push(`T2-opt Same trades as ~0.50-delta options (≥ 2 DTE): ${gr(r.T2opt)}`);
+        L.push(`   return on premium per trade: ${fs(r.T2opt.full, '')}`);
+        L.push(`   halves: 2016-20 ${fs(r.T2opt.h1, '')} | 2021-on ${fs(r.T2opt.h2, '')}`);
+        L.push(`   same entries, 60-min cap, as options (reported, not graded): ${fs(r.T2opt.cap, '')}`);
+        L.push(`   by year: ${Object.entries(r.T2opt.byYear).map(([y, s]) => `${y} ${f2(s.mean, 3)}`).join('  ')}`);
+        L.push(`   concentration (diagnostic): ${fc(r.T2opt.conc)}`);
+      }
+    }
+    L.push(`T3 Turn of the month (McConnell & Xu): ${gr(r.T3)}`);
     L.push(`   close-to-close: TOM ${f2(r.T3.closeToClose.tom.mean, 1)} bp vs other ${f2(r.T3.closeToClose.other.mean, 1)} bp, diff ${f2(r.T3.closeToClose.diff, 1)} (t ${f2(r.T3.closeToClose.t)}) · halves ${f2(r.T3.h1.diff, 1)} / ${f2(r.T3.h2.diff, 1)}`);
     L.push(`   open-to-close (intraday only): diff ${f2(r.T3.openToClose.diff, 1)} bp (t ${f2(r.T3.openToClose.t)})`);
     if (r.T5.note) L.push(`T5 Volatility picks the sleeve: not run — ${r.T5.note}`);
     else {
-      L.push(`T5 Volatility picks the sleeve: ${pf(r.T5.pass)}   (VIX terciles ≤${f2(r.T5.vixTerciles[0], 1)} / ≤${f2(r.T5.vixTerciles[1], 1)} / above)`);
+      L.push(`T5 Volatility picks the sleeve: ${gr(r.T5)}   (VIX terciles ≤${f2(r.T5.vixTerciles[0], 1)} / ≤${f2(r.T5.vixTerciles[1], 1)} / above)`);
       L.push(`   trend Sharpe low/mid/high VIX: ${['low', 'mid', 'high'].map(t => f2(r.T5.trend.all[t])).join(' / ')}  (halves: ${['low', 'high'].map(t => f2(r.T5.trend.h1[t])).join('→')} | ${['low', 'high'].map(t => f2(r.T5.trend.h2[t])).join('→')})`);
       L.push(`   fade  Sharpe low/mid/high VIX: ${['low', 'mid', 'high'].map(t => f2(r.T5.fade.all[t])).join(' / ')}  (halves: ${['low', 'high'].map(t => f2(r.T5.fade.h1[t])).join('→')} | ${['low', 'high'].map(t => f2(r.T5.fade.h2[t])).join('→')}) · fade overall Sharpe ${f2(r.T5.fadeSharpeAll)}`);
     }
-    L.push(`T6 Continuation after a level breaks (Osler): prior-day high/low ${pf(r.T6.pd.pass)} ${fs(r.T6.pd.full)} | $5 round numbers ${pf(r.T6.round.pass)} ${fs(r.T6.round.full)}`);
+    L.push(`T6 Continuation after a level breaks (Osler): prior-day high/low ${gr(r.T6.pd)} ${fs(r.T6.pd.full)} | $5 round numbers ${gr(r.T6.round)} ${fs(r.T6.round.full)}`);
     L.push(`   halves: pd ${f2(r.T6.pd.h1.mean, 1)} / ${f2(r.T6.pd.h2.mean, 1)} bp · round ${f2(r.T6.round.h1.mean, 1)} / ${f2(r.T6.round.h2.mean, 1)} bp`);
     L.push('');
   }
-  L.push('PRE-REGISTERED PASS LINES');
+  L.push('PRE-REGISTERED PASS LINES (T1-T6 written before the first run; T2opt/CONC/GRADE added in v1.1 before their first run)');
   for (const [k, v] of Object.entries(PASS)) L.push(`  ${k}: ${v}`);
   L.push('');
   L.push('Limits: T2 approximates the published rules; options are Black-Scholes on the daily VIX/VXN (no intraday skew or term');
@@ -287,4 +371,5 @@ function textReport(res, sources = {}) {
   return L.join('\n');
 }
 
-module.exports = { PASS, groupDays, pxAt, summ, sharpe, t1, t2, t2Day, t3, t5, t6, fadeDay, run, textReport, etParts };
+module.exports = { PASS, groupDays, pxAt, summ, sharpe, t1, t2, t2Day, t2opt, t3, t5, t6, fadeDay, concentration, run, textReport, etParts,
+  MIN_HALF_DAYS, MIN_CELL_DAYS, MAX_STALE_DAYS };
