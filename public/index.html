@@ -724,7 +724,7 @@ input[type=text]:focus{border-color:var(--blue)}
     <div style="font-size:11px;font-weight:700;letter-spacing:1px;color:var(--blue);margin-bottom:6px">FLOW HARNESS — PUBLISHED INTRADAY EDGES, TESTED BEFORE THEY TRADE</div>
     <div style="font-size:12px;color:var(--text);line-height:1.6">
       Runs the pre-registered tests on SPY and QQQ 5-minute bars from 2016: end-of-day momentum (Baltussen et al. 2021; Gao et al. 2018),
-      noise-area momentum held to a trailing stop or the close vs. a 60-minute cap (Zarattini &amp; Aziz 2024), turn of the month
+      noise-area momentum held to a trailing stop or the close vs. a 60-minute cap (Zarattini &amp; Aziz 2024), APEX's own intraday-trend sleeve replayed with its live rules, turn of the month
       (McConnell &amp; Xu 2008), volatility picking trend vs. fade, and continuation after a level breaks (Osler). The pass lines were
       written before the first run and are printed with the results. Every trial is shown, pass or fail.
     </div>
@@ -2837,6 +2837,9 @@ function _fbtVerdicts(res) {
   const rows = [['T1 End-of-day momentum (shares)', r => G(r.T1, r.T1.pass)], ['T1 as 0DTE options', r => (r.T1.optGrade || {}).dte0 || G(null, r.T1.optPass.dte0)], ['T1 as 2DTE options', r => (r.T1.optGrade || {}).dte2 || G(null, r.T1.optPass.dte2)],
     ['T2 Noise-area momentum, hold to trail/close', r => G(r.T2, r.T2.pass)], ['T2 holding beats a 60-min cap', r => r.T2.holdGrade || G(null, r.T2.holdBeatsCap)],
     ['T2-opt Same trades as options (v1.1)', r => r.T2opt ? G(r.T2opt, r.T2opt.pass) : '—'],
+    ['T2-opt14 On APEX\'s 14-DTE instrument (#21)', r => r.T2opt14 ? G(r.T2opt14, r.T2opt14.pass) : '—'],
+    ['T7a APEX intraday-trend as live (options)', r => r.T7 ? G(r.T7.a) : '—'], ['T7b Same entries: holding beats live exits', r => r.T7 ? G(r.T7.b) : '—'],
+    ['T7c Held version, shares', r => r.T7 ? G(r.T7.c) : '—'], ['T7c-opt Held version, options', r => r.T7 ? G(r.T7.cOpt) : '—'],
     ['T2 one year > 50% of P&L (diagnostic)', r => r.T2.conc ? (r.T2.conc.tooConcentrated == null ? 'n/a' : r.T2.conc.tooConcentrated ? 'YES ' + r.T2.conc.topYear : 'no') : '—'],
     ['T3 Turn of the month', r => G(r.T3, r.T3.pass)],
     ['T5 Volatility picks the sleeve', r => G(r.T5, r.T5.pass)], ['T6 Break continuation: prior-day high/low', r => G(r.T6.pd, r.T6.pd.pass)], ['T6 Break continuation: $5 round numbers', r => G(r.T6.round, r.T6.round.pass)]];
