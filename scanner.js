@@ -139,7 +139,8 @@ const {
   AGENT_ENABLED = false,   // 10/15: silence the disabled news agent's staleness warnings   // 10/14: shadow = no trend-swing orders
   ITREND_NEG_GAMMA_BLOCK = true,
   GEX_REGIME_HYST_M = 250, GEX_WALL_HOLD_MIN = 6,   // 10/15: wall hysteresis (minutes a new strike must win before it becomes the wall)
-  ITREND_LATE_START_ET = 11.0, ITREND_LATE_ADX_MIN = 40,
+  ITREND_LATE_START_ET = 11.0, ITREND_LATE_ADX_MIN = 40, ITREND_LATE_ADX_ENABLED = true,
+  LEGACY_SCORED_ENTRIES = true,
   ITREND_ENABLED = true, ITREND_ADX_MIN = 25, ITREND_VWAP_MIN = 0.05, ITREND_BREADTH_STRONG = 55,   // 9/20: ITREND_ENABLED aligned to constants=true (kill via constants, not this default). 9/21 FIX: comment had eaten ITREND_VWAP_MIN + ITREND_BREADTH_STRONG off this line → itrend crashed all 9/21
   ITREND_START_ET = 10.0, ITREND_END_ET = 12.0, ITREND_COOLDOWN_MIN = 30,
   BREAK_ENTRY_SCORE = 80, BREAK_CONFIRM_BARS = 1, BREAK_MAX_AGE_MIN = 10, BREAK_VOL_LOOKBACK = 10,
@@ -1300,14 +1301,18 @@ async function runScan() {
     const dailyLossLimit = (state.alpacaCash || state.cash || 30000) * -0.03;
     state._dailyPnL = parseFloat(todayPnL.toFixed(2));
     if (todayPnL < dailyLossLimit && !dryRunMode && !dataGatherActive(DATA_GATHER_MODE)) {
-      logEvent("warn", `[DAILY CIRCUIT] Daily P&L $${todayPnL.toFixed(0)} below -3% limit — halting new entries`);
+      // 10/15: was a warn EVERY scan (1,381 lines on 10/15) that said "halting" while paper data mode let every entry
+      // through (_circuitEntryHalt and risk.js both skip under paperDataActive). Now: on change or every 30 min, and
+      // the wording says what actually happens.
+      if (paperDataActive(state)) logOnChange("dailycircuit", "paper", "scan", `[DAILY CIRCUIT] Daily P&L $${todayPnL.toFixed(0)} below -3% limit — NOT halting (paper data mode)`, 30 * 60000);
+      else logOnChange("dailycircuit", "halt", "warn", `[DAILY CIRCUIT] Daily P&L $${todayPnL.toFixed(0)} below -3% limit — halting new entries`, 30 * 60000);
       state._dailyCircuitOpen = false;
     } else if (state._dailyCircuitOpen === false && todayPnL >= dailyLossLimit * 0.75) {
       logEvent("scan", `[DAILY CIRCUIT] Auto-reset — P&L $${todayPnL.toFixed(0)} recovered`);
       state._dailyCircuitOpen = true;
     }
     if (dataGatherActive(DATA_GATHER_MODE) && todayPnL < dailyLossLimit && !dryRunMode) {
-      logEvent("scan", `[DAILY CIRCUIT] data-gather mode — P&L $${todayPnL.toFixed(0)} below -3% but NOT halting (gathering data)`);
+      logOnChange("dailycircuit-dg", "dg", "scan", `[DAILY CIRCUIT] data-gather mode — P&L $${todayPnL.toFixed(0)} below -3% but NOT halting (gathering data)`, 30 * 60000);
     }
     if (dataGatherActive(DATA_GATHER_MODE)) {
       state._circuitHaltEntries = false;   // data-gather: never let a stale _dailyCircuitOpen=false keep entries halted
@@ -1401,7 +1406,6 @@ async function runScan() {
   }
 
   const MAX_SIMULTANEOUS_CALLS = 3;
-  const SLOT3_MIN_SCORE = 85;
   const CORR_GROUPS = {
     SPY: 'equity', QQQ: 'equity', SMH: 'equity',
     GLD: 'macro',  TLT: 'macro',
@@ -1419,7 +1423,7 @@ async function runScan() {
   } else if (openCalls === 2) {
     state._callCapActive = false;
     state._slot3Active   = true;
-    logEvent("filter", `[CALL CAP] 2 calls open — slot 3 available (score >= ${SLOT3_MIN_SCORE} + uncorrelated group only)`);
+    logEvent("filter", `[CALL CAP] 2 calls open — slot 3 available (uncorrelated group only)`);
   } else {
     state._callCapActive = false;
     state._slot3Active   = false;
@@ -3046,7 +3050,7 @@ async function runScan() {
           const _iSlope = (state._vwapSlope || {})[liveStock.ticker] ?? 0;
           const _iAdx  = (typeof liveStock.adx === "number") ? liveStock.adx : 0;
           const _iBr   = (marketContext && marketContext.breadth && typeof marketContext.breadth.breadthPct === "number") ? marketContext.breadth.breadthPct : 50;
-          const _iAdxMin = (_iH >= ITREND_LATE_START_ET) ? Math.max(ITREND_ADX_MIN, ITREND_LATE_ADX_MIN) : ITREND_ADX_MIN;   // 10/6: ADX 40+ after 11:00 ET
+          const _iAdxMin = (ITREND_LATE_ADX_ENABLED && _iH >= ITREND_LATE_START_ET) ? Math.max(ITREND_ADX_MIN, ITREND_LATE_ADX_MIN) : ITREND_ADX_MIN;   // 10/6: ADX 40+ after 11:00 ET; 10/15: switched off (failed out of sample) — still labelled in skipBy
           if (_ior && _ior.locked && _ior.low > 0 && _ior.high > 0 && _iVw !== null && _iAdx >= _iAdxMin) {
             // breadth is SOFT/fail-open: block only when actively against (neutral ~50 passes both sides)
             const _brAgainstPut  = _iBr > ITREND_BREADTH_STRONG;          // breadth actively bullish
@@ -3639,6 +3643,15 @@ async function runScan() {
     if (eeCandidate.sizeMod < 1.0) {
       logEvent("filter", `${stock.ticker} size modifier ${eeCandidate.sizeMod.toFixed(2)}x`);
     }
+    // 10/15 (audit + harness T6): RETIRE the legacy score / structural-break entry path. The score is anti-predictive and
+    // the break trigger's idea (continuation after a level breaks, Osler) failed the 10-year harness on SPY and QQQ;
+    // it fired once ever. Only the dormant MR-scalp still rides this path, so it is kept. Everything above (verdict,
+    // telemetry, BREAK_TRIGGER_ENFORCE's gamma-regime plumbing) still runs — only the queueing for entry stops, which
+    // also ends the per-scan 0.35-delta options prefetch for these candidates ([IV-COVERAGE], 3,198 lines on 10/15).
+    if (!LEGACY_SCORED_ENTRIES && !liveStock._mrScalp) {
+      logOnChange("legacy-" + liveStock.ticker, "off", "filter", `[LEGACY] ${liveStock.ticker} ${eeCandidate.optionType} score ${eeCandidate.score} not queued — score/break entries retired 10/15 (sleeves only)`, 60 * 60000);
+      continue;
+    }
     scored.push({
       stock: liveStock, price,
       score:           eeCandidate.score,
@@ -4018,15 +4031,12 @@ async function runScan() {
     }
 
     if (state._callCapActive && optionType === "call") { logEvent("filter", `${stock.ticker} call blocked — call cap`); continue; }
-    if (openCalls === 1 && optionType === "call") {
-      const SLOT2_MIN_SCORE = 75;
-      if (score < SLOT2_MIN_SCORE) { logEvent("filter", `${stock.ticker} call blocked — slot 2 requires score >= ${SLOT2_MIN_SCORE}`); continue; }
-    }
+    // 10/15 (audit): the score is anti-predictive (r -0.07 to -0.11), so it no longer decides slots 2 and 3 (was
+    // score >= 75 / >= 85). The 3-call cap and the slot-3 uncorrelated-group rule stay (risk plumbing).
     if (state._slot3Active && optionType === "call") {
       const _ticker3 = stock.ticker;
       const _group3  = (CORR_GROUPS || {})[_ticker3] || 'other';
       const _occupied3 = state._occupiedCorrGroups || [];
-      if (score < SLOT3_MIN_SCORE) { logEvent("filter", `${_ticker3} call blocked — slot 3 requires score >= ${SLOT3_MIN_SCORE}`); continue; }
       if (_occupied3.includes(_group3)) { logEvent("filter", `${_ticker3} call blocked — slot 3 group ${_group3} occupied`); continue; }
     }
 
