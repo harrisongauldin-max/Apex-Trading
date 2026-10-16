@@ -33,7 +33,10 @@ const MR = {
   WALL_PROXIMITY_PCT:     0.30,   // 9/22 (Harrison): tightened 0.35→0.30. DATA: fades ≤0.30% from the wall reverted 43% vs 22% mid-range (n=87 vs 74). The wall IS the fade signal (dealers defend it) — proven on tape, not just literature.
   WALL_REQUIRE_INTACT:    true,   // 10/14 (Harrison): the wall must still be on the near side — a put wall BELOW price for a call fade, a call wall ABOVE price for a put fade. Was Math.abs(), so price already 0.3% THROUGH the wall counted as "at the wall". Telemetry 10/1-10/14 (Gate-2 setups): intact n=18, +0.12% at 30m, 83% right way; broken n=23, -0.12%, 17%. Same sign in both halves of the sample. Support only holds from the side it supports.
   REQUIRE_WALL:           false,  // 9/22: when true, ONLY fade at a wall (drop the vwap-band fallback = the weak 22% mid-range group). Default false = still take band-fades but TAGGED (locationSource) so we can measure wall vs band separately, THEN flip true if band-fades confirm weak. Governing principle: measure before restricting.
-  ALLOW_VWAP_BAND:        true,   // if no wall nearby, a deep VWAP-band stretch also counts as a location
+  // 10/15 (Harrison): OFF. The flow harness ran exactly this rule (fade >= 0.40% from VWAP, out at VWAP or 60 min) on
+  // 10 years of SPY/QQQ: Sharpe −0.91 / −1.06, negative in nearly every VIX tercile. No gamma conditioning there, but no
+  // APEX evidence that positive gamma rescues it either — it fails §0's data leg. Wall-located fades (BOTH) are unchanged.
+  ALLOW_VWAP_BAND:        false,  // was true: if no wall nearby, a deep VWAP-band stretch also counts as a location
   VWAP_BAND_PCT:          0.40,   // the VWAP-band distance that qualifies as a location on its own
   INVALIDATION_PCT:       0.25,   // thesis dead if price extends this % beyond entry against the fade
   // ── 9/29 (Harrison): NEGATIVE-GAMMA FADE. Data: neg-gamma fades revert MORE than pos-gamma (39% vs 18%),
