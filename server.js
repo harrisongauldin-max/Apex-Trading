@@ -929,7 +929,7 @@ app.get("/api/market-state", (req, res) => {
       tickers,
       gates: {
         itrend: { window: `${hhmm(C.ITREND_START_ET)}-${hhmm(C.ITREND_END_ET)} ET`, open: open && h >= C.ITREND_START_ET && h < C.ITREND_END_ET,
-                  adxMinNow: h >= (C.ITREND_LATE_START_ET ?? 99) ? Math.max(C.ITREND_ADX_MIN, C.ITREND_LATE_ADX_MIN ?? 0) : C.ITREND_ADX_MIN,
+                  adxMinNow: (C.ITREND_LATE_ADX_ENABLED !== false && h >= (C.ITREND_LATE_START_ET ?? 99)) ? Math.max(C.ITREND_ADX_MIN, C.ITREND_LATE_ADX_MIN ?? 0) : C.ITREND_ADX_MIN,
                   negGammaBlocked: negBlocked, sizeUpAtAdx: C.ITREND_ADX_SIZE_ENABLED ? C.ITREND_ADX_SIZE_MIN : null },
         mrFade:     { cutoff: `${hhmm(C.MR_FADE_CUTOFF_ET)} ET`, open: open && h < C.MR_FADE_CUTOFF_ET },
         trendSwing: { cutoff: `${hhmm(C.TREND_CUTOFF_ET)} ET`, open: open && h < C.TREND_CUTOFF_ET,
@@ -1626,17 +1626,23 @@ app.get("/api/flow-backtest", requireSecret, async (req, res) => {
     const et = getETTime(), h = et.getHours() + et.getMinutes() / 60, wd = et.getDay() >= 1 && et.getDay() <= 5;
     if (wd && h >= 9.25 && h < 16.25 && req.query.force !== "1")
       return res.status(409).type("text/plain").send("The flow harness runs outside market hours (it pulls ~10 years of 5-minute bars). Run it after 4:15 PM ET, or add &force=1.");
-    const FB = require("./flowBacktest"), TO = require("./trendOptions");
+    const FB = require("./flowBacktest"), TO = require("./trendOptions"), DAYCTX_FB = require("./dayContext");
     const { ALPACA_DATA } = require("./constants");
     const { alpacaHeaders, withTimeout } = require("./broker");
     const nf = require("node-fetch");
     const start = /^\d{4}-\d{2}-\d{2}$/.test(String(req.query.start || "")) ? req.query.start : "2016-01-01";
-    const end = new Date(Date.now() - 20 * 60000).toISOString();
+    // ?end=YYYY-MM-DD runs (and grades) the harness as of a past date; default is now
+    const endDay = /^\d{4}-\d{2}-\d{2}$/.test(String(req.query.end || "")) ? req.query.end : null;
+    const end = endDay ? endDay + "T21:00:00Z" : new Date(Date.now() - 20 * 60000).toISOString();
     const t0 = Date.now(), sources = {};
+    // v1.1 (10/15): each ticker gets its OWN 4.5-minute budget and the tickers download in parallel — the shared budget
+    // cut QQQ off at 2021 on the first run. ?tickers=QQQ runs one ticker on its own.
+    const tickers = String(req.query.tickers || "SPY,QQQ").toUpperCase().split(",").map(x => x.trim()).filter(x => x === "SPY" || x === "QQQ");
+    if (!tickers.length) return res.status(400).type("text/plain").send("tickers must be SPY, QQQ or SPY,QQQ");
     const fetchBars = async (tk) => {
-      const out = []; let token = null, pages = 0, tries = 0;
+      const out = []; let token = null, pages = 0, tries = 0; const tk0 = Date.now();
       for (;;) {
-        if (Date.now() - t0 > 240000) { sources[tk + " note"] = "stopped at the 4-minute budget"; break; }
+        if (Date.now() - tk0 > 270000) { sources[tk + " note"] = "stopped at the 4.5-minute budget — rerun with ?tickers=" + tk; break; }
         const url = `${ALPACA_DATA}/stocks/${tk}/bars?timeframe=5Min&start=${start}T00:00:00Z&end=${end}&adjustment=raw&feed=sip&limit=10000` + (token ? `&page_token=${encodeURIComponent(token)}` : "");
         let r = null; try { r = await withTimeout(nf(url, { headers: alpacaHeaders() }), 30000); } catch (_) { r = null; }
         if (r && r.status === 429 && tries < 5) { tries++; await new Promise(z => setTimeout(z, 3000 * tries)); continue; }
@@ -1650,10 +1656,9 @@ app.get("/api/flow-backtest", requireSecret, async (req, res) => {
       return out;
     };
     const bars = {};
-    for (const tk of ["SPY", "QQQ"]) {
-      bars[tk] = await fetchBars(tk);
-      if (bars[tk].length < 20000) return res.status(502).type("text/plain").send(`Not enough 5-minute history for ${tk} (${bars[tk].length} bars). ${sources[tk + " note"] || ""}`);
-    }
+    const got = await Promise.all(tickers.map(tk => fetchBars(tk)));
+    tickers.forEach((tk, i) => { bars[tk] = got[i]; });
+    for (const tk of tickers) if (bars[tk].length < 20000) return res.status(502).type("text/plain").send(`Not enough 5-minute history for ${tk} (${bars[tk].length} bars). ${sources[tk + " note"] || ""}`);
     const getText = async (url) => { try { const r = await withTimeout(nf(url), 20000); return (r && r.ok) ? await r.text() : null; } catch (_) { return null; } };
     const CB = "https://cdn.cboe.com/api/global/us_indices/daily_prices/";
     const [vixT, vxnT] = await Promise.all([getText(CB + "VIX_History.csv"), getText(CB + "VXN_History.csv")]);
@@ -1664,9 +1669,9 @@ app.get("/api/flow-backtest", requireSecret, async (req, res) => {
     const vixPrev = Object.keys(VIX).length ? prevOf(VIX) : null, vxnPrev = Object.keys(VXN).length ? prevOf(VXN) : null;
     const iv = { SPY: vixPrev ? (d) => { const v = vixPrev(d); return v ? v / 100 : null; } : null,
                  QQQ: vxnPrev ? (d) => { const v = vxnPrev(d); return v ? v / 100 : null; } : (vixPrev ? (d) => { const v = vixPrev(d); return v ? v * 1.2 / 100 : null; } : null) };
-    const result = FB.run(bars, iv, vixPrev);
+    const result = FB.run(bars, iv, vixPrev, { asOf: endDay || DAYCTX_FB.etDateStr(Date.now()) });
     const report = FB.textReport(result, sources);
-    logEvent("scan", `[FLOW-HARNESS] ran in ${((Date.now() - t0) / 1000).toFixed(0)}s — ${Object.entries(result.tickers).map(([tk, r]) => `${tk}: T1 ${r.T1.pass ? "PASS" : "fail"}, T2 ${r.T2.pass ? "PASS" : "fail"}, T3 ${r.T3.pass ? "PASS" : "fail"}, T5 ${r.T5.pass ? "PASS" : "fail"}, T6 ${r.T6.pd.pass ? "PASS" : "fail"}/${r.T6.round.pass ? "PASS" : "fail"}`).join(" | ")}`);
+    logEvent("scan", `[FLOW-HARNESS] ran in ${((Date.now() - t0) / 1000).toFixed(0)}s — ${Object.entries(result.tickers).map(([tk, r]) => `${tk} (${r.from}→${r.to}): T1 ${r.T1.grade}, T2 ${r.T2.grade}, T2-opt ${r.T2opt.grade}, T3 ${r.T3.grade}, T5 ${r.T5.grade}, T6 ${r.T6.pd.grade}/${r.T6.round.grade}`).join(" | ")}`);
     if (req.query.format === "json") return res.json({ start, sources, result, report });
     res.type("text/plain").send(report);
   } catch (e) { res.status(500).type("text/plain").send("flow-backtest error: " + e.message); }
