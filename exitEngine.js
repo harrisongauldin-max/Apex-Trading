@@ -575,8 +575,20 @@ async function checkExits(positions, posSnapshots, posQuotes, posNewsCache, ctx)
       const _chMode = TREND_EXIT_MODE === "chandelier" && (TREND_TICKERS || []).includes(pos.ticker);
       if (_chMode) {
         const _ch = _chandelierStep(pos, _tStopPct, _tDelta, _tPrem, _tAtr);
+        if (!_ch.noUnderlying && pos._chNoUSince) delete pos._chNoUSince;
         if (_ch.reason) _tReason = _ch.reason;
-        else if (_ch.noUnderlying && chg <= -_tStopPct) _tReason = "trend-stop";   // no fresh QQQ price: fall back to the option-% stop
+        else if (_ch.noUnderlying) {
+          // 10/15 FIX: the option-% fallback fired at 9:30:07 on 10/15 (QQQ 734C, −$1,888) with QQQ at $729 — nowhere near
+          // the $720.33 underlying stop. The underlying was simply not refreshed yet for the session, and the opening
+          // option quote was wide. The stop is on the UNDERLYING; an option-% stand-in now applies only after the
+          // underlying has been missing for 10 straight minutes AND it is 9:45 ET or later.
+          if (!pos._chNoUSince) { pos._chNoUSince = Date.now(); logEvent("scan", `[TREND-STOP] ${pos.ticker} no fresh underlying price — holding on the underlying stop (option-% fallback only after 10 min and 9:45 ET)`); }
+          const _nuEt = getETTime(), _nuH = _nuEt.getHours() + _nuEt.getMinutes() / 60;
+          if (Date.now() - pos._chNoUSince >= 10 * 60000 && _nuH >= 9.75 && chg <= -_tStopPct) {
+            _tReason = "trend-stop";
+            logEvent("warn", `[TREND-STOP] ${pos.ticker} underlying missing ${((Date.now() - pos._chNoUSince) / 60000).toFixed(0)} min — option-% fallback stop (${(chg * 100).toFixed(0)}% <= -${(_tStopPct * 100).toFixed(0)}%)`);
+          }
+        }
         else if (_tDTE <= TREND_ROLL_DTE) {
           _tReason = "trend-roll";
           if (!state._trendRollCarry) state._trendRollCarry = {};
