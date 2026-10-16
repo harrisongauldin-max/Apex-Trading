@@ -1671,7 +1671,7 @@ app.get("/api/flow-backtest", requireSecret, async (req, res) => {
                  QQQ: vxnPrev ? (d) => { const v = vxnPrev(d); return v ? v / 100 : null; } : (vixPrev ? (d) => { const v = vixPrev(d); return v ? v * 1.2 / 100 : null; } : null) };
     const result = FB.run(bars, iv, vixPrev, { asOf: endDay || DAYCTX_FB.etDateStr(Date.now()) });
     const report = FB.textReport(result, sources);
-    logEvent("scan", `[FLOW-HARNESS] ran in ${((Date.now() - t0) / 1000).toFixed(0)}s — ${Object.entries(result.tickers).map(([tk, r]) => `${tk} (${r.from}→${r.to}): T1 ${r.T1.grade}, T2 ${r.T2.grade}, T2-opt ${r.T2opt.grade}, T3 ${r.T3.grade}, T5 ${r.T5.grade}, T6 ${r.T6.pd.grade}/${r.T6.round.grade}`).join(" | ")}`);
+    logEvent("scan", `[FLOW-HARNESS] ran in ${((Date.now() - t0) / 1000).toFixed(0)}s — ${Object.entries(result.tickers).map(([tk, r]) => `${tk} (${r.from}→${r.to}): T1 ${r.T1.grade}, T2 ${r.T2.grade}, T2-opt ${r.T2opt.grade}, T2-opt14 ${r.T2opt14.grade}, T7 ${r.T7.a.grade}/${r.T7.b.grade}/${r.T7.c.grade}/${r.T7.cOpt.grade} (${r.T7.trades} trades), T3 ${r.T3.grade}, T5 ${r.T5.grade}, T6 ${r.T6.pd.grade}/${r.T6.round.grade}`).join(" | ")}`);
     if (req.query.format === "json") return res.json({ start, sources, result, report });
     res.type("text/plain").send(report);
   } catch (e) { res.status(500).type("text/plain").send("flow-backtest error: " + e.message); }
