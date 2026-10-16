@@ -633,7 +633,11 @@ const FASTCUT_PEAK_LONG      = 0.012;  // >21 DTE: a 40-DTE leg CANNOT print +3%
 // The entry score correlates -0.07..-0.19 with winning and 100+ pts of its range is frozen
 // daily weather, so it cannot separate trade from trade. The trigger replaces the "which side"
 // and "is there a trade" decisions with an OBSERVED EVENT rather than a prediction.
-const BREAK_TRIGGER_ENABLED       = true;    // compute + log the signal every scan
+// 10/15 (Harrison): RETIRED. Continuation after a level breaks (Osler) failed the 10-year flow harness on SPY and QQQ
+// (prior-day high/low and $5 round numbers, ~0 bp at 30 min); the trigger fired once ever. ENFORCE stays true on purpose:
+// its block also computes the per-scan gamma regime the sleeves read (_gexRegime/_gexFresh), and with no trigger it keeps
+// the legacy scores zeroed. Entries on the legacy path are closed by LEGACY_SCORED_ENTRIES below.
+const BREAK_TRIGGER_ENABLED       = false;   // was true: compute + log the signal every scan
 const BREAK_TRIGGER_ENFORCE       = true ;   // when true the trigger SETS the side and GATES entry  // 8/25 TEARDOWN: AUTHORITATIVE — score demoted to carrier
 const BREAK_TRIGGER_ALLOW_MRSCALP = true;    // MR-scalp is its own scoreless channel — let it arm under enforce
 // ── 8/25: NEGATIVE-GAMMA TREND SLEEVE — literature-aligned instrument for a confirmed break ──
@@ -758,7 +762,8 @@ const ITREND_NEG_GAMMA_BLOCK = true;
 // live itrend at ADX 40+ = 13 trades, 76% WR, +$49.2/trade (t=+2.95); ADX 25-40 = 21 trades, -$227. Counterfactual
 // 2x at 40+: net +$1,051 vs +$412, worst drawdown -$168 vs -$230. Caveat: 7 of the 13 were on 9/21. Cash and heat
 // caps still apply after sizing. false = flat 1 contract.
-const ITREND_ADX_SIZE_ENABLED   = true;
+// 10/15 (audit): OFF — built on the ADX split that reversed out of sample (no literature either). Flat 1 contract.
+const ITREND_ADX_SIZE_ENABLED   = false;
 const ITREND_ADX_SIZE_MIN       = 40;
 const ITREND_ADX_SIZE_CONTRACTS = 2;
 // 10/6 (Harrison): TREND-SWING SIZED TO THE STOP. The old formula budgeted 1 daily ATR of risk per contract
@@ -771,7 +776,14 @@ const TREND_MAX_RISK_PCT  = 0.03;
 // 10/6 (Harrison, Sunday list): intraday-trend after 11:00 ET only at ADX 40+. Live itrend through 10/5 (n=94):
 // 11-12 ET ADX 25-40 = 17 trades, -$17.4/trade; ADX 40+ = 5 trades, +$33.6/trade. 10-11 ET keeps ADX >= 25.
 const ITREND_LATE_START_ET = 11.0;
-const ITREND_LATE_ADX_MIN  = 40;   // no new entries after 1:30pm ET (Gao et al. morning-window; reversals cluster late)
+const ITREND_LATE_ADX_MIN  = 40;   // still used as the "40+" label in the entry meta-labels (skipBy adx<40)
+// 10/15 (audit): OFF — the ADX 35+/40+ split reversed out of sample (H1 +$281, H2 −$51) and ADX has no academic support.
+// Note the 11:00-12:00 hour itself lost in both halves; the 10:00-12:00 window is reviewed with the hold-to-close shadow.
+const ITREND_LATE_ADX_ENABLED = false;
+// 10/15 (audit + harness): the legacy score / structural-break entry path no longer queues entries (score is
+// anti-predictive; the break idea failed the harness). The sleeves (intraday-trend, MR-fade, trend-swing shadow) and the
+// dormant MR-scalp are unaffected. true = the old behaviour.
+const LEGACY_SCORED_ENTRIES = false;
 const ITREND_TRAIL_ARM_PCT      = 0.15;
 const ITREND_TRAIL_GIVEBACK_PCT = 0.07;
 const ITREND_STOP_PCT     = 0.30;   // hard floor (0.50-delta 14-DTE is more volatile than deep-ITM)
@@ -1002,7 +1014,7 @@ module.exports = {
   ITREND_ENABLED, ITREND_DELTA, ITREND_DELTA_MIN, ITREND_DELTA_MAX, ITREND_TARGET_DTE, ITREND_DTE_MIN, ITREND_DTE_MAX,
   ITREND_ADX_MIN, ITREND_VWAP_MIN, ITREND_BREADTH_STRONG, ITREND_START_ET, ITREND_END_ET, ITREND_NEG_GAMMA_BLOCK,
   ITREND_ADX_SIZE_ENABLED, ITREND_ADX_SIZE_MIN, ITREND_ADX_SIZE_CONTRACTS, TREND_SIZE_AT_STOP, TREND_MAX_RISK_PCT,
-  ITREND_LATE_START_ET, ITREND_LATE_ADX_MIN,
+  ITREND_LATE_START_ET, ITREND_LATE_ADX_MIN, ITREND_LATE_ADX_ENABLED, LEGACY_SCORED_ENTRIES,
   ITREND_TRAIL_ARM_PCT, ITREND_TRAIL_GIVEBACK_PCT, ITREND_STOP_PCT, ITREND_COOLDOWN_MIN, ITREND_MAX_HOLD_MIN, ITREND_NOARM_MIN,
   UNIVERSAL_NOARM_ENABLED, UNIVERSAL_NOARM_MIN, RSI_DEADZONE_VETO,
   STRADDLE_TP_PCT, STRADDLE_MAX_HOLD_MIN,
