@@ -301,7 +301,13 @@ async function findContract(ticker, optionType, targetDelta, targetDTE, vix, sto
       if (!state._ivCoverage) state._ivCoverage = { withIV: 0, total: 0 };
       state._ivCoverage.total++; if (_bestRawIV > 0) state._ivCoverage.withIV++;
       const _covPct = (100 * state._ivCoverage.withIV / state._ivCoverage.total).toFixed(0);
-      logEvent("filter", `[IV-COVERAGE] ${ticker} chosen ${_bestRawIV > 0 ? `feed IV ${_bestRawIV.toFixed(3)}` : "feed IV MISSING (realized-vol proxy)"} | window ${_ivWin.withIV}/${_ivWin.total} | session ${_covPct}% (${state._ivCoverage.withIV}/${state._ivCoverage.total})`);
+      // 10/15: on change (feed IV present/missing) or every 15 min per ticker — was every call (3,198 lines on 10/15)
+      if (!state._ivCovLog) state._ivCovLog = {};
+      const _icK = ticker + "|" + (_bestRawIV > 0 ? "iv" : "miss"), _icP = state._ivCovLog[ticker];
+      if (!_icP || _icP.k !== _icK || Date.now() - _icP.at >= 15 * 60000) {
+        state._ivCovLog[ticker] = { k: _icK, at: Date.now() };
+        logEvent("filter", `[IV-COVERAGE] ${ticker} chosen ${_bestRawIV > 0 ? `feed IV ${_bestRawIV.toFixed(3)}` : "feed IV MISSING (realized-vol proxy)"} | window ${_ivWin.withIV}/${_ivWin.total} | session ${_covPct}% (${state._ivCoverage.withIV}/${state._ivCoverage.total})`);
+      }
       logEvent("filter", `${ticker} findContract: ${optionType} $${_best.strike} | ${_best.expDays}DTE | delta${Math.abs(parseFloat(_best.greeks.delta)).toFixed(3)} | $${_best.premium} | target delta${targetDelta} strike $${targetStrike} (closest in-window)`);
       // ── MATERIAL-DISTINCTNESS GATE (7/28) ────────────────────────────────────────────────
       // With data-gather live, scanner's same-ticker-same-direction block is BYPASSED by design
