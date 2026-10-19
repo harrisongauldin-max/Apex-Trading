@@ -32,6 +32,10 @@
 //       20-min no-arm cut, 60-min cap, 3:15 flatten). Compared with the SAME entries held to a VWAP trail or the close.
 //       Not replayable: the negative-gamma block (no gamma history), breadth, the CVD tag. ADX is computed on trailing
 //       5-minute bars including the prior session (live uses the session's 1-minute bars) — close, not identical.
+//   v1.3 (pre-registered 10/19 BEFORE its first run):
+//   T8  Selling premium, on REAL option prices: Cboe's benchmark indexes built from actual SPX option trades — PUT
+//       (S&P 500 put-write, cash-secured) and CNDR (S&P 500 iron condor, defined risk) — against SPY buy-and-hold
+//       (Alpaca daily bars, dividend-adjusted = total return). BXM (covered call) reported, not graded.
 // Not testable here (no history in Alpaca): dealer gamma (needs historical open interest), expiration pinning (same),
 // macro-announcement days (dayContext only holds the 2026 calendar). Gamma conditioning is being collected live.
 'use strict';
@@ -55,6 +59,8 @@ const PASS = {
   T7b:  'The SAME T7 entries held to a VWAP trail (exit on a 5-minute close back across VWAP) or the close, as the same options: mean return per trade beats the live exits in both halves — per ticker.',
   T7c:  'The held version on shares (net 1 bp per side): annualised daily Sharpe >= 0.5 AND positive in both halves — per ticker (the T2 line).',
   T7cOpt: 'The held version as the same options: mean return on premium per trade > 0 with t >= 2.0, AND positive in both halves — per ticker.',
+  // v1.3 — written 10/19, BEFORE T8 was ever computed
+  T8:   'Per index (PUT, CNDR), 2016-01-04 to now vs SPY buy-and-hold total return on the same dates: annualised Sharpe >= SPY\'s AND worst drawdown no deeper than SPY\'s; the index series must be current (<= 10 days old). 2007-2015 is reported against SPX without dividends (no total-return SPY history before 2016) and is NOT graded — it flatters the option indexes by roughly the dividend yield.',
 };
 const MIN_HALF_DAYS = 250, MIN_CELL_DAYS = 60, MAX_STALE_DAYS = 10;
 const COST_BP = 1;           // per side, shares
@@ -402,6 +408,47 @@ function t7(days, iv, R = null) {
   };
 }
 
+// ── T8: selling premium, on real option prices (v1.3) ─────────────────────────────────────────────────────────────
+// series: { SPYTR, SPX, PUT, CNDR, BXM } each { 'YYYY-MM-DD': level }. Pure.
+function seriesStats(dates, ser) {
+  const px = dates.map(d => ser[d]); const r = [];
+  for (let i = 1; i < px.length; i++) r.push({ date: dates[i], r: px[i] / px[i - 1] - 1 });
+  const s = summ(r.map(x => x.r)), yrs = (dates.length - 1) / 252;
+  let peak = px[0], dd = 0, ddAt = dates[0];
+  for (let i = 0; i < px.length; i++) { peak = Math.max(peak, px[i]); const x = px[i] / peak - 1; if (x < dd) { dd = x; ddAt = dates[i]; } }
+  const byYr = {}; for (const d of dates) { const y = d.slice(0, 4); if (!byYr[y]) byYr[y] = { a: ser[d] }; byYr[y].z = ser[d]; }
+  // calendar-year return uses the prior year's last level as the base
+  const yKeys = Object.keys(byYr).sort(), years = {};
+  for (let i = 0; i < yKeys.length; i++) { const base = i ? byYr[yKeys[i - 1]].z : byYr[yKeys[i]].a; years[yKeys[i]] = byYr[yKeys[i]].z / base - 1; }
+  const win = (a, b) => { const ds = dates.filter(d => d >= a && d <= b); return ds.length > 1 ? ser[ds[ds.length - 1]] / ser[ds[0]] - 1 : null; };
+  return { n: r.length, cagr: px.length > 1 ? Math.pow(px[px.length - 1] / px[0], 1 / Math.max(yrs, 1e-9)) - 1 : null,
+           vol: s.sd != null ? s.sd * Math.sqrt(252) : null, sharpe: sharpe(r.map(x => x.r)), maxDD: dd, maxDDAt: ddAt,
+           sharpeH1: sharpe(r.filter(x => x.date < SPLIT).map(x => x.r)), sharpeH2: sharpe(r.filter(x => x.date >= SPLIT).map(x => x.r)),
+           years, stress: { feb2018: win('2018-01-26', '2018-02-09'), covid2020: win('2020-02-19', '2020-03-23'), bear2022: win('2022-01-03', '2022-10-12') } };
+}
+function t8(series, opts = {}) {
+  const asOf = opts.asOf || null, out = { graded: {}, info: {}, from: '2016-01-04', missing: [] };
+  const last = (ser) => { const k = Object.keys(ser || {}).sort(); return k.length ? k[k.length - 1] : null; };
+  const has = (k) => series[k] && Object.keys(series[k]).length > 50;
+  if (!has('SPYTR')) { out.note = 'no SPY total-return history'; return out; }
+  for (const k of ['PUT', 'CNDR', 'BXM']) {
+    if (!has(k)) { out.missing.push(k); continue; }
+    const ds = Object.keys(series[k]).filter(d => d >= out.from && series.SPYTR[d] != null).sort();
+    if (ds.length < 500) { out.missing.push(k); continue; }
+    const idx = seriesStats(ds, series[k]), spy = seriesStats(ds, series.SPYTR);
+    const lastK = last(series[k]), stale = asOf && lastK ? Math.round((Date.parse(asOf) - Date.parse(lastK)) / 864e5) : null;
+    const current = stale != null && stale <= MAX_STALE_DAYS;
+    const ok = idx.sharpe >= spy.sharpe && idx.maxDD >= spy.maxDD;
+    out.graded[k] = { idx, spy, from: ds[0], to: ds[ds.length - 1], lastDate: lastK, staleDays: stale, graded: k !== 'BXM',
+                      ...grade(ok, current) };
+    if (has('SPX')) {
+      const di = Object.keys(series[k]).filter(d => d >= '2007-01-03' && d < '2016-01-01' && series.SPX[d] != null).sort();
+      if (di.length > 500) out.info[k] = { idx: seriesStats(di, series[k]), spx: seriesStats(di, series.SPX), from: di[0], to: di[di.length - 1] };
+    }
+  }
+  return out;
+}
+
 // ── run + report ────────────────────────────────────────────────────────────────────────────────────────────────
 function run(barsByTicker, ivByTicker = {}, vixFn = null, opts = {}) {
   const out = { pass: PASS, tickers: {} };
@@ -427,6 +474,7 @@ function run(barsByTicker, ivByTicker = {}, vixFn = null, opts = {}) {
   }
   out.asOf = asOf;
   out.trials = Object.keys(out.tickers).length * 15;   // T1 x3, T2 + hold-vs-cap, T2-opt, T2-opt14, T7 a/b/c/cOpt, T3, T5, T6 x2
+  if (opts.t8Series) { out.T8 = t8(opts.t8Series, { asOf }); out.trials += Object.values(out.T8.graded || {}).filter(g => g.graded).length; }
   return out;
 }
 
@@ -435,6 +483,24 @@ const fs = (s, unit = 'bp') => s && s.n ? `${f2(s.mean)} ${unit} (t ${f2(s.t)}, 
 const pf = (b) => b ? 'PASS' : 'fail';
 const gr = (o) => (o && o.grade) || pf(o && o.pass);
 const fc = (c) => !c || c.topYear == null ? 'n/a (total not positive)' : `largest year ${c.topYear} = ${(c.topShare * 100).toFixed(0)}% of total${c.tooConcentrated ? ' → TOO CONCENTRATED (> 50%)' : ''}`;
+
+function t8Report(T8) {
+  const L = [], p = (x, d = 1) => x == null || !isFinite(x) ? '—' : (x >= 0 ? '+' : '') + (x * 100).toFixed(d) + '%';
+  L.push('════════ T8 Selling premium on REAL option prices (Cboe benchmark indexes) vs SPY buy-and-hold ════════');
+  if (!T8 || T8.note) { L.push(`   not run — ${(T8 && T8.note) || 'no data'}`); return L; }
+  if (T8.missing.length) L.push(`   unavailable: ${T8.missing.join(', ')}`);
+  for (const [k, g] of Object.entries(T8.graded)) {
+    const nm = { PUT: 'PUT  put-write (cash-secured, monthly ATM)', CNDR: 'CNDR iron condor (defined risk)', BXM: 'BXM  covered call' }[k] || k;
+    L.push(`${nm}: ${g.graded ? g.grade : 'reported, not graded'}   (${g.from} → ${g.to}${(g.staleDays != null && g.staleDays > MAX_STALE_DAYS) ? ` — ⚠ series ends ${g.lastDate}, ${g.staleDays} days old` : ''})`);
+    L.push(`   ${k.padEnd(4)} CAGR ${p(g.idx.cagr)} · vol ${p(g.idx.vol)} · Sharpe ${f2(g.idx.sharpe)} (2016-20 ${f2(g.idx.sharpeH1)}, 2021-on ${f2(g.idx.sharpeH2)}) · worst drawdown ${p(g.idx.maxDD)} (${g.idx.maxDDAt})`);
+    L.push(`   SPY  CAGR ${p(g.spy.cagr)} · vol ${p(g.spy.vol)} · Sharpe ${f2(g.spy.sharpe)} (2016-20 ${f2(g.spy.sharpeH1)}, 2021-on ${f2(g.spy.sharpeH2)}) · worst drawdown ${p(g.spy.maxDD)} (${g.spy.maxDDAt})`);
+    L.push(`   stress  Feb-2018: ${p(g.idx.stress.feb2018)} vs ${p(g.spy.stress.feb2018)} · Covid 2020: ${p(g.idx.stress.covid2020)} vs ${p(g.spy.stress.covid2020)} · 2022 bear: ${p(g.idx.stress.bear2022)} vs ${p(g.spy.stress.bear2022)}`);
+    L.push(`   by year (${k} / SPY): ${Object.keys(g.idx.years).map(y => `${y} ${p(g.idx.years[y], 0)}/${p(g.spy.years[y], 0)}`).join('  ')}`);
+    const inf = T8.info[k];
+    if (inf) L.push(`   2007-2015, not graded (vs SPX WITHOUT dividends): ${k} CAGR ${p(inf.idx.cagr)}, Sharpe ${f2(inf.idx.sharpe)}, worst DD ${p(inf.idx.maxDD)} | SPX CAGR ${p(inf.spx.cagr)}, Sharpe ${f2(inf.spx.sharpe)}, worst DD ${p(inf.spx.maxDD)}`);
+  }
+  return L;
+}
 
 function textReport(res, sources = {}) {
   const L = [];
@@ -500,7 +566,8 @@ function textReport(res, sources = {}) {
     L.push(`   halves: pd ${f2(r.T6.pd.h1.mean, 1)} / ${f2(r.T6.pd.h2.mean, 1)} bp · round ${f2(r.T6.round.h1.mean, 1)} / ${f2(r.T6.round.h2.mean, 1)} bp`);
     L.push('');
   }
-  L.push('PRE-REGISTERED PASS LINES (T1-T6 written before the first run; T2opt/CONC/GRADE added in v1.1 and T2opt14/T7 in v1.2, each before its first run)');
+  if (res.T8) { L.push(...t8Report(res.T8)); L.push(''); }
+  L.push('PRE-REGISTERED PASS LINES (T1-T6 written before the first run; T2opt/CONC/GRADE added in v1.1, T2opt14/T7 in v1.2, T8 in v1.3, each before its first run)');
   for (const [k, v] of Object.entries(PASS)) L.push(`  ${k}: ${v}`);
   L.push('');
   L.push('Limits: T2 approximates the published rules; options are Black-Scholes on the daily VIX/VXN (no intraday skew or term');
@@ -509,5 +576,5 @@ function textReport(res, sources = {}) {
   return L.join('\n');
 }
 
-module.exports = { PASS, groupDays, pxAt, summ, sharpe, t1, t2, t2Day, t2opt, t3, t5, t6, t7, adxOf, fadeDay, concentration, run, textReport, etParts,
+module.exports = { PASS, groupDays, pxAt, summ, sharpe, t1, t2, t2Day, t2opt, t3, t5, t6, t7, adxOf, t8, seriesStats, t8Report, fadeDay, concentration, run, textReport, etParts,
   MIN_HALF_DAYS, MIN_CELL_DAYS, MAX_STALE_DAYS };
