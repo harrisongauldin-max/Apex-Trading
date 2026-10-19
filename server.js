@@ -1624,7 +1624,9 @@ app.get("/api/trend-backtest", requireSecret, async (req, res) => {
 app.get("/api/flow-backtest", requireSecret, async (req, res) => {
   try {
     const et = getETTime(), h = et.getHours() + et.getMinutes() / 60, wd = et.getDay() >= 1 && et.getDay() <= 5;
-    if (wd && h >= 9.25 && h < 16.25 && req.query.force !== "1")
+    // v1.3 (10/19): ?tests=T8 runs only the premium-selling benchmark test (1 Alpaca call + 4 Cboe files) — allowed any time
+    const onlyT8 = String(req.query.tests || "").toUpperCase() === "T8";
+    if (!onlyT8 && wd && h >= 9.25 && h < 16.25 && req.query.force !== "1")
       return res.status(409).type("text/plain").send("The flow harness runs outside market hours (it pulls ~10 years of 5-minute bars). Run it after 4:15 PM ET, or add &force=1.");
     const FB = require("./flowBacktest"), TO = require("./trendOptions"), DAYCTX_FB = require("./dayContext");
     const { ALPACA_DATA } = require("./constants");
@@ -1656,12 +1658,28 @@ app.get("/api/flow-backtest", requireSecret, async (req, res) => {
       return out;
     };
     const bars = {};
-    const got = await Promise.all(tickers.map(tk => fetchBars(tk)));
-    tickers.forEach((tk, i) => { bars[tk] = got[i]; });
-    for (const tk of tickers) if (bars[tk].length < 20000) return res.status(502).type("text/plain").send(`Not enough 5-minute history for ${tk} (${bars[tk].length} bars). ${sources[tk + " note"] || ""}`);
+    const got = onlyT8 ? [] : await Promise.all(tickers.map(tk => fetchBars(tk)));
+    if (!onlyT8) tickers.forEach((tk, i) => { bars[tk] = got[i]; });
+    for (const tk of Object.keys(bars)) if (bars[tk].length < 20000) return res.status(502).type("text/plain").send(`Not enough 5-minute history for ${tk} (${bars[tk].length} bars). ${sources[tk + " note"] || ""}`);
     const getText = async (url) => { try { const r = await withTimeout(nf(url), 20000); return (r && r.ok) ? await r.text() : null; } catch (_) { return null; } };
     const CB = "https://cdn.cboe.com/api/global/us_indices/daily_prices/";
-    const [vixT, vxnT] = await Promise.all([getText(CB + "VIX_History.csv"), getText(CB + "VXN_History.csv")]);
+    const [vixT, vxnT, putT, cndrT, bxmT, spxT] = await Promise.all(["VIX", "VXN", "PUT", "CNDR", "BXM", "SPX"].map(k => getText(CB + k + "_History.csv")));
+    // T8 (v1.3): SPY total return = Alpaca daily bars with dividends adjusted in (adjustment=all), 2016 on
+    const SPYTR = {};
+    try {
+      let tok = null, pg = 0;
+      do {
+        const u = `${ALPACA_DATA}/stocks/SPY/bars?timeframe=1Day&start=2016-01-01T00:00:00Z&end=${end}&adjustment=all&feed=sip&limit=10000` + (tok ? `&page_token=${encodeURIComponent(tok)}` : "");
+        const r = await withTimeout(nf(u, { headers: alpacaHeaders() }), 30000);
+        if (!r || !r.ok) break;
+        const d = await r.json();
+        for (const b of d.bars || []) SPYTR[FB.etParts(b.t).day] = b.c;
+        tok = d.next_page_token || null; pg++;
+      } while (tok && pg < 5);
+    } catch (_) {}
+    const t8Series = { SPYTR, PUT: TO.parseSeriesCsv(putT), CNDR: TO.parseSeriesCsv(cndrT), BXM: TO.parseSeriesCsv(bxmT), SPX: TO.parseSeriesCsv(spxT) };
+    const _lastOf = (o) => { const k = Object.keys(o).sort(); return k.length ? k[k.length - 1] : "none"; };
+    sources.T8 = ["SPYTR", "PUT", "CNDR", "BXM", "SPX"].map(k => `${k} ${Object.keys(t8Series[k]).length} days to ${_lastOf(t8Series[k])}`).join(", ");
     const VIX = TO.parseSeriesCsv(vixT), VXN = TO.parseSeriesCsv(vxnT);
     sources.VIX = Object.keys(VIX).length ? "Cboe VIX history" : "unavailable"; sources.VXN = Object.keys(VXN).length ? "Cboe VXN history" : "unavailable";
     // the PRIOR day's close (known before the trade), as a decimal
@@ -1669,9 +1687,9 @@ app.get("/api/flow-backtest", requireSecret, async (req, res) => {
     const vixPrev = Object.keys(VIX).length ? prevOf(VIX) : null, vxnPrev = Object.keys(VXN).length ? prevOf(VXN) : null;
     const iv = { SPY: vixPrev ? (d) => { const v = vixPrev(d); return v ? v / 100 : null; } : null,
                  QQQ: vxnPrev ? (d) => { const v = vxnPrev(d); return v ? v / 100 : null; } : (vixPrev ? (d) => { const v = vixPrev(d); return v ? v * 1.2 / 100 : null; } : null) };
-    const result = FB.run(bars, iv, vixPrev, { asOf: endDay || DAYCTX_FB.etDateStr(Date.now()) });
+    const result = FB.run(bars, iv, vixPrev, { asOf: endDay || DAYCTX_FB.etDateStr(Date.now()), t8Series });
     const report = FB.textReport(result, sources);
-    logEvent("scan", `[FLOW-HARNESS] ran in ${((Date.now() - t0) / 1000).toFixed(0)}s — ${Object.entries(result.tickers).map(([tk, r]) => `${tk} (${r.from}→${r.to}): T1 ${r.T1.grade}, T2 ${r.T2.grade}, T2-opt ${r.T2opt.grade}, T2-opt14 ${r.T2opt14.grade}, T7 ${r.T7.a.grade}/${r.T7.b.grade}/${r.T7.c.grade}/${r.T7.cOpt.grade} (${r.T7.trades} trades), T3 ${r.T3.grade}, T5 ${r.T5.grade}, T6 ${r.T6.pd.grade}/${r.T6.round.grade}`).join(" | ")}`);
+    logEvent("scan", `[FLOW-HARNESS] ran in ${((Date.now() - t0) / 1000).toFixed(0)}s — ${Object.entries(result.tickers).map(([tk, r]) => `${tk} (${r.from}→${r.to}): T1 ${r.T1.grade}, T2 ${r.T2.grade}, T2-opt ${r.T2opt.grade}, T2-opt14 ${r.T2opt14.grade}, T7 ${r.T7.a.grade}/${r.T7.b.grade}/${r.T7.c.grade}/${r.T7.cOpt.grade} (${r.T7.trades} trades), T3 ${r.T3.grade}, T5 ${r.T5.grade}, T6 ${r.T6.pd.grade}/${r.T6.round.grade}`).join(" | ")}` + (result.T8 && result.T8.graded ? ` | T8 ${Object.entries(result.T8.graded).filter(([, g]) => g.graded).map(([k, g]) => `${k} ${g.grade}`).join(", ")}` : ""));
     if (req.query.format === "json") return res.json({ start, sources, result, report });
     res.type("text/plain").send(report);
   } catch (e) { res.status(500).type("text/plain").send("flow-backtest error: " + e.message); }
