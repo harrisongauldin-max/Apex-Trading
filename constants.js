@@ -742,6 +742,10 @@ const TREND_TRAIL_GIVEBACK_PCT = 0.05;   // incremental profit-lock: give back 5
 // gated hard on ADX>=25 (the subpopulation most likely to trend) + a real opening-range break,
 // fully instrumented so forward fills settle whether the edge exists. Kill: ITREND_ENABLED=false.
 const ITREND_ENABLED      = true;
+// 10/19 (Harrison): "shadow" = signals are recorded in the blocked-signal ledger, no orders. Harness T7 (10/16): APEX's
+// intraday-trend rules lost on 10 years of SPY and QQQ (−0.7% of premium per trade, t −9 / −8, every year), and holding
+// longer was worse. Pre-registered consequence. "live" = place orders as before.
+const ITREND_MODE        = "shadow";
 const ITREND_DELTA        = 0.50;   // ATM-ish: responsiveness for a same-day move (not deep-ITM)
 const ITREND_DELTA_MIN    = 0.42;
 const ITREND_DELTA_MAX    = 0.60;
@@ -1014,7 +1018,7 @@ module.exports = {
   ITREND_ENABLED, ITREND_DELTA, ITREND_DELTA_MIN, ITREND_DELTA_MAX, ITREND_TARGET_DTE, ITREND_DTE_MIN, ITREND_DTE_MAX,
   ITREND_ADX_MIN, ITREND_VWAP_MIN, ITREND_BREADTH_STRONG, ITREND_START_ET, ITREND_END_ET, ITREND_NEG_GAMMA_BLOCK,
   ITREND_ADX_SIZE_ENABLED, ITREND_ADX_SIZE_MIN, ITREND_ADX_SIZE_CONTRACTS, TREND_SIZE_AT_STOP, TREND_MAX_RISK_PCT,
-  ITREND_LATE_START_ET, ITREND_LATE_ADX_MIN, ITREND_LATE_ADX_ENABLED, LEGACY_SCORED_ENTRIES,
+  ITREND_LATE_START_ET, ITREND_LATE_ADX_MIN, ITREND_LATE_ADX_ENABLED, LEGACY_SCORED_ENTRIES, ITREND_MODE,
   ITREND_TRAIL_ARM_PCT, ITREND_TRAIL_GIVEBACK_PCT, ITREND_STOP_PCT, ITREND_COOLDOWN_MIN, ITREND_MAX_HOLD_MIN, ITREND_NOARM_MIN,
   UNIVERSAL_NOARM_ENABLED, UNIVERSAL_NOARM_MIN, RSI_DEADZONE_VETO,
   STRADDLE_TP_PCT, STRADDLE_MAX_HOLD_MIN,
