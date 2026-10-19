@@ -798,6 +798,8 @@ input[type=text]:focus{border-color:var(--blue)}
     <span style="display:inline-flex;gap:6px">
       <button class="btn" onclick="repairJournalPnl()" id="repair-journal-btn" title="Finds closed trades whose size grew after the buy was recorded and whose journal P&amp;L used only the first contract's cost. Shows the list first; changes nothing unless you confirm.">🛠 REPAIR P&amp;L</button>
       <button class="btn btn-green" onclick="copyJournal()" id="copy-journal-btn">📋 COPY JOURNAL</button>
+      <button class="btn" onclick="downloadJournal('csv')" id="dl-journal-csv" style="background:#0a1a2a;border:1px solid #00c4ff;color:#44ccff" title="Every journal entry (all fields) as a spreadsheet. Uses the From/To dates below if set, otherwise everything since 6/1.">⬇ JOURNAL CSV</button>
+      <button class="btn" onclick="downloadJournal('json')" id="dl-journal-json" style="background:#0a1a2a;border:1px solid #00c4ff;color:#44ccff" title="Every journal entry with nested fields intact (JSON). Same date range as the CSV.">⬇ JOURNAL JSON</button>
     </span>
   </div>
   <div style="display:flex;gap:6px;margin-bottom:12px;flex-wrap:wrap">
@@ -3766,6 +3768,35 @@ function _fmtJournalTrade(e, pad){
     rs.forEach(function(r){ L.push(pad + '    • ' + r); });
   }
   return L;
+}
+
+// 10/19 (Harrison): download the full journal — every entry, every field. Range = the From/To pickers if set, else 2026-06-01 → today.
+async function downloadJournal(fmt) {
+  const btn = document.getElementById(fmt === 'json' ? 'dl-journal-json' : 'dl-journal-csv'), label = btn ? btn.textContent : '';
+  const today = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+  const from = ((document.getElementById('jv-from') || {}).value) || '2026-06-01';
+  const to = ((document.getElementById('jv-to') || {}).value) || today;
+  if (btn) { btn.disabled = true; btn.textContent = '⏳ LOADING…'; }
+  try {
+    const r = await fetch('/api/journal?from=' + encodeURIComponent(from) + '&to=' + encodeURIComponent(to));
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    const j = await r.json();
+    const entries = (j && j.entries) || [];
+    if (!entries.length) { alert('No journal entries between ' + from + ' and ' + to + '.'); return; }
+    entries.sort((a, b) => new Date(a.openDate || 0) - new Date(b.openDate || 0));
+    let blob, name = 'apex-journal-' + from + '_to_' + to;
+    if (fmt === 'json') { blob = new Blob([JSON.stringify(entries, null, 1)], { type: 'application/json' }); name += '.json'; }
+    else {
+      const keys = []; const seen = new Set();
+      for (const e of entries) for (const k of Object.keys(e || {})) if (!seen.has(k)) { seen.add(k); keys.push(k); }
+      const cell = (v) => { if (v == null) return ''; const t = typeof v === 'object' ? JSON.stringify(v) : String(v); return /[",\n\r]/.test(t) ? '"' + t.replace(/"/g, '""') + '"' : t; };
+      const csv = [keys.join(',')].concat(entries.map(e => keys.map(k => cell(e[k])).join(','))).join('\n');
+      blob = new Blob([csv], { type: 'text/csv' }); name += '.csv';
+    }
+    const url = URL.createObjectURL(blob), a = document.createElement('a');
+    a.href = url; a.download = name; document.body.appendChild(a); a.click(); a.remove(); URL.revokeObjectURL(url);
+  } catch (e) { alert('Journal download failed: ' + e.message); }
+  finally { if (btn) { btn.disabled = false; btn.textContent = label; } }
 }
 
 async function copyJournal() {
