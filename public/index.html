@@ -732,7 +732,7 @@ input[type=text]:focus{border-color:var(--blue)}
       <span style="font-size:11px;color:var(--muted)">START</span>
       <input type="date" id="fbt-start" value="2016-01-01" style="background:var(--panel);border:1px solid var(--border);color:var(--text);padding:4px 6px;border-radius:4px;font-family:inherit">
       <select id="fbt-tickers" style="background:var(--panel);border:1px solid var(--border);color:var(--text);padding:4px 6px;border-radius:4px;font-family:inherit">
-        <option value="SPY,QQQ">SPY + QQQ</option><option value="SPY">SPY only</option><option value="QQQ">QQQ only</option>
+        <option value="SPY,QQQ">SPY + QQQ</option><option value="SPY">SPY only</option><option value="QQQ">QQQ only</option><option value="T8">T8 only — selling premium (quick, any time)</option>
       </select>
       <button class="btn btn-green" id="fbt-run" onclick="runFlowHarnessTab()">▶ RUN HARNESS</button>
       <button class="btn" id="fbt-dl" onclick="downloadFlowHarnessReport()" disabled style="opacity:.5">⬇ DOWNLOAD REPORT</button>
@@ -2843,13 +2843,25 @@ function _fbtVerdicts(res) {
     ['T2 one year > 50% of P&L (diagnostic)', r => r.T2.conc ? (r.T2.conc.tooConcentrated == null ? 'n/a' : r.T2.conc.tooConcentrated ? 'YES ' + r.T2.conc.topYear : 'no') : '—'],
     ['T3 Turn of the month', r => G(r.T3, r.T3.pass)],
     ['T5 Volatility picks the sleeve', r => G(r.T5, r.T5.pass)], ['T6 Break continuation: prior-day high/low', r => G(r.T6.pd, r.T6.pd.pass)], ['T6 Break continuation: $5 round numbers', r => G(r.T6.round, r.T6.round.pass)]];
-  const col = (v) => v === 'PASS' || v === 'no' ? 'var(--green)' : v === 'INCOMPLETE' || v === 'n/a' || v === '—' ? 'var(--yellow, #e0b000)' : 'var(--red)';
+  const col = (v) => v === 'PASS' || v === 'no' ? 'var(--green)' : v === 'INCOMPLETE' || v === 'n/a' || v === '—' || v === 'not graded' ? 'var(--yellow, #e0b000)' : 'var(--red)';
   const tks = Object.keys(res.tickers || {});
   let h = '<div class="card" style="padding:10px 16px;margin-bottom:12px"><table style="width:100%;font-size:12px;border-collapse:collapse"><thead><tr style="color:var(--muted)"><th style="text-align:left;padding:4px 8px">Test</th>' +
     tks.map(t => { const x = res.tickers[t]; return `<th style="padding:4px 8px">${t}<div style="font-weight:400;font-size:10px">${x.from || ''} → ${x.to || ''}</div></th>`; }).join('') + '</tr></thead><tbody>';
   for (const [name, f] of rows) h += `<tr style="border-top:1px solid var(--border)"><td style="padding:4px 8px">${name}</td>` +
     tks.map(t => { let v = '—'; try { v = f(res.tickers[t]); } catch (_) {} return `<td style="padding:4px 8px;text-align:center;font-weight:700;color:${col(v)}">${v}</td>`; }).join('') + '</tr>';
-  return h + '</tbody></table></div>';
+  h += '</tbody></table></div>';
+  // v1.3: T8 — premium selling on real option prices vs SPY buy-and-hold (one row per Cboe index)
+  if (res.T8 && res.T8.graded && Object.keys(res.T8.graded).length) {
+    const pc = (x) => x == null ? '—' : (x >= 0 ? '+' : '') + (x * 100).toFixed(1) + '%', f = (x) => x == null ? '—' : x.toFixed(2);
+    h += '<div class="card" style="padding:10px 16px;margin-bottom:12px"><div style="font-size:11px;font-weight:700;color:var(--blue);margin-bottom:6px">T8 SELLING PREMIUM (Cboe indexes, real option prices) vs SPY BUY-AND-HOLD, 2016 →</div>' +
+      '<table style="width:100%;font-size:12px;border-collapse:collapse"><thead><tr style="color:var(--muted)"><th style="text-align:left;padding:4px 8px">Index</th><th>Grade</th><th>CAGR</th><th>Sharpe</th><th>Worst drawdown</th><th>SPY Sharpe</th><th>SPY worst DD</th></tr></thead><tbody>';
+    for (const [k, g] of Object.entries(res.T8.graded)) {
+      const v = g.graded ? g.grade : 'not graded';
+      h += `<tr style="border-top:1px solid var(--border)"><td style="padding:4px 8px">${k}</td><td style="text-align:center;font-weight:700;color:${col(v)}">${v}</td><td style="text-align:center">${pc(g.idx.cagr)}</td><td style="text-align:center">${f(g.idx.sharpe)}</td><td style="text-align:center">${pc(g.idx.maxDD)}</td><td style="text-align:center">${f(g.spy.sharpe)}</td><td style="text-align:center">${pc(g.spy.maxDD)}</td></tr>`;
+    }
+    h += '</tbody></table></div>';
+  }
+  return h;
 }
 async function runFlowHarnessTab() {
   const btn = document.getElementById('fbt-run'), st = document.getElementById('fbt-status'), dl = document.getElementById('fbt-dl'), out = document.getElementById('fbt-results');
@@ -2858,7 +2870,7 @@ async function runFlowHarnessTab() {
   const s = sessionStorage.getItem('apexSecret') || prompt('Enter APEX secret:') || '';
   btn.disabled = true; btn.textContent = '⏳ RUNNING…'; st.textContent = 'Fetching 5-minute history and running the tests… (1-4 min)'; st.style.color = 'var(--muted)';
   try {
-    const r = await fetch('/api/flow-backtest?format=json&start=' + encodeURIComponent(start) + '&tickers=' + encodeURIComponent(tks), { headers: { 'x-argo-secret': s } });
+    const r = await fetch('/api/flow-backtest?format=json&start=' + encodeURIComponent(start) + (tks === 'T8' ? '&tests=T8' : '&tickers=' + encodeURIComponent(tks)), { headers: { 'x-argo-secret': s } });
     if (!r.ok) { const t = await r.text(); st.textContent = 'Failed: HTTP ' + r.status + (r.status === 401 ? ' (bad/missing secret)' : r.status === 404 ? ' (server.js / flowBacktest.js not deployed?)' : '') + ' ' + t.slice(0, 200); st.style.color = 'var(--red)'; return; }
     if (s) sessionStorage.setItem('apexSecret', s);
     _fbtLast = await r.json();
