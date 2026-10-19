@@ -139,7 +139,7 @@ const {
   AGENT_ENABLED = false,   // 10/15: silence the disabled news agent's staleness warnings   // 10/14: shadow = no trend-swing orders
   ITREND_NEG_GAMMA_BLOCK = true,
   GEX_REGIME_HYST_M = 250, GEX_WALL_HOLD_MIN = 6,   // 10/15: wall hysteresis (minutes a new strike must win before it becomes the wall)
-  ITREND_LATE_START_ET = 11.0, ITREND_LATE_ADX_MIN = 40, ITREND_LATE_ADX_ENABLED = true,
+  ITREND_LATE_START_ET = 11.0, ITREND_LATE_ADX_MIN = 40, ITREND_LATE_ADX_ENABLED = true, ITREND_MODE = "live",
   LEGACY_SCORED_ENTRIES = true,
   ITREND_ENABLED = true, ITREND_ADX_MIN = 25, ITREND_VWAP_MIN = 0.05, ITREND_BREADTH_STRONG = 55,   // 9/20: ITREND_ENABLED aligned to constants=true (kill via constants, not this default). 9/21 FIX: comment had eaten ITREND_VWAP_MIN + ITREND_BREADTH_STRONG off this line → itrend crashed all 9/21
   ITREND_START_ET = 10.0, ITREND_END_ET = 12.0, ITREND_COOLDOWN_MIN = 30,
@@ -3142,6 +3142,18 @@ async function runScan() {
                 logEvent("filter", `[ITREND-META] ${liveStock.ticker} ${_iSide.toUpperCase()} — ADX ${_iAdx.toFixed(0)} (${liveStock._iMeta.adxTier}) | gamma ${_g ? _g.regime : "n/a"}${_g && _g.regimeHeld ? " (held)" : ""} net ${_g ? Math.round(_g.netGexM) + "M" : "n/a"} flip ${_g && _g.distFlipPct != null ? _g.distFlipPct.toFixed(2) + "%" : "n/a"} | would-skip: ${_skip.length ? _skip.join(", ") : "none"} | ${liveStock._iMeta.winMin} min into the window | daily trend: ${_dAlign || "n/a"} [label only — entering as normal]`);
               } catch (_mErr) { liveStock._iMeta = null; }
               state._iTrendLast[_iCoolKey] = Date.now();
+              // 10/19 (Harrison): SHADOW-ONLY. The 10-year replay (harness T7) failed on SPY and QQQ: −0.7% of premium per
+              // trade as live, worse when held; live record 54/102 right way. Pre-registered consequence: no orders. The
+              // signal still goes to the blocked-signal ledger (10/20/30-min, close and VWAP-trail marks) so it keeps
+              // being measured. ITREND_MODE = "live" restores orders.
+              if (ITREND_MODE === "shadow") {
+                recordGateShadow("itrend-shadow", "intraday-trend", liveStock.ticker, _iSide, price,
+                  { adx: +(+_iAdx || 0).toFixed(1), skip: (liveStock._iMeta && liveStock._iMeta.skipBy || []).join("+") || "none" });
+                liveStock._iTrend = null; liveStock._iCvdTag = null; liveStock._iOrTag = null; liveStock._iMeta = null;
+                recordStandDown("itrend", "SHADOW — signal recorded, no order (10/19)");
+                logEvent("filter", `[INTRADAY-TREND] ${liveStock.ticker} ${_iSide.toUpperCase()} SHADOW (no order) — ${_iReason}`);
+                continue;
+              }
               const _iOK = await executeTrade(liveStock, price, 0, [_iReason], state.vix, _iSide, false, 1.0, null, null, `${liveStock.ticker}-${_iSide}-itrend-${Date.now()}`);
               liveStock._iTrend = null; liveStock._iCvdTag = null; liveStock._iOrTag = null; liveStock._iMeta = null;   // 10/6+10/7: don't let tags leak onto a later entry
               if (_iOK) {
