@@ -725,18 +725,19 @@ input[type=text]:focus{border-color:var(--blue)}
     <div style="font-size:12px;color:var(--text);line-height:1.6">
       Runs the pre-registered tests on SPY and QQQ 5-minute bars from 2016: end-of-day momentum (Baltussen et al. 2021; Gao et al. 2018),
       noise-area momentum held to a trailing stop or the close vs. a 60-minute cap (Zarattini &amp; Aziz 2024), APEX's own intraday-trend sleeve replayed with its live rules, turn of the month
-      (McConnell &amp; Xu 2008), volatility picking trend vs. fade, and continuation after a level breaks (Osler). The pass lines were
+      (McConnell &amp; Xu 2008), volatility picking trend vs. fade, and continuation after a level breaks (Osler). <b>T8</b> (its own button) tests selling premium on real option prices: Cboe's put-write and iron-condor indexes vs. holding SPY. The pass lines were
       written before the first run and are printed with the results. Every trial is shown, pass or fail.
     </div>
     <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:10px">
       <span style="font-size:11px;color:var(--muted)">START</span>
       <input type="date" id="fbt-start" value="2016-01-01" style="background:var(--panel);border:1px solid var(--border);color:var(--text);padding:4px 6px;border-radius:4px;font-family:inherit">
       <select id="fbt-tickers" style="background:var(--panel);border:1px solid var(--border);color:var(--text);padding:4px 6px;border-radius:4px;font-family:inherit">
-        <option value="SPY,QQQ">SPY + QQQ</option><option value="SPY">SPY only</option><option value="QQQ">QQQ only</option><option value="T8">T8 only — selling premium (quick, any time)</option>
+        <option value="SPY,QQQ">SPY + QQQ</option><option value="SPY">SPY only</option><option value="QQQ">QQQ only</option>
       </select>
       <button class="btn btn-green" id="fbt-run" onclick="runFlowHarnessTab()">▶ RUN HARNESS</button>
+      <button class="btn" id="fbt-run-t8" onclick="runFlowHarnessTab('T8')" style="background:#2a1a00;border:1px solid #DD550C;color:#ffb070" title="T8 only: Cboe put-write (PUT) and iron-condor (CNDR) indexes vs SPY buy-and-hold. Seconds; runs during market hours.">▶ RUN T8 — SELLING PREMIUM (any time)</button>
       <button class="btn" id="fbt-dl" onclick="downloadFlowHarnessReport()" disabled style="opacity:.5">⬇ DOWNLOAD REPORT</button>
-      <span id="fbt-status" style="font-size:11px;color:var(--muted)">Not run yet — runs after 4:15 PM ET only (it pulls ~10 years of 5-minute bars, about 2-5 minutes; each ticker downloads in parallel with its own time limit).</span>
+      <span id="fbt-status" style="font-size:11px;color:var(--muted)">Not run yet. RUN HARNESS: after 4:15 PM ET only (10 years of 5-minute bars, about 2-5 minutes). RUN T8: any time, a few seconds.</span>
     </div>
   </div>
   <div id="fbt-results"></div>
@@ -2850,6 +2851,7 @@ function _fbtVerdicts(res) {
   for (const [name, f] of rows) h += `<tr style="border-top:1px solid var(--border)"><td style="padding:4px 8px">${name}</td>` +
     tks.map(t => { let v = '—'; try { v = f(res.tickers[t]); } catch (_) {} return `<td style="padding:4px 8px;text-align:center;font-weight:700;color:${col(v)}">${v}</td>`; }).join('') + '</tr>';
   h += '</tbody></table></div>';
+  if (!tks.length) h = '';   // T8-only run: no per-ticker grid
   // v1.3: T8 — premium selling on real option prices vs SPY buy-and-hold (one row per Cboe index)
   if (res.T8 && res.T8.graded && Object.keys(res.T8.graded).length) {
     const pc = (x) => x == null ? '—' : (x >= 0 ? '+' : '') + (x * 100).toFixed(1) + '%', f = (x) => x == null ? '—' : x.toFixed(2);
@@ -2863,12 +2865,12 @@ function _fbtVerdicts(res) {
   }
   return h;
 }
-async function runFlowHarnessTab() {
-  const btn = document.getElementById('fbt-run'), st = document.getElementById('fbt-status'), dl = document.getElementById('fbt-dl'), out = document.getElementById('fbt-results');
+async function runFlowHarnessTab(mode) {
+  const btn = document.getElementById(mode === 'T8' ? 'fbt-run-t8' : 'fbt-run'), btnLabel = btn ? btn.textContent : '', st = document.getElementById('fbt-status'), dl = document.getElementById('fbt-dl'), out = document.getElementById('fbt-results');
   const start = (document.getElementById('fbt-start') || {}).value || '2016-01-01';
-  const tks = (document.getElementById('fbt-tickers') || {}).value || 'SPY,QQQ';
+  const tks = mode === 'T8' ? 'T8' : ((document.getElementById('fbt-tickers') || {}).value || 'SPY,QQQ');
   const s = sessionStorage.getItem('apexSecret') || prompt('Enter APEX secret:') || '';
-  btn.disabled = true; btn.textContent = '⏳ RUNNING…'; st.textContent = 'Fetching 5-minute history and running the tests… (1-4 min)'; st.style.color = 'var(--muted)';
+  btn.disabled = true; btn.textContent = '⏳ RUNNING…'; st.textContent = mode === 'T8' ? 'Fetching SPY daily history and the Cboe indexes… (a few seconds)' : 'Fetching 5-minute history and running the tests… (2-5 min)'; st.style.color = 'var(--muted)';
   try {
     const r = await fetch('/api/flow-backtest?format=json&start=' + encodeURIComponent(start) + (tks === 'T8' ? '&tests=T8' : '&tickers=' + encodeURIComponent(tks)), { headers: { 'x-argo-secret': s } });
     if (!r.ok) { const t = await r.text(); st.textContent = 'Failed: HTTP ' + r.status + (r.status === 401 ? ' (bad/missing secret)' : r.status === 404 ? ' (server.js / flowBacktest.js not deployed?)' : '') + ' ' + t.slice(0, 200); st.style.color = 'var(--red)'; return; }
@@ -2879,7 +2881,7 @@ async function runFlowHarnessTab() {
     st.textContent = `Done — ${new Date().toLocaleTimeString()}`; st.style.color = 'var(--green)';
     dl.disabled = false; dl.style.opacity = '1';
   } catch (e) { st.textContent = 'Error: ' + e.message; st.style.color = 'var(--red)'; }
-  finally { btn.disabled = false; btn.textContent = '▶ RUN HARNESS'; }
+  finally { btn.disabled = false; btn.textContent = btnLabel || '▶ RUN HARNESS'; }
 }
 function downloadFlowHarnessReport() {
   if (!_fbtLast || !_fbtLast.report) return;
