@@ -140,6 +140,7 @@ const {
   ITREND_NEG_GAMMA_BLOCK = true,
   GEX_REGIME_HYST_M = 250, GEX_WALL_HOLD_MIN = 6,   // 10/15: wall hysteresis (minutes a new strike must win before it becomes the wall)
   ITREND_LATE_START_ET = 11.0, ITREND_LATE_ADX_MIN = 40, ITREND_LATE_ADX_ENABLED = true, ITREND_MODE = "live",
+  ITREND_ADX_GATE = true, ITREND_BREADTH_GATE = true, ITREND_NEG_GAMMA_DIR_GATE = true, SLEEVES_BYPASS_LEGACY_SKIPS = false,
   LEGACY_SCORED_ENTRIES = true,
   ITREND_ENABLED = true, ITREND_ADX_MIN = 25, ITREND_VWAP_MIN = 0.05, ITREND_BREADTH_STRONG = 55,   // 9/20: ITREND_ENABLED aligned to constants=true (kill via constants, not this default). 9/21 FIX: comment had eaten ITREND_VWAP_MIN + ITREND_BREADTH_STRONG off this line → itrend crashed all 9/21
   ITREND_START_ET = 10.0, ITREND_END_ET = 12.0, ITREND_COOLDOWN_MIN = 30,
@@ -1635,14 +1636,18 @@ async function runScan() {
       continue;
     }
 
+    // 10/20 (Harrison): the gap-up skip and the below-VWAP knife block were legacy score-path rules that `continue`d the
+    // whole ticker — so they also silenced the sleeves. With SLEEVES_BYPASS_LEGACY_SKIPS they only flag the legacy path.
+    let _legacySkipReason = null;
     if (bars.length >= 2) {
       const overnightGap = Math.abs(bars[bars.length-1].o - bars[bars.length-2].c) / bars[bars.length-2].c;
       const _gapDir = bars[bars.length-1].o - bars[bars.length-2].c;
       const _isCreditPutMode = false;
       const _skipForGap = overnightGap > MAX_GAP_PCT && _gapDir > 0;
       if (_skipForGap) {
-        logEvent("filter", `${stock.ticker} gap UP ${(overnightGap*100).toFixed(1)}% overnight - skip`);
-        continue;
+        if (!SLEEVES_BYPASS_LEGACY_SKIPS) { logEvent("filter", `${stock.ticker} gap UP ${(overnightGap*100).toFixed(1)}% overnight - skip`); continue; }
+        _legacySkipReason = `gap UP ${(overnightGap*100).toFixed(1)}% overnight`;
+        logOnChange("gapskip-" + stock.ticker, "1", "filter", `${stock.ticker} gap UP ${(overnightGap*100).toFixed(1)}% overnight — legacy path skipped; sleeves still evaluate`, 60 * 60000);
       }
       if (overnightGap > MAX_GAP_PCT && _gapDir < 0) {
         logEvent("filter", `${stock.ticker} gap DOWN ${(overnightGap*100).toFixed(1)}% — put thesis possible, scoring continues`);
@@ -1810,7 +1815,8 @@ async function runScan() {
         const _vwPctBelow   = ((price/vwap-1)*100).toFixed(1);
         if (_vwLiftOff < MR_INTRA_LIFTOFF_PTS) {
           logEvent("filter", `[VWAP] ${stock.ticker} MR call path blocked — ${_vwPctBelow}% below VWAP, still falling (RSI ${signals.rsi.toFixed(0)} vs sessLow ${_vwSessLowRSI.toFixed(0)}, liftoff ${_vwLiftOff.toFixed(0)}<${MR_INTRA_LIFTOFF_PTS})`);
-          continue;
+          if (!SLEEVES_BYPASS_LEGACY_SKIPS) continue;
+          _legacySkipReason = "below-VWAP falling knife (legacy call path)";   // 10/20: sleeves still evaluate
         }
         logEvent("filter", `[VWAP] ${stock.ticker} below-VWAP call ALLOWED (early turn) — ${_vwPctBelow}% below VWAP but RSI lifting off (sessLow ${_vwSessLowRSI.toFixed(0)}→${signals.rsi.toFixed(0)}, +${_vwLiftOff.toFixed(0)})`);
       }
@@ -3051,10 +3057,10 @@ async function runScan() {
           const _iAdx  = (typeof liveStock.adx === "number") ? liveStock.adx : 0;
           const _iBr   = (marketContext && marketContext.breadth && typeof marketContext.breadth.breadthPct === "number") ? marketContext.breadth.breadthPct : 50;
           const _iAdxMin = (ITREND_LATE_ADX_ENABLED && _iH >= ITREND_LATE_START_ET) ? Math.max(ITREND_ADX_MIN, ITREND_LATE_ADX_MIN) : ITREND_ADX_MIN;   // 10/6: ADX 40+ after 11:00 ET; 10/15: switched off (failed out of sample) — still labelled in skipBy
-          if (_ior && _ior.locked && _ior.low > 0 && _ior.high > 0 && _iVw !== null && _iAdx >= _iAdxMin) {
+          if (_ior && _ior.locked && _ior.low > 0 && _ior.high > 0 && _iVw !== null && (!ITREND_ADX_GATE || _iAdx >= _iAdxMin)) {   // 10/20: ADX gate off (label only)
             // breadth is SOFT/fail-open: block only when actively against (neutral ~50 passes both sides)
-            const _brAgainstPut  = _iBr > ITREND_BREADTH_STRONG;          // breadth actively bullish
-            const _brAgainstCall = _iBr < (100 - ITREND_BREADTH_STRONG);  // breadth actively bearish
+            const _brAgainstPut  = ITREND_BREADTH_GATE && _iBr > ITREND_BREADTH_STRONG;   // 10/20: breadth gate off (label only)          // breadth actively bullish
+            const _brAgainstCall = ITREND_BREADTH_GATE && _iBr < (100 - ITREND_BREADTH_STRONG);  // breadth actively bearish
             let _iSide = null, _iReason = null;
             if (_iVw <= -ITREND_VWAP_MIN && _iSlope < 0 && price < _ior.low && !_brAgainstPut) {
               _iSide = "put";  _iReason = `intraday downtrend: vwap${_iVw.toFixed(2)}% slope<0 px$${price.toFixed(2)}<ORlow$${_ior.low.toFixed(2)} adx${_iAdx.toFixed(0)} brdth${_iBr}%`;
@@ -3082,7 +3088,7 @@ async function runScan() {
               // dominant direction = price vs the 50-day (below = down-biased). Catches a weakening tape
               // (price under the 50d even before the 50d/100d cross) — 9/01 QQQ was 707 < 50d 712.
               const _iDailyDir = (_iDT && _iDT.ma50) ? (price > _iDT.ma50 ? 1 : -1) : null;
-              if (_iGamma === "neg" && _iDailyDir !== null) {
+              if (ITREND_NEG_GAMMA_DIR_GATE && _iGamma === "neg" && _iDailyDir !== null) {   // 10/20: off
                 if (_iSide === "call" && _iDailyDir === -1) { recordStandDown("itrend", "neg-gamma: call fights down-biased tape"); logEvent("filter", `[INTRADAY-TREND] ${liveStock.ticker} CALL suppressed — neg gamma + price below 50d (ride the trend, don't fade the bounce)`); _iSide = null; _iSuppressed = true; }
                 else if (_iSide === "put" && _iDailyDir === 1) { recordStandDown("itrend", "neg-gamma: put fights up-biased tape"); logEvent("filter", `[INTRADAY-TREND] ${liveStock.ticker} PUT suppressed — neg gamma + price above 50d`); _iSide = null; _iSuppressed = true; }
               }
@@ -3660,6 +3666,7 @@ async function runScan() {
     // it fired once ever. Only the dormant MR-scalp still rides this path, so it is kept. Everything above (verdict,
     // telemetry, BREAK_TRIGGER_ENFORCE's gamma-regime plumbing) still runs — only the queueing for entry stops, which
     // also ends the per-scan 0.35-delta options prefetch for these candidates ([IV-COVERAGE], 3,198 lines on 10/15).
+    if (_legacySkipReason) continue;   // 10/20: legacy-only skips (gap-up / falling knife) still stop the legacy + MR-scalp queue
     if (!LEGACY_SCORED_ENTRIES && !liveStock._mrScalp) {
       logOnChange("legacy-" + liveStock.ticker, "off", "filter", `[LEGACY] ${liveStock.ticker} ${eeCandidate.optionType} score ${eeCandidate.score} not queued — score/break entries retired 10/15 (sleeves only)`, 60 * 60000);
       continue;
