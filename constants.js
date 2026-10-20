@@ -772,6 +772,9 @@ const ITREND_ADX_GATE           = false;
 const ITREND_BREADTH_GATE       = false;
 const ITREND_NEG_GAMMA_DIR_GATE = false;
 const SLEEVES_BYPASS_LEGACY_SKIPS = true;
+// 10/20 (Harrison): which opening range intraday-trend must break. "textbook" = true high/low of the 9:30-9:44 one-minute
+// bars (Crabel; the ORB literature). "apex" = the old sampled range (~9:35 on, scan prices).
+const ITREND_OR_SOURCE = "textbook";
 // 10/6 (Harrison): ADX-TIERED SIZING for intraday-trend. Under today's rules (10:00-12:00 ET, not negative gamma),
 // live itrend at ADX 40+ = 13 trades, 76% WR, +$49.2/trade (t=+2.95); ADX 25-40 = 21 trades, -$227. Counterfactual
 // 2x at 40+: net +$1,051 vs +$412, worst drawdown -$168 vs -$230. Caveat: 7 of the 13 were on 9/21. Cash and heat
@@ -1029,7 +1032,7 @@ module.exports = {
   ITREND_ADX_MIN, ITREND_VWAP_MIN, ITREND_BREADTH_STRONG, ITREND_START_ET, ITREND_END_ET, ITREND_NEG_GAMMA_BLOCK,
   ITREND_ADX_SIZE_ENABLED, ITREND_ADX_SIZE_MIN, ITREND_ADX_SIZE_CONTRACTS, TREND_SIZE_AT_STOP, TREND_MAX_RISK_PCT,
   ITREND_LATE_START_ET, ITREND_LATE_ADX_MIN, ITREND_LATE_ADX_ENABLED, LEGACY_SCORED_ENTRIES, ITREND_MODE,
-  ITREND_ADX_GATE, ITREND_BREADTH_GATE, ITREND_NEG_GAMMA_DIR_GATE, SLEEVES_BYPASS_LEGACY_SKIPS,
+  ITREND_ADX_GATE, ITREND_BREADTH_GATE, ITREND_NEG_GAMMA_DIR_GATE, SLEEVES_BYPASS_LEGACY_SKIPS, ITREND_OR_SOURCE,
   ITREND_TRAIL_ARM_PCT, ITREND_TRAIL_GIVEBACK_PCT, ITREND_STOP_PCT, ITREND_COOLDOWN_MIN, ITREND_MAX_HOLD_MIN, ITREND_NOARM_MIN,
   UNIVERSAL_NOARM_ENABLED, UNIVERSAL_NOARM_MIN, RSI_DEADZONE_VETO,
   STRADDLE_TP_PCT, STRADDLE_MAX_HOLD_MIN,
