@@ -140,7 +140,7 @@ const {
   ITREND_NEG_GAMMA_BLOCK = true,
   GEX_REGIME_HYST_M = 250, GEX_WALL_HOLD_MIN = 6,   // 10/15: wall hysteresis (minutes a new strike must win before it becomes the wall)
   ITREND_LATE_START_ET = 11.0, ITREND_LATE_ADX_MIN = 40, ITREND_LATE_ADX_ENABLED = true, ITREND_MODE = "live",
-  ITREND_ADX_GATE = true, ITREND_BREADTH_GATE = true, ITREND_NEG_GAMMA_DIR_GATE = true, SLEEVES_BYPASS_LEGACY_SKIPS = false,
+  ITREND_ADX_GATE = true, ITREND_BREADTH_GATE = true, ITREND_NEG_GAMMA_DIR_GATE = true, SLEEVES_BYPASS_LEGACY_SKIPS = false, ITREND_OR_SOURCE = "apex",
   LEGACY_SCORED_ENTRIES = true,
   ITREND_ENABLED = true, ITREND_ADX_MIN = 25, ITREND_VWAP_MIN = 0.05, ITREND_BREADTH_STRONG = 55,   // 9/20: ITREND_ENABLED aligned to constants=true (kill via constants, not this default). 9/21 FIX: comment had eaten ITREND_VWAP_MIN + ITREND_BREADTH_STRONG off this line → itrend crashed all 9/21
   ITREND_START_ET = 10.0, ITREND_END_ET = 12.0, ITREND_COOLDOWN_MIN = 30,
@@ -3051,7 +3051,19 @@ async function runScan() {
       try {
         const _iH = (() => { const d = getETTime(); return d.getHours() + d.getMinutes() / 60; })();
         if (_iH >= ITREND_START_ET && _iH < ITREND_END_ET) {
-          const _ior   = state._openRange ? state._openRange[liveStock.ticker] : null;
+          // 10/20 (Harrison): trade the STANDARD opening range — true high/low of the 9:30-9:44 one-minute bars (Crabel;
+          // the ORB literature) — not APEX's sampled range, which starts ~9:35 (waits for VWAP) and uses scan prices, so
+          // it is narrower and "breaks" too easily (10/16: QQQ 723.34 vs 725.50, SPY 772.14 vs 772.92). Falls back to
+          // APEX's range only if the bars are missing.
+          const _iorApex = state._openRange ? state._openRange[liveStock.ticker] : null;
+          const _iorStd = (ITREND_OR_SOURCE === "textbook") ? (() => {
+            const _c = (state._dayCtx || {})[liveStock.ticker];
+            const _t = (_c && _c.day === DAYCTX.etDateStr()) ? _c.orT : null;
+            return (_t && _t.done && _t.hi > 0 && _t.lo > 0) ? { high: _t.hi, low: _t.lo, locked: true, src: "textbook" } : null;
+          })() : null;
+          const _ior   = _iorStd || _iorApex;
+          logOnChange("orsrc-" + liveStock.ticker, _iorStd ? `t${_iorStd.high}/${_iorStd.low}` : "apex", "scan",
+            `[ITREND-OR] ${liveStock.ticker} entry range: ${_iorStd ? `STANDARD 9:30-9:44 $${_iorStd.low}-$${_iorStd.high}` : `APEX sampled range (standard range not ready)${_iorApex && _iorApex.locked ? ` $${_iorApex.low.toFixed(2)}-$${_iorApex.high.toFixed(2)}` : ""}`}`, 6 * 60 * 60000);
           const _iVw   = (liveStock.intradayVWAP > 0 && price > 0) ? ((price - liveStock.intradayVWAP) / liveStock.intradayVWAP) * 100 : null;
           const _iSlope = (state._vwapSlope || {})[liveStock.ticker] ?? 0;
           const _iAdx  = (typeof liveStock.adx === "number") ? liveStock.adx : 0;
