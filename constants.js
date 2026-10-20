@@ -745,7 +745,7 @@ const ITREND_ENABLED      = true;
 // 10/19 (Harrison): "shadow" = signals are recorded in the blocked-signal ledger, no orders. Harness T7 (10/16): APEX's
 // intraday-trend rules lost on 10 years of SPY and QQQ (−0.7% of premium per trade, t −9 / −8, every year), and holding
 // longer was worse. Pre-registered consequence. "live" = place orders as before.
-const ITREND_MODE        = "shadow";
+const ITREND_MODE        = "live";     // 10/20 (Harrison): back to live — non-literature entry blocks removed (see ITREND_*_GATE below)
 const ITREND_DELTA        = 0.50;   // ATM-ish: responsiveness for a same-day move (not deep-ITM)
 const ITREND_DELTA_MIN    = 0.42;
 const ITREND_DELTA_MAX    = 0.60;
@@ -755,13 +755,23 @@ const ITREND_DTE_MAX      = 21;
 const ITREND_ADX_MIN      = 25;     // trend-strength floor — telemetry p50=22, so this keeps the top ~42% (out of the chop)
 const ITREND_VWAP_MIN     = 0.05;   // |vwap%| floor — clearly on one side of VWAP (p50 dist = 0.09%)
 const ITREND_BREADTH_STRONG = 55;   // soft breadth: block only when breadth is actively AGAINST (fail-open at neutral)
-const ITREND_START_ET     = 10.0;   // after OR locks (9:45) + let the trend establish
-const ITREND_END_ET       = 12.0;   // 10/2 (Harrison): was 13.5. Live itrend 9/14-10/2: 10-11 ET +$20.2/trade (n=29), 11-12 -$1.7 (n=18), 12-13:30 -$9.3 (n=30, 33% WR). Edge is in the first trading hour; midday entries bleed (midday volume lull, Admati & Pfleiderer 1988). Entries only — open positions still exit normally.
+const ITREND_START_ET     = 9.75;   // 10/20 (Harrison): = the opening-range lock (9:45). Was 10:00 — no published basis for the extra 15 min (ORB literature enters on the first break after the range)
+const ITREND_END_ET       = 15.25;  // 10/20 (Harrison): = the global 3:15 entry cutoff. Was 12:00 (APEX data only: 11-12 −$174, 12+ −$457, no literature). Intraday-momentum papers trade the whole session
 // 9/30 (Harrison): intraday-trend stands aside ENTIRELY in negative gamma. Data 9/14-9/30: itrend-family
 // entries in neg gamma 7 trades / 14% WR / -$37 avg vs pos gamma 38 / 60% / +$15; and on this tape moves
 // REVERSE more in neg gamma (81 rev vs 37 cont), in every time-of-day window. A momentum sleeve has no
 // business there. false = fall back to the older direction-only gate below it.
-const ITREND_NEG_GAMMA_BLOCK = true;
+// 10/20 (Harrison): OFF. The literature points the other way — intraday momentum is concentrated on negative-gamma
+// days (Baltussen, Da, Lammers & Martens 2021). Signals are now traded in every regime; gexReg is stamped on each entry.
+const ITREND_NEG_GAMMA_BLOCK = false;
+// 10/20 (Harrison): non-literature intraday-trend entry gates, all OFF (each still computed and logged as a label):
+//   ADX floor (Wilder ADX — practitioner, no academic support), breadth soft block (no support), the negative-gamma
+//   direction gate vs the 50d (built from one day, 9/01), and the two legacy per-ticker skips that also stopped the
+//   sleeves (overnight gap-up > 3%, below-VWAP "falling knife" call block — both now apply to the legacy path only).
+const ITREND_ADX_GATE           = false;
+const ITREND_BREADTH_GATE       = false;
+const ITREND_NEG_GAMMA_DIR_GATE = false;
+const SLEEVES_BYPASS_LEGACY_SKIPS = true;
 // 10/6 (Harrison): ADX-TIERED SIZING for intraday-trend. Under today's rules (10:00-12:00 ET, not negative gamma),
 // live itrend at ADX 40+ = 13 trades, 76% WR, +$49.2/trade (t=+2.95); ADX 25-40 = 21 trades, -$227. Counterfactual
 // 2x at 40+: net +$1,051 vs +$412, worst drawdown -$168 vs -$230. Caveat: 7 of the 13 were on 9/21. Cash and heat
@@ -1019,6 +1029,7 @@ module.exports = {
   ITREND_ADX_MIN, ITREND_VWAP_MIN, ITREND_BREADTH_STRONG, ITREND_START_ET, ITREND_END_ET, ITREND_NEG_GAMMA_BLOCK,
   ITREND_ADX_SIZE_ENABLED, ITREND_ADX_SIZE_MIN, ITREND_ADX_SIZE_CONTRACTS, TREND_SIZE_AT_STOP, TREND_MAX_RISK_PCT,
   ITREND_LATE_START_ET, ITREND_LATE_ADX_MIN, ITREND_LATE_ADX_ENABLED, LEGACY_SCORED_ENTRIES, ITREND_MODE,
+  ITREND_ADX_GATE, ITREND_BREADTH_GATE, ITREND_NEG_GAMMA_DIR_GATE, SLEEVES_BYPASS_LEGACY_SKIPS,
   ITREND_TRAIL_ARM_PCT, ITREND_TRAIL_GIVEBACK_PCT, ITREND_STOP_PCT, ITREND_COOLDOWN_MIN, ITREND_MAX_HOLD_MIN, ITREND_NOARM_MIN,
   UNIVERSAL_NOARM_ENABLED, UNIVERSAL_NOARM_MIN, RSI_DEADZONE_VETO,
   STRADDLE_TP_PCT, STRADDLE_MAX_HOLD_MIN,
