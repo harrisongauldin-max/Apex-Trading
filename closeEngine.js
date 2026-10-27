@@ -96,6 +96,56 @@ async function _confirmCloseFill(resp, label) {
   return null;
 }
 
+// 10/27 (Harrison): EXECUTION AT THE MID — passive sell rungs for NON-URGENT exits (midExec.exitSteps).
+// Runs BEFORE the existing sell-at-bid order. Each rung: limit sell, poll, cancel, re-read (same cancel race as
+// every other order here). Returns {filled, price, idx} | {partial, qty} | null (nothing filled -> caller runs the
+// old bid order unchanged). A partial fill stops everything for this scan: the reconciler syncs the remaining
+// quantity and the next scan re-sells it — never a second full-size sell on top of a partial.
+async function _passiveSell(sym, qty, steps, label) {
+  const MX = require("./midExec");
+  for (let i = 0; i < steps.length; i++) {
+    const st = steps[i];
+    let resp;
+    try {
+      resp = await alpacaPost("/orders", { symbol: sym, qty, side: "sell", type: "limit", time_in_force: "day",
+        limit_price: st.price, position_intent: "sell_to_close",
+        client_order_id: `apex-x-${sym}-${Date.now()}-p${i + 1}`.slice(0, 48) });
+    } catch (e) { logEvent("warn", `[EXEC] ${label} passive rung ${i + 1} error: ${e.message} — falling back to bid`); return null; }
+    if (!resp || !resp.id) { logEvent("warn", `[EXEC] ${label} passive rung ${i + 1} rejected: ${JSON.stringify(resp)?.slice(0, 120)} — falling back to bid`); return null; }
+    if (resp.status === "filled" && parseFloat(resp.filled_avg_price || 0) > 0)
+      return { filled: true, price: parseFloat(parseFloat(resp.filled_avg_price).toFixed(2)), idx: i };
+    const t0 = Date.now();
+    let done = false;
+    while (!done && Date.now() - t0 < st.timeoutMs) {
+      await new Promise(r => setTimeout(r, MX.cfg.pollMs));
+      try {
+        const p = await alpacaGet(`/orders/${resp.id}`);
+        if (p && p.status === "filled" && parseFloat(p.filled_avg_price || 0) > 0)
+          return { filled: true, price: parseFloat(parseFloat(p.filled_avg_price).toFixed(2)), idx: i };
+        if (p && ["canceled", "expired", "rejected"].includes(p.status)) done = true;
+      } catch (_) { done = true; }
+    }
+    let cancelErr = null;
+    try { await alpacaDelete(`/orders/${resp.id}`); } catch (e) { cancelErr = e; }
+    try {
+      await new Promise(r => setTimeout(r, MX.cfg.cancelSettleMs));
+      const fin = await alpacaGet(`/orders/${resp.id}`);
+      const fq = fin ? parseInt(fin.filled_qty || 0) : 0;
+      if (fin && fq >= qty && parseFloat(fin.filled_avg_price || 0) > 0) {
+        logEvent("trade", `[EXEC] ${label} rung ${i + 1} FILLED during cancel @ $${parseFloat(fin.filled_avg_price).toFixed(2)} — recording, no second sell`);
+        return { filled: true, price: parseFloat(parseFloat(fin.filled_avg_price).toFixed(2)), idx: i };
+      }
+      if (fq > 0) { logEvent("warn", `[EXEC-PARTIAL] ${label} rung ${i + 1} filled ${fq}/${qty} — stopping; reconciler syncs, next scan sells the rest`); return { partial: true, qty: fq }; }
+    } catch (e) {
+      // can't confirm the final state: do NOT send another sell on top of a possibly-working order
+      logEvent("warn", `[EXEC] ${label} rung ${i + 1} post-cancel check failed: ${e.message} — position preserved, retry next scan`);
+      return { partial: true, qty: 0 };
+    }
+    if (cancelErr) { logEvent("error", `[EXEC] ${label} could not cancel rung ${i + 1} order ${resp.id}: ${cancelErr.message} — position preserved, check Alpaca`); return { partial: true, qty: 0 }; }
+  }
+  return null;
+}
+
 // ─── Injected dependencies ───────────────────────────────────────
 let _dryRunMode    = false;
 let _getOptionsPrice = async () => 0;
@@ -275,8 +325,25 @@ async function _doClosePosition(ticker, reason, exitPremium = null, contractSym 
             position_intent: "sell_to_close",
           };
         }
-        const closeResp = await alpacaPost("/orders", closeBody);
-        if (closeResp && closeResp.id) {
+        // 10/27: EXECUTION AT THE MID — non-urgent sleeve exits try mid -> halfway first (midExec.js).
+        // Stops / flatten / forced closes get [] here and go straight to the bid exactly as before.
+        let _pv = null;
+        const _MX = require("./midExec");
+        const _pvSteps = isShortLeg ? [] : _MX.exitSteps(reason, pos.bid, pos.ask, pos._bidAt);
+        if (_pvSteps.length) {
+          const _qb = pos.bid, _qa = pos.ask;
+          _pv = await _passiveSell(closeSym, closeQty, _pvSteps, `${ticker} ${reason}`);
+          if (_pv && _pv.filled) {
+            ep = _pv.price; _epSrc = "fill"; alpacaCloseOk = true;
+            logEvent("trade", _MX.execLine("SELL", ticker, closeSym, _qb, _qa, ep, _pv.idx, _pvSteps.length + 1, _pvSteps[_pv.idx].label) + ` | reason:${reason}`);
+          } else if (!_pv) {
+            logEvent("scan", `[EXEC] ${ticker} SELL ${closeSym} no passive fill (${_pvSteps.map(x => x.price.toFixed(2)).join(" / ")}) — selling at bid $${(+_qb).toFixed(2)} as before | reason:${reason}`);
+          }
+        }
+        const closeResp = _pv ? null : await alpacaPost("/orders", closeBody);
+        if (_pv) {
+          // handled by the passive rungs: filled -> booked below; partial/unknown -> alpacaCloseOk stays false, position preserved
+        } else if (closeResp && closeResp.id) {
           logEvent("trade", `Alpaca close order: ${closeResp.id} | ${closeSym} | ${closeQty}x ${isShortLeg ? "buy_to_close" : "sell_to_close"} | reason:${reason}`);
 
           // ── 7/31: CONFIRM THE FILL. DO NOT BOOK A CLOSE ON AN ORDER ID ALONE. ────────
@@ -312,6 +379,7 @@ async function _doClosePosition(ticker, reason, exitPremium = null, contractSym 
 
           if (_closeFilled) {
             alpacaCloseOk = true;
+            if (!isShortLeg) logEvent("trade", _MX.execLine("SELL", ticker, closeSym, pos.bid, pos.ask, ep, _pvSteps.length, _pvSteps.length + 1, "bid") + ` | reason:${reason}`);
           } else {
             // CANCEL. Leaving it working is what blocked the manual close on 7/31 — the
             // contracts stay committed to the open order. alpacaCloseOk stays false, so the
@@ -332,6 +400,7 @@ async function _doClosePosition(ticker, reason, exitPremium = null, contractSym 
                 _closeFilled = true; alpacaCloseOk = true;
                 ep = parseFloat(parseFloat(_fin.filled_avg_price).toFixed(2)); _epSrc = "fill";
                 logEvent("trade", `[CLOSE] ${closeSym} close order ${closeResp.id} FILLED during cancel @ $${ep} — recording the close (no second sell)`);
+                if (!isShortLeg) logEvent("trade", _MX.execLine("SELL", ticker, closeSym, pos.bid, pos.ask, ep, _pvSteps.length, _pvSteps.length + 1, "bid") + ` | reason:${reason}`);
               } else if (_finQty > 0) {
                 logEvent("warn", `[CLOSE-PARTIAL] ${closeSym} close order ${closeResp.id} filled ${_finQty}/${closeQty} before cancel — the reconciler will sync the remaining quantity`);
               }
