@@ -642,8 +642,13 @@ async function executeTrade(stock, price, score, scoreReasons, vix, optionType =
     try {
       const askPrice = parseFloat(contract.ask.toFixed(2));
       const midPrice = contract.bid > 0 ? parseFloat(((contract.bid + contract.ask) / 2).toFixed(2)) : askPrice;
-      const _payUp = parseFloat(Math.min(askPrice * 1.02, askPrice + 0.15).toFixed(2));
-      const concessionPrices = [askPrice, _payUp];   // BUG-5 fix: escalate for a BUY — cross at ask, then pay up (<=2% / 15c) to catch a quote that moved between findContract and submit. Was [ask, mid], which RETREATED and guaranteed the 2nd attempt missed in a fast tape.
+      // 10/27: EXECUTION AT THE MID (midExec.js). Ladder = mid -> halfway -> ask -> pay-up when EXEC_MID_ENABLED,
+      // else the old [ask, pay-up] (BUG-5: never retreat below the ask once crossing). Each rung keeps the
+      // cancel-race re-read below, so a rung that fills during its cancel is never re-bought.
+      const _MX = require('./midExec');
+      const _steps = _MX.entrySteps(contract.bid, contract.ask);
+      const concessionPrices = _steps.map(s => s.price);
+      const _q = { bid: contract.bid, ask: contract.ask };   // the quote the ladder was priced from
       let limitPrice = askPrice;
       let fillConfirmed = false;
       let fillPrice = null;
@@ -652,7 +657,7 @@ async function executeTrade(stock, price, score, scoreReasons, vix, optionType =
       for (let attempt = 0; attempt < concessionPrices.length && !fillConfirmed; attempt++) {
         limitPrice = concessionPrices[attempt];
         if (attempt > 0) {
-          logEvent("trade", `Order concession attempt ${attempt+1}: paying up to $${limitPrice} to ensure fill`);
+          logEvent("trade", `Order concession attempt ${attempt+1}/${concessionPrices.length} (${_steps[attempt].label}): limit $${limitPrice}`);
         }
         const orderBody = {
           symbol:          contract.symbol,
@@ -673,7 +678,7 @@ async function executeTrade(stock, price, score, scoreReasons, vix, optionType =
         alpacaOrderId = orderResp.id;
         logEvent("trade", `Alpaca order submitted: ${orderResp.id} | ${contract.symbol} | ${contracts}x @ $${limitPrice} (attempt ${attempt+1})`);
 
-        const FILL_TIMEOUT  = attempt === 0 ? 6000 : 8000;
+        const FILL_TIMEOUT  = _steps[attempt].timeoutMs;
         const POLL_INTERVAL = 1000;
         const pollStart = Date.now();
 
@@ -719,6 +724,12 @@ async function executeTrade(stock, price, score, scoreReasons, vix, optionType =
         }
       }
 
+      if (fillConfirmed && fillPrice) {
+        const _ri = Math.max(0, concessionPrices.indexOf(limitPrice));
+        logEvent("trade", _MX.execLine("BUY", stock.ticker, contract.symbol, _q.bid, _q.ask, fillPrice, _ri, concessionPrices.length, _steps[_ri] ? _steps[_ri].label : "?"));
+      } else {
+        logEvent("warn", `[EXEC-MISS] ${stock.ticker} BUY ${contract.symbol} bid ${(+_q.bid||0).toFixed(2)} ask ${(+_q.ask||0).toFixed(2)} — no fill on ${concessionPrices.length} rungs (${concessionPrices.join(" / ")}) — entry skipped`);
+      }
       if (!fillConfirmed) {
           state._pendingOrder = null;
           markDirty();
