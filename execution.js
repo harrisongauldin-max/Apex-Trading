@@ -323,7 +323,7 @@ async function findContract(ticker, optionType, targetDelta, targetDTE, vix, sto
         && Math.abs((parseFloat(p.strike) || 0) - (parseFloat(_best.strike) || 0)) <= MIN_STRIKE_DISTINCT
       );
       if (_dupOpen) {
-        logEvent("filter", );
+        logEvent("filter", `${ticker} findContract: ${optionType} $${_best.strike} exp ${_best.expDate} REJECTED — within ${MIN_STRIKE_DISTINCT} strikes of open ${_dupOpen.contractSymbol || _dupOpen.strike} (same expiry; one idea, not two)`);   // 10/28: was an empty message — the block was invisible
         return null;
       }
 
@@ -649,7 +649,12 @@ async function executeTrade(stock, price, score, scoreReasons, vix, optionType =
       // "reconstructed" QQQ 715C in the same second this order filled -> ADDON MERGE doubled it to 2 contracts and the
       // trade lost its strategy label. The reconciler skips a symbol stamped here for 120s (the stamp just expires).
       if (!state._entryInFlight) state._entryInFlight = {};
-      state._entryInFlight[contract.symbol] = Date.now();
+      for (const [_k, _v] of Object.entries(state._entryInFlight)) { const _t = typeof _v === "number" ? _v : (_v && _v.at) || 0; if (Date.now() - _t > 86400000) delete state._entryInFlight[_k]; }   // 10/28: prune (>1 day)
+      // 10/28: carry the strategy so a reconcile that does rebuild this contract (after the 120s skip) restores its label
+      state._entryInFlight[contract.symbol] = { at: Date.now(),
+        strategy: stock._straddle ? "vol-straddle" : stock._iTrend ? "intraday-trend" : stock._isTrend ? "trend-swing" : stock._structBreak ? "struct-break" : (stock._mrFade ? "mr-fade-lit" : (_mrScalp ? "mr-scalp" : (stock._mrStrong ? "mr" : "breakout-or-context"))),
+        iTrend: !!stock._iTrend, isTrend: !!stock._isTrend, mrFade: !!stock._mrFade, straddle: !!stock._straddle, structBreak: !!stock._structBreak,
+        mrInv: stock._mrFade && typeof stock._mrFade.invalidationPx === "number" ? stock._mrFade.invalidationPx : null };
       const _MX = require('./midExec');
       const _steps = _MX.entrySteps(contract.bid, contract.ask);
       const concessionPrices = _steps.map(s => s.price);
@@ -1205,7 +1210,6 @@ async function executeTrade(stock, price, score, scoreReasons, vix, optionType =
     entryMomentum:  stock.momentum || null,
     dteBand:         dteBand || (_sameWeekLeg ? "sameweek" : "standard"),   // leg tag — was missing from the journal (needed for the leg A/B)
     entryADX:        stock._adx ?? stock.adx ?? 0,                            // intraday trend strength at entry — was missing from the journal
-    isMeanReversion: isMeanReversion || false,                               // entry type — was missing from the journal
     entryRelStr:     stock._relStrength || 1.0,                              // relative strength at entry — for the SPY/QQQ divergence
     entryIntradayScore: (() => {                                             // 7/28: logging-only intraday score, for ranking validation vs the legacy score
       const _is = (state._intradayScore || {})[stock.ticker];
