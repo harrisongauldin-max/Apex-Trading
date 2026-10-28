@@ -738,38 +738,54 @@ cron.schedule("55 19,20 * * 1-5", async () => {
 
 // 3:45pm ET hard close — pure intraday (9/21: moved 3:15 → 3:45; entries still cut at 3:15, giving
 // positions opened before 3:15 an extra 30min to work before the flatten)
-cron.schedule("45 19,20 * * 1-5", async () => {
-  const et = getETTime();
-  if (!(et.getHours() === 15 && et.getMinutes() === 45)) return;
+// 10/28 (Harrison, bug check): THE FLATTEN NOW RETRIES. It used to run once at 3:45; a sell that did not fill was
+// cancelled ("position preserved") and nothing tried again, so an intraday position that was up and still rising
+// (no exit rule fires) could be carried overnight. Pass 2 at 3:50 re-tries anything still open; pass 3 at 3:55
+// prices the sell to cross (a few cents under the live bid) so it fills.
+async function runEodFlatten(pass) {
   if (state._overnightCutDisabled) {
-    logEvent("scan", "[EOD CLOSE] Disabled for this session — skipping 3:15pm hard close");
-    return;
+    if (pass === 1) logEvent("scan", "[EOD CLOSE] Disabled for this session — skipping the 3:45pm hard close");
+    return { closed: 0, left: 0, skipped: true };
   }
   const { isFlattenExempt } = require('./constants');
   const _allPos = state.positions || [];
   // 8/27: label-driven flatten. swing-class positions (trend-swing) hold overnight; the exit engine
-  // resumes managing them at next open. Everything intraday still hard-closes at 3:15.
+  // resumes managing them at next open. Everything intraday still hard-closes.
   const positions = _allPos.filter(p => !isFlattenExempt(p.entryStrategy));
   const _held = _allPos.length - positions.length;
-  if (positions.length === 0) { if (_held > 0) logEvent("scan", `[EOD CLOSE] 3:45pm — ${_held} swing position(s) HELD overnight, 0 intraday to close.`); return; }
-  logEvent("scan", `[EOD CLOSE] 3:45pm — closing ${positions.length} intraday position(s)${_held ? `; HOLDING ${_held} swing overnight` : ""}.`);
+  const _label = pass === 1 ? "3:45pm" : pass === 2 ? "3:50pm RETRY" : "3:55pm FINAL (crossing)";
+  if (positions.length === 0) {
+    if (pass === 1 && _held > 0) logEvent("scan", `[EOD CLOSE] 3:45pm — ${_held} swing position(s) HELD overnight, 0 intraday to close.`);
+    return { closed: 0, left: 0 };
+  }
+  logEvent(pass === 1 ? "scan" : "warn", `[EOD CLOSE] ${_label} — closing ${positions.length} intraday position(s)${_held ? `; HOLDING ${_held} swing overnight` : ""}.`);
   for (const pos of [...positions]) {
     const _curPrice = (pos.currentPrice != null && !isNaN(pos.currentPrice) && pos.currentPrice > 0)
       ? pos.currentPrice : pos.premium;
     const chg    = pos.premium > 0 ? (_curPrice - pos.premium) / pos.premium : 0;
     const reason = chg > 0 ? "eod-profit-close" : "eod-close";
     logEvent("scan",
-      `[EOD CLOSE] Closing ${pos.ticker} — reason:${reason} chg:${(chg*100).toFixed(0)}% ` +
+      `[EOD CLOSE] ${_label} Closing ${pos.ticker} — reason:${reason} chg:${(chg*100).toFixed(0)}% ` +
       `premium:$${pos.premium} current:$${_curPrice.toFixed(2)}`
     );
     try {
-      await closePosition(pos.ticker, reason, null, pos.contractSymbol || pos.buySymbol);
+      await closePosition(pos.ticker, reason, null, pos.contractSymbol || pos.buySymbol, pass >= 3 ? { aggressive: true } : {});
     } catch(e) {
       logEvent("error", `[EOD CLOSE] Failed to close ${pos.ticker}: ${e.message}`);
     }
     await new Promise(r => setTimeout(r, 1000));
   }
-});
+  const left = (state.positions || []).filter(p => !isFlattenExempt(p.entryStrategy));
+  if (left.length) logEvent(pass >= 3 ? "error" : "warn", `[EOD CLOSE] ${_label} — ${left.length} intraday position(s) STILL OPEN: ${left.map(p => p.contractSymbol || p.ticker).join(", ")}${pass >= 3 ? " — CHECK ALPACA, will be carried overnight" : " — retrying at the next pass"}`);
+  return { closed: positions.length - left.length, left: left.length };
+}
+for (const [min, pass] of [[45, 1], [50, 2], [55, 3]]) {
+  cron.schedule(`${min} 19,20 * * 1-5`, async () => {
+    const et = getETTime();
+    if (!(et.getHours() === 15 && et.getMinutes() === min)) return;
+    await runEodFlatten(pass);
+  });
+}
 
 cron.schedule("15 20,21 * * 1-5", async () => {
   const et = getETTime();
