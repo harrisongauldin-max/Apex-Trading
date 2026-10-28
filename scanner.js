@@ -143,7 +143,7 @@ const {
   ITREND_ADX_GATE = true, ITREND_BREADTH_GATE = true, ITREND_NEG_GAMMA_DIR_GATE = true, SLEEVES_BYPASS_LEGACY_SKIPS = false, ITREND_OR_SOURCE = "apex",
   LEGACY_SCORED_ENTRIES = true,
   ITREND_ENABLED = true, ITREND_ADX_MIN = 25, ITREND_VWAP_MIN = 0.05, ITREND_BREADTH_STRONG = 55,   // 9/20: ITREND_ENABLED aligned to constants=true (kill via constants, not this default). 9/21 FIX: comment had eaten ITREND_VWAP_MIN + ITREND_BREADTH_STRONG off this line → itrend crashed all 9/21
-  ITREND_START_ET = 10.0, ITREND_END_ET = 12.0, ITREND_COOLDOWN_MIN = 30,
+  ITREND_START_ET = 10.0, ITREND_END_ET = 12.0, ITREND_COOLDOWN_MIN = 30, ITREND_FAIL_BACKOFF_MIN = 2,
   BREAK_ENTRY_SCORE = 80, BREAK_CONFIRM_BARS = 1, BREAK_MAX_AGE_MIN = 10, BREAK_VOL_LOOKBACK = 10,
   BREAK_VOL_MULT_PUT = 1.8, BREAK_VOL_MULT_CALL = 2.2, BREAK_ADX_MIN_PUT = 18, BREAK_ADX_MIN_CALL = 22,
   BREAK_VWAP_SLOPE_MIN = 0.0002, BREAK_MAX_EXT_PCT = 0.006, BREAK_CALL_CUTOFF_ET = 12.0,
@@ -887,6 +887,15 @@ async function runScan() {
     { dryRunMode, scanET, alpacaBalance, pdtCount, marketContext }
   );
 
+  // 10/28 (bug check): URGENT EXITS FIRST. Exits run one at a time, and since Batch G a patient exit (lock /
+  // no-arm / max-hold / take-profit) can spend ~10s at the mid plus up to 20s at the bid. A stop on another
+  // position in the same scan used to wait behind it (10/27 10:40: QQQ waited ~20s behind SPY). Stops and every
+  // other non-patient reason now go first; the order within each group is unchanged (stable sort).
+  try {
+    const _PASSIVE = require('./midExec').PASSIVE_EXIT_REASONS;
+    const _rank = (d) => (d.action === 'close' && _PASSIVE.has(d.reason) ? 1 : 0);
+    exitDecisions.sort((a, b) => _rank(a) - _rank(b));
+  } catch (_ordErr) { /* keep original order */ }
   for (const d of exitDecisions) {
     if (d.action === 'close')
       await closePosition(d.ticker, d.reason, d.exitPremium, d.contractSym);
@@ -3159,12 +3168,16 @@ async function runScan() {
                   dTrend: _dAlign };                                                 // 10/14: with | against | none (daily trend flat/mixed)
                 logEvent("filter", `[ITREND-META] ${liveStock.ticker} ${_iSide.toUpperCase()} — ADX ${_iAdx.toFixed(0)} (${liveStock._iMeta.adxTier}) | gamma ${_g ? _g.regime : "n/a"}${_g && _g.regimeHeld ? " (held)" : ""} net ${_g ? Math.round(_g.netGexM) + "M" : "n/a"} flip ${_g && _g.distFlipPct != null ? _g.distFlipPct.toFixed(2) + "%" : "n/a"} | would-skip: ${_skip.length ? _skip.join(", ") : "none"} | ${liveStock._iMeta.winMin} min into the window | daily trend: ${_dAlign || "n/a"} [label only — entering as normal]`);
               } catch (_mErr) { liveStock._iMeta = null; }
-              state._iTrendLast[_iCoolKey] = Date.now();
+              // 10/28 (Harrison, bug check): the 30-min cooldown starts only when an entry actually FILLS (stamped
+              // below). It used to be stamped here, before the order, so a failed entry (no fill, no contract, the
+              // duplicate-strike block) locked that side out for 30 minutes anyway. A failed attempt now backs off
+              // ITREND_FAIL_BACKOFF_MIN instead, so a broken quote can't hammer the broker every scan.
               // 10/19 (Harrison): SHADOW-ONLY. The 10-year replay (harness T7) failed on SPY and QQQ: −0.7% of premium per
               // trade as live, worse when held; live record 54/102 right way. Pre-registered consequence: no orders. The
               // signal still goes to the blocked-signal ledger (10/20/30-min, close and VWAP-trail marks) so it keeps
               // being measured. ITREND_MODE = "live" restores orders.
               if (ITREND_MODE === "shadow") {
+                state._iTrendLast[_iCoolKey] = Date.now();   // shadow: a recorded signal counts as a fire
                 recordGateShadow("itrend-shadow", "intraday-trend", liveStock.ticker, _iSide, price,
                   { adx: +(+_iAdx || 0).toFixed(1), skip: (liveStock._iMeta && liveStock._iMeta.skipBy || []).join("+") || "none" });
                 liveStock._iTrend = null; liveStock._iCvdTag = null; liveStock._iOrTag = null; liveStock._iMeta = null;
@@ -3173,6 +3186,12 @@ async function runScan() {
                 continue;
               }
               const _iOK = await executeTrade(liveStock, price, 0, [_iReason], state.vix, _iSide, false, 1.0, null, null, `${liveStock.ticker}-${_iSide}-itrend-${Date.now()}`);
+              if (_iOK) state._iTrendLast[_iCoolKey] = Date.now();
+              else {
+                const _fb = (typeof ITREND_FAIL_BACKOFF_MIN === "number" ? ITREND_FAIL_BACKOFF_MIN : 2);
+                state._iTrendLast[_iCoolKey] = Date.now() - Math.max(0, ITREND_COOLDOWN_MIN - _fb) * 60000;   // expires in _fb minutes
+                logEvent("filter", `[INTRADAY-TREND] ${liveStock.ticker} ${_iSide.toUpperCase()} entry did not complete — retry allowed in ${_fb} min (no 30-min cooldown for a trade that never happened)`);
+              }
               liveStock._iTrend = null; liveStock._iCvdTag = null; liveStock._iOrTag = null; liveStock._iMeta = null;   // 10/6+10/7: don't let tags leak onto a later entry
               if (_iOK) {
                 try {   // 10/15: start the hold-to-close shadow on the contract just bought
@@ -3879,7 +3898,7 @@ async function runScan() {
             state._nearMiss.push({
               id: `${_nmKey}-${Date.now()}`, at: Date.now(), ticker: stock.ticker, side: optionType,
               score, reason: String(eeResult.reason || "").slice(0, 60), px: price,
-              rsi: stock.rsi ?? null, dRsi: stock.dailyRsi ?? null, adx: signals.adx ?? null,
+              rsi: stock.rsi ?? null, dRsi: stock.dailyRsi ?? null, adx: (typeof stock.adx === "number" ? stock.adx : null),   /* 10/28: was signals.adx — undefined here, so every near-miss row threw and the ledger was never written */
               rangePct: stock._intraRangePct ?? null, rangeRegime: stock._rangeRegime || null,
               rv: stock._rv ?? null, fwdPct: null, fwdMins: null,
             });
