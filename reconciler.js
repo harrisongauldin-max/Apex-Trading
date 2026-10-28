@@ -429,6 +429,20 @@ async function runReconciliation() {
             continue;
           }
 
+          // 10/28: ENTRY IN FLIGHT — APEX is placing/recording this very contract right now (execution.js stamps it
+          // before the order ladder; _pendingOrder covers the same window). Reconstructing it here races the entry
+          // and doubles the position (10/26 QQQ 715C). Skip for 120s; a fill APEX genuinely failed to record is still
+          // picked up on the first reconcile after that.
+          {
+            const _po = _state._pendingOrder;
+            const _stamp = _state._entryInFlight && _state._entryInFlight[p.sym];
+            const _poHit = _po && _po.contractSymbol === p.sym && (Date.now() - (_po.submittedAt || 0)) < 120000;
+            if (_poHit || (_stamp && Date.now() - _stamp < 120000)) {
+              _log('scan', `[RECONCILE] Skipping ${p.ticker} (${p.sym}) — entry in flight (${(((Date.now() - (_stamp || _po.submittedAt)) / 1000)).toFixed(0)}s), APEX will record it`);
+              continue;
+            }
+          }
+
           const curP = p.mktVal > 0 ? p.mktVal / (Math.abs(p.qty) * 100) : p.avgEntry;
 
           // ── FIX: Reconstruct the position object FIRST, then reference it ──────
