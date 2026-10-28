@@ -752,6 +752,17 @@ const ITREND_DELTA_MAX    = 0.60;
 const ITREND_TARGET_DTE   = 14;
 const ITREND_DTE_MIN      = 10;
 const ITREND_DTE_MAX      = 21;
+// 10/28 (Harrison): COST-BASED CONTRACT SELECTION for intraday-trend, live. Instead of a fixed ~14 DTE, every entry
+// scores each candidate (1-21 DTE, delta inside ITREND_DELTA_MIN..MAX) by what one unit of SPY/QQQ exposure costs
+// for the planned hold: (ask - bid + |theta per day| x hold/390) / |delta|, and buys the cheapest. All inputs come
+// from the live chain at that moment — nothing is fitted to past P&L. Chain data 10/20-10/27 (0.45-0.55 delta, 20-min
+// hold): SPY 3-6 DTE $0.100/share of exposure vs 7-13 $0.141 and 14-21 $0.152; QQQ 3-6 $0.138 vs $0.241 / $0.295.
+// 0DTE is never selected (min 1 day). false = the old fixed-DTE selection exactly.
+const ITREND_COST_SELECT        = true;
+const ITREND_SELECT_DTE_MIN     = 1;
+const ITREND_SELECT_DTE_MAX     = 21;
+const ITREND_SELECT_HOLD_MIN    = 20;     // planned hold for the decay term (no-arm cut is 20 min; median hold ~20)
+const ITREND_SELECT_STRIKE_BAND = 0.02;   // fetch strikes within ±2% of spot across all expiries in the window
 const ITREND_ADX_MIN      = 25;     // trend-strength floor — telemetry p50=22, so this keeps the top ~42% (out of the chop)
 const ITREND_VWAP_MIN     = 0.05;   // |vwap%| floor — clearly on one side of VWAP (p50 dist = 0.09%)
 const ITREND_BREADTH_STRONG = 55;   // soft breadth: block only when breadth is actively AGAINST (fail-open at neutral)
@@ -1042,7 +1053,7 @@ module.exports = {
   TREND_ENABLED, TREND_DELTA, TREND_DELTA_MIN, TREND_DELTA_MAX, TREND_TARGET_DTE, TREND_DTE_MIN, TREND_DTE_MAX,
   TREND_ROLL_DTE, TREND_COOLDOWN_DAYS, TREND_MODE, TREND_RETIRE_LIVE, TREND_RETIRE_AFTER_ET, TREND_TICKERS, TREND_EXIT_MODE, TREND_CHANDELIER_ATR, TREND_CHANDELIER_CHECK_ET, TREND_MA_FAST, TREND_MA_SLOW, TREND_RSI_MIN, TREND_RSI_MAX, TREND_OVEREXT_ATR, TREND_BREADTH_MIN,
   TREND_CUTOFF_ET, TREND_RISK_BUDGET, TREND_TRAIL_ARM_PCT, TREND_STOP_UNDL_PCT, TREND_STOP_PCT, TREND_ATR_STOP_MULT, TREND_USTOP_FLOOR, TREND_USTOP_CEIL, TREND_STALE_DAYS, TREND_STALE_PEAK, TREND_TRAIL_GIVEBACK_PCT,
-  ITREND_ENABLED, ITREND_DELTA, ITREND_DELTA_MIN, ITREND_DELTA_MAX, ITREND_TARGET_DTE, ITREND_DTE_MIN, ITREND_DTE_MAX,
+  ITREND_ENABLED, ITREND_DELTA, ITREND_DELTA_MIN, ITREND_DELTA_MAX, ITREND_TARGET_DTE, ITREND_DTE_MIN, ITREND_DTE_MAX, ITREND_COST_SELECT, ITREND_SELECT_DTE_MIN, ITREND_SELECT_DTE_MAX, ITREND_SELECT_HOLD_MIN, ITREND_SELECT_STRIKE_BAND,
   ITREND_ADX_MIN, ITREND_VWAP_MIN, ITREND_BREADTH_STRONG, ITREND_START_ET, ITREND_END_ET, ITREND_NEG_GAMMA_BLOCK,
   ITREND_ADX_SIZE_ENABLED, ITREND_ADX_SIZE_MIN, ITREND_ADX_SIZE_CONTRACTS, TREND_SIZE_AT_STOP, TREND_MAX_RISK_PCT,
   ITREND_LATE_START_ET, ITREND_LATE_ADX_MIN, ITREND_LATE_ADX_ENABLED, LEGACY_SCORED_ENTRIES, ITREND_MODE,
