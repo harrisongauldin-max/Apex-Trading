@@ -656,6 +656,10 @@ async function runBacktest(config) {
         regimeClass: regime?.regimeClass || "A" });
     } else {
       // Not yet settled - track as open position
+      // 10/28 (bug check): agentRegime was only defined in the settled branch above, so this push threw a
+      // ReferenceError and every still-open backtest position was silently dropped. Derive it the same way here.
+      const _arFull = reasons.find(r => r.includes("Agent")) || "";
+      const agentRegime = _arFull.includes("trending_bear") ? "trending_bear" : _arFull.includes("trending_bull") ? "trending_bull" : _arFull.includes("choppy") ? "choppy" : "neutral";
       openBT.push({ entryIdx: i, entryType, entryPrem, positionCost, score,
         expiryIdx: Math.min(i + holdDays, bars.length-1), reasons: reasons.slice(0,3), vixEst, agentRegime,
         useSpread, btNetDebit, btSpreadWidth, btTradeType });
