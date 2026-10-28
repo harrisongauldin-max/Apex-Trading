@@ -39,6 +39,7 @@ const { CAPITAL_FLOOR, MIN_OPTION_PREMIUM, MIN_OI,
         BREAK_DELTA = 0.70, BREAK_DELTA_MIN = 0.55, BREAK_DELTA_MAX = 0.85, BREAK_TARGET_DTE = 7,
         TREND_DELTA = 0.65, TREND_DELTA_MIN = 0.55, TREND_DELTA_MAX = 0.75, TREND_TARGET_DTE = 60, TREND_RISK_BUDGET = 0.01,
         ITREND_DELTA = 0.50, ITREND_DELTA_MIN = 0.42, ITREND_DELTA_MAX = 0.60, ITREND_TARGET_DTE = 14,
+        ITREND_COST_SELECT = false, ITREND_SELECT_DTE_MIN = 1, ITREND_SELECT_DTE_MAX = 21, ITREND_SELECT_HOLD_MIN = 20, ITREND_SELECT_STRIKE_BAND = 0.02,
         VOL_INFRA_ENABLED = false, CHAIN_RETAIN_ENABLED = false, CHAIN_RETAIN_MAX = 60,
         SLIPPAGE_LOG_ENABLED = false, DECISION_SPLIT_LOG = false,
         SPREAD_COST_LOG = false, FEASIBILITY_ENABLED = false, FEASIBILITY_ENFORCE = false,
@@ -125,7 +126,17 @@ async function findContract(ticker, optionType, targetDelta, targetDTE, vix, sto
     if (!targetStrike || targetStrike <= 0) return null;
 
     let fetchMin, fetchMax;
-    if (fixedExpiry) {
+    // 10/28: cost-based selection (intraday-trend only) — wide DTE window, narrow strike band, cheapest exposure wins
+    const _costSel = !fixedExpiry && !!(stock && stock._iTrend) && ITREND_COST_SELECT === true;
+    const _etToday = new Date().toLocaleDateString("en-CA", { timeZone: "America/New_York" });   // YYYY-MM-DD (ET)
+    let _strikeQ = "";
+    if (_costSel) {
+      const _d0 = (k) => { const t = new Date(Date.parse(_etToday + "T12:00:00Z") + k * 86400000); return t.toISOString().slice(0, 10); };
+      fetchMin = _d0(Math.max(1, ITREND_SELECT_DTE_MIN));   // never 0DTE
+      fetchMax = _d0(ITREND_SELECT_DTE_MAX);
+      const _spot = stock ? (stock.price || 0) : 0;
+      if (_spot > 0) _strikeQ = `&strike_price_gte=${(_spot * (1 - ITREND_SELECT_STRIKE_BAND)).toFixed(2)}&strike_price_lte=${(_spot * (1 + ITREND_SELECT_STRIKE_BAND)).toFixed(2)}`;
+    } else if (fixedExpiry) {
       fetchMin = fixedExpiry;
       fetchMax = fixedExpiry;
     } else {
@@ -145,7 +156,7 @@ async function findContract(ticker, optionType, targetDelta, targetDTE, vix, sto
       fetchMax = new Date(today.getTime() + maxDays * 86400000).toISOString().split("T")[0];
     }
 
-    const baseUrl = `/options/contracts?underlying_symbol=${ticker}&expiration_date_gte=${fetchMin}&expiration_date_lte=${fetchMax}&type=${optionType}&limit=200`;
+    const baseUrl = `/options/contracts?underlying_symbol=${ticker}&expiration_date_gte=${fetchMin}&expiration_date_lte=${fetchMax}&type=${optionType}&limit=200${_strikeQ}`;
     let allC = [], tok = null, pages = 0;
     do {
       const pg = await alpacaGet(tok ? `${baseUrl}&page_token=${tok}` : baseUrl, ALPACA_OPTIONS);
@@ -169,7 +180,9 @@ async function findContract(ticker, optionType, targetDelta, targetDTE, vix, sto
       return Math.abs(aDTE - targetDTE) - Math.abs(bDTE - targetDTE);
     });
 
-    const symbols = allC.slice(0, 50).map(c => c.symbol);
+    const _evalN = _costSel ? 100 : 50;   // 10/28: ~3-4 strikes x every expiry in the window
+    if (_costSel) allC = allC.filter(c => String(c.expiration_date) > _etToday);   // belt and braces: no 0DTE
+    const symbols = allC.slice(0, _evalN).map(c => c.symbol);
     const batches = [];
     for (let i = 0; i < symbols.length; i += 25) batches.push(symbols.slice(i, i+25).join(","));
     const snapResults = await Promise.all(
@@ -186,7 +199,9 @@ async function findContract(ticker, optionType, targetDelta, targetDTE, vix, sto
     // yields the IV surface — skew across strikes, term structure across expiries.
     const _chainRows = [];
     let _ivWin = { withIV: 0, total: 0 };   // Q3.1: measure indicative-feed IV coverage across the evaluated window
-    for (const c of allC.slice(0, 50)) {
+    let _cBest = null, _cBestScore = Infinity, _cRef = null, _cRefDist = Infinity;   // 10/28: cheapest + the old-rule reference
+    const _holdFrac = Math.max(1, ITREND_SELECT_HOLD_MIN) / 390;
+    for (const c of allC.slice(0, _evalN)) {
       const snap = snaps[c.symbol];
       if (!snap) continue;
       const q   = snap.latestQuote || {};
@@ -205,7 +220,7 @@ async function findContract(ticker, optionType, targetDelta, targetDTE, vix, sto
       const _bwBand = targetDTE > 10 && targetDTE <= 20;
       const _swingBand = targetDTE > 45;   // 9/02 FIX: trend-swing (60-DTE, ±15) was hitting the 55 standard cap
                                            // and NEVER filling — the gate passed but every 57-58DTE contract got skipped.
-      const DTE_ENTRY_CAP = targetDTE <= 10 ? 8 : (_bwBand ? 16 : (_swingBand ? (targetDTE + 15) : 55));
+      const DTE_ENTRY_CAP = _costSel ? ITREND_SELECT_DTE_MAX : (targetDTE <= 10 ? 8 : (_bwBand ? 16 : (_swingBand ? (targetDTE + 15) : 55)));
       const _bandName = targetDTE <= 10 ? "same-week" : (_bwBand ? "biweekly" : (_swingBand ? "swing" : "standard"));
       if (expDTE > DTE_ENTRY_CAP) {
         logEvent("filter", `${ticker} findContract: skipping $${strike} ${expDTE}DTE — exceeds ${DTE_ENTRY_CAP}DTE entry cap (${_bandName} band)`);
@@ -228,6 +243,22 @@ async function findContract(ticker, optionType, targetDelta, targetDTE, vix, sto
       }
       const _dist = Math.abs(delta - targetDelta);
       const [_accMin, _accMax] = _acceptDeltaRange(stock);   // 10/7: select only what executeTrade will accept
+      // 10/28: cost per unit of exposure for the planned hold. Needs a real quote and a real (negative) theta.
+      const _mkCand = () => ({
+          symbol: c.symbol, strike, expDate: c.expiration_date, expDays: expDTE, premium: parseFloat(mid.toFixed(2)),
+          bid, ask, spread: ask > 0 ? (ask - bid) / ask : 1,
+          greeks: { delta: parseFloat(g.delta || 0).toFixed(3), theta: parseFloat(g.theta || 0).toFixed(3),
+                    gamma: parseFloat(g.gamma || 0).toFixed(4), vega: parseFloat(g.vega || 0).toFixed(3) },
+          oi: parseInt(snap.openInterest || 0), iv: parseFloat(snap.impliedVolatility || sigma) });
+      if (_costSel && delta >= _accMin && delta <= _accMax && bid > 0 && ask > bid) {
+        const _th = parseFloat(g.theta || 0);
+        if (_th < 0 && expDTE >= Math.max(1, ITREND_SELECT_DTE_MIN)) {
+          const _score = ((ask - bid) + Math.abs(_th) * _holdFrac) / delta;   // $ per share of underlying exposure
+          if (_score < _cBestScore) { _cBestScore = _score; _cBest = { ..._mkCand(), _costPerShare: _score, _rawIV }; }
+          // reference: what the old fixed rule would have bought (closest delta inside the old 9-16 DTE band)
+          if (expDTE >= 9 && expDTE <= 16 && _dist < _cRefDist) { _cRefDist = _dist; _cRef = { symbol: c.symbol, expDays: expDTE, strike, score: _score, spread: ask - bid, premium: mid }; }
+        }
+      }
       if (delta >= _accMin && delta <= _accMax && _dist < _bestDist) {
         _bestDist = _dist;
         _bestRawIV = _rawIV;
@@ -246,6 +277,19 @@ async function findContract(ticker, optionType, targetDelta, targetDTE, vix, sto
           oi:      parseInt(snap.openInterest || 0),
           iv:      parseFloat(snap.impliedVolatility || sigma),
         };
+      }
+    }
+
+    // 10/28: cost-based selection wins when it found a priced candidate; otherwise the closest-delta pick stands
+    if (_costSel) {
+      if (_cBest) {
+        const _rawSel = _cBest._rawIV; delete _cBest._rawIV;
+        _best = _cBest; _bestRawIV = _rawSel;
+        const _f = (v) => "$" + v.toFixed(3);
+        const _ref = _cRef ? ` vs old rule ${_cRef.expDays}DTE $${_cRef.strike} ${_f(_cRef.score)}/sh (saves ~$${Math.max(0, (_cRef.score - _cBestScore) * 100 * Math.abs(parseFloat(_best.greeks.delta))).toFixed(2)}/contract)` : " (no old-rule contract in the chain to compare)";
+        logEvent("filter", `[ITREND-SELECT] ${ticker} ${optionType.toUpperCase()} → ${_best.expDays}DTE $${_best.strike} Δ${Math.abs(parseFloat(_best.greeks.delta)).toFixed(2)} mid $${_best.premium} spread $${(_best.ask - _best.bid).toFixed(2)} θ${_best.greeks.theta}/day | cost ${_f(_cBestScore)}/share of exposure for ${ITREND_SELECT_HOLD_MIN}min${_ref}`);
+      } else {
+        logEvent("filter", `[ITREND-SELECT] ${ticker} ${optionType.toUpperCase()} — no priced candidate with theta in ${fetchMin}..${fetchMax}; using closest-delta pick${_best ? ` ${_best.expDays}DTE $${_best.strike}` : " (none)"}`);
       }
     }
 
@@ -288,7 +332,8 @@ async function findContract(ticker, optionType, targetDelta, targetDTE, vix, sto
           // puts until the next v2 fetch (10/2 QQQ: 186 corrupted readings, regime swinging +2,000M <-> -950M). Only
           // write here when the stored chain is NOT from v2 (i.e., v2 is off or fell back to v1).
           const _isV2Chain = !!(state._gexChain && state._gexChain[ticker] && state._gexChain[ticker].v2);
-          if (_cdte != null && _cdte <= 7 && !_isV2Chain) {
+          // 10/28: a cost-selection chain spans many expiries — never let it stand in for a single-expiry GEX chain
+          if (_cdte != null && _cdte <= 7 && !_isV2Chain && !_costSel) {
             if (!state._gexChain) state._gexChain = {};
             if (!state._gexChain[ticker]) state._gexChain[ticker] = {};
             state._gexChain[ticker][optionType] = { rows: _chainRows, dte: _cdte, spot: (stock && (stock.price || stock.lastPrice)) || 0, ts: Date.now() };
@@ -451,6 +496,9 @@ async function executeTrade(stock, price, score, scoreReasons, vix, optionType =
   let contract;
   if (dteBand === "standard") {
     contract = await findContract(stock.ticker, optionType, targetDelta, targetDTE, vix, stock);
+  } else if (stock && stock._iTrend && ITREND_COST_SELECT === true) {
+    // 10/28: intraday-trend always selects fresh by cost — a prefetched contract (chosen by another rule) is ignored
+    contract = await findContract(stock.ticker, optionType, targetDelta, targetDTE, vix, stock);
   } else {
     contract = stock._cachedContract || await findContract(stock.ticker, optionType, targetDelta, targetDTE, vix, stock);
     // 8/17: VALIDATE THE CACHE AGAINST targetDTE, ALWAYS. This guard previously ran only when
@@ -601,6 +649,17 @@ async function executeTrade(stock, price, score, scoreReasons, vix, optionType =
     return false;
   }
 
+  // 10/28 (bug check): the OI and spread gates used to run AFTER the order filled and the position was recorded, so
+  // they never prevented a buy — they just returned false on a trade APEX already owned (fired 9/09, 9/17, 9/22, 9/23).
+  // They now run here, before anything is sent. The post-fill copies below are warnings only.
+  if (!_dryRunMode && contract.oi > 0 && contract.oi < MIN_OI) {
+    logEvent("filter", `${stock.ticker} BLOCKED - OI:${contract.oi} below minimum ${MIN_OI} - unfillable in live trading (pre-submit)`);
+    return false;
+  }
+  if (!_dryRunMode && contract.spread > MAX_SPREAD_PCT) {
+    logEvent("filter", `[WIDE-SPREAD] ${stock.ticker} BLOCKED — spread ${(contract.spread*100).toFixed(1)}% exceeds ${(MAX_SPREAD_PCT*100).toFixed(0)}% max (pre-submit, nothing sent)`);
+    return false;
+  }
   if (!_dryRunMode && !(stock && stock._straddle) && state._pendingOrder && state._pendingOrder.ticker === stock.ticker) {
     logEvent("filter", `${stock.ticker} pending order exists - skipping naked/MR submission`);
     return false;   // 9/20: straddle legs EXEMPT — a straddle is intentionally 2 same-ticker orders back-to-back; the single-entry lock would reject leg 2 and orphan the straddle
@@ -1131,14 +1190,10 @@ async function executeTrade(stock, price, score, scoreReasons, vix, optionType =
   const typeLabel = optionType === "put" ? "P" : "C";
   const dataLabel = contract.symbol ? "REAL" : "EST";
 
-  if (!_dryRunMode && contract.oi > 0 && contract.oi < MIN_OI) {
-    logEvent("filter", `${stock.ticker} BLOCKED - OI:${contract.oi} below minimum ${MIN_OI} - unfillable in live trading`);
-    return false;
-  }
+  // 10/28: post-fill — informational only (the real gates run pre-submit; the position is already owned here)
   if (!_dryRunMode && contract.spread > MAX_SPREAD_PCT) {
     const slippageEst = parseFloat((contract.premium * contract.spread * 0.5 * 100 * contracts).toFixed(2));
-    logEvent("filter", `[WIDE-SPREAD] ${stock.ticker} BLOCKED — spread ${(contract.spread*100).toFixed(0)}% exceeds ${(MAX_SPREAD_PCT*100).toFixed(0)}% max - est. slippage $${slippageEst}`);
-    return false;
+    logEvent("warn", `[WIDE-SPREAD] ${stock.ticker} filled with spread ${(contract.spread*100).toFixed(0)}% > ${(MAX_SPREAD_PCT*100).toFixed(0)}% (quote moved after the pre-submit check) - est. slippage $${slippageEst}`);
   }
   if (contract.oi > 0 && contract.oi < 50) {
     logEvent("warn", `- ${stock.ticker} LOW OI: ${contract.oi} - fill may be slow`);
