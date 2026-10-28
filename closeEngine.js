@@ -146,6 +146,27 @@ async function _passiveSell(sym, qty, steps, label) {
   return null;
 }
 
+// 10/28 (Harrison, "cost leaks"): FRESH QUOTE FOR EVERY SELL. pos.bid comes from the last exit scan and was up to
+// 29s old on 10/27. A limit at a stale bid in a falling market never fills: 10/27 10:39 SPY 767P sold at the old
+// $6.92, sat 20s unfilled, was cancelled and sold next scan at $6.78 (-$14). Fetch the live quote right before
+// pricing the order (and again after the passive mid rungs miss). On any failure this returns null and the old
+// cached bid is used exactly as before.
+async function _freshQuote(sym) {
+  try {
+    const { OPTION_FEED, ALPACA_OPT_SNAP } = require("./constants");
+    const data = await alpacaGet(`/options/snapshots?symbols=${sym}&feed=${OPTION_FEED}`, ALPACA_OPT_SNAP);
+    const snap = data && data.snapshots && data.snapshots[sym];
+    const q = snap && (snap.latestQuote || snap.latest_quote || {});
+    const bid = parseFloat((q && (q.bp || q.bid_price)) || 0), ask = parseFloat((q && (q.ap || q.ask_price)) || 0);
+    return bid > 0 && ask >= bid ? { bid, ask } : null;
+  } catch (_) { return null; }
+}
+function _applyQuote(pos, fq) {
+  if (!fq) return false;
+  pos.bid = fq.bid; pos.ask = fq.ask; pos._bidAt = Date.now();
+  return true;
+}
+
 // ─── Injected dependencies ───────────────────────────────────────
 let _dryRunMode    = false;
 let _getOptionsPrice = async () => 0;
@@ -314,6 +335,7 @@ async function _doClosePosition(ticker, reason, exitPremium = null, contractSym 
             position_intent: "buy_to_close",
           };
         } else {
+          { const _qOld = pos.bid; if (_applyQuote(pos, await _freshQuote(closeSym)) && Math.abs(pos.bid - _qOld) >= 0.01) logEvent("scan", `[EXEC] ${ticker} ${closeSym} fresh quote bid $${pos.bid.toFixed(2)} (cached $${(+_qOld || 0).toFixed(2)})`); }
           const bidPrice = parseFloat((pos.bid > 0 ? pos.bid : ep * 0.98).toFixed(2));
           closeBody = {
             symbol:          closeSym,
@@ -337,7 +359,9 @@ async function _doClosePosition(ticker, reason, exitPremium = null, contractSym 
             ep = _pv.price; _epSrc = "fill"; alpacaCloseOk = true;
             logEvent("trade", _MX.execLine("SELL", ticker, closeSym, _qb, _qa, ep, _pv.idx, _pvSteps.length + 1, _pvSteps[_pv.idx].label) + ` | reason:${reason}`);
           } else if (!_pv) {
-            logEvent("scan", `[EXEC] ${ticker} SELL ${closeSym} no passive fill (${_pvSteps.map(x => x.price.toFixed(2)).join(" / ")}) — selling at bid $${(+_qb).toFixed(2)} as before | reason:${reason}`);
+            // 10/28: re-price the fallback at the bid AS IT IS NOW, not as it was before the ~10s of passive rungs
+            if (_applyQuote(pos, await _freshQuote(closeSym))) closeBody.limit_price = parseFloat(pos.bid.toFixed(2));
+            logEvent("scan", `[EXEC] ${ticker} SELL ${closeSym} no passive fill (${_pvSteps.map(x => x.price.toFixed(2)).join(" / ")}) — selling at bid $${(+closeBody.limit_price).toFixed(2)} (fresh; was $${(+_qb).toFixed(2)}) | reason:${reason}`);
           }
         }
         const closeResp = _pv ? null : await alpacaPost("/orders", closeBody);
