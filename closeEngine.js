@@ -336,7 +336,10 @@ async function _doClosePosition(ticker, reason, exitPremium = null, contractSym 
           };
         } else {
           { const _qOld = pos.bid; if (_applyQuote(pos, await _freshQuote(closeSym)) && Math.abs(pos.bid - _qOld) >= 0.01) logEvent("scan", `[EXEC] ${ticker} ${closeSym} fresh quote bid $${pos.bid.toFixed(2)} (cached $${(+_qOld || 0).toFixed(2)})`); }
-          const bidPrice = parseFloat((pos.bid > 0 ? pos.bid : ep * 0.98).toFixed(2));
+          let bidPrice = parseFloat((pos.bid > 0 ? pos.bid : ep * 0.98).toFixed(2));
+          // 10/28: FINAL flatten pass — price a few cents UNDER the live bid so the sell is marketable and fills at
+          // the best bid even if it ticks down while the order travels (a sell limit below the bid fills AT the bid).
+          if (opts && opts.aggressive) bidPrice = Math.max(0.01, parseFloat((bidPrice - Math.max(0.05, bidPrice * 0.03)).toFixed(2)));
           closeBody = {
             symbol:          closeSym,
             qty:             closeQty,
@@ -351,7 +354,7 @@ async function _doClosePosition(ticker, reason, exitPremium = null, contractSym 
         // Stops / flatten / forced closes get [] here and go straight to the bid exactly as before.
         let _pv = null;
         const _MX = require("./midExec");
-        const _pvSteps = isShortLeg ? [] : _MX.exitSteps(reason, pos.bid, pos.ask, pos._bidAt);
+        const _pvSteps = (isShortLeg || (opts && opts.aggressive)) ? [] : _MX.exitSteps(reason, pos.bid, pos.ask, pos._bidAt);
         if (_pvSteps.length) {
           const _qb = pos.bid, _qa = pos.ask;
           _pv = await _passiveSell(closeSym, closeQty, _pvSteps, `${ticker} ${reason}`);
