@@ -645,6 +645,11 @@ async function executeTrade(stock, price, score, scoreReasons, vix, optionType =
       // 10/27: EXECUTION AT THE MID (midExec.js). Ladder = mid -> halfway -> ask -> pay-up when EXEC_MID_ENABLED,
       // else the old [ask, pay-up] (BUG-5: never retreat below the ask once crossing). Each rung keeps the
       // cancel-race re-read below, so a rung that fills during its cancel is never re-bought.
+      // 10/28: mark this contract as an entry IN FLIGHT. The reconciler runs on its own timer and on 10/26 11:17 it
+      // "reconstructed" QQQ 715C in the same second this order filled -> ADDON MERGE doubled it to 2 contracts and the
+      // trade lost its strategy label. The reconciler skips a symbol stamped here for 120s (the stamp just expires).
+      if (!state._entryInFlight) state._entryInFlight = {};
+      state._entryInFlight[contract.symbol] = Date.now();
       const _MX = require('./midExec');
       const _steps = _MX.entrySteps(contract.bid, contract.ask);
       const concessionPrices = _steps.map(s => s.price);
