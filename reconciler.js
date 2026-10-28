@@ -426,6 +426,7 @@ async function runReconciliation() {
 
           if (_alreadyClosed) {
             _log('warn', `[RECONCILE] Skipping ${p.ticker} (${p.sym}) — closed ${_closeAgeS.toFixed(0)}s ago, sell order still pending fill (grace ${CLOSED_SKIP_GRACE_S}s)`);
+            orphans = Math.max(0, orphans - 1);   // 10/28: not reconstructed — don't count it as one
             continue;
           }
 
@@ -435,10 +436,12 @@ async function runReconciliation() {
           // picked up on the first reconcile after that.
           {
             const _po = _state._pendingOrder;
-            const _stamp = _state._entryInFlight && _state._entryInFlight[p.sym];
+            const _stRaw = _state._entryInFlight && _state._entryInFlight[p.sym];
+            const _stamp = typeof _stRaw === "number" ? _stRaw : (_stRaw && _stRaw.at) || 0;   // 10/28: stamp is now {at, strategy, ...}
             const _poHit = _po && _po.contractSymbol === p.sym && (Date.now() - (_po.submittedAt || 0)) < 120000;
             if (_poHit || (_stamp && Date.now() - _stamp < 120000)) {
               _log('scan', `[RECONCILE] Skipping ${p.ticker} (${p.sym}) — entry in flight (${(((Date.now() - (_stamp || _po.submittedAt)) / 1000)).toFixed(0)}s), APEX will record it`);
+              orphans = Math.max(0, orphans - 1);   // 10/28: the summary line counted skipped orphans as "reconstructed"
               continue;
             }
           }
@@ -482,6 +485,24 @@ async function runReconciliation() {
             stop:   parseFloat((p.avgEntry * (1 - STOP_LOSS_PCT)).toFixed(2)),
             takeProfitPct: TAKE_PROFIT_PCT, fastStopPct: STOP_LOSS_PCT,
           };
+
+          // 10/28 (bug check): RESTORE THE STRATEGY LABEL. A rebuilt position had no entryStrategy and no sleeve flag, so
+          // the intraday-trend exits (lock ladder, no-arm, max-hold) never managed it — the legacy exits did — and the
+          // sleeve didn't see it as open (a second same-side entry could fire). execution.js stamps the strategy before
+          // every order; if this contract was ours today, put the label back.
+          {
+            const _st = _state._entryInFlight && _state._entryInFlight[p.sym];
+            if (_st && typeof _st === "object" && Date.now() - (_st.at || 0) < 12 * 3600000 && _st.strategy) {
+              reconPos.entryStrategy = _st.strategy;
+              if (_st.iTrend) reconPos._iTrend = true;
+              if (_st.isTrend) reconPos._isTrend = true;
+              if (_st.mrFade) { reconPos._isMrFade = true; reconPos._mrInvalidation = _st.mrInv != null ? _st.mrInv : null; }
+              if (_st.straddle) reconPos._isStraddle = true;
+              if (_st.structBreak) reconPos._isStructBreak = true;
+              reconPos.dteLabel = 'RECONCILED-' + _st.strategy;
+              _log('warn', `[RECONCILE] ${p.ticker} (${p.sym}) label restored: ${_st.strategy} (from the entry stamp) — managed by that sleeve's exits`);
+            }
+          }
 
           // Push, save, THEN write journal — all in correct order
           _state.positions.push(reconPos);
