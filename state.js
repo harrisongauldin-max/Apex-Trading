@@ -548,7 +548,7 @@ async function saveDailyLogToRedis(isEOD = false) {
     state._momoBlocks = []; state._momoShadow = []; state._momoLastMin = {};
     state._nearMiss = []; state._nmLastMin = {};
     state._entryFwd = [];
-    state._standDownTally = { brk: {}, mrf: {}, trend: {}, itrend: {} };   // 8/25 reset daily; 8/27 +trend; 8/28 +itrend
+    state._standDownTally = { brk: {}, mrf: {}, trend: {}, itrend: {}, eodm: {} };   // 8/25 reset daily; 8/27 +trend; 8/28 +itrend
     state._vfSkip = [];
     state._gateShadow = [];   // 10/14
     state._holdShadow = [];   // 10/15
@@ -955,7 +955,7 @@ async function restoreBuffersFromRedis() {
 function recordStandDown(strat, rawReason) {   // 8/25: tally why breaks/MR-fades did/didn't fire (regime-starved vs gate-starved)
   if (state._observeOnly) return;   // 10/5: 3:15-4:00 ET observe-only scans don't count toward stand-down tallies
   try {
-    if (!state._standDownTally) state._standDownTally = { brk: {}, mrf: {}, trend: {}, itrend: {} };
+    if (!state._standDownTally) state._standDownTally = { brk: {}, mrf: {}, trend: {}, itrend: {}, eodm: {} };
     const book = strat === "brk" ? state._standDownTally.brk : strat === "trend" ? state._standDownTally.trend : strat === "itrend" ? state._standDownTally.itrend : state._standDownTally.mrf;
     const key = String(rawReason || "other").replace(/[0-9]+(\.[0-9]+)?/g, "N").replace(/\s+/g, " ").trim().slice(0, 60);
     book[key] = (book[key] || 0) + 1;
