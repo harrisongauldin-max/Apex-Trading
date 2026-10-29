@@ -3101,8 +3101,8 @@ async function runScan() {
                 const _gx = (state._gexNow || {})[liveStock.ticker] || {};
                 recordGateShadow("itrend-neg-gamma", "intraday-trend", liveStock.ticker, _iSide, price,
                   { adx: +(+_iAdx || 0).toFixed(1), gexNetM: typeof _gx.netGexM === "number" ? Math.round(_gx.netGexM) : null });   // 10/14
-                recordStandDown("itrend", "neg-gamma regime — itrend stands aside");
-                logEvent("filter", `[INTRADAY-TREND] ${liveStock.ticker} ${_iSide.toUpperCase()} blocked — negative gamma (momentum reverses here; itrend stands aside)`);
+                recordStandDown("itrend", "neg-gamma — replaced by end-of-day momentum");
+                logOnChange(`itrend-neg-${liveStock.ticker}-${_iSide}`, "neg", "filter", `[INTRADAY-TREND] ${liveStock.ticker} ${_iSide.toUpperCase()} stands aside — negative gamma: replaced by the 3:30pm end-of-day momentum trade (10/29); signal logged to the gate shadow`);   // 10/29: once per 15 min, not every scan
                 _iSide = null; _iSuppressed = true;
               }
               const _iDT = (state._dailyMA || {})[liveStock.ticker] || null;
