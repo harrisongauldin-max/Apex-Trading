@@ -623,6 +623,21 @@ async function checkExits(positions, posSnapshots, posQuotes, posNewsCache, ctx)
     // ── 8/28: INTRADAY-TREND (same-day) ──────────────────────────────────────────
     // Trail + hard stop. Intraday class — flattens at 3:15 via the cron (not exempt). No overnight,
     // no DTE roll. Own block before the generic rails, unconditional continue.
+    // 10/29: END-OF-DAY MOMENTUM — held to the close by design (Baltussen et al.: last-30-min return). No stop, no ladder,
+    // no time cut here; server.js closes it at 3:58 / 3:59pm ET. Only the market-wide emergency exits elsewhere apply.
+    if (pos._eodMom) {
+      pos.currentPrice = curP; markDirty();
+      // 10/29 bug check: if the 3:58/3:59 exits failed and it was carried overnight, it is no longer the trade the
+      // papers describe — close it at the first scan of the next session instead of holding it until 3:58 again.
+      const _etD = (ms) => new Date(ms).toLocaleDateString("en-CA", { timeZone: "America/New_York" });
+      const _opened = Date.parse(pos.openDate || pos.entryTime || "");
+      if (Number.isFinite(_opened) && _etD(_opened) < _etD(Date.now()) && !_closedThisCycle.has(pi)) {
+        _closedThisCycle.add(pi);
+        logEvent("warn", `[EOD-MOM] ${pos.ticker} ${pos.contractSymbol} was carried overnight (opened ${_etD(_opened)}) — closing now`);
+        decisions.push({ pi, ticker: pos.ticker, action: 'close', reason: 'eodm-stale', exitPremium: null, contractSym: pos.contractSymbol || null });
+      }
+      continue;
+    }
     if (pos._iTrend) {
       pos._iTrendPeak = Math.max(typeof pos._iTrendPeak === "number" ? pos._iTrendPeak : -Infinity, chg);
       const _iHeld = (Date.now() - new Date(pos.openDate || pos.entryTime || Date.now()).getTime()) / 60000;
