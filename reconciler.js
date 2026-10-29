@@ -495,6 +495,7 @@ async function runReconciliation() {
             if (_st && typeof _st === "object" && Date.now() - (_st.at || 0) < 12 * 3600000 && _st.strategy) {
               reconPos.entryStrategy = _st.strategy;
               if (_st.iTrend) reconPos._iTrend = true;
+              if (_st.eodMom) reconPos._eodMom = true;
               if (_st.isTrend) reconPos._isTrend = true;
               if (_st.mrFade) { reconPos._isMrFade = true; reconPos._mrInvalidation = _st.mrInv != null ? _st.mrInv : null; }
               if (_st.straddle) reconPos._isStraddle = true;
