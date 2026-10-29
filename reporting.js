@@ -375,7 +375,7 @@ async function sendEmail(type) {
         const dateStr = new Date().toLocaleDateString("en-CA", { timeZone: "America/New_York" });
         const t = (_eodSnap && _eodSnap.standDownTally) ? _eodSnap.standDownTally : ((state && state._standDownTally) ? state._standDownTally : { brk: {}, mrf: {} });   // 9/09: snapshot, not live (EOD reset race)
         const lines = ["strategy,reason,count,pct"];
-        for (const [strat, book] of [["break", t.brk || {}], ["mr-fade", t.mrf || {}], ["trend-swing", t.trend || {}], ["intraday-trend", t.itrend || {}]]) {   // 9/01: CSV was hardcoded to brk/mrf — trend/itrend buckets were recorded but never exported
+        for (const [strat, book] of [["break", t.brk || {}], ["mr-fade", t.mrf || {}], ["trend-swing", t.trend || {}], ["intraday-trend", t.itrend || {}], ["eod-momentum", t.eodm || {}]]) {   // 9/01: CSV was hardcoded to brk/mrf — trend/itrend buckets were recorded but never exported
           const entries = Object.entries(book).sort((a, b) => b[1] - a[1]);
           const total = entries.reduce((s, [, n]) => s + n, 0) || 1;
           for (const [reason, n] of entries) {
@@ -760,7 +760,7 @@ function buildEmailHTML(type) {
 
   const posRows = state.positions.map(p => {
     const strikeLabel = p.isSpread ? `$${p.buyStrike}/$${p.sellStrike} ${p.optionType.toUpperCase()} SPRD` : `$${p.strike}${p.optionType === 'put' ? 'P' : 'C'}`;
-    return `<tr><td>${p.ticker}</td><td>${strikeLabel}</td><td>${p.expDate}</td><td>${p.contracts}x</td><td>$${p.premium}</td><td>${({"intraday-trend":"Intraday-trend","mr-fade-lit":"MR-fade","trend-swing":"Trend-swing","break":"Breakout","vol-straddle":"Straddle"})[p.entryStrategy] || p.entryStrategy || "—"}</td></tr>`;   // 10/12: sleeve (entry score is retired)
+    return `<tr><td>${p.ticker}</td><td>${strikeLabel}</td><td>${p.expDate}</td><td>${p.contracts}x</td><td>$${p.premium}</td><td>${({"intraday-trend":"Intraday-trend","eod-momentum":"EOD-momentum","mr-fade-lit":"MR-fade","trend-swing":"Trend-swing","break":"Breakout","vol-straddle":"Straddle"})[p.entryStrategy] || p.entryStrategy || "—"}</td></tr>`;   // 10/12: sleeve (entry score is retired)
   }).join("") || "<tr><td colspan='6' style='color:#666'>No open positions</td></tr>";
 
   const recentTrades = trades.slice(-5).reverse().map(t =>
