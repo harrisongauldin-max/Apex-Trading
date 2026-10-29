@@ -751,7 +751,9 @@ async function runEodFlatten(pass) {
   const _allPos = state.positions || [];
   // 8/27: label-driven flatten. swing-class positions (trend-swing) hold overnight; the exit engine
   // resumes managing them at next open. Everything intraday still hard-closes.
-  const positions = _allPos.filter(p => !isFlattenExempt(p.entryStrategy));
+  // 10/29: end-of-day momentum positions are closed by their own 3:58 exit (they exist to hold into the close)
+  const _isEod = (p) => !!(p && (p._eodMom || p.entryStrategy === "eod-momentum"));
+  const positions = _allPos.filter(p => !isFlattenExempt(p.entryStrategy) && !_isEod(p));
   const _held = _allPos.length - positions.length;
   const _label = pass === 1 ? "3:45pm" : pass === 2 ? "3:50pm RETRY" : "3:55pm FINAL (crossing)";
   if (positions.length === 0) {
@@ -775,10 +777,42 @@ async function runEodFlatten(pass) {
     }
     await new Promise(r => setTimeout(r, 1000));
   }
-  const left = (state.positions || []).filter(p => !isFlattenExempt(p.entryStrategy));
+  const left = (state.positions || []).filter(p => !isFlattenExempt(p.entryStrategy) && !_isEod(p));
   if (left.length) logEvent(pass >= 3 ? "error" : "warn", `[EOD CLOSE] ${_label} — ${left.length} intraday position(s) STILL OPEN: ${left.map(p => p.contractSymbol || p.ticker).join(", ")}${pass >= 3 ? " — CHECK ALPACA, will be carried overnight" : " — retrying at the next pass"}`);
   return { closed: positions.length - left.length, left: left.length };
 }
+// 10/29 (Harrison): END-OF-DAY MOMENTUM (eodMomentum.js) — negative gamma only. Entry 3:30pm ET (retries each minute to
+// 3:34 if an entry doesn't complete), exit 3:58pm at the live bid, 3:59pm crossing retry.
+const EODM = require('./eodMomentum');
+for (const min of [30, 31, 32, 33, 34]) {
+  cron.schedule(`${min} 19,20 * * 1-5`, async () => {
+    const et = getETTime();
+    if (!(et.getHours() === 15 && et.getMinutes() === min)) return;
+    try {
+      const { executeTrade } = require('./execution');
+      const { paperDataActive } = require('./state');
+      const { getCircuitState } = require('./broker');
+      // same account-level halts the scanner applies to every entry (loss locks unless paper-data mode; broker circuit open)
+      const entryBlock = () => {
+        const lock = (state._dailyLossLockActive || state._weeklyLossLockActive || state._monthlyLossLockActive) && !paperDataActive(state);
+        if (lock) return "account loss lock active";
+        try { if (getCircuitState().open) return "Alpaca API circuit open"; } catch (_) {}
+        return null;
+      };
+      await EODM.runEntry({ state, executeTrade, getStockQuote, getStockBars, logEvent, entryBlock, etHour: et.getHours() + et.getMinutes() / 60 });
+      markDirty();
+    } catch (e) { logEvent("error", `[EOD-MOM] entry run failed: ${e.message}`); }
+  });
+}
+for (const [min, pass] of [[58, 1], [59, 2]]) {
+  cron.schedule(`${min} 19,20 * * 1-5`, async () => {
+    const et = getETTime();
+    if (!(et.getHours() === 15 && et.getMinutes() === min)) return;
+    try { await EODM.runExit({ state, closePosition, logEvent }, pass); markDirty(); }
+    catch (e) { logEvent("error", `[EOD-MOM] exit run failed: ${e.message}`); }
+  });
+}
+
 for (const [min, pass] of [[45, 1], [50, 2], [55, 3]]) {
   cron.schedule(`${min} 19,20 * * 1-5`, async () => {
     const et = getETTime();
@@ -898,7 +932,7 @@ app.use(express.static(path.join(__dirname, "public")));
 const _SLEEVE_OF = (t) => {
   if (t && t.entryStrategy) return t.entryStrategy;
   const r = String((t && (t.reason || t.exitReason)) || "");
-  return /^itrend/.test(r) ? "intraday-trend" : /^mr-fade/.test(r) ? "mr-fade-lit" : /^trend/.test(r) ? "trend-swing"
+  return /^eodm/.test(r) ? "eod-momentum" : /^itrend/.test(r) ? "intraday-trend" : /^mr-fade/.test(r) ? "mr-fade-lit" : /^trend/.test(r) ? "trend-swing"
        : /^break/.test(r) ? "break" : /straddle/.test(r) ? "vol-straddle" : "other";
 };
 app.get("/api/market-state", (req, res) => {
