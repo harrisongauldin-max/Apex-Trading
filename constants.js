@@ -689,6 +689,7 @@ const STRATEGY_CLASS = {
   "breakout-or-context":  { hold: "intraday", flattenExempt: false },
   "trend-swing":          { hold: "swing",    flattenExempt: true  },
   "intraday-trend":       { hold: "intraday", flattenExempt: false },
+  "eod-momentum":         { hold: "intraday", flattenExempt: false },   // 10/29: closed by its own 3:58 exit; the 3:45 flatten skips it
 };
 function strategyClass(entryStrategy) { return STRATEGY_CLASS[entryStrategy] || STRATEGY_CLASS["breakout-or-context"]; }
 function isFlattenExempt(entryStrategy) { return !!(STRATEGY_CLASS[entryStrategy] && STRATEGY_CLASS[entryStrategy].flattenExempt); }
@@ -774,7 +775,20 @@ const ITREND_END_ET       = 15.25;  // 10/20 (Harrison): = the global 3:15 entry
 // business there. false = fall back to the older direction-only gate below it.
 // 10/20 (Harrison): OFF. The literature points the other way — intraday momentum is concentrated on negative-gamma
 // days (Baltussen, Da, Lammers & Martens 2021). Signals are now traded in every regime; gexReg is stamped on each entry.
-const ITREND_NEG_GAMMA_BLOCK = false;
+const ITREND_NEG_GAMMA_BLOCK = true;   // 10/29 (Harrison): ON — in NEGATIVE gamma the all-day 20-min intraday-trend trades are REPLACED by
+                                      // the end-of-day momentum trade (eodMomentum.js; Baltussen et al. 2021: the negative-gamma momentum
+                                      // is concentrated in the last 30 min, held to the close). Positive gamma: intraday-trend unchanged.
+                                      // Blocked signals still go to the gate-shadow ledger (itrend-neg-gamma), so they keep being measured.
+// 10/29 (Harrison): END-OF-DAY MOMENTUM (eodMomentum.js), NEGATIVE GAMMA ONLY, live on paper. At 3:30pm ET: sign of the
+// move from the prior close -> buy that direction, hold to 3:58pm ET (Baltussen, Da, Lammers & Martens 2021; Gao, Han, Li &
+// Zhou 2018). Contract = the cost selector's cheapest for a 28-min hold. One trade per ticker per day.
+const EODM_ENABLED           = true;
+const EODM_TICKERS           = ["SPY", "QQQ"];
+const EODM_ENTRY_START_ET    = 15.5;      // 3:30pm
+const EODM_ENTRY_END_ET      = 15.5833;   // retries allowed until 3:35pm if an entry doesn't fill
+const EODM_EXIT_ET           = 15.9667;   // 3:58pm (3:59pm = crossing retry)
+const EODM_REQUIRE_NEG_GAMMA = true;
+const EODM_HOLD_MIN          = 28;        // decay term for the contract selector
 // 10/20 (Harrison): non-literature intraday-trend entry gates, all OFF (each still computed and logged as a label):
 //   ADX floor (Wilder ADX — practitioner, no academic support), breadth soft block (no support), the negative-gamma
 //   direction gate vs the 50d (built from one day, 9/01), and the two legacy per-ticker skips that also stopped the
@@ -1053,6 +1067,7 @@ module.exports = {
   TREND_ENABLED, TREND_DELTA, TREND_DELTA_MIN, TREND_DELTA_MAX, TREND_TARGET_DTE, TREND_DTE_MIN, TREND_DTE_MAX,
   TREND_ROLL_DTE, TREND_COOLDOWN_DAYS, TREND_MODE, TREND_RETIRE_LIVE, TREND_RETIRE_AFTER_ET, TREND_TICKERS, TREND_EXIT_MODE, TREND_CHANDELIER_ATR, TREND_CHANDELIER_CHECK_ET, TREND_MA_FAST, TREND_MA_SLOW, TREND_RSI_MIN, TREND_RSI_MAX, TREND_OVEREXT_ATR, TREND_BREADTH_MIN,
   TREND_CUTOFF_ET, TREND_RISK_BUDGET, TREND_TRAIL_ARM_PCT, TREND_STOP_UNDL_PCT, TREND_STOP_PCT, TREND_ATR_STOP_MULT, TREND_USTOP_FLOOR, TREND_USTOP_CEIL, TREND_STALE_DAYS, TREND_STALE_PEAK, TREND_TRAIL_GIVEBACK_PCT,
+  EODM_ENABLED, EODM_TICKERS, EODM_ENTRY_START_ET, EODM_ENTRY_END_ET, EODM_EXIT_ET, EODM_REQUIRE_NEG_GAMMA, EODM_HOLD_MIN,
   ITREND_ENABLED, ITREND_DELTA, ITREND_DELTA_MIN, ITREND_DELTA_MAX, ITREND_TARGET_DTE, ITREND_DTE_MIN, ITREND_DTE_MAX, ITREND_COST_SELECT, ITREND_SELECT_DTE_MIN, ITREND_SELECT_DTE_MAX, ITREND_SELECT_HOLD_MIN, ITREND_SELECT_STRIKE_BAND,
   ITREND_ADX_MIN, ITREND_VWAP_MIN, ITREND_BREADTH_STRONG, ITREND_START_ET, ITREND_END_ET, ITREND_NEG_GAMMA_BLOCK,
   ITREND_ADX_SIZE_ENABLED, ITREND_ADX_SIZE_MIN, ITREND_ADX_SIZE_CONTRACTS, TREND_SIZE_AT_STOP, TREND_MAX_RISK_PCT,
