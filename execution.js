@@ -39,7 +39,7 @@ const { CAPITAL_FLOOR, MIN_OPTION_PREMIUM, MIN_OI,
         BREAK_DELTA = 0.70, BREAK_DELTA_MIN = 0.55, BREAK_DELTA_MAX = 0.85, BREAK_TARGET_DTE = 7,
         TREND_DELTA = 0.65, TREND_DELTA_MIN = 0.55, TREND_DELTA_MAX = 0.75, TREND_TARGET_DTE = 60, TREND_RISK_BUDGET = 0.01,
         ITREND_DELTA = 0.50, ITREND_DELTA_MIN = 0.42, ITREND_DELTA_MAX = 0.60, ITREND_TARGET_DTE = 14,
-        ITREND_COST_SELECT = false, ITREND_SELECT_DTE_MIN = 1, ITREND_SELECT_DTE_MAX = 21, ITREND_SELECT_HOLD_MIN = 20, ITREND_SELECT_STRIKE_BAND = 0.02,
+        ITREND_COST_SELECT = false, ITREND_SELECT_DTE_MIN = 1, ITREND_SELECT_DTE_MAX = 21, ITREND_SELECT_HOLD_MIN = 20, ITREND_SELECT_STRIKE_BAND = 0.02, EODM_HOLD_MIN = 28,
         VOL_INFRA_ENABLED = false, CHAIN_RETAIN_ENABLED = false, CHAIN_RETAIN_MAX = 60,
         SLIPPAGE_LOG_ENABLED = false, DECISION_SPLIT_LOG = false,
         SPREAD_COST_LOG = false, FEASIBILITY_ENABLED = false, FEASIBILITY_ENFORCE = false,
@@ -103,8 +103,8 @@ const MIN_STRIKE_DISTINCT = 5;
 // TOP of its 0.22-0.42 band, so whenever the closest strike was 0.427 the whole trade was discarded (~40% of mr-fade
 // FIRE decisions in recent logs). Now findContract only SELECTS among strikes the entry will accept.
 function _acceptDeltaRange(stock) {
-  const min = (stock && stock._straddle) ? 0.40 : (stock && stock._iTrend) ? ITREND_DELTA_MIN : (stock && stock._isTrend) ? TREND_DELTA_MIN : (stock && stock._structBreak) ? BREAK_DELTA_MIN : TARGET_DELTA_MIN;
-  const max = (stock && stock._straddle) ? 0.60 : (stock && stock._iTrend) ? ITREND_DELTA_MAX : (stock && stock._isTrend) ? TREND_DELTA_MAX : (stock && stock._structBreak) ? BREAK_DELTA_MAX : TARGET_DELTA_MAX;
+  const min = (stock && stock._straddle) ? 0.40 : (stock && (stock._iTrend || stock._eodMom)) ? ITREND_DELTA_MIN : (stock && stock._isTrend) ? TREND_DELTA_MIN : (stock && stock._structBreak) ? BREAK_DELTA_MIN : TARGET_DELTA_MIN;
+  const max = (stock && stock._straddle) ? 0.60 : (stock && (stock._iTrend || stock._eodMom)) ? ITREND_DELTA_MAX : (stock && stock._isTrend) ? TREND_DELTA_MAX : (stock && stock._structBreak) ? BREAK_DELTA_MAX : TARGET_DELTA_MAX;
   return [min, max];
 }
 
@@ -127,7 +127,7 @@ async function findContract(ticker, optionType, targetDelta, targetDTE, vix, sto
 
     let fetchMin, fetchMax;
     // 10/28: cost-based selection (intraday-trend only) — wide DTE window, narrow strike band, cheapest exposure wins
-    const _costSel = !fixedExpiry && !!(stock && stock._iTrend) && ITREND_COST_SELECT === true;
+    const _costSel = !fixedExpiry && !!(stock && (stock._iTrend || stock._eodMom)) && ITREND_COST_SELECT === true;   // 10/29: + end-of-day momentum
     const _etToday = new Date().toLocaleDateString("en-CA", { timeZone: "America/New_York" });   // YYYY-MM-DD (ET)
     let _strikeQ = "";
     if (_costSel) {
@@ -200,7 +200,8 @@ async function findContract(ticker, optionType, targetDelta, targetDTE, vix, sto
     const _chainRows = [];
     let _ivWin = { withIV: 0, total: 0 };   // Q3.1: measure indicative-feed IV coverage across the evaluated window
     let _cBest = null, _cBestScore = Infinity, _cRef = null, _cRefDist = Infinity;   // 10/28: cheapest + the old-rule reference
-    const _holdFrac = Math.max(1, ITREND_SELECT_HOLD_MIN) / 390;
+    const _holdMin = (stock && stock._eodMom) ? EODM_HOLD_MIN : ITREND_SELECT_HOLD_MIN;   // 10/29: EOD trade holds ~28 min to the close
+    const _holdFrac = Math.max(1, _holdMin) / 390;
     for (const c of allC.slice(0, _evalN)) {
       const snap = snaps[c.symbol];
       if (!snap) continue;
@@ -287,7 +288,7 @@ async function findContract(ticker, optionType, targetDelta, targetDTE, vix, sto
         _best = _cBest; _bestRawIV = _rawSel;
         const _f = (v) => "$" + v.toFixed(3);
         const _ref = _cRef ? ` vs old rule ${_cRef.expDays}DTE $${_cRef.strike} ${_f(_cRef.score)}/sh (saves ~$${Math.max(0, (_cRef.score - _cBestScore) * 100 * Math.abs(parseFloat(_best.greeks.delta))).toFixed(2)}/contract)` : " (no old-rule contract in the chain to compare)";
-        logEvent("filter", `[ITREND-SELECT] ${ticker} ${optionType.toUpperCase()} → ${_best.expDays}DTE $${_best.strike} Δ${Math.abs(parseFloat(_best.greeks.delta)).toFixed(2)} mid $${_best.premium} spread $${(_best.ask - _best.bid).toFixed(2)} θ${_best.greeks.theta}/day | cost ${_f(_cBestScore)}/share of exposure for ${ITREND_SELECT_HOLD_MIN}min${_ref}`);
+        logEvent("filter", `[ITREND-SELECT] ${ticker} ${optionType.toUpperCase()} → ${_best.expDays}DTE $${_best.strike} Δ${Math.abs(parseFloat(_best.greeks.delta)).toFixed(2)} mid $${_best.premium} spread $${(_best.ask - _best.bid).toFixed(2)} θ${_best.greeks.theta}/day | cost ${_f(_cBestScore)}/share of exposure for ${_holdMin}min${_ref}`);
       } else {
         logEvent("filter", `[ITREND-SELECT] ${ticker} ${optionType.toUpperCase()} — no priced candidate with theta in ${fetchMin}..${fetchMax}; using closest-delta pick${_best ? ` ${_best.expDays}DTE $${_best.strike}` : " (none)"}`);
       }
@@ -451,7 +452,8 @@ async function executeTrade(stock, price, score, scoreReasons, vix, optionType =
   // one can clear the flag while the other is still past 3:15. The clock check can't be cleared. (Before this
   // change no entry could ever happen after 3:15 — scans stopped there — so refusing by clock removes nothing.)
   const _etNowX = getETTime(); const _etHX = _etNowX.getHours() + _etNowX.getMinutes() / 60;
-  if (state._observeOnly || (!_dryRunMode && _etHX >= 15.25 && _etHX < 16)) {
+  // 10/29: the end-of-day momentum trade enters at 3:30 by design — it is the one entry allowed in the observe window
+  if (!(stock && stock._eodMom) && (state._observeOnly || (!_dryRunMode && _etHX >= 15.25 && _etHX < 16))) {
     if (!state._obsSkipLogAt || Date.now() - state._obsSkipLogAt > 60000) {
       state._obsSkipLogAt = Date.now();
       logEvent("skip", `${stock && stock.ticker} — entry refused: observe-only after 3:15 ET`);
@@ -468,7 +470,7 @@ async function executeTrade(stock, price, score, scoreReasons, vix, optionType =
   // bounce trap while keeping the gamma that captures the fast snap. Detected via stock._mrScalp
   // (set in the scanner detector). Otherwise the normal MR/momentum profile applies.
   const _mrScalp = stock && stock._mrScalp === true;
-  const targetDelta = (stock && stock._straddle) ? 0.50 : (stock && stock._iTrend) ? ITREND_DELTA : (stock && stock._isTrend) ? TREND_DELTA : (stock && stock._structBreak) ? BREAK_DELTA : (_mrScalp ? MR_SCALP_DELTA : (isMeanReversion ? 0.42 : 0.35));   // 9/16: straddle legs ATM 0.50 (symmetric = delta-neutral). 8/25 break; 8/27 trend-swing; 8/28 intraday-trend=ATM
+  const targetDelta = (stock && stock._straddle) ? 0.50 : (stock && (stock._iTrend || stock._eodMom)) ? ITREND_DELTA : (stock && stock._isTrend) ? TREND_DELTA : (stock && stock._structBreak) ? BREAK_DELTA : (_mrScalp ? MR_SCALP_DELTA : (isMeanReversion ? 0.42 : 0.35));   // 9/16: straddle legs ATM 0.50 (symmetric = delta-neutral). 8/25 break; 8/27 trend-swing; 8/28 intraday-trend=ATM
   // 6/30 (Harrison): DTE resolution.
   //   dteBand === "sameweek" → force 0-8 DTE leg.  dteBand === "standard" → force the 30-50 momentum band.
   //   dteBand === null (normal call) → DATA_GATHER_MODE forces same-week; otherwise per-profile default.
@@ -476,7 +478,7 @@ async function executeTrade(stock, price, score, scoreReasons, vix, optionType =
   const _dgm = dataGatherActive(DATA_GATHER_MODE);
   // 8/03: THIRD BAND. 13 sits mid-window of an empty 9-16 DTE gap between the two existing
   // legs — 20 sessions produced literally zero trades there, so its behaviour is unknown.
-  const targetDTE = (stock && stock._iTrend) ? ITREND_TARGET_DTE
+  const targetDTE = (stock && (stock._iTrend || stock._eodMom)) ? ITREND_TARGET_DTE
                   : (stock && stock._isTrend) ? TREND_TARGET_DTE
                   : (stock && stock._structBreak) ? BREAK_TARGET_DTE
                   : _mrScalp ? MR_SCALP_TARGET_DTE
@@ -496,7 +498,7 @@ async function executeTrade(stock, price, score, scoreReasons, vix, optionType =
   let contract;
   if (dteBand === "standard") {
     contract = await findContract(stock.ticker, optionType, targetDelta, targetDTE, vix, stock);
-  } else if (stock && stock._iTrend && ITREND_COST_SELECT === true) {
+  } else if (stock && (stock._iTrend || stock._eodMom) && ITREND_COST_SELECT === true) {
     // 10/28: intraday-trend always selects fresh by cost — a prefetched contract (chosen by another rule) is ignored
     contract = await findContract(stock.ticker, optionType, targetDelta, targetDTE, vix, stock);
   } else {
@@ -711,8 +713,8 @@ async function executeTrade(stock, price, score, scoreReasons, vix, optionType =
       for (const [_k, _v] of Object.entries(state._entryInFlight)) { const _t = typeof _v === "number" ? _v : (_v && _v.at) || 0; if (Date.now() - _t > 86400000) delete state._entryInFlight[_k]; }   // 10/28: prune (>1 day)
       // 10/28: carry the strategy so a reconcile that does rebuild this contract (after the 120s skip) restores its label
       state._entryInFlight[contract.symbol] = { at: Date.now(),
-        strategy: stock._straddle ? "vol-straddle" : stock._iTrend ? "intraday-trend" : stock._isTrend ? "trend-swing" : stock._structBreak ? "struct-break" : (stock._mrFade ? "mr-fade-lit" : (_mrScalp ? "mr-scalp" : (stock._mrStrong ? "mr" : "breakout-or-context"))),
-        iTrend: !!stock._iTrend, isTrend: !!stock._isTrend, mrFade: !!stock._mrFade, straddle: !!stock._straddle, structBreak: !!stock._structBreak,
+        strategy: stock._eodMom ? "eod-momentum" : stock._straddle ? "vol-straddle" : stock._iTrend ? "intraday-trend" : stock._isTrend ? "trend-swing" : stock._structBreak ? "struct-break" : (stock._mrFade ? "mr-fade-lit" : (_mrScalp ? "mr-scalp" : (stock._mrStrong ? "mr" : "breakout-or-context"))),
+        iTrend: !!stock._iTrend, eodMom: !!stock._eodMom, isTrend: !!stock._isTrend, mrFade: !!stock._mrFade, straddle: !!stock._straddle, structBreak: !!stock._structBreak,
         mrInv: stock._mrFade && typeof stock._mrFade.invalidationPx === "number" ? stock._mrFade.invalidationPx : null };
       const _MX = require('./midExec');
       const _steps = _MX.entrySteps(contract.bid, contract.ask);
@@ -904,7 +906,7 @@ async function executeTrade(stock, price, score, scoreReasons, vix, optionType =
     fastStopPct:    exitParams.fastStopPct,
     dteLabel:       exitParams.label,
     isMeanReversion: isMeanReversion,
-    entryStrategy:  stock._straddle ? "vol-straddle" : stock._iTrend ? "intraday-trend" : stock._isTrend ? "trend-swing" : stock._structBreak ? "struct-break" : (stock._mrFade ? "mr-fade-lit" : (_mrScalp ? "mr-scalp" : (stock._mrStrong ? "mr" : "breakout-or-context"))),   // 8/28: +intraday-trend
+    entryStrategy:  stock._eodMom ? "eod-momentum" : stock._straddle ? "vol-straddle" : stock._iTrend ? "intraday-trend" : stock._isTrend ? "trend-swing" : stock._structBreak ? "struct-break" : (stock._mrFade ? "mr-fade-lit" : (_mrScalp ? "mr-scalp" : (stock._mrStrong ? "mr" : "breakout-or-context"))),   // 8/28: +intraday-trend
     _mrScalp:       _mrScalp,                                              // 8/09: routes the fast scalp exits in exitEngine
     _mrEntryVWAP:   _mrScalp ? (stock._mrEntryVWAP || price || null) : null,   // reversion target = reclaim of entry VWAP
     dteBand:        dteBand || (_sameWeekLeg ? "sameweek" : "standard"),   // 6/30: A/B leg tag for twin-entry comparison
@@ -1061,6 +1063,7 @@ async function executeTrade(stock, price, score, scoreReasons, vix, optionType =
   if (stock._straddle) { (_openSame || position)._isStraddle = true; }
   if (stock._structBreak) { (_openSame || position)._isStructBreak = true; }
   if (stock._isTrend) { (_openSame || position)._isTrend = true; }
+  if (stock._eodMom) { (_openSame || position)._eodMom = true; (_openSame || position)._eodmRet = stock._eodmRet; }   // 10/29: end-of-day momentum
   // 10/12: a 21-DTE roll continues the same trade — carry the chandelier state (stop level, high-water mark) over
   if (stock._isTrend && stock._trendCarry && stock._trendCarry.ch) {
     (_openSame || position)._ch = { ...stock._trendCarry.ch, rolls: (stock._trendCarry.ch.rolls || 0) + 1, rolledFrom: stock._trendCarry.from || null };
