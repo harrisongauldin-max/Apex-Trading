@@ -165,6 +165,7 @@ async function sendEmail(type) {
       vetoBlocks:    (state._vetoBlocks    || []).slice(),
       dailyLog:      (state._dailyLogBuffer || []).slice(),
       standDownTally: JSON.parse(JSON.stringify(state._standDownTally || { brk:{}, mrf:{}, trend:{}, itrend:{} })),  // 9/09: snapshot before EOD reset wipes it
+      sip:           JSON.parse(JSON.stringify(state._sip || null)),   // 11/02: stocks-in-play share sleeve
     };
 
     let attachments = [];
@@ -389,6 +390,16 @@ async function sendEmail(type) {
         }
       } catch (_nmErr) { /* near-miss attachment is best-effort — never block the email */ }
 
+      // ── 11/02: STOCKS-IN-PLAY CSV — one row per candidate: live fill/exit AND the paper's ideal replay ──
+      try {
+        const _sipCsv = require('./stocksInPlay').eodCSV(_eodSnap.sip);
+        if (_sipCsv && _sipCsv.split("\n").length > 1) {
+          const dateStr = (_eodSnap.sip && _eodSnap.sip.day) || new Date().toLocaleDateString("en-CA", { timeZone: "America/New_York" });
+          attachments.push({ filename: `argo-stocksinplay-${dateStr}.csv`, content: Buffer.from(_sipCsv, "utf8").toString("base64") });
+          _retainToRedis("stocksinplay", dateStr, _sipCsv).catch(() => {});
+        }
+      } catch (_sipErr) { /* best-effort */ }
+
       // ── 8/17: FULL SESSION LOG, GZIPPED ─────────────────────────────────────
       // Every [BREAK] rejection, [RANGE-REGIME] transition, [FEASIBILITY] ratio, [U-STOP]
       // conversion and [CALL-MOMO] verdict of the session — the reasoning trail, not just the
@@ -441,6 +452,7 @@ async function sendEmail(type) {
       try { bodyHtml += buildGateShadowSection(_eodSnap); } catch (_gsErr) { logEvent("warn", `[GATE-SHADOW] EOD section skipped: ${_gsErr.message}`); }   // 10/14
       try { bodyHtml += buildTrendShadowSection(_eodSnap); } catch (_tsErr) { logEvent("warn", `[TREND-SHADOW] EOD section skipped: ${_tsErr.message}`); }   // 10/14
       try { bodyHtml += require('./holdShadow').section(_eodSnap.holdShadow, _eodSnap.outcomeBuffer, require('./outcomes').OUTCOME_HEADER); } catch (_hsErr) { logEvent("warn", `[HOLD-SHADOW] EOD section skipped: ${_hsErr.message}`); }   // 10/15
+      try { bodyHtml += require('./stocksInPlay').eodSection(_eodSnap.sip); } catch (_sipErr2) { logEvent("warn", `[SIP] EOD section skipped: ${_sipErr2.message}`); }   // 11/02
       try { bodyHtml += buildStandDownSection(_eodSnap); }
       catch (_sdErr) { logEvent("warn", `[STAND-DOWN] EOD section skipped: ${_sdErr.message}`); }
     }
