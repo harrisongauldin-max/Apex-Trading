@@ -185,7 +185,12 @@ async function syncCashFromAlpaca() {
   try {
     const acct = await alpacaGet("/account");
     if (!acct || !acct.cash) return;
-    const alpacaCash      = parseFloat(acct.cash);
+    // 11/02: the stocks-in-play share sleeve moves Alpaca cash by its notional (a long spends it, a short receives it).
+    // Back that out so options sizing, heat, the capital floor and peakCash see the same cash they would without it.
+    let _sipAdj = 0;
+    try { _sipAdj = require('./stocksInPlay').cashAdjustment(state) || 0; } catch (_) { _sipAdj = 0; }
+    const alpacaCash      = parseFloat((parseFloat(acct.cash) + _sipAdj).toFixed(2));
+    state._sipCashAdj     = _sipAdj;
     const alpacaBuyPower  = parseFloat(acct.buying_power || acct.cash);
     const alpacaOptBP     = parseFloat(acct.options_buying_power || acct.buying_power || acct.cash);
     state.alpacaCash      = alpacaCash;
