@@ -789,6 +789,15 @@ const EODM_ENTRY_END_ET      = 15.5833;   // retries allowed until 3:35pm if an 
 const EODM_EXIT_ET           = 15.9667;   // 3:58pm (3:59pm = crossing retry)
 const EODM_REQUIRE_NEG_GAMMA = true;
 const EODM_HOLD_MIN          = 28;        // decay term for the contract selector
+// 11/02 (Harrison): STOCKS-IN-PLAY OPENING-RANGE BREAKOUT, SHARES (stocksInPlay.js), live on paper. Zarattini, Barbon & Aziz
+// (2024): top 20 US stocks by opening 5-min relative volume (>= 100%), stop entry at the first 5-min high/low in that candle's
+// direction, stop 10% of the 14-day ATR, exit at the close, 1% risk per position on sleeve/20, 4x leverage cap. No APEX data yet —
+// the paper modeled no slippage, so every trade is also replayed at the paper's ideal prices and the EOD report shows the gap.
+// Its own sleeve: positions are NOT in state.positions; share cash is backed out of the options sizing cash (cashAdjustment).
+const SIP_ENABLED        = true;
+const SIP_MODE           = "live";    // "live" = real paper orders; "shadow" = log + ideal replay only (env SIP_MODE overrides)
+const SIP_SLEEVE_USD     = 25000;     // the paper's starting capital: $1,250 per position, $12.50 risk, <= $5,000 notional each
+const SIP_OPT_BP_RESERVE = 15000;     // never let resting share orders take options buying power below this
 // 10/20 (Harrison): non-literature intraday-trend entry gates, all OFF (each still computed and logged as a label):
 //   ADX floor (Wilder ADX — practitioner, no academic support), breadth soft block (no support), the negative-gamma
 //   direction gate vs the 50d (built from one day, 9/01), and the two legacy per-ticker skips that also stopped the
@@ -1067,6 +1076,7 @@ module.exports = {
   TREND_ENABLED, TREND_DELTA, TREND_DELTA_MIN, TREND_DELTA_MAX, TREND_TARGET_DTE, TREND_DTE_MIN, TREND_DTE_MAX,
   TREND_ROLL_DTE, TREND_COOLDOWN_DAYS, TREND_MODE, TREND_RETIRE_LIVE, TREND_RETIRE_AFTER_ET, TREND_TICKERS, TREND_EXIT_MODE, TREND_CHANDELIER_ATR, TREND_CHANDELIER_CHECK_ET, TREND_MA_FAST, TREND_MA_SLOW, TREND_RSI_MIN, TREND_RSI_MAX, TREND_OVEREXT_ATR, TREND_BREADTH_MIN,
   TREND_CUTOFF_ET, TREND_RISK_BUDGET, TREND_TRAIL_ARM_PCT, TREND_STOP_UNDL_PCT, TREND_STOP_PCT, TREND_ATR_STOP_MULT, TREND_USTOP_FLOOR, TREND_USTOP_CEIL, TREND_STALE_DAYS, TREND_STALE_PEAK, TREND_TRAIL_GIVEBACK_PCT,
+  SIP_ENABLED, SIP_MODE, SIP_SLEEVE_USD, SIP_OPT_BP_RESERVE,
   EODM_ENABLED, EODM_TICKERS, EODM_ENTRY_START_ET, EODM_ENTRY_END_ET, EODM_EXIT_ET, EODM_REQUIRE_NEG_GAMMA, EODM_HOLD_MIN,
   ITREND_ENABLED, ITREND_DELTA, ITREND_DELTA_MIN, ITREND_DELTA_MAX, ITREND_TARGET_DTE, ITREND_DTE_MIN, ITREND_DTE_MAX, ITREND_COST_SELECT, ITREND_SELECT_DTE_MIN, ITREND_SELECT_DTE_MAX, ITREND_SELECT_HOLD_MIN, ITREND_SELECT_STRIKE_BAND,
   ITREND_ADX_MIN, ITREND_VWAP_MIN, ITREND_BREADTH_STRONG, ITREND_START_ET, ITREND_END_ET, ITREND_NEG_GAMMA_BLOCK,
