@@ -303,7 +303,9 @@ async function initState() {
 
   if (ALPACA_KEY) {
     try {
-      const openOrders = await alpacaGet("/orders?status=open&limit=50");
+      const _allOpen = await alpacaGet("/orders?status=open&limit=500");
+      // 11/02: the stocks-in-play sleeve's resting entries and protective stops (client_order_id "sip-...") survive a restart
+      const openOrders = Array.isArray(_allOpen) ? _allOpen.filter(o => !require('./stocksInPlay').isSipOrder(o)) : _allOpen;
       if (Array.isArray(openOrders) && openOrders.length > 0) {
         console.log(`[STARTUP] Cancelling ${openOrders.length} open order(s) from previous session`);
         for (const ord of openOrders) {
@@ -935,6 +937,10 @@ const _SLEEVE_OF = (t) => {
   return /^eodm/.test(r) ? "eod-momentum" : /^itrend/.test(r) ? "intraday-trend" : /^mr-fade/.test(r) ? "mr-fade-lit" : /^trend/.test(r) ? "trend-swing"
        : /^break/.test(r) ? "break" : /straddle/.test(r) ? "vol-straddle" : "other";
 };
+app.get("/api/sip", (req, res) => {   // 11/02: today's stocks-in-play sleeve (candidates, orders, fills, summary)
+  res.json({ cfg: require('./stocksInPlay').CFG, day: state._sip || null, cashAdj: state._sipCashAdj || 0 });
+});
+
 app.get("/api/market-state", (req, res) => {
   try {
     const C = require("./constants"), DC = require("./dayContext"), INT = require("./marketInternals"), M = require("./market");
@@ -2186,15 +2192,18 @@ app.post("/api/emergency-close", requireSecret, async (req, res) => {
       if (idx !== -1) state.positions.splice(idx, 1);
     }
   }
-  logEvent("circuit", `EMERGENCY CLOSE ALL complete - ${closed} closed, ${failed} failed`);
+  let _sipClosed = 0;
+  try { _sipClosed = await require('./stocksInPlay').flattenAll(state, logEvent, "emergency-close"); } catch (e) { logEvent("error", `[SIP] emergency flatten failed: ${e.message}`); }
+  logEvent("circuit", `EMERGENCY CLOSE ALL complete - ${closed} closed, ${failed} failed${_sipClosed ? `; ${_sipClosed} share position(s) sent to market` : ""}`);
   try { await saveStateNow(); } catch(e) {}
-  res.json({ ok: true, closed, failed, total: count });
+  res.json({ ok: true, closed, failed, total: count, sharesClosed: _sipClosed });
 });
 
 app.post("/api/cancel-pending-orders", requireSecret, async (req, res) => {
   try {
-    const openOrders = await alpacaGet("/orders?status=open&limit=50");
-    if (!openOrders || !Array.isArray(openOrders)) return res.json({ ok: true, cancelled: 0, message: "No open orders found" });
+    const _open = await alpacaGet("/orders?status=open&limit=500");
+    if (!_open || !Array.isArray(_open)) return res.json({ ok: true, cancelled: 0, message: "No open orders found" });
+    const openOrders = _open.filter(o => !require('./stocksInPlay').isSipOrder(o));   // 11/02: share-sleeve stops are not "pending" options orders
     let cancelled = 0, failed = 0;
     for (const ord of openOrders) {
       try { await alpacaPost(`/orders/${ord.id}/cancel`, {}); cancelled++; }
@@ -2431,6 +2440,17 @@ initState().then(async () => {
     calcCreditSpreadTP: calcCreditSpreadTP,
     markDirtyFn:       markDirty,
   });
+
+  // 11/02 (Harrison): STOCKS-IN-PLAY share sleeve (stocksInPlay.js). Runs its own clock every 5s: 9:00 universe, 9:35 scan +
+  // stop entries, protective stops on fills, exit 2 min before the close, ideal replay after the close. Started only after
+  // state has loaded so a restart resumes the day's orders instead of re-placing them.
+  try {
+    const SIP = require('./stocksInPlay');
+    if (SIP.CFG.ENABLED) {
+      setInterval(() => { SIP.tick({ state, logEvent, markDirty, saveNow: saveStateNow }).catch(e => logEvent("error", `[SIP] ${e.message}`)); }, 5000);
+      logEvent("scan", `[SIP] stocks-in-play sleeve ON — mode ${SIP.CFG.MODE.toUpperCase()}, sleeve $${SIP.CFG.SLEEVE_USD.toLocaleString()}`);
+    }
+  } catch (e) { logEvent("error", `[SIP] could not start: ${e.message}`); }
 
   app.listen(PORT, () => {
     console.log(`APEX running on port ${PORT}`);
