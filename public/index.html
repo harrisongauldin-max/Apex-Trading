@@ -478,7 +478,11 @@ input[type=text]:focus{border-color:var(--blue)}
 
   <!-- 11/03 (Harrison): STOCKS IN PLAY share sleeve — not in state.positions, so it gets its own panel -->
   <div class="section-title" id="sip-title">Stocks in Play — shares</div>
-  <div id="sip-wrap" style="margin-bottom:16px"><div class="no-data">Loading stocks-in-play sleeve…</div></div>
+  <div id="sip-wrap" style="margin-bottom:8px"><div class="no-data">Loading stocks-in-play sleeve…</div></div>
+  <div style="margin-bottom:16px">
+    <button class="btn" id="sip-replay-btn" onclick="runSipReplay()" style="background:rgba(0,196,255,.08);border:1px solid rgba(0,196,255,.4);color:#44ccff" title="Run today's stocks-in-play entries through every exit rule on today's 1-minute bars">▶ REPLAY EXITS (today)</button>
+    <div id="sip-replay" style="margin-top:8px"></div>
+  </div>
 
   <div class="section-title">Portfolio Greeks</div>
   <div id="portfolio-greeks" style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:16px">
@@ -908,6 +912,44 @@ async function fetchState() {
     renderAll();
   } catch(e) { console.error('Fetch error:', e); }
   try { fetchSip(); } catch(e){}
+}
+
+// ── 11/03: exit replay — same entries, every exit rule, today's 1-minute bars (/api/sip/replay) ──
+async function runSipReplay() {
+  const out = document.getElementById('sip-replay'), btn = document.getElementById('sip-replay-btn');
+  if (!out) return;
+  out.innerHTML = '<div class="no-data">Replaying today\'s entries on 1-minute bars…</div>'; if (btn) btn.disabled = true;
+  try { const r = await fetch('/api/sip/replay'); const d = await r.json(); if (!r.ok) throw new Error(d.error || ('HTTP ' + r.status)); renderSipReplay(d); }
+  catch (e) { out.innerHTML = '<div class="no-data" style="color:var(--red)">Replay failed: ' + String(e.message).replace(/[<>&]/g, '') + '</div>'; }
+  finally { if (btn) btn.disabled = false; }
+}
+function renderSipReplay(d) {
+  const out = document.getElementById('sip-replay'); if (!out) return;
+  const esc = (x) => String(x == null ? '' : x).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+  const money = (x) => x == null || isNaN(x) ? '—' : (x >= 0 ? '+' : '-') + '$' + Math.abs(x).toFixed(2);
+  const rr = (x) => x == null || isNaN(x) ? '—' : (x >= 0 ? '+' : '') + (+x).toFixed(2) + 'R';
+  const tot = d.totals || {}, keys = Object.keys(tot);
+  if (!keys.length) { out.innerHTML = '<div class="no-data">' + esc(d.note || 'Nothing to replay yet.') + '</div>'; return; }
+  const th = (t) => '<th style="text-align:left;padding:3px 6px;font-weight:400;color:var(--muted);border-bottom:1px solid var(--border);white-space:nowrap">' + t + '</th>';
+  const td = (t, st) => '<td style="padding:3px 6px;border-bottom:1px solid rgba(13,48,80,.5);white-space:nowrap;' + (st || '') + '">' + t + '</td>';
+  const col = (x) => x > 0 ? 'var(--green)' : x < 0 ? 'var(--red)' : 'var(--muted)';
+  const best = keys.reduce((a, k) => (a == null || tot[k].usd > tot[a].usd ? k : a), null);
+  let h = '<div style="font-size:11px;color:var(--muted);margin-bottom:6px">' + esc(d.day) + ' · bars to ' + esc(d.asOf) + (d.final ? ' (final)' : ' — still trading: open trades marked at the latest bar') + ' · same entries for every rule, ideal fills (no slippage), each rule sized so its stop = 1R</div>';
+  h += '<div style="overflow-x:auto"><table style="border-collapse:collapse;font-size:11px;width:100%"><tr>' + ['Exit rule', 'Trades', 'Won', 'Win %', 'Total R', 'P&amp;L'].map(th).join('') + '</tr>';
+  if (d.live && d.live.trades) h += '<tr>' + td('<i>Actual live today (paper stop, real fills)</i>', 'color:var(--muted)') + td(d.live.trades) + td(d.live.wins) + td(Math.round(100 * d.live.wins / d.live.trades) + '%') + td(rr(d.live.R), 'color:' + col(d.live.R)) + td(money(d.live.usd), 'font-weight:700;color:' + col(d.live.usd)) + '</tr>';
+  for (const k of keys) { const t = tot[k];
+    h += '<tr>' + td((k === best ? '★ ' : '') + esc(t.label), k === best ? 'color:var(--gold)' : '') + td(t.trades) + td(t.wins) + td(t.winPct != null ? t.winPct + '%' : '—') + td(rr(t.R), 'color:' + col(t.R)) + td(money(t.usd), 'font-weight:700;color:' + col(t.usd)) + '</tr>'; }
+  h += '</table></div>';
+  const syms = Object.keys(d.perTrade || {});
+  if (syms.length) {
+    h += '<div style="overflow-x:auto;margin-top:8px"><table style="border-collapse:collapse;font-size:11px;width:100%"><tr>' + th('Symbol') + keys.map(k => th(esc(k))).join('') + '</tr>';
+    for (const sym of syms) { const row = d.perTrade[sym];
+      h += '<tr>' + td('<b>' + esc(sym) + '</b>') + keys.map(k => { const r = row[k]; if (!r) return td('—');
+        if (!r.entered) return td('no trigger', 'color:var(--muted)');
+        return td(rr(r.R) + ' <span style="color:var(--muted)">' + esc(r.reason) + (r.peakR != null ? ', peak ' + r.peakR + 'R' : '') + '</span>', 'color:' + col(r.R)); }).join('') + '</tr>'; }
+    h += '</table></div>';
+  }
+  out.innerHTML = h;
 }
 
 // ── 11/03: STOCKS IN PLAY share sleeve panel (/api/sip) ─────────────────────
