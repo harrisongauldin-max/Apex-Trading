@@ -366,12 +366,15 @@ function recordExit(c, px, qty, reason, log) {
 }
 
 async function protect(c, s, log) {
+  if (!(openQty(c) > 0) || c.status === "closed") return;   // 11/03 hotfix: nothing left to protect
   const L = c.side === "long";
   c.stopPx = L ? floorC(c.fillPx - c.stopDist) : ceilC(c.fillPx + c.stopDist);
   c.stopSeq = (c.stopSeq || 0) + 1;
   const r = await placeOrder({ symbol: c.sym, qty: String(openQty(c)), side: L ? "sell" : "buy", type: "stop", stop_price: c.stopPx.toFixed(2),
                                time_in_force: "day", client_order_id: cid(s.day, c.sym, `S${c.stopSeq}`) });
   if (r.ok) { c.stopOrderId = r.order.id; c.status = "open"; log("trade", `[SIP] ${c.sym} filled ${c.filledQty} @ $${c.fillPx.toFixed(2)} — protective stop $${c.stopPx.toFixed(2)} placed`); return; }
+  c.stopRejects = (c.stopRejects || 0) + 1;
+  if (!c.stopRejectMsg) c.stopRejectMsg = String(r.msg).slice(0, 120);   // keep the FIRST reason for the EOD CSV
   log("error", `[SIP] ${c.sym} protective stop REJECTED (${r.msg}) — closing at market`);
   await closeMarket(c, s, "stop-reject", log);
 }
@@ -417,7 +420,9 @@ async function poll(s, log) {
         else c.status = e.status === "rejected" ? `rejected: ${e.status}` : c._weCancelledEntry || s.exitPass ? "not triggered" : `entry ${e.status} (not by APEX)`;
       }
       // protect only once the entry order is done: a sell stop beside a still-working buy can be rejected as a wash trade
-      if (c.filledQty > 0 && !c.stopOrderId && !c.closeOrderId && terminal && !s.exitPass) await protect(c, s, log);
+      // 11/03 hotfix: and only while shares are still open — a position already closed (stop-reject -> market close, or
+      // closed outside APEX) has no stop and no close order left, and used to loop here every tick with qty 0
+      if (c.filledQty > 0 && openQty(c) > 0 && c.status !== "closed" && !c.stopOrderId && !c.closeOrderId && terminal && !s.exitPass) await protect(c, s, log);
     }
     // protective stop
     const st = c.stopOrderId && byId[c.stopOrderId];
