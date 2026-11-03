@@ -927,6 +927,14 @@ function renderSip(d) {
   const openQ = (c) => Math.max(0, (c.filledQty || 0) - (c.exitQty || 0));
   const truth = (state && state.alpacaTruth && Array.isArray(state.alpacaTruth.openPositions)) ? state.alpacaTruth.openPositions : [];
   const unreal = (c) => { const t = truth.find(p => p.symbol === c.sym); return t ? +t.unrealizedPnL : null; };
+  // % change on the position, signed by side (a short that falls is +): closed = fill -> exit; open = Alpaca's unrealized %
+  const pctOf = (c) => {
+    if (c.status === 'closed' && c.fillPx > 0 && c.exitPx > 0) return (c.side === 'short' ? -1 : 1) * (c.exitPx / c.fillPx - 1) * 100;
+    // open: Alpaca's unrealized $ over our cost (its own % field's sign for shorts isn't relied on)
+    if (openQ(c) > 0 && c.fillPx > 0) { const u = unreal(c); if (u != null && isFinite(u)) return u / (openQ(c) * c.fillPx) * 100; }
+    return null;
+  };
+  const pct = (x) => x == null || isNaN(x) ? '—' : (x >= 0 ? '+' : '') + x.toFixed(2) + '%';
   const closed = rows.filter(c => c.status === 'closed');
   const open = rows.filter(c => openQ(c) > 0);
   const working = rows.filter(c => c.status === 'working');
@@ -943,7 +951,7 @@ function renderSip(d) {
     + (s.universeSize ? pill('universe ' + s.universeSize, 'var(--muted)') : '')
     + pill(rows.length + ' in play', 'var(--blue)')
     + pill(closed.length + ' closed · ' + closed.filter(c => c.pnl > 0).length + ' won', 'var(--blue)')
-    + '<span style="font-size:12px;font-weight:700;color:' + (realized >= 0 ? 'var(--green)' : 'var(--red)') + '">realized ' + money(realized) + ' (' + (realR >= 0 ? '+' : '') + realR.toFixed(2) + 'R)</span>'
+    + '<span style="font-size:12px;font-weight:700;color:' + (realized >= 0 ? 'var(--green)' : 'var(--red)') + '">realized ' + money(realized) + ' (' + (realR >= 0 ? '+' : '') + realR.toFixed(2) + 'R · ' + pct(realized / (cfg.SLEEVE_USD || 25000) * 100) + ' of sleeve)</span>'
     + (open.length ? '<span style="font-size:12px;color:' + (unr >= 0 ? 'var(--green)' : 'var(--red)') + '">open ' + money(unr) + '</span>' : '')
     + '</div>';
   if (s.skipped) head += '<div style="font-size:11px;color:var(--gold);margin-bottom:6px">No trades: ' + esc(s.skipped) + '</div>';
@@ -963,13 +971,14 @@ function renderSip(d) {
       + td(esc(status), 'color:' + col(c) + (c.stopRejectMsg ? ';cursor:help" title="first stop rejection: ' + esc(c.stopRejectMsg) : ''))
       + td(px(c.fillPx)) + td(q > 0 ? px(c.stopPx) : '—') + td(px(c.exitPx))
       + td(c.status === 'closed' ? money(c.pnl) : (u != null ? money(u) + '*' : '—'), 'color:' + col(c) + ';font-weight:700')
+      + td(pct(pctOf(c)) + (pctOf(c) != null && c.status !== 'closed' ? '*' : ''), 'color:' + col(c))
       + td(c.R != null ? (c.R >= 0 ? '+' : '') + c.R + 'R' : '—', 'color:' + col(c))
       + td(c.ideal ? (c.ideal.entered ? (c.ideal.R >= 0 ? '+' : '') + c.ideal.R + 'R' : 'no trigger') : '—', 'color:var(--muted)')
       + '</tr>';
   }).join('');
   wrap.innerHTML = head + '<div style="overflow-x:auto;-webkit-overflow-scrolling:touch"><table style="border-collapse:collapse;font-size:11px;width:100%">'
-    + '<tr>' + ['#', 'Symbol', 'Side', 'RVol', 'Entry', 'Qty', 'Status', 'Fill', 'Stop', 'Exit', 'P&amp;L', 'R', 'Ideal R'].map(th).join('') + '</tr>' + body + '</table></div>'
-    + '<div style="font-size:10px;color:var(--muted);margin-top:4px">Separate $' + (cfg.SLEEVE_USD || 25000).toLocaleString() + ' sleeve: not in Open Positions or the options P&amp;L. * open P&amp;L from Alpaca, refreshed every 5 min. Ideal R fills in after the close.</div>';
+    + '<tr>' + ['#', 'Symbol', 'Side', 'RVol', 'Entry', 'Qty', 'Status', 'Fill', 'Stop', 'Exit', 'P&amp;L', '%', 'R', 'Ideal R'].map(th).join('') + '</tr>' + body + '</table></div>'
+    + '<div style="font-size:10px;color:var(--muted);margin-top:4px">Separate $' + (cfg.SLEEVE_USD || 25000).toLocaleString() + ' sleeve: not in Open Positions or the options P&amp;L. % = gain/loss on the position (a short that falls is +). * open P&amp;L and % from Alpaca, refreshed every 5 min. Ideal R fills in after the close.</div>';
 }
 
 // ── SPY Live Tracker ───────────────────────────────────────────────────────
