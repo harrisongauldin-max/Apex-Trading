@@ -216,6 +216,101 @@ function simulate(cand, bars) {
   return { entered: true, entryPx, stopPx, exitPx, reason: "close", R: +(((L ? exitPx - entryPx : entryPx - exitPx) / sd)).toFixed(3) };
 }
 
+// ───────────────────────── exit variants (11/03, Harrison: "use today's trades as the basis") ─────────────────────────
+// Same entry for every variant (the paper's: the first 5-min high/low, touched on 1-minute bars from 9:35).
+// Only the EXIT changes. Each variant sizes its own shares so a full stop = 1R ($12.50 at the default sleeve) — a wider
+// stop means fewer shares, never more dollar risk — capped at 4x the per-position allocation like the paper.
+//   paper      stop 10% of the 14-day ATR, hold to the close            Zarattini, Barbon & Aziz (2024)
+//   or         stop on the other side of the opening range, hold         Zarattini & Aziz (2023) opening-range rule
+//   atr1       stop 1 x ATR, hold                                         wide-stop benchmark
+//   or_be      OR stop; at +1R stop to breakeven; from +2R trail 1R behind the best price   Kaminski & Lo (2014): stops help in trends
+//   or_apex    OR stop + APEX's options lock ladder translated to R (options stop 30% of premium = 1R)   APEX data: lock exits +$3,813 since 9/01
+// Gross of slippage (ideal fills at stop/floor levels). Intrabar order: the exit check uses the peak from EARLIER bars,
+// then the bar's own high/low extends the peak (an exit and a new high in one bar is scored as the exit — conservative).
+const _apexLadderR = (() => {
+  try { const C2 = require("./constants"); const k = 1 / (C2.ITREND_STOP_PCT || 0.30);
+        return { rungs: (C2.LOCK_LADDER || []).map(([a, f]) => [a * k, f * k]), trail: (C2.LOCK_LADDER_TRAIL || 0.025) * k }; }
+  catch (_) { return { rungs: [[0.167, 0], [0.25, 0.167], [0.283, 0.25], [0.333, 0.283], [0.417, 0.333], [0.5, 0.417]], trail: 0.083 }; }
+})();
+const EXIT_VARIANTS = {
+  paper:   { label: "Paper: 10% ATR stop, hold to close",       stop: (c) => CFG.ATR_STOP * c.atr },
+  or:      { label: "Opening-range stop, hold to close",         stop: (c) => Math.max(c.h - c.l, 0.1 * c.atr) },
+  atr1:    { label: "1 x ATR stop, hold to close",               stop: (c) => c.atr },
+  or_be:   { label: "OR stop + breakeven at 1R + 1R trail from 2R", stop: (c) => Math.max(c.h - c.l, 0.1 * c.atr),
+             floorR: (pk) => pk >= 2 ? pk - 1 : pk >= 1 ? 0 : null },
+  or_apex: { label: "OR stop + APEX lock ladder (in R)",         stop: (c) => Math.max(c.h - c.l, 0.1 * c.atr),
+             floorR: (pk) => { const L = _apexLadderR.rungs; if (!L.length || pk < L[0][0]) return null; let f = L[0][1];
+                               for (const [a, fl] of L) if (pk >= a) f = fl; const top = L[L.length - 1]; if (pk >= top[0]) f = Math.max(f, pk - _apexLadderR.trail); return f; } },
+};
+function simulateExit(cand, bars, v, closeOpen = true) {
+  if (!cand || !cand.entry || cand.side === "doji" || !Array.isArray(bars) || !bars.length) return null;
+  const L = cand.side === "long", sg = L ? 1 : -1, sd = v.stop(cand);
+  if (!(sd > 0)) return null;
+  let entryPx = null, peakR = 0, at = null;
+  const rOf = (px) => sg * (px - entryPx) / sd;
+  for (let i = 0; i < bars.length; i++) {
+    const b = bars[i], o = +b.o, h = +b.h, l = +b.l, c = +b.c;
+    if (entryPx == null) {
+      if (!(L ? h >= cand.entry : l <= cand.entry)) continue;
+      entryPx = L ? Math.max(cand.entry, o) : Math.min(cand.entry, o); at = b.t;
+      const up = c >= o, gapIn = L ? o >= cand.entry : o <= cand.entry;
+      const adverse = gapIn ? (L ? l : h) : L ? (up ? c : l) : (up ? h : c);   // same path convention as simulate()
+      if (rOf(adverse) <= -1) return { entered: true, entryPx, R: -1, reason: "stop (entry bar)", at, sd };
+      peakR = Math.max(0, rOf(c));
+      continue;
+    }
+    const floor = v.floorR ? v.floorR(peakR) : null;
+    const stopR = floor != null ? Math.max(-1, floor) : -1;
+    const lowR = rOf(L ? l : h), openR = rOf(o);
+    if (lowR <= stopR) {
+      const exitR = openR <= stopR ? openR : stopR;   // gapped through: out at the open
+      return { entered: true, entryPx, R: +exitR.toFixed(3), reason: floor != null ? (stopR > -1 ? "ladder" : "stop") : "stop", peakR: +peakR.toFixed(2), at, sd };
+    }
+    peakR = Math.max(peakR, rOf(L ? h : l));
+  }
+  if (entryPx == null) return { entered: false, R: 0, reason: "not triggered", sd };
+  const last = +bars[bars.length - 1].c;
+  return { entered: true, entryPx, R: +rOf(last).toFixed(3), reason: closeOpen ? "close" : "still open (marked)", peakR: +peakR.toFixed(2), at, sd };
+}
+// every variant on every candidate -> { perTrade: {SYM: {variant: result}}, totals: {variant: {...}} }
+function replayVariants(cands, barsBySym, closeOpen = true) {
+  const perTrade = {}, totals = {};
+  for (const k of Object.keys(EXIT_VARIANTS)) totals[k] = { label: EXIT_VARIANTS[k].label, trades: 0, wins: 0, R: 0, usd: 0 };
+  for (const c of cands) {
+    if (!c || c.side === "doji" || !c.entry) continue;
+    const bars = barsBySym[c.sym] || [];
+    perTrade[c.sym] = {};
+    for (const [k, v] of Object.entries(EXIT_VARIANTS)) {
+      const r = simulateExit(c, bars, v, closeOpen);
+      if (!r) continue;
+      if (r.entered) { const sh = sizePosition(c.entry, r.sd); r.shares = sh; r.usd = +(r.R * r.sd * sh).toFixed(2);
+                       const t = totals[k]; t.trades++; if (r.R > 0) t.wins++; t.R += r.R; t.usd += r.usd; }
+      perTrade[c.sym][k] = r;
+    }
+  }
+  for (const t of Object.values(totals)) { t.R = +t.R.toFixed(2); t.usd = +t.usd.toFixed(2); t.winPct = t.trades ? +(100 * t.wins / t.trades).toFixed(0) : null; }
+  return { perTrade, totals };
+}
+// on demand (dashboard button): today's candidates against today's 1-minute bars so far
+let _replayCache = null;
+async function replayToday(state) {
+  const s = state && state._sip;
+  if (!s || !Array.isArray(s.cands) || !s.cands.length) return { day: s ? s.day : null, note: "no stocks-in-play candidates today", totals: {}, perTrade: {} };
+  if (_replayCache && _replayCache.day === s.day && Date.now() - _replayCache.at < 60000) return _replayCache.out;
+  const p = etParts();
+  const exitMin = (s.sessionCloseMin || 960) - CFG.EXIT_BEFORE_CLOSE_MIN;
+  const endMin = p.day === s.day ? Math.min(p.min, exitMin) : exitMin;
+  const closed = !(p.day === s.day && p.min < exitMin);
+  const cs = s.cands.filter(c => c.side !== "doji" && c.entry);
+  const raw = await multiBars(cs.map(c => c.sym), "1Min", iso(etToUtcMs(s.day, 9, 35)), iso(etToUtcMs(s.day, Math.floor(endMin / 60), Math.floor(endMin % 60)) - 1000));
+  const bars = {};
+  for (const c of cs) bars[c.sym] = (raw[c.sym] || []).filter(x => { const m = etParts(Date.parse(x.t)).min; return m >= 575 && m < exitMin; });
+  const out = { day: s.day, asOf: hhmm(endMin) + " ET", final: closed, ...replayVariants(cs, bars, closed),
+                live: cs.filter(c => c.status === "closed").reduce((a, c) => ({ trades: a.trades + 1, wins: a.wins + (c.pnl > 0 ? 1 : 0), usd: +(a.usd + (c.pnl || 0)).toFixed(2), R: +(a.R + (c.R || 0)).toFixed(2) }), { trades: 0, wins: 0, usd: 0, R: 0 }) };
+  _replayCache = { day: s.day, at: Date.now(), out };
+  return out;
+}
+
 // ───────────────────────── universe build (9:00 ET, in memory) ─────────────────────────
 let _universe = null;   // { day, syms: { SYM: { atr, avgVol, prevClose, ovAvg, etb, shortable } }, built }
 async function buildUniverse(day, log) {
@@ -491,6 +586,7 @@ async function simulateDay(s, log) {
     }
   }
   s.summary = summarize(s);
+  try { s.variants = replayVariants(cs, Object.fromEntries(cs.map(c => [c.sym, (bars[c.sym] || []).filter(x => { const m2 = etParts(Date.parse(x.t)).min; return m2 >= 575 && m2 < exitMin; })])), true).totals; } catch (_) {}
   const m = s.summary;
   log("trade", `[SIP] DAY ${s.day} (${s.mode}): ${m.candidates} in play, ${m.triggered} triggered live, actual ${m.actualPnl >= 0 ? "+" : ""}$${m.actualPnl} (${m.actualR >= 0 ? "+" : ""}${m.actualR}R) | paper's ideal on all ${m.idealTrades} triggers ${m.idealR >= 0 ? "+" : ""}${m.idealR}R | slippage on traded ${m.slipRPerTrade != null ? m.slipRPerTrade + "R/trade" : "n/a"}`);
 }
@@ -659,10 +755,11 @@ function eodSection(s) {
   return `<div style="margin:14px 0;font-family:monospace;font-size:11px;color:#cde">
 <div style="font-weight:bold;color:#9cf">STOCKS IN PLAY — opening-range breakout, shares (Zarattini, Barbon &amp; Aziz 2024) · ${s.mode.toUpperCase()} · sleeve $${CFG.SLEEVE_USD.toLocaleString()}</div>
 ${s.skipped ? `<div>No trades: ${s.skipped}</div>` : `<div>${m.candidates} in play (${m.dojis} doji, ${m.noBorrow} not borrowable) · ${m.triggered} traded, ${m.wins} won · actual ${m.actualPnl >= 0 ? "+" : ""}$${m.actualPnl} (${m.actualR}R) · paper's ideal ${m.idealR}R on ${m.idealTrades} triggers (${m.idealRTraded}R on the ones traded) · slippage ${m.slipRPerTrade != null ? m.slipRPerTrade + "R/trade" : "n/a"}</div>
-<table style="border-collapse:collapse;margin-top:4px"><tr>${["#", "sym", "side", "RVol", "status", "P&amp;L", "R", "ideal R", "slip R"].map(td).join("")}</tr>${rows}</table>`}
+<table style="border-collapse:collapse;margin-top:4px"><tr>${["#", "sym", "side", "RVol", "status", "P&amp;L", "R", "ideal R", "slip R"].map(td).join("")}</tr>${rows}</table>
+${s.variants ? `<div style="margin-top:8px;font-weight:bold;color:#9cf">Exit variants on the same entries (ideal fills, $12.50 = 1R each)</div><table style="border-collapse:collapse">${Object.values(s.variants).map(v => `<tr>${[v.label, v.trades + " trades", (v.winPct != null ? v.winPct + "% won" : ""), (v.R >= 0 ? "+" : "") + v.R + "R", (v.usd >= 0 ? "+" : "-") + "$" + Math.abs(v.usd).toFixed(2)].map(td).join("")}</tr>`).join("")}</table>` : ""}`}
 </div>`;
 }
 
-module.exports = { CFG, tick, cashAdjustment, flattenAll, isSipOrder, eodCSV, eodSection,
-                   _t: { etParts, etToUtcMs, dailyStats, sizePosition, selectCandidates, simulate, summarize, setIO, freshDay, poll, exitPass, placeEntries, recordExit, closeMarket, brokerQty, refreshLast,
+module.exports = { CFG, tick, cashAdjustment, flattenAll, isSipOrder, eodCSV, eodSection, replayToday, EXIT_VARIANTS,
+                   _t: { etParts, etToUtcMs, dailyStats, sizePosition, selectCandidates, simulate, summarize, setIO, freshDay, poll, exitPass, placeEntries, recordExit, closeMarket, brokerQty, refreshLast, simulateExit, replayVariants,
                          setUniverse: (u) => { _universe = u; }, NON_COMMON_RE } };
