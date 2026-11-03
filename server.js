@@ -937,6 +937,11 @@ const _SLEEVE_OF = (t) => {
   return /^eodm/.test(r) ? "eod-momentum" : /^itrend/.test(r) ? "intraday-trend" : /^mr-fade/.test(r) ? "mr-fade-lit" : /^trend/.test(r) ? "trend-swing"
        : /^break/.test(r) ? "break" : /straddle/.test(r) ? "vol-straddle" : "other";
 };
+app.get("/api/sip/replay", async (req, res) => {   // 11/03: today's sleeve candidates through every exit variant (1-min SIP bars)
+  try { res.json(await require('./stocksInPlay').replayToday(state)); }
+  catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 app.get("/api/sip", (req, res) => {   // 11/02: today's stocks-in-play sleeve (candidates, orders, fills, summary)
   res.json({ cfg: require('./stocksInPlay').CFG, day: state._sip || null, cashAdj: state._sipCashAdj || 0 });
 });
