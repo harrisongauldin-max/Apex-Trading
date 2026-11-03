@@ -225,6 +225,8 @@ function simulate(cand, bars) {
 //   atr1       stop 1 x ATR, hold                                         wide-stop benchmark
 //   or_be      OR stop; at +1R stop to breakeven; from +2R trail 1R behind the best price   Kaminski & Lo (2014): stops help in trends
 //   or_apex    OR stop + APEX's options lock ladder translated to R (options stop 30% of premium = 1R)   APEX data: lock exits +$3,813 since 9/01
+//   paper_be   paper stop + breakeven at 1R + 1R trail from 2R  (11/03: added after the first replay — tight stop, locked profits)
+//   paper_be2  paper stop + breakeven at 2R + 2R trail from 4R  (looser version of the same, less noise-sensitive)
 // Gross of slippage (ideal fills at stop/floor levels). Intrabar order: the exit check uses the peak from EARLIER bars,
 // then the bar's own high/low extends the peak (an exit and a new high in one bar is scored as the exit — conservative).
 const _apexLadderR = (() => {
@@ -238,6 +240,19 @@ const EXIT_VARIANTS = {
   atr1:    { label: "1 x ATR stop, hold to close",               stop: (c) => c.atr },
   or_be:   { label: "OR stop + breakeven at 1R + 1R trail from 2R", stop: (c) => Math.max(c.h - c.l, 0.1 * c.atr),
              floorR: (pk) => pk >= 2 ? pk - 1 : pk >= 1 ? 0 : null },
+  // 11/03: today's replay showed 9 paper-stop losers peaking at +5R to +13R before round-tripping to -1R
+  paper_be: { label: "Paper stop + breakeven at 1R + 1R trail from 2R", stop: (c) => CFG.ATR_STOP * c.atr,
+              floorR: (pk) => pk >= 2 ? pk - 1 : pk >= 1 ? 0 : null },
+  paper_be2: { label: "Paper stop + breakeven at 2R + 2R trail from 4R", stop: (c) => CFG.ATR_STOP * c.atr,
+              floorR: (pk) => pk >= 4 ? pk - 2 : pk >= 2 ? 0 : null },
+  // 11/03 (Harrison): "-0.5R lock? exit at 2R?" — a fixed target is a LIMIT order: no exit slippage on winners
+  paper_t2:   { label: "Paper stop + take profit at +2R", stop: (c) => CFG.ATR_STOP * c.atr, targetR: 2 },
+  paper_t2be: { label: "Paper stop + breakeven at 1R + take profit at +2R", stop: (c) => CFG.ATR_STOP * c.atr, targetR: 2,
+                floorR: (pk) => pk >= 1 ? 0 : null },
+  paper_l05:  { label: "Paper stop + lock -0.5R at 1R + 1R trail from 2R", stop: (c) => CFG.ATR_STOP * c.atr,
+                floorR: (pk) => pk >= 2 ? pk - 1 : pk >= 1 ? -0.5 : null },
+  paper_l05t2: { label: "Paper stop + lock -0.5R at 1R + take profit at +2R", stop: (c) => CFG.ATR_STOP * c.atr, targetR: 2,
+                 floorR: (pk) => pk >= 1 ? -0.5 : null },
   or_apex: { label: "OR stop + APEX lock ladder (in R)",         stop: (c) => Math.max(c.h - c.l, 0.1 * c.atr),
              floorR: (pk) => { const L = _apexLadderR.rungs; if (!L.length || pk < L[0][0]) return null; let f = L[0][1];
                                for (const [a, fl] of L) if (pk >= a) f = fl; const top = L[L.length - 1]; if (pk >= top[0]) f = Math.max(f, pk - _apexLadderR.trail); return f; } },
@@ -265,6 +280,10 @@ function simulateExit(cand, bars, v, closeOpen = true) {
     if (lowR <= stopR) {
       const exitR = openR <= stopR ? openR : stopR;   // gapped through: out at the open
       return { entered: true, entryPx, R: +exitR.toFixed(3), reason: floor != null ? (stopR > -1 ? "ladder" : "stop") : "stop", peakR: +peakR.toFixed(2), at, sd };
+    }
+    if (v.targetR != null) {   // take-profit limit: filled at the target, or at the open if it gapped past it
+      const hiR = rOf(L ? h : l);
+      if (hiR >= v.targetR) return { entered: true, entryPx, R: +Math.max(v.targetR, openR).toFixed(3), reason: "target", peakR: +Math.max(peakR, hiR).toFixed(2), at, sd };
     }
     peakR = Math.max(peakR, rOf(L ? h : l));
   }
