@@ -476,6 +476,10 @@ input[type=text]:focus{border-color:var(--blue)}
     <div class="no-data">No open positions. APEX will enter trades during market hours (Puts 9:45AM / Calls 10AM–3:30PM ET).</div>
   </div>
 
+  <!-- 11/03 (Harrison): STOCKS IN PLAY share sleeve — not in state.positions, so it gets its own panel -->
+  <div class="section-title" id="sip-title">Stocks in Play — shares</div>
+  <div id="sip-wrap" style="margin-bottom:16px"><div class="no-data">Loading stocks-in-play sleeve…</div></div>
+
   <div class="section-title">Portfolio Greeks</div>
   <div id="portfolio-greeks" style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:16px">
     <div class="greek-chip"><span class="greek-label">DELTA</span><span class="greek-val" id="g-delta">--</span></div>
@@ -903,6 +907,69 @@ async function fetchState() {
     health = await healthRes.json();
     renderAll();
   } catch(e) { console.error('Fetch error:', e); }
+  try { fetchSip(); } catch(e){}
+}
+
+// ── 11/03: STOCKS IN PLAY share sleeve panel (/api/sip) ─────────────────────
+async function fetchSip() {
+  try { const r = await fetch('/api/sip'); if (!r.ok) return; renderSip(await r.json()); }
+  catch(e) { console.error('SIP fetch error:', e); }
+}
+function renderSip(d) {
+  const wrap = document.getElementById('sip-wrap'); if (!wrap) return;
+  const esc = (x) => String(x == null ? '' : x).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+  const money = (x) => x == null || isNaN(x) ? '—' : (x >= 0 ? '+' : '-') + '$' + Math.abs(x).toFixed(2);
+  const px = (x) => x == null || isNaN(x) || !(x > 0) ? '—' : '$' + (+x).toFixed(2);
+  const cfg = (d && d.cfg) || {}, s = d && d.day;
+  if (cfg.ENABLED === false) { wrap.innerHTML = '<div class="no-data">Stocks-in-play sleeve is OFF (SIP_ENABLED = false).</div>'; return; }
+  if (!s) { wrap.innerHTML = '<div class="no-data">No stocks-in-play day yet. The universe builds at 9:00 ET and the scan runs at 9:35 ET.</div>'; return; }
+  const rows = [...(s.cands || []), ...(s.carry || []).map(c => Object.assign({}, c, { _carry: true }))];
+  const openQ = (c) => Math.max(0, (c.filledQty || 0) - (c.exitQty || 0));
+  const truth = (state && state.alpacaTruth && Array.isArray(state.alpacaTruth.openPositions)) ? state.alpacaTruth.openPositions : [];
+  const unreal = (c) => { const t = truth.find(p => p.symbol === c.sym); return t ? +t.unrealizedPnL : null; };
+  const closed = rows.filter(c => c.status === 'closed');
+  const open = rows.filter(c => openQ(c) > 0);
+  const working = rows.filter(c => c.status === 'working');
+  const realized = closed.reduce((a, c) => a + (+c.pnl || 0), 0);
+  const realR = closed.reduce((a, c) => a + (+c.R || 0), 0);
+  const unr = open.reduce((a, c) => a + (unreal(c) || 0), 0);
+  const title = document.getElementById('sip-title');
+  if (title) title.textContent = 'Stocks in Play — shares · ' + open.length + ' open · ' + working.length + ' resting';
+  const m = s.summary;
+  const pill = (txt, col) => '<span style="font-size:10px;padding:2px 8px;border-radius:10px;border:1px solid ' + col + ';color:' + col + '">' + esc(txt) + '</span>';
+  let head = '<div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:8px">'
+    + pill((s.mode || 'live').toUpperCase(), s.mode === 'shadow' ? 'var(--gold)' : 'var(--green)')
+    + pill(s.day, 'var(--muted)')
+    + (s.universeSize ? pill('universe ' + s.universeSize, 'var(--muted)') : '')
+    + pill(rows.length + ' in play', 'var(--blue)')
+    + pill(closed.length + ' closed · ' + closed.filter(c => c.pnl > 0).length + ' won', 'var(--blue)')
+    + '<span style="font-size:12px;font-weight:700;color:' + (realized >= 0 ? 'var(--green)' : 'var(--red)') + '">realized ' + money(realized) + ' (' + (realR >= 0 ? '+' : '') + realR.toFixed(2) + 'R)</span>'
+    + (open.length ? '<span style="font-size:12px;color:' + (unr >= 0 ? 'var(--green)' : 'var(--red)') + '">open ' + money(unr) + '</span>' : '')
+    + '</div>';
+  if (s.skipped) head += '<div style="font-size:11px;color:var(--gold);margin-bottom:6px">No trades: ' + esc(s.skipped) + '</div>';
+  if (m) head += '<div style="font-size:11px;color:var(--muted);margin-bottom:6px">After the close — paper\'s ideal prices: ' + (m.idealR >= 0 ? '+' : '') + m.idealR + 'R on ' + m.idealTrades + ' triggers (' + m.idealRTraded + 'R on the ones traded) · slippage ' + (m.slipRPerTrade != null ? m.slipRPerTrade + 'R/trade' : 'n/a') + '</div>';
+  if (!rows.length) { wrap.innerHTML = head + '<div class="no-data">' + (s.scanned ? 'No stocks in play today.' : 'Waiting for the 9:35 ET scan' + (s.built ? ' (universe built).' : '.')) + '</div>'; return; }
+  const col = (c) => c.status === 'closed' ? (c.pnl > 0 ? 'var(--green)' : 'var(--red)') : openQ(c) > 0 ? 'var(--blue)' : c.status === 'working' ? 'var(--gold)' : 'var(--muted)';
+  const th = (t) => '<th style="text-align:left;padding:3px 6px;font-weight:400;color:var(--muted);border-bottom:1px solid var(--border);white-space:nowrap">' + t + '</th>';
+  const td = (t, st) => '<td style="padding:3px 6px;border-bottom:1px solid rgba(13,48,80,.5);white-space:nowrap;' + (st || '') + '">' + t + '</td>';
+  const order = (c) => openQ(c) > 0 ? 0 : c.status === 'working' ? 1 : c.status === 'closed' ? 2 : 3;
+  rows.sort((a, b) => order(a) - order(b) || (a.rank || 99) - (b.rank || 99));
+  const body = rows.map(c => {
+    const q = openQ(c), u = q > 0 ? unreal(c) : null;
+    const status = (c._carry ? 'carried · ' : '') + (q > 0 ? 'OPEN ' + q + ' sh' : c.status) + (c.exitReason && c.status === 'closed' ? ' · ' + c.exitReason : '');
+    return '<tr>' + td(c.rank || '—', 'color:var(--muted)') + td('<b>' + esc(c.sym) + '</b>')
+      + td(esc((c.side || '').toUpperCase()), 'color:' + (c.side === 'long' ? 'var(--green)' : c.side === 'short' ? 'var(--red)' : 'var(--muted)'))
+      + td(c.rvol != null ? esc(c.rvol) + 'x' : '—') + td(px(c.entry)) + td(c.qty || '—')
+      + td(esc(status), 'color:' + col(c) + (c.stopRejectMsg ? ';cursor:help" title="first stop rejection: ' + esc(c.stopRejectMsg) : ''))
+      + td(px(c.fillPx)) + td(q > 0 ? px(c.stopPx) : '—') + td(px(c.exitPx))
+      + td(c.status === 'closed' ? money(c.pnl) : (u != null ? money(u) + '*' : '—'), 'color:' + col(c) + ';font-weight:700')
+      + td(c.R != null ? (c.R >= 0 ? '+' : '') + c.R + 'R' : '—', 'color:' + col(c))
+      + td(c.ideal ? (c.ideal.entered ? (c.ideal.R >= 0 ? '+' : '') + c.ideal.R + 'R' : 'no trigger') : '—', 'color:var(--muted)')
+      + '</tr>';
+  }).join('');
+  wrap.innerHTML = head + '<div style="overflow-x:auto;-webkit-overflow-scrolling:touch"><table style="border-collapse:collapse;font-size:11px;width:100%">'
+    + '<tr>' + ['#', 'Symbol', 'Side', 'RVol', 'Entry', 'Qty', 'Status', 'Fill', 'Stop', 'Exit', 'P&amp;L', 'R', 'Ideal R'].map(th).join('') + '</tr>' + body + '</table></div>'
+    + '<div style="font-size:10px;color:var(--muted);margin-top:4px">Separate $' + (cfg.SLEEVE_USD || 25000).toLocaleString() + ' sleeve: not in Open Positions or the options P&amp;L. * open P&amp;L from Alpaca, refreshed every 5 min. Ideal R fills in after the close.</div>';
 }
 
 // ── SPY Live Tracker ───────────────────────────────────────────────────────
@@ -1786,7 +1853,7 @@ function renderSingleLeg(p) {
         <span style="font-size:9px;padding:2px 7px;border-radius:10px;background:${isReconciled?'rgba(255,165,0,.15)':'rgba(100,100,100,.15)'};color:${isReconciled?'var(--orange)':'var(--muted)'}">${dteLabel.toUpperCase()}</span>
       </div>
       <div style="display:flex;align-items:center;gap:8px">
-        <span style="font-size:11px;font-weight:700;color:var(--blue)" title="Sleeve that opened this position">${({"intraday-trend":"INTRADAY-TREND","mr-fade-lit":"MR-FADE","trend-swing":"TREND-SWING","break":"BREAK","vol-straddle":"STRADDLE"})[p.entryStrategy] || (p.entryStrategy ? String(p.entryStrategy).toUpperCase() : "ENTRY")}</span>
+        <span style="font-size:11px;font-weight:700;color:var(--blue)" title="Sleeve that opened this position">${({"intraday-trend":"INTRADAY-TREND","eod-momentum":"EOD-MOMENTUM","mr-fade-lit":"MR-FADE","trend-swing":"TREND-SWING","break":"BREAK","vol-straddle":"STRADDLE"})[p.entryStrategy] || (p.entryStrategy ? String(p.entryStrategy).toUpperCase() : "ENTRY")}</span>
         ${rescoreBtn(p.ticker)}
         ${closeBtn(p.ticker, p.buySymbol||p.contractSymbol||'')}
       </div>
@@ -1911,7 +1978,7 @@ function renderSingleCard(p) {
           ${p._morningExitFlag ? '<span style="font-size:9px;padding:2px 6px;border-radius:10px;background:rgba(255,50,50,.2);color:var(--red)">EXIT AT OPEN</span>' : ''}
         </div>
         <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
-          <span style="font-size:11px;font-weight:700;color:var(--blue)" title="Sleeve that opened this position">${({"intraday-trend":"INTRADAY-TREND","mr-fade-lit":"MR-FADE","trend-swing":"TREND-SWING","break":"BREAK","vol-straddle":"STRADDLE"})[p.entryStrategy] || (p.entryStrategy ? String(p.entryStrategy).toUpperCase() : "ENTRY")}</span>
+          <span style="font-size:11px;font-weight:700;color:var(--blue)" title="Sleeve that opened this position">${({"intraday-trend":"INTRADAY-TREND","eod-momentum":"EOD-MOMENTUM","mr-fade-lit":"MR-FADE","trend-swing":"TREND-SWING","break":"BREAK","vol-straddle":"STRADDLE"})[p.entryStrategy] || (p.entryStrategy ? String(p.entryStrategy).toUpperCase() : "ENTRY")}</span>
           ${thesisScore < 100 ? `<span style="font-size:10px;padding:2px 6px;border-radius:4px;background:rgba(0,0,0,.3);color:${thesisColor}">Thesis: ${thesisScore}</span>` : ''}
           ${(function() {
             if (p._liveRescore) {
