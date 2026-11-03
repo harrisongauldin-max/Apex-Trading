@@ -926,7 +926,16 @@ function renderSip(d) {
   const rows = [...(s.cands || []), ...(s.carry || []).map(c => Object.assign({}, c, { _carry: true }))];
   const openQ = (c) => Math.max(0, (c.filledQty || 0) - (c.exitQty || 0));
   const truth = (state && state.alpacaTruth && Array.isArray(state.alpacaTruth.openPositions)) ? state.alpacaTruth.openPositions : [];
-  const unreal = (c) => { const t = truth.find(p => p.symbol === c.sym); return t ? +t.unrealizedPnL : null; };
+  const lastMap = s.last || {};
+  const nowPx = (c) => { const l = lastMap[c.sym]; return l && l.px > 0 ? +l.px : null; };
+  const sgn = (c) => c.side === 'short' ? -1 : 1;
+  // open P&L: live SIP price (once a minute) when we have it, else Alpaca's 5-min figure
+  const unreal = (c) => { const n = nowPx(c); if (n && c.fillPx > 0) return sgn(c) * (n - c.fillPx) * openQ(c);
+                          const t = truth.find(p => p.symbol === c.sym); return t ? +t.unrealizedPnL : null; };
+  // "if held": the trade's % from our fill to the price now, as if it had never been stopped (signed by side)
+  const heldPct = (c) => { const n = nowPx(c); return n && c.fillPx > 0 && (c.filledQty || 0) > 0 ? sgn(c) * (n / c.fillPx - 1) * 100 : null; };
+  // not filled: how far the price now is from the entry level, in the trade's direction (+ = already past it)
+  const vsEntry = (c) => { const n = nowPx(c); return n && c.entry > 0 && c.side !== 'doji' ? sgn(c) * (n / c.entry - 1) * 100 : null; };
   // % change on the position, signed by side (a short that falls is +): closed = fill -> exit; open = Alpaca's unrealized %
   const pctOf = (c) => {
     if (c.status === 'closed' && c.fillPx > 0 && c.exitPx > 0) return (c.side === 'short' ? -1 : 1) * (c.exitPx / c.fillPx - 1) * 100;
@@ -974,11 +983,15 @@ function renderSip(d) {
       + td(pct(pctOf(c)) + (pctOf(c) != null && c.status !== 'closed' ? '*' : ''), 'color:' + col(c))
       + td(c.R != null ? (c.R >= 0 ? '+' : '') + c.R + 'R' : '—', 'color:' + col(c))
       + td(c.ideal ? (c.ideal.entered ? (c.ideal.R >= 0 ? '+' : '') + c.ideal.R + 'R' : 'no trigger') : '—', 'color:var(--muted)')
+      + td(px(nowPx(c)), 'color:var(--text)')
+      + (function () { const h = heldPct(c);
+          if (h != null) return td(pct(h), 'font-weight:700;color:' + (h >= 0 ? 'var(--green)' : 'var(--red)'));
+          const v = vsEntry(c); return td(v != null ? pct(v) + ' vs entry' : '—', 'color:var(--muted);font-style:italic'); })()
       + '</tr>';
   }).join('');
   wrap.innerHTML = head + '<div style="overflow-x:auto;-webkit-overflow-scrolling:touch"><table style="border-collapse:collapse;font-size:11px;width:100%">'
-    + '<tr>' + ['#', 'Symbol', 'Side', 'RVol', 'Entry', 'Qty', 'Status', 'Fill', 'Stop', 'Exit', 'P&amp;L', '%', 'R', 'Ideal R'].map(th).join('') + '</tr>' + body + '</table></div>'
-    + '<div style="font-size:10px;color:var(--muted);margin-top:4px">Separate $' + (cfg.SLEEVE_USD || 25000).toLocaleString() + ' sleeve: not in Open Positions or the options P&amp;L. % = gain/loss on the position (a short that falls is +). * open P&amp;L and % from Alpaca, refreshed every 5 min. Ideal R fills in after the close.</div>';
+    + '<tr>' + ['#', 'Symbol', 'Side', 'RVol', 'Entry', 'Qty', 'Status', 'Fill', 'Stop', 'Exit', 'P&amp;L', '%', 'R', 'Ideal R', 'Now', 'If held'].map(th).join('') + '</tr>' + body + '</table></div>'
+    + '<div style="font-size:10px;color:var(--muted);margin-top:4px">Separate $' + (cfg.SLEEVE_USD || 25000).toLocaleString() + ' sleeve: not in Open Positions or the options P&amp;L. % = gain/loss on the position (a short that falls is +). Now = last SIP trade, refreshed each minute. If held = our fill to Now, as if never stopped (signed by side); unfilled rows show the distance from the entry level. * open P&amp;L. Ideal R fills in after the close.</div>';
 }
 
 // ── SPY Live Tracker ───────────────────────────────────────────────────────
