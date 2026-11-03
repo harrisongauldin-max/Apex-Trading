@@ -511,7 +511,18 @@ function summarize(s) {
 }
 
 // ───────────────────────── tick (every 5s from server.js) ─────────────────────────
-let _busy = false, _buildFailAt = 0;
+let _busy = false, _buildFailAt = 0, _lastPxAt = 0;
+// latest SIP trade for each candidate -> s.last = { SYM: { px, at } } (display only)
+async function refreshLast(s) {
+  const syms = [...new Set([...s.cands, ...s.carry].map(c => c.sym))];
+  if (!syms.length) return;
+  const last = s.last || {};
+  for (const grp of chunk(syms, CFG.BATCH)) {
+    const b = await getJSON(io().data, `/stocks/trades/latest?symbols=${grp.join(",")}&feed=sip`, 1);
+    for (const [sym, t] of Object.entries((b && b.trades) || {})) if (t && +t.p > 0) last[sym] = { px: +t.p, at: t.t || iso(Date.now()) };
+  }
+  s.last = last;
+}
 async function tick(deps) {
   if (!CFG.ENABLED || _busy) return;
   const { state, logEvent: log } = deps;
@@ -579,6 +590,11 @@ async function tick(deps) {
         else for (const c of s.cands) if (c.side !== "doji") c.status = "shadow";
         await saveNow();   // order ids must survive a restart in the next seconds
       }
+    }
+    // 11/03 (Harrison): live price for every candidate, once a minute, for the dashboard ("how are they doing now")
+    if (s.scanned && s.cands.length && p.min >= 9 * 60 + 30 && p.min < s.sessionCloseMin + 1 && Date.now() - _lastPxAt >= 60000) {
+      _lastPxAt = Date.now();
+      try { await refreshLast(s); } catch (_) { /* display only — never blocks trading */ }
     }
     // intraday order management
     if ((live || s.carry.length) && p.min >= 9 * 60 + 30 && p.min < s.sessionCloseMin + 5 && [...s.cands, ...s.carry].some(c => c.entryOrderId || c.stopOrderId || c.closeOrderId)) {
@@ -648,5 +664,5 @@ ${s.skipped ? `<div>No trades: ${s.skipped}</div>` : `<div>${m.candidates} in pl
 }
 
 module.exports = { CFG, tick, cashAdjustment, flattenAll, isSipOrder, eodCSV, eodSection,
-                   _t: { etParts, etToUtcMs, dailyStats, sizePosition, selectCandidates, simulate, summarize, setIO, freshDay, poll, exitPass, placeEntries, recordExit, closeMarket, brokerQty,
+                   _t: { etParts, etToUtcMs, dailyStats, sizePosition, selectCandidates, simulate, summarize, setIO, freshDay, poll, exitPass, placeEntries, recordExit, closeMarket, brokerQty, refreshLast,
                          setUniverse: (u) => { _universe = u; }, NON_COMMON_RE } };
