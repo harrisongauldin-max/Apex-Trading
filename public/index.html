@@ -938,7 +938,7 @@ function renderSipReplay(d) {
   h += '<div style="overflow-x:auto"><table style="border-collapse:collapse;font-size:11px;width:100%"><tr>' + ['Exit rule', 'Trades', 'Won', 'Win %', 'Total R', 'P&amp;L'].map(th).join('') + '</tr>';
   if (d.live && d.live.trades) h += '<tr>' + td('<i>Actual live today (paper stop, real fills)</i>', 'color:var(--muted)') + td(d.live.trades) + td(d.live.wins) + td(Math.round(100 * d.live.wins / d.live.trades) + '%') + td(rr(d.live.R), 'color:' + col(d.live.R)) + td(money(d.live.usd), 'font-weight:700;color:' + col(d.live.usd)) + '</tr>';
   for (const k of keys) { const t = tot[k];
-    h += '<tr>' + td((k === best ? '★ ' : '') + esc(t.label), k === best ? 'color:var(--gold)' : '') + td(t.trades) + td(t.wins) + td(t.winPct != null ? t.winPct + '%' : '—') + td(rr(t.R), 'color:' + col(t.R)) + td(money(t.usd), 'font-weight:700;color:' + col(t.usd)) + '</tr>'; }
+    h += '<tr>' + td((k === best ? '★ ' : '') + esc(t.label) + (k === d.liveRule ? ' <b style="color:var(--green)">← LIVE RULE</b>' : ''), k === best ? 'color:var(--gold)' : '') + td(t.trades) + td(t.wins) + td(t.winPct != null ? t.winPct + '%' : '—') + td(rr(t.R), 'color:' + col(t.R)) + td(money(t.usd), 'font-weight:700;color:' + col(t.usd)) + '</tr>'; }
   h += '</table></div>';
   const syms = Object.keys(d.perTrade || {});
   if (syms.length) {
@@ -1015,7 +1015,8 @@ function renderSip(d) {
   rows.sort((a, b) => order(a) - order(b) || (a.rank || 99) - (b.rank || 99));
   const body = rows.map(c => {
     const q = openQ(c), u = q > 0 ? unreal(c) : null;
-    const status = (c._carry ? 'carried · ' : '') + (q > 0 ? 'OPEN ' + q + ' sh' : c.status) + (c.exitReason && c.status === 'closed' ? ' · ' + c.exitReason : '');
+    const lock = q > 0 && c.floorR != null && c.floorR > -1 ? ' · ' + (c.floorR >= 0 ? 'locked +' : 'lock ') + (+c.floorR).toFixed(2) + 'R' : '';
+    const status = (c._carry ? 'carried · ' : '') + (q > 0 ? 'OPEN ' + q + ' sh' + lock + (c.peakR != null ? ' · peak +' + c.peakR + 'R' : '') : c.status) + (c.exitReason && c.status === 'closed' ? ' · ' + c.exitReason : '') + (c.late ? ' · late entry' : '');
     return '<tr>' + td(c.rank || '—', 'color:var(--muted)') + td('<b>' + esc(c.sym) + '</b>')
       + td(esc((c.side || '').toUpperCase()), 'color:' + (c.side === 'long' ? 'var(--green)' : c.side === 'short' ? 'var(--red)' : 'var(--muted)'))
       + td(c.rvol != null ? esc(c.rvol) + 'x' : '—') + td(px(c.entry)) + td(c.qty || '—')
