@@ -477,10 +477,20 @@ input[type=text]:focus{border-color:var(--blue)}
   </div>
 
   <!-- 11/03 (Harrison): STOCKS IN PLAY share sleeve — not in state.positions, so it gets its own panel -->
-  <div class="section-title" id="sip-title">Stocks in Play — shares</div>
+  <div style="display:flex;justify-content:space-between;align-items:flex-end;gap:8px;flex-wrap:wrap">
+    <div class="section-title" id="sip-title" style="flex:1;min-width:220px">Stocks in Play — shares</div>
+    <div style="display:flex;gap:6px;margin-bottom:8px">
+      <button id="sip-copy-btn" onclick="copySip()" style="font-size:10px;padding:3px 10px;background:rgba(0,196,255,.08);border:1px solid rgba(0,196,255,.3);border-radius:4px;color:#44aaff;cursor:pointer" title="Copy today's stocks-in-play table as text to paste into Claude">&#9112; Copy for Claude</button>
+      <button id="sip-csv-btn" onclick="downloadSipCsv()" style="font-size:10px;padding:3px 10px;background:rgba(0,196,255,.08);border:1px solid rgba(0,196,255,.3);border-radius:4px;color:#44aaff;cursor:pointer" title="Save today's stocks-in-play table as a CSV file">&#11015; Save CSV</button>
+    </div>
+  </div>
   <div id="sip-wrap" style="margin-bottom:8px"><div class="no-data">Loading stocks-in-play sleeve…</div></div>
   <div style="margin-bottom:16px">
     <button class="btn" id="sip-replay-btn" onclick="runSipReplay()" style="background:rgba(0,196,255,.08);border:1px solid rgba(0,196,255,.4);color:#44ccff" title="Run today's stocks-in-play entries through every exit rule on today's 1-minute bars">▶ REPLAY EXITS (today)</button>
+    <span id="sip-replay-tools" style="display:none">
+      <button id="sip-rcopy-btn" onclick="copySipReplay()" style="font-size:10px;padding:3px 10px;margin-left:6px;background:rgba(0,196,255,.08);border:1px solid rgba(0,196,255,.3);border-radius:4px;color:#44aaff;cursor:pointer" title="Copy the exit replay (rules + per-trade grid) to paste into Claude">&#9112; Copy for Claude</button>
+      <button id="sip-rcsv-btn" onclick="downloadSipReplayCsv()" style="font-size:10px;padding:3px 10px;margin-left:6px;background:rgba(0,196,255,.08);border:1px solid rgba(0,196,255,.3);border-radius:4px;color:#44aaff;cursor:pointer" title="Save the exit replay as a CSV file">&#11015; Save CSV</button>
+    </span>
     <div id="sip-replay" style="margin-top:8px"></div>
   </div>
 
@@ -914,6 +924,80 @@ async function fetchState() {
   try { fetchSip(); } catch(e){}
 }
 
+// ── 11/04 (Harrison): Copy for Claude + Save CSV for the stocks-in-play table and the exit replay ──
+function _sipRows(d) {   // one flat record per candidate, same fields for copy and CSV
+  const s = d && d.day; if (!s) return [];
+  const last = s.last || {}, sg = (c) => (c.side === 'short' ? -1 : 1);
+  const openQ = (c) => Math.max(0, (c.filledQty || 0) - (c.exitQty || 0));
+  const r2 = (x, n) => (x == null || x === '' || isNaN(x) ? '' : (+x).toFixed(n == null ? 2 : n));
+  return [...(s.cands || []), ...(s.carry || []).map(c => Object.assign({}, c, { _carry: true }))].map(c => {
+    const now = last[c.sym] && last[c.sym].px > 0 ? +last[c.sym].px : null;
+    const held = now && c.fillPx > 0 && (c.filledQty || 0) > 0 ? sg(c) * (now / c.fillPx - 1) * 100 : null;
+    const pct = c.status === 'closed' && c.fillPx > 0 && c.exitPx > 0 ? sg(c) * (c.exitPx / c.fillPx - 1) * 100 : null;
+    return { day: s.day, mode: s.mode || '', rank: c.rank || '', symbol: c.sym, side: c.side, rvol: r2(c.rvol), atr: r2(c.atr), entry: r2(c.entry), stopDist: r2(c.stopDist, 4),
+      qty: c.qty || '', status: (c._carry ? 'carried ' : '') + (openQ(c) > 0 ? 'OPEN ' + openQ(c) + ' sh' : (c.status || '')), late: c.late ? 'Y' : '',
+      fill: r2(c.fillPx), stop: r2(c.stopPx), lockR: r2(c.floorR), peakR: r2(c.peakR), exit: r2(c.exitPx), exitReason: c.exitReason || '',
+      pnl: r2(c.pnl), pct: r2(pct), R: r2(c.R, 3), idealR: c.ideal ? (c.ideal.entered ? r2(c.ideal.R, 3) : 'no trigger') : '',
+      now: r2(now), ifHeldPct: r2(held), stopRejectMsg: c.stopRejectMsg || '' };
+  });
+}
+const _SIP_COLS = ['day','mode','rank','symbol','side','rvol','atr','entry','stopDist','qty','status','late','fill','stop','lockR','peakR','exit','exitReason','pnl','pct','R','idealR','now','ifHeldPct','stopRejectMsg'];
+function _csvCell(x) { const s = String(x == null ? '' : x); return /[",\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s; }
+function _saveFile(name, text) {
+  try { const b = new Blob([text], { type: 'text/csv;charset=utf-8' }), a = document.createElement('a');
+        a.href = URL.createObjectURL(b); a.download = name; document.body.appendChild(a); a.click(); setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 500); }
+  catch (e) { alert('Could not save the file: ' + e.message); }
+}
+function _copyText(text, btnId, label) {
+  const btn = document.getElementById(btnId), done = (ok) => { if (!btn) return; btn.textContent = ok ? '✓ Copied' : 'Copy failed'; setTimeout(() => { btn.innerHTML = label; }, 1800); };
+  const fallback = () => { try { const t = document.createElement('textarea'); t.value = text; t.style.position = 'fixed'; t.style.opacity = '0'; document.body.appendChild(t); t.select(); const ok = document.execCommand('copy'); t.remove(); done(ok); } catch (_) { done(false); } };
+  if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(text).then(() => done(true), fallback); else fallback();
+}
+function _sipHeaderText(d) {
+  const s = d && d.day, cfg = (d && d.cfg) || {}; if (!s) return '';
+  const rows = [...(s.cands || []), ...(s.carry || [])], closed = rows.filter(c => c.status === 'closed');
+  const pnl = closed.reduce((a, c) => a + (+c.pnl || 0), 0), R = closed.reduce((a, c) => a + (+c.R || 0), 0);
+  const exitRule = cfg.EXIT_MODE === 'hold' ? 'paper (stop, else the close)' : 'stop -1R; at +' + cfg.LOCK_AT_R + 'R lock ' + cfg.LOCK_FLOOR_R + 'R; from +' + cfg.TRAIL_FROM_R + 'R trail ' + cfg.TRAIL_R + 'R; safety net -' + cfg.HARD_CAP_R + 'R';
+  return 'APEX stocks-in-play ' + s.day + ' (' + (s.mode || 'live').toUpperCase() + ', sleeve $' + (cfg.SLEEVE_USD || 25000) + ', 1R = $' + ((cfg.SLEEVE_USD || 25000) / 20 * 0.01).toFixed(2) + ')\n'
+    + 'Exit rule: ' + exitRule + '\n'
+    + (s.skipped ? 'No trades: ' + s.skipped + '\n' : '')
+    + 'Universe ' + (s.universeSize || '?') + ' | in play ' + rows.length + ' | closed ' + closed.length + ' (' + closed.filter(c => c.pnl > 0).length + ' won) | realized ' + (pnl >= 0 ? '+' : '-') + '$' + Math.abs(pnl).toFixed(2) + ' (' + (R >= 0 ? '+' : '') + R.toFixed(2) + 'R)'
+    + ' | as of ' + new Date().toLocaleTimeString('en-US', { timeZone: 'America/New_York', hour12: false }) + ' ET\n';
+}
+function copySip() {
+  const d = window._sipLast; if (!d || !d.day) { _copyText('No stocks-in-play data yet.', 'sip-copy-btn', '&#9112; Copy for Claude'); return; }
+  const rows = _sipRows(d);
+  const text = _sipHeaderText(d) + '\n' + _SIP_COLS.join('\t') + '\n' + rows.map(r => _SIP_COLS.map(k => r[k]).join('\t')).join('\n') + '\n';
+  _copyText(text, 'sip-copy-btn', '&#9112; Copy for Claude');
+}
+function downloadSipCsv() {
+  const d = window._sipLast; if (!d || !d.day) { alert('No stocks-in-play data yet.'); return; }
+  const rows = _sipRows(d);
+  _saveFile('apex-stocksinplay-' + d.day.day + '.csv', _SIP_COLS.join(',') + '\n' + rows.map(r => _SIP_COLS.map(k => _csvCell(r[k])).join(',')).join('\n') + '\n');
+}
+function _replayTables(d) {   // -> { rules: [[...]], grid: [[...]] } with header rows
+  const tot = d.totals || {}, keys = Object.keys(tot);
+  const rules = [['rule', 'key', 'live', 'trades', 'won', 'winPct', 'totalR', 'pnl']];
+  if (d.live && d.live.trades) rules.push(['Actual live today (real fills)', 'live', '', d.live.trades, d.live.wins, Math.round(100 * d.live.wins / d.live.trades), d.live.R, d.live.usd]);
+  for (const k of keys) { const t = tot[k]; rules.push([t.label, k, k === d.liveRule ? 'LIVE' : '', t.trades, t.wins, t.winPct == null ? '' : t.winPct, t.R, t.usd]); }
+  const grid = [['symbol', ...keys.flatMap(k => [k + '_R', k + '_exit', k + '_peakR'])]];
+  for (const [sym, row] of Object.entries(d.perTrade || {})) grid.push([sym, ...keys.flatMap(k => { const r = row[k]; return !r ? ['', '', ''] : !r.entered ? ['', 'no trigger', ''] : [r.R, r.reason, r.peakR == null ? '' : r.peakR]; })]);
+  return { rules, grid };
+}
+function copySipReplay() {
+  const d = window._sipReplayLast; if (!d || !d.totals) { _copyText('Run the replay first.', 'sip-rcopy-btn', '&#9112; Copy for Claude'); return; }
+  const { rules, grid } = _replayTables(d);
+  const text = 'APEX stocks-in-play exit replay ' + d.day + ' — bars to ' + d.asOf + (d.final ? ' (final)' : ' (still trading: open trades marked at the latest bar)') + '\n'
+    + 'Same entries for every rule, ideal fills (no slippage), each rule sized so its stop = 1R' + (d.liveRule ? '; live rule = ' + d.liveRule : '') + '\n\n'
+    + rules.map(r => r.join('\t')).join('\n') + '\n\n' + grid.map(r => r.join('\t')).join('\n') + '\n';
+  _copyText(text, 'sip-rcopy-btn', '&#9112; Copy for Claude');
+}
+function downloadSipReplayCsv() {
+  const d = window._sipReplayLast; if (!d || !d.totals) { alert('Run the replay first.'); return; }
+  const { rules, grid } = _replayTables(d);
+  _saveFile('apex-sip-replay-' + d.day + '.csv', rules.map(r => r.map(_csvCell).join(',')).join('\n') + '\n\n' + grid.map(r => r.map(_csvCell).join(',')).join('\n') + '\n');
+}
+
 // ── 11/03: exit replay — same entries, every exit rule, today's 1-minute bars (/api/sip/replay) ──
 async function runSipReplay() {
   const out = document.getElementById('sip-replay'), btn = document.getElementById('sip-replay-btn');
@@ -924,6 +1008,8 @@ async function runSipReplay() {
   finally { if (btn) btn.disabled = false; }
 }
 function renderSipReplay(d) {
+  window._sipReplayLast = d;
+  const tools = document.getElementById('sip-replay-tools'); if (tools) tools.style.display = d && d.totals && Object.keys(d.totals).length ? 'inline' : 'none';
   const out = document.getElementById('sip-replay'); if (!out) return;
   const esc = (x) => String(x == null ? '' : x).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
   const money = (x) => x == null || isNaN(x) ? '—' : (x >= 0 ? '+' : '-') + '$' + Math.abs(x).toFixed(2);
@@ -958,6 +1044,7 @@ async function fetchSip() {
   catch(e) { console.error('SIP fetch error:', e); }
 }
 function renderSip(d) {
+  window._sipLast = d;
   const wrap = document.getElementById('sip-wrap'); if (!wrap) return;
   const esc = (x) => String(x == null ? '' : x).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
   const money = (x) => x == null || isNaN(x) ? '—' : (x >= 0 ? '+' : '-') + '$' + Math.abs(x).toFixed(2);
