@@ -52,7 +52,14 @@ const CFG = {
   TRAIL_R:        Number.isFinite(C.SIP_TRAIL_R) ? C.SIP_TRAIL_R : 1,              // ... it trails 1R behind the best price
   HARD_CAP_R:     Number.isFinite(C.SIP_HARD_CAP_R) ? C.SIP_HARD_CAP_R : 2,        // down 2R from the fill = stop failed: market out
   USE_OTO:        C.SIP_USE_OTO !== false,      // entry + stop as one order (the stop rests the instant the entry fills)
-  STOP_BASE:      C.SIP_STOP_BASE === "fill" ? "fill" : "level",   // R is measured from the entry LEVEL, like the replay
+  // 11/04: R is measured from the ACTUAL FILL (day 2: level-based stops sat 2-3R below real fills — PCOR -3.3R, GXO -3.7R,
+  // and YOU showed "+4.7R locked" while it was ~breakeven on the shares held). "level" keeps the old behaviour.
+  STOP_BASE:      C.SIP_STOP_BASE === "level" ? "level" : "fill",
+  // replay execution costs, as a fraction of the 14-day ATR, measured from day 2's live fills (11/04): entry stop-market
+  // fills ~0.15 ATR past the level; stop exits ~0.10 ATR past the stop; the 2:58 market close ~0.02 ATR.
+  COST_ENTRY_ATR: Number.isFinite(C.SIP_COST_ENTRY_ATR) ? C.SIP_COST_ENTRY_ATR : 0.15,
+  COST_EXIT_ATR:  Number.isFinite(C.SIP_COST_EXIT_ATR) ? C.SIP_COST_EXIT_ATR : 0.10,
+  COST_CLOSE_ATR: Number.isFinite(C.SIP_COST_CLOSE_ATR) ? C.SIP_COST_CLOSE_ATR : 0.02,
   MAX_LATE_R:     2,                            // already-through entries: market only if within 2R of the level
   BATCH:          100,
   CONCURRENCY:    6,
@@ -268,24 +275,44 @@ const EXIT_VARIANTS = {
                 floorR: (pk) => pk >= 0.5 ? pk - 0.5 : null },
   paper_g05b: { label: "Paper stop + sell on a 0.5R drop from the high (armed at +1R)", stop: (c) => CFG.ATR_STOP * c.atr,
                 floorR: (pk) => pk >= 1 ? pk - 0.5 : null },
+  // 11/04 (Harrison, from day 2's fills: ~2.4R of round-trip slippage on a 0.1-ATR R): same lock + trail on a BIGGER R
+  atr25_l05: { label: "0.25 ATR stop + lock -0.5R at 1R + 1R trail from 2R", stop: (c) => 0.25 * c.atr, floorR: (pk) => pk >= 2 ? pk - 1 : pk >= 1 ? -0.5 : null },
+  atr50_l05: { label: "0.5 ATR stop + lock -0.5R at 1R + 1R trail from 2R",  stop: (c) => 0.5 * c.atr,  floorR: (pk) => pk >= 2 ? pk - 1 : pk >= 1 ? -0.5 : null },
+  atr100_l05: { label: "1 ATR stop + lock -0.5R at 1R + 1R trail from 2R",   stop: (c) => c.atr,        floorR: (pk) => pk >= 2 ? pk - 1 : pk >= 1 ? -0.5 : null },
+  // stop-LIMIT entry: no fill if the trigger bar opens more than 0.05 ATR past the level; slippage capped at 0.05 ATR (approximate)
+  paper_l05_cap: { label: "Paper stop + lock/trail, entry capped at 0.05 ATR past the level (stop-limit, approx.)", stop: (c) => CFG.ATR_STOP * c.atr,
+                   entryCapAtr: 0.05, floorR: (pk) => pk >= 2 ? pk - 1 : pk >= 1 ? -0.5 : null },
+  atr50_l05_cap: { label: "0.5 ATR stop + lock/trail, entry capped at 0.05 ATR past the level (approx.)", stop: (c) => 0.5 * c.atr,
+                   entryCapAtr: 0.05, floorR: (pk) => pk >= 2 ? pk - 1 : pk >= 1 ? -0.5 : null },
   or_apex: { label: "OR stop + APEX lock ladder (in R)",         stop: (c) => Math.max(c.h - c.l, 0.1 * c.atr),
              floorR: (pk) => { const L = _apexLadderR.rungs; if (!L.length || pk < L[0][0]) return null; let f = L[0][1];
                                for (const [a, fl] of L) if (pk >= a) f = fl; const top = L[L.length - 1]; if (pk >= top[0]) f = Math.max(f, pk - _apexLadderR.trail); return f; } },
 };
-function simulateExit(cand, bars, v, closeOpen = true) {
+// costs (optional, in fractions of ATR): { entryAtr, exitAtr, closeAtr }. With costs the entry fills PAST the trigger, the stop
+// and floors are measured from that fill (as live), stop/floor exits fill PAST the stop, the 2:58 close pays closeAtr; targets
+// are limit orders (no slippage).
+function simulateExit(cand, bars, v, closeOpen = true, costs = null) {
   if (!cand || !cand.entry || cand.side === "doji" || !Array.isArray(bars) || !bars.length) return null;
   const L = cand.side === "long", sg = L ? 1 : -1, sd = v.stop(cand);
   if (!(sd > 0)) return null;
+  const atr = +cand.atr || 0;
+  let ec = costs ? (costs.entryAtr || 0) * atr : 0;
+  const xr = costs ? (costs.exitAtr || 0) * atr / sd : 0, cr = costs ? (costs.closeAtr || 0) * atr / sd : 0;
   let entryPx = null, peakR = 0, at = null;
   const rOf = (px) => sg * (px - entryPx) / sd;
   for (let i = 0; i < bars.length; i++) {
     const b = bars[i], o = +b.o, h = +b.h, l = +b.l, c = +b.c;
     if (entryPx == null) {
       if (!(L ? h >= cand.entry : l <= cand.entry)) continue;
-      entryPx = L ? Math.max(cand.entry, o) : Math.min(cand.entry, o); at = b.t;
+      const trig = L ? Math.max(cand.entry, o) : Math.min(cand.entry, o);
+      if (v.entryCapAtr != null) {   // stop-limit: a bar that opens beyond the cap never fills; otherwise slippage is capped
+        if (sg * (trig - cand.entry) > v.entryCapAtr * atr + 1e-9) return { entered: false, R: 0, reason: "limit not filled (gapped past)", sd };
+        ec = Math.min(ec, Math.max(0, v.entryCapAtr * atr - sg * (trig - cand.entry)));
+      }
+      entryPx = L ? Math.min(trig + ec, h) : Math.max(trig - ec, l); at = b.t;   // slippage can't fill outside the bar's range
       const up = c >= o, gapIn = L ? o >= cand.entry : o <= cand.entry;
       const adverse = gapIn ? (L ? l : h) : L ? (up ? c : l) : (up ? h : c);   // same path convention as simulate()
-      if (rOf(adverse) <= -1) return { entered: true, entryPx, R: -1, reason: "stop (entry bar)", at, sd };
+      if (rOf(adverse) <= -1) return { entered: true, entryPx, R: +Math.max(-1 - xr, rOf(L ? l : h)).toFixed(3), reason: "stop (entry bar)", at, sd };
       peakR = Math.max(0, rOf(c));
       continue;
     }
@@ -293,7 +320,7 @@ function simulateExit(cand, bars, v, closeOpen = true) {
     const stopR = floor != null ? Math.max(-1, floor) : -1;
     const lowR = rOf(L ? l : h), openR = rOf(o);
     if (lowR <= stopR) {
-      const exitR = openR <= stopR ? openR : stopR;   // gapped through: out at the open
+      const exitR = Math.max((openR <= stopR ? openR : stopR) - xr, lowR);   // gapped through: out at the open; slippage, but not past the bar
       return { entered: true, entryPx, R: +exitR.toFixed(3), reason: floor != null ? (stopR > -1 ? "ladder" : "stop") : "stop", peakR: +peakR.toFixed(2), at, sd };
     }
     if (v.targetR != null) {   // take-profit limit: filled at the target, or at the open if it gapped past it
@@ -304,12 +331,14 @@ function simulateExit(cand, bars, v, closeOpen = true) {
   }
   if (entryPx == null) return { entered: false, R: 0, reason: "not triggered", sd };
   const last = +bars[bars.length - 1].c;
-  return { entered: true, entryPx, R: +rOf(last).toFixed(3), reason: closeOpen ? "close" : "still open (marked)", peakR: +peakR.toFixed(2), at, sd };
+  return { entered: true, entryPx, R: +(rOf(last) - (closeOpen ? cr : 0)).toFixed(3), reason: closeOpen ? "close" : "still open (marked)", peakR: +peakR.toFixed(2), at, sd };
 }
+const replayCosts = () => ({ entryAtr: CFG.COST_ENTRY_ATR, exitAtr: CFG.COST_EXIT_ATR, closeAtr: CFG.COST_CLOSE_ATR });
 // every variant on every candidate -> { perTrade: {SYM: {variant: result}}, totals: {variant: {...}} }
-function replayVariants(cands, barsBySym, closeOpen = true) {
+// 11/04: every rule twice — gross (ideal fills) and NET (with replayCosts()). Totals carry both; per-trade results carry Rnet.
+function replayVariants(cands, barsBySym, closeOpen = true, costs = replayCosts()) {
   const perTrade = {}, totals = {};
-  for (const k of Object.keys(EXIT_VARIANTS)) totals[k] = { label: EXIT_VARIANTS[k].label, trades: 0, wins: 0, R: 0, usd: 0 };
+  for (const k of Object.keys(EXIT_VARIANTS)) totals[k] = { label: EXIT_VARIANTS[k].label, trades: 0, wins: 0, R: 0, usd: 0, tradesNet: 0, winsNet: 0, Rnet: 0, usdNet: 0 };
   for (const c of cands) {
     if (!c || c.side === "doji" || !c.entry) continue;
     const bars = barsBySym[c.sym] || [];
@@ -317,12 +346,20 @@ function replayVariants(cands, barsBySym, closeOpen = true) {
     for (const [k, v] of Object.entries(EXIT_VARIANTS)) {
       const r = simulateExit(c, bars, v, closeOpen);
       if (!r) continue;
+      const t = totals[k];
       if (r.entered) { const sh = sizePosition(c.entry, r.sd); r.shares = sh; r.usd = +(r.R * r.sd * sh).toFixed(2);
-                       const t = totals[k]; t.trades++; if (r.R > 0) t.wins++; t.R += r.R; t.usd += r.usd; }
+                       t.trades++; if (r.R > 0) t.wins++; t.R += r.R; t.usd += r.usd; }
+      const n = costs ? simulateExit(c, bars, v, closeOpen, costs) : null;
+      if (n) { r.Rnet = n.entered ? n.R : null; r.reasonNet = n.reason;
+               if (n.entered) { const shn = sizePosition(c.entry, n.sd); r.usdNet = +(n.R * n.sd * shn).toFixed(2);
+                                t.tradesNet++; if (n.R > 0) t.winsNet++; t.Rnet += n.R; t.usdNet += r.usdNet; } }
       perTrade[c.sym][k] = r;
     }
   }
-  for (const t of Object.values(totals)) { t.R = +t.R.toFixed(2); t.usd = +t.usd.toFixed(2); t.winPct = t.trades ? +(100 * t.wins / t.trades).toFixed(0) : null; }
+  for (const t of Object.values(totals)) {
+    t.R = +t.R.toFixed(2); t.usd = +t.usd.toFixed(2); t.winPct = t.trades ? +(100 * t.wins / t.trades).toFixed(0) : null;
+    t.Rnet = +t.Rnet.toFixed(2); t.usdNet = +t.usdNet.toFixed(2); t.winPctNet = t.tradesNet ? +(100 * t.winsNet / t.tradesNet).toFixed(0) : null;
+  }
   return { perTrade, totals };
 }
 // on demand (dashboard button): today's candidates against today's 1-minute bars so far
@@ -341,7 +378,7 @@ async function replayToday(state) {
   for (const c of cs) bars[c.sym] = (raw[c.sym] || []).filter(x => { const m = etParts(Date.parse(x.t)).min; return m >= 575 && m < exitMin; });
   const liveRule = CFG.EXIT_MODE === "hold" ? "paper"
     : (CFG.LOCK_AT_R === 1 && CFG.LOCK_FLOOR_R === -0.5 && CFG.TRAIL_FROM_R === 2 && CFG.TRAIL_R === 1 ? "paper_l05" : null);
-  const out = { day: s.day, asOf: hhmm(endMin) + " ET", final: closed, liveRule, ...replayVariants(cs, bars, closed),
+  const out = { day: s.day, asOf: hhmm(endMin) + " ET", final: closed, liveRule, costs: replayCosts(), ...replayVariants(cs, bars, closed),
                 live: cs.filter(c => c.status === "closed").reduce((a, c) => ({ trades: a.trades + 1, wins: a.wins + (c.pnl > 0 ? 1 : 0), usd: +(a.usd + (c.pnl || 0)).toFixed(2), R: +(a.R + (c.R || 0)).toFixed(2) }), { trades: 0, wins: 0, usd: 0, R: 0 }) };
   _replayCache = { day: s.day, at: Date.now(), out };
   return out;
@@ -568,7 +605,8 @@ async function moveStop(c, s, newPx, floorR, log) {
     const r = await io().patch(`/orders/${c.stopOrderId}`, { stop_price: newPx.toFixed(2) });
     if (r && r.status >= 200 && r.status < 300 && r.body && r.body.id) {
       c.stopOrderId = r.body.id; c.stopPx = newPx; c.floorR = floorR;
-      log("trade", `[SIP] ${c.sym} stop raised to $${newPx.toFixed(2)} — ${floorR >= 0 ? "+" : ""}${floorR.toFixed(2)}R locked (peak +${c.peakR}R)`);
+      log("trade", floorR <= -1 ? `[SIP] ${c.sym} stop re-based to $${newPx.toFixed(2)} = -1R from the fill $${c.fillPx.toFixed(2)}`
+                                : `[SIP] ${c.sym} stop raised to $${newPx.toFixed(2)} — ${floorR >= 0 ? "+" : ""}${floorR.toFixed(2)}R locked from the fill (peak +${c.peakR}R)`);
       return;
     }
     const old = c.stopOrderId; c._weCancelledStop = true;
@@ -578,7 +616,7 @@ async function moveStop(c, s, newPx, floorR, log) {
     if (!(openQty(c) > 0)) return;
   }
   c.floorR = floorR;
-  await protect(c, s, log, "lock");   // places at the new floor; if the price is already through it, closes at market (= the lock)
+  await protect(c, s, log, floorR <= -1 ? "stop-reject" : "lock");   // places at the new floor; if the price is already through it, closes at market
   if (c.stopOrderId && c.floorR !== prevFloor) log("trade", `[SIP] ${c.sym} stop moved to $${(+c.stopPx).toFixed(2)} — ${floorR >= 0 ? "+" : ""}${floorR.toFixed(2)}R locked (re-placed, peak +${c.peakR}R)`);
 }
 // safety net: the stop should have filled by now. Cancel it (so the shares aren't held twice) and go to market.
@@ -604,14 +642,17 @@ async function manageExits(s, log) {
     c._capHits = lossR >= CFG.HARD_CAP_R ? (c._capHits || 0) + 1 : 0;
     if (c._capHits >= 2) { await hardCap(c, s, px, lossR, log); continue; }
     const prev = c._lastPx; c._lastPx = px;
-    if (CFG.EXIT_MODE !== "lock_trail" || s.carry.includes(c) || prev == null) continue;
-    const conf = sg > 0 ? Math.min(prev, px) : Math.max(prev, px);   // confirmed peak: held across two prints
-    c.peakPx = c.peakPx == null ? conf : sg > 0 ? Math.max(c.peakPx, conf) : Math.min(c.peakPx, conf);
+    if (CFG.EXIT_MODE !== "lock_trail" || s.carry.includes(c)) continue;
+    const conf = prev == null ? null : sg > 0 ? Math.min(prev, px) : Math.max(prev, px);   // confirmed peak: held across two prints
+    if (conf == null && c.peakPx == null) { c.peakPx = c.fillPx; }
+    if (conf != null) c.peakPx = sg > 0 ? Math.max(c.peakPx, conf) : Math.min(c.peakPx, conf);
     c.peakR = +(sg * (c.peakPx - baseOf(c)) / c.stopDist).toFixed(2);
-    const fr = lockFloorR(c.peakR);
-    if (fr <= -1 || (c.floorR != null && fr <= c.floorR)) continue;
+    // target floor: the lock/trail, never below -1R from the base. With STOP_BASE "fill" this also re-bases the stop that went
+    // out with the entry (placed at the LEVEL before the fill was known) onto the real fill — tighter whenever the fill slipped.
+    const fr = Math.max(-1, lockFloorR(c.peakR));
+    if (c.floorR != null && fr < c.floorR) continue;
     const newPx = stopPxFor(c, fr), step = Math.max(0.01, 0.1 * c.stopDist);
-    if (c.stopPx != null && (sg > 0 ? newPx < c.stopPx + step - 1e-9 : newPx > c.stopPx - step + 1e-9)) continue;   // not worth a replace
+    if (c.stopPx != null && (sg > 0 ? newPx < c.stopPx + step - 1e-9 : newPx > c.stopPx - step + 1e-9)) continue;   // never lower, no replace spam
     await moveStop(c, s, newPx, fr, log);
   }
 }
@@ -720,7 +761,7 @@ async function simulateDay(s, log) {
     }
   }
   s.summary = summarize(s);
-  try { s.variants = replayVariants(cs, Object.fromEntries(cs.map(c => [c.sym, (bars[c.sym] || []).filter(x => { const m2 = etParts(Date.parse(x.t)).min; return m2 >= 575 && m2 < exitMin; })])), true).totals; } catch (_) {}
+  try { s.variants = replayVariants(cs, Object.fromEntries(cs.map(c => [c.sym, (bars[c.sym] || []).filter(x => { const m2 = etParts(Date.parse(x.t)).min; return m2 >= 575 && m2 < exitMin; })])), true).totals; s.variantCosts = replayCosts(); } catch (_) {}
   const m = s.summary;
   log("trade", `[SIP] DAY ${s.day} (${s.mode}): ${m.candidates} in play, ${m.triggered} triggered live, actual ${m.actualPnl >= 0 ? "+" : ""}$${m.actualPnl} (${m.actualR >= 0 ? "+" : ""}${m.actualR}R) | paper's ideal on all ${m.idealTrades} triggers ${m.idealR >= 0 ? "+" : ""}${m.idealR}R | slippage on traded ${m.slipRPerTrade != null ? m.slipRPerTrade + "R/trade" : "n/a"}`);
 }
@@ -894,7 +935,7 @@ function eodSection(s) {
 <div style="font-weight:bold;color:#9cf">STOCKS IN PLAY — opening-range breakout, shares (Zarattini, Barbon &amp; Aziz 2024) · ${s.mode.toUpperCase()} · sleeve $${CFG.SLEEVE_USD.toLocaleString()} · exit ${CFG.EXIT_MODE === "hold" ? "paper (stop, else the close)" : `stop -1R; at +${CFG.LOCK_AT_R}R lock ${CFG.LOCK_FLOOR_R}R; from +${CFG.TRAIL_FROM_R}R trail ${CFG.TRAIL_R}R; safety net -${CFG.HARD_CAP_R}R`}</div>
 ${s.skipped ? `<div>No trades: ${s.skipped}</div>` : `<div>${m.candidates} in play (${m.dojis} doji, ${m.noBorrow} not borrowable) · ${m.triggered} traded, ${m.wins} won · actual ${m.actualPnl >= 0 ? "+" : ""}$${m.actualPnl} (${m.actualR}R) · paper's ideal ${m.idealR}R on ${m.idealTrades} triggers (${m.idealRTraded}R on the ones traded) · slippage ${m.slipRPerTrade != null ? m.slipRPerTrade + "R/trade" : "n/a"}</div>
 <table style="border-collapse:collapse;margin-top:4px"><tr>${["#", "sym", "side", "RVol", "status", "P&amp;L", "R", "ideal R", "slip R"].map(td).join("")}</tr>${rows}</table>
-${s.variants ? `<div style="margin-top:8px;font-weight:bold;color:#9cf">Exit variants on the same entries (ideal fills, $12.50 = 1R each)</div><table style="border-collapse:collapse">${Object.values(s.variants).map(v => `<tr>${[v.label, v.trades + " trades", (v.winPct != null ? v.winPct + "% won" : ""), (v.R >= 0 ? "+" : "") + v.R + "R", (v.usd >= 0 ? "+" : "-") + "$" + Math.abs(v.usd).toFixed(2)].map(td).join("")}</tr>`).join("")}</table>` : ""}`}
+${s.variants ? `<div style="margin-top:8px;font-weight:bold;color:#9cf">Exit variants on the same entries ($12.50 = 1R each) — gross = ideal fills; NET = entry ${CFG.COST_ENTRY_ATR} ATR + stop exit ${CFG.COST_EXIT_ATR} ATR + close ${CFG.COST_CLOSE_ATR} ATR slippage</div><table style="border-collapse:collapse"><tr>${["rule", "trades", "won", "gross R", "gross $", "NET R", "NET $"].map(td).join("")}</tr>${Object.values(s.variants).map(v => `<tr>${[v.label, v.trades, (v.winPct != null ? v.winPct + "%" : ""), (v.R >= 0 ? "+" : "") + v.R + "R", (v.usd >= 0 ? "+" : "-") + "$" + Math.abs(v.usd).toFixed(2), v.Rnet != null ? (v.Rnet >= 0 ? "+" : "") + v.Rnet + "R" : "", v.usdNet != null ? (v.usdNet >= 0 ? "+" : "-") + "$" + Math.abs(v.usdNet).toFixed(2) : ""].map(td).join("")}</tr>`).join("")}</table>` : ""}`}
 </div>`;
 }
 
