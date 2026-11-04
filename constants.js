@@ -894,6 +894,11 @@ const GEX_V2_SNAP_CONCURRENCY     = 6;       // snapshot batches in flight at on
 // 10/6 (Harrison): always include the MONTHLY (third-Friday) expiration in the v2 book — the 6 nearest daily
 // expiries only reach ~8 DTE and miss the monthly, where much of the open interest sits. +1 expiry per fetch.
 const GEX_V2_INCLUDE_MONTHLY      = true;
+// 11/04 (Harrison): include TODAY's expiry (0DTE) in the gamma read. Alpaca gives no greeks for same-day options, so APEX
+// prices their gamma from the mid quote (implied vol -> Black-Scholes gamma). 0DTE now carries a large share of SPY gamma;
+// leaving it out was the biggest known gap in the estimate. "live" = counts toward the regime; "shadow" = logged only
+// ("[0DTE shadow: with it ...]"); "off" = the old behaviour. Every [GEX] line shows the regime WITHOUT 0DTE beside it.
+const GEX_0DTE_MODE               = "live";
 // 10/6: REGIME HYSTERESIS. The label only changes when the new reading is decisive (|net GEX| >= this, in $M);
 // weaker opposite readings keep the previous label. 10/1 QQQ flipped 6x on readings between -149M and +240M;
 // typical |net GEX| is 900M-4,000M (10th-90th pct of v2 readings). 0 = no hysteresis.
@@ -1088,7 +1093,7 @@ module.exports = {
   BREAK_DELTA, BREAK_DELTA_MIN, BREAK_DELTA_MAX, BREAK_TARGET_DTE, BREAK_MAX_HOLD_MIN, BREAK_TRAIL_ARM_PCT, BREAK_TRAIL_GIVEBACK_PCT,
   GEX_FETCH_ENABLED, GEX_FETCH_THROTTLE_MS,
   GEX_V2_ENABLED, GEX_V2_MAX_EXPIRIES, GEX_V2_MAX_DAYS, GEX_V2_STRIKE_BAND, GEX_V2_SNAP_CONCURRENCY,
-  GEX_V2_INCLUDE_MONTHLY, GEX_REGIME_HYST_M, GEX_WALL_HOLD_MIN,
+  GEX_V2_INCLUDE_MONTHLY, GEX_REGIME_HYST_M, GEX_WALL_HOLD_MIN, GEX_0DTE_MODE,
   STRATEGY_CLASS, strategyClass, isFlattenExempt, LOCK_LADDER, LOCK_LADDER_TRAIL, ladderFloor,
   TREND_ENABLED, TREND_DELTA, TREND_DELTA_MIN, TREND_DELTA_MAX, TREND_TARGET_DTE, TREND_DTE_MIN, TREND_DTE_MAX,
   TREND_ROLL_DTE, TREND_COOLDOWN_DAYS, TREND_MODE, TREND_RETIRE_LIVE, TREND_RETIRE_AFTER_ET, TREND_TICKERS, TREND_EXIT_MODE, TREND_CHANDELIER_ATR, TREND_CHANDELIER_CHECK_ET, TREND_MA_FAST, TREND_MA_SLOW, TREND_RSI_MIN, TREND_RSI_MAX, TREND_OVEREXT_ATR, TREND_BREADTH_MIN,
