@@ -798,6 +798,17 @@ const SIP_ENABLED        = true;
 const SIP_MODE           = "live";    // "live" = real paper orders; "shadow" = log + ideal replay only (env SIP_MODE overrides)
 const SIP_SLEEVE_USD     = 25000;     // the paper's starting capital: $1,250 per position, $12.50 risk, <= $5,000 notional each
 const SIP_OPT_BP_RESERVE = 15000;     // never let resting share orders take options buying power below this
+// 11/03 (Harrison, from the day-1 exit replay — same 17 entries, ideal fills: paper hold-to-close +3.7R; lock + trail +20.9R):
+// EXIT = stop -1R from the entry level; at +1R the stop moves to -0.5R; from +2R it trails 1R behind the best price (never lowered);
+// anything still open closes at 2:58 CT. The stop goes out WITH the entry (one-triggers-other), so it rests the instant shares fill.
+// Safety net: a position 2R against its fill (the stop failed or gapped) is closed at market. "hold" = the paper's original exit.
+const SIP_EXIT_MODE      = "lock_trail";
+const SIP_LOCK_AT_R      = 1;
+const SIP_LOCK_FLOOR_R   = -0.5;
+const SIP_TRAIL_FROM_R   = 2;
+const SIP_TRAIL_R        = 1;
+const SIP_HARD_CAP_R     = 2;
+const SIP_USE_OTO        = true;
 // 10/20 (Harrison): non-literature intraday-trend entry gates, all OFF (each still computed and logged as a label):
 //   ADX floor (Wilder ADX — practitioner, no academic support), breadth soft block (no support), the negative-gamma
 //   direction gate vs the 50d (built from one day, 9/01), and the two legacy per-ticker skips that also stopped the
@@ -1077,6 +1088,7 @@ module.exports = {
   TREND_ROLL_DTE, TREND_COOLDOWN_DAYS, TREND_MODE, TREND_RETIRE_LIVE, TREND_RETIRE_AFTER_ET, TREND_TICKERS, TREND_EXIT_MODE, TREND_CHANDELIER_ATR, TREND_CHANDELIER_CHECK_ET, TREND_MA_FAST, TREND_MA_SLOW, TREND_RSI_MIN, TREND_RSI_MAX, TREND_OVEREXT_ATR, TREND_BREADTH_MIN,
   TREND_CUTOFF_ET, TREND_RISK_BUDGET, TREND_TRAIL_ARM_PCT, TREND_STOP_UNDL_PCT, TREND_STOP_PCT, TREND_ATR_STOP_MULT, TREND_USTOP_FLOOR, TREND_USTOP_CEIL, TREND_STALE_DAYS, TREND_STALE_PEAK, TREND_TRAIL_GIVEBACK_PCT,
   SIP_ENABLED, SIP_MODE, SIP_SLEEVE_USD, SIP_OPT_BP_RESERVE,
+  SIP_EXIT_MODE, SIP_LOCK_AT_R, SIP_LOCK_FLOOR_R, SIP_TRAIL_FROM_R, SIP_TRAIL_R, SIP_HARD_CAP_R, SIP_USE_OTO,
   EODM_ENABLED, EODM_TICKERS, EODM_ENTRY_START_ET, EODM_ENTRY_END_ET, EODM_EXIT_ET, EODM_REQUIRE_NEG_GAMMA, EODM_HOLD_MIN,
   ITREND_ENABLED, ITREND_DELTA, ITREND_DELTA_MIN, ITREND_DELTA_MAX, ITREND_TARGET_DTE, ITREND_DTE_MIN, ITREND_DTE_MAX, ITREND_COST_SELECT, ITREND_SELECT_DTE_MIN, ITREND_SELECT_DTE_MAX, ITREND_SELECT_HOLD_MIN, ITREND_SELECT_STRIKE_BAND,
   ITREND_ADX_MIN, ITREND_VWAP_MIN, ITREND_BREADTH_STRONG, ITREND_START_ET, ITREND_END_ET, ITREND_NEG_GAMMA_BLOCK,
