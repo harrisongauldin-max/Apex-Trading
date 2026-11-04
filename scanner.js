@@ -2915,7 +2915,7 @@ async function runScan() {
                 state._gexLogLast[liveStock.ticker] = { sig: _gxSig, at: Date.now() };
                 const _coi = _gc.call.rows.reduce((s, r) => s + (r.oi || 0), 0);
                 const _poi = _gc.put.rows.reduce((s, r) => s + (r.oi || 0), 0);
-                logEvent("scan", `[GEX] ${liveStock.ticker} netGEX=${_g.netGEX} (${_g.netGexM}M) regime=${_g.regime} | near=${_g.regimeNear}(${_g.netGexNearM}M) flip=${_g.flipLevel ?? _g.flipNote}${_g.distFlipPct != null ? ` (${_g.distFlipPct}%)` : ""} ${_g.nExpiries}exp | ${_gc.call.rows.length}c/${_gc.put.rows.length}p oi=${_coi}c/${_poi}p ${_gc.call.dte}${_gc.farDte != null ? `-${_gc.farDte}` : ""}DTE`);
+                logEvent("scan", `[GEX] ${liveStock.ticker} netGEX=${_g.netGEX} (${_g.netGexM}M) regime=${_g.regime}${_g.n0dte ? ` [0DTE ${_g.net0dteM >= 0 ? "+" : ""}${_g.net0dteM}M; without it: ${_g.regimeEx0}${_g.regimeEx0 !== _g.regime ? " — 0DTE FLIPS THE REGIME" : ""}]` : (_gc.z0 && _gc.z0.shadow ? (() => { try { const z = GEX.computeGEX([..._gc.call.rows, ..._gc.z0.shadow.call], [..._gc.put.rows, ..._gc.z0.shadow.put], price); return z ? ` [0DTE shadow: with it ${z.regime} (${z.netGexM}M)]` : ""; } catch (_) { return ""; } })() : "")} | near=${_g.regimeNear}(${_g.netGexNearM}M) flip=${_g.flipLevel ?? _g.flipNote}${_g.distFlipPct != null ? ` (${_g.distFlipPct}%)` : ""} ${_g.nExpiries}exp | ${_gc.call.rows.length}c/${_gc.put.rows.length}p oi=${_coi}c/${_poi}p ${_gc.call.dte}${_gc.farDte != null ? `-${_gc.farDte}` : ""}DTE`);
               }
             } catch (_gxl) {}
           }
