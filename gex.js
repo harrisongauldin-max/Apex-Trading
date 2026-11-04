@@ -30,6 +30,29 @@ const _flipCache = new WeakMap();
 
 function _normPdf(x) { return Math.exp(-0.5 * x * x) / Math.sqrt(2 * Math.PI); }
 
+// 11/04 (Harrison): same-day expiries (0DTE). Alpaca gives no greeks for them, so APEX prices their gamma itself:
+// implied vol from the option's mid quote (Black-Scholes, r ~ 0), then gamma at that IV. Helpers below.
+function _normCdf(x) {   // Abramowitz-Stegun 26.2.17, |err| < 7.5e-8
+  const t = 1 / (1 + 0.2316419 * Math.abs(x));
+  const d = 0.3989422804014327 * Math.exp(-0.5 * x * x);
+  const p = d * t * (0.31938153 + t * (-0.356563782 + t * (1.781477937 + t * (-1.821255978 + t * 1.330274429))));
+  return x >= 0 ? 1 - p : p;
+}
+function bsPrice(S, K, T, iv, type) {
+  if (!(S > 0) || !(K > 0) || !(T > 0) || !(iv > 0)) return null;
+  const v = iv * Math.sqrt(T), d1 = (Math.log(S / K) + 0.5 * iv * iv * T) / v, d2 = d1 - v;
+  return type === "put" ? K * _normCdf(-d2) - S * _normCdf(-d1) : S * _normCdf(d1) - K * _normCdf(d2);
+}
+// implied vol by bisection on [1%, 500%]; null if the price is outside what any vol can produce
+function impliedVol(price, S, K, T, type) {
+  if (!(price > 0) || !(S > 0) || !(K > 0) || !(T > 0)) return null;
+  let lo = 0.01, hi = 5;
+  const pLo = bsPrice(S, K, T, lo, type), pHi = bsPrice(S, K, T, hi, type);
+  if (pLo == null || pHi == null || price < pLo - 1e-9 || price > pHi + 1e-9) return null;
+  for (let i = 0; i < 80; i++) { const m = (lo + hi) / 2; if (bsPrice(S, K, T, m, type) > price) hi = m; else lo = m; }
+  return (lo + hi) / 2;
+}
+
 // Black-Scholes gamma (r ~ 0 over these horizons). Returns 0 on bad inputs.
 function _bsGamma(S, K, T, iv) {
   if (!(S > 0) || !(K > 0) || !(T > 0) || !(iv > 0)) return 0;
@@ -104,14 +127,20 @@ function computeGEX(callRows, putRows, spot) {
   const netGEX = (_sumGO(callRows) - _sumGO(putRows)) * scale;
 
   // near-expiry-only read (= the v1 number) for comparison
-  const exps = [...new Set([...callRows, ...putRows].map(r => r.exp).filter(Boolean))].sort();
+  // "near" keeps its v1 meaning: the nearest FUTURE expiry (0DTE rows are flagged z0 and counted separately)
+  const exps = [...new Set([...callRows, ...putRows].filter(r => !r.z0).map(r => r.exp).filter(Boolean))].sort();
   let netGexNear = netGEX;
-  if (exps.length > 1) {
+  if (exps.length > 1 || callRows.some(r => r.z0) || putRows.some(r => r.z0)) {
     const near = exps[0];
-    netGexNear = (_sumGO(callRows.filter(r => r.exp === near)) - _sumGO(putRows.filter(r => r.exp === near))) * scale;
+    netGexNear = (_sumGO(callRows.filter(r => r.exp === near && !r.z0)) - _sumGO(putRows.filter(r => r.exp === near && !r.z0))) * scale;
   }
+  // 11/04: the 0DTE share, and what the regime would be WITHOUT it (logged side by side)
+  const net0dte = (_sumGO(callRows.filter(r => r.z0)) - _sumGO(putRows.filter(r => r.z0))) * scale;
+  const netEx0 = netGEX - net0dte;
 
-  const callWall = _wall(callRows), putWall = _wall(putRows);
+  // walls stay on FUTURE expiries only: 0DTE gamma near expiry is enormous and would swamp them, and the wall-based
+  // mean-reversion fades (9 of 10 so far) were built and tested on walls without 0DTE. The regime and flip include it.
+  const callWall = _wall(callRows.filter(r => !r.z0)), putWall = _wall(putRows.filter(r => !r.z0));
   const flip = _flipCached(callRows, putRows, spot);
 
   return {
@@ -120,7 +149,10 @@ function computeGEX(callRows, putRows, spot) {
     regime: netGEX >= 0 ? "pos" : "neg",                    // FULL-BOOK regime (v2)
     netGexNearM: Math.round(netGexNear / 1e6),
     regimeNear: netGexNear >= 0 ? "pos" : "neg",            // nearest-expiry regime (what v1 reported)
-    nExpiries: exps.length || 1,
+    nExpiries: (exps.length || 1) + (net0dte !== 0 || callRows.some(r => r.z0) ? 1 : 0),
+    net0dteM: Math.round(net0dte / 1e6),
+    regimeEx0: netEx0 >= 0 ? "pos" : "neg",
+    n0dte: callRows.filter(r => r.z0).length + putRows.filter(r => r.z0).length,
     callWall, putWall,
     distCallWallPct: (callWall > 0) ? parseFloat((((callWall - spot) / spot) * 100).toFixed(3)) : null,
     distPutWallPct:  (putWall  > 0) ? parseFloat((((putWall  - spot) / spot) * 100).toFixed(3)) : null,
@@ -176,4 +208,4 @@ function applyWallHysteresis(state, ticker, g, spot, holdMin) {
   return g;
 }
 
-module.exports = { computeGEX, applyRegimeHysteresis, applyWallHysteresis };
+module.exports = { computeGEX, applyRegimeHysteresis, applyWallHysteresis, bsGamma: _bsGamma, bsPrice, impliedVol };
