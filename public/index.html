@@ -977,18 +977,18 @@ function downloadSipCsv() {
 }
 function _replayTables(d) {   // -> { rules: [[...]], grid: [[...]] } with header rows
   const tot = d.totals || {}, keys = Object.keys(tot);
-  const rules = [['rule', 'key', 'live', 'trades', 'won', 'winPct', 'totalR', 'pnl']];
-  if (d.live && d.live.trades) rules.push(['Actual live today (real fills)', 'live', '', d.live.trades, d.live.wins, Math.round(100 * d.live.wins / d.live.trades), d.live.R, d.live.usd]);
-  for (const k of keys) { const t = tot[k]; rules.push([t.label, k, k === d.liveRule ? 'LIVE' : '', t.trades, t.wins, t.winPct == null ? '' : t.winPct, t.R, t.usd]); }
-  const grid = [['symbol', ...keys.flatMap(k => [k + '_R', k + '_exit', k + '_peakR'])]];
-  for (const [sym, row] of Object.entries(d.perTrade || {})) grid.push([sym, ...keys.flatMap(k => { const r = row[k]; return !r ? ['', '', ''] : !r.entered ? ['', 'no trigger', ''] : [r.R, r.reason, r.peakR == null ? '' : r.peakR]; })]);
+  const rules = [['rule', 'key', 'live', 'trades', 'won', 'winPct', 'grossR', 'grossPnl', 'netR', 'netPnl']];
+  if (d.live && d.live.trades) rules.push(['Actual live today (real fills)', 'live', '', d.live.trades, d.live.wins, Math.round(100 * d.live.wins / d.live.trades), '', '', d.live.R, d.live.usd]);
+  for (const k of keys) { const t = tot[k]; rules.push([t.label, k, k === d.liveRule ? 'LIVE' : '', t.trades, t.wins, t.winPct == null ? '' : t.winPct, t.R, t.usd, t.Rnet == null ? '' : t.Rnet, t.usdNet == null ? '' : t.usdNet]); }
+  const grid = [['symbol', ...keys.flatMap(k => [k + '_R', k + '_netR', k + '_exit', k + '_peakR'])]];
+  for (const [sym, row] of Object.entries(d.perTrade || {})) grid.push([sym, ...keys.flatMap(k => { const r = row[k]; return !r ? ['', '', '', ''] : !r.entered ? ['', '', 'no trigger', ''] : [r.R, r.Rnet == null ? '' : r.Rnet, r.reason, r.peakR == null ? '' : r.peakR]; })]);
   return { rules, grid };
 }
 function copySipReplay() {
   const d = window._sipReplayLast; if (!d || !d.totals) { _copyText('Run the replay first.', 'sip-rcopy-btn', '&#9112; Copy for Claude'); return; }
   const { rules, grid } = _replayTables(d);
   const text = 'APEX stocks-in-play exit replay ' + d.day + ' — bars to ' + d.asOf + (d.final ? ' (final)' : ' (still trading: open trades marked at the latest bar)') + '\n'
-    + 'Same entries for every rule, ideal fills (no slippage), each rule sized so its stop = 1R' + (d.liveRule ? '; live rule = ' + d.liveRule : '') + '\n\n'
+    + 'Same entries for every rule, each sized so its stop = 1R. gross = ideal fills; net = slippage of ' + JSON.stringify(d.costs || {}) + ' (fractions of ATR)' + (d.liveRule ? '; live rule = ' + d.liveRule : '') + '\n\n'
     + rules.map(r => r.join('\t')).join('\n') + '\n\n' + grid.map(r => r.join('\t')).join('\n') + '\n';
   _copyText(text, 'sip-rcopy-btn', '&#9112; Copy for Claude');
 }
@@ -1019,12 +1019,18 @@ function renderSipReplay(d) {
   const th = (t) => '<th style="text-align:left;padding:3px 6px;font-weight:400;color:var(--muted);border-bottom:1px solid var(--border);white-space:nowrap">' + t + '</th>';
   const td = (t, st) => '<td style="padding:3px 6px;border-bottom:1px solid rgba(13,48,80,.5);white-space:nowrap;' + (st || '') + '">' + t + '</td>';
   const col = (x) => x > 0 ? 'var(--green)' : x < 0 ? 'var(--red)' : 'var(--muted)';
-  const best = keys.reduce((a, k) => (a == null || tot[k].usd > tot[a].usd ? k : a), null);
-  let h = '<div style="font-size:11px;color:var(--muted);margin-bottom:6px">' + esc(d.day) + ' · bars to ' + esc(d.asOf) + (d.final ? ' (final)' : ' — still trading: open trades marked at the latest bar') + ' · same entries for every rule, ideal fills (no slippage), each rule sized so its stop = 1R</div>';
-  h += '<div style="overflow-x:auto"><table style="border-collapse:collapse;font-size:11px;width:100%"><tr>' + ['Exit rule', 'Trades', 'Won', 'Win %', 'Total R', 'P&amp;L'].map(th).join('') + '</tr>';
-  if (d.live && d.live.trades) h += '<tr>' + td('<i>Actual live today (paper stop, real fills)</i>', 'color:var(--muted)') + td(d.live.trades) + td(d.live.wins) + td(Math.round(100 * d.live.wins / d.live.trades) + '%') + td(rr(d.live.R), 'color:' + col(d.live.R)) + td(money(d.live.usd), 'font-weight:700;color:' + col(d.live.usd)) + '</tr>';
+  // 11/04: the star goes to the best NET result (after realistic slippage) when the replay has costs
+  const hasNet = keys.some(k => tot[k].usdNet != null);
+  const score = (k) => { const v = hasNet ? tot[k].usdNet : tot[k].usd; return v == null || isNaN(v) ? -Infinity : v; };
+  const best = keys.reduce((a, k) => (a == null || score(k) > score(a) ? k : a), null);
+  const cst = d.costs || {};
+  let h = '<div style="font-size:11px;color:var(--muted);margin-bottom:6px">' + esc(d.day) + ' · bars to ' + esc(d.asOf) + (d.final ? ' (final)' : ' — still trading: open trades marked at the latest bar') + ' · same entries for every rule, each sized so its stop = 1R · <b>Gross</b> = ideal fills · <b>Net</b> = entry ' + (cst.entryAtr != null ? cst.entryAtr : '?') + ' ATR + stop exit ' + (cst.exitAtr != null ? cst.exitAtr : '?') + ' ATR + close ' + (cst.closeAtr != null ? cst.closeAtr : '?') + ' ATR slippage (measured on 11/04 live fills) · ★ = best net</div>';
+  h += '<div style="overflow-x:auto"><table style="border-collapse:collapse;font-size:11px;width:100%"><tr>' + ['Exit rule', 'Trades', 'Won', 'Win %', 'Gross R', 'Gross P&amp;L', 'Net R', 'Net P&amp;L'].map(th).join('') + '</tr>';
+  if (d.live && d.live.trades) h += '<tr>' + td('<i>Actual live today (real fills)</i>', 'color:var(--muted)') + td(d.live.trades) + td(d.live.wins) + td(Math.round(100 * d.live.wins / d.live.trades) + '%') + td('—') + td('—') + td(rr(d.live.R), 'color:' + col(d.live.R)) + td(money(d.live.usd), 'font-weight:700;color:' + col(d.live.usd)) + '</tr>';
   for (const k of keys) { const t = tot[k];
-    h += '<tr>' + td((k === best ? '★ ' : '') + esc(t.label) + (k === d.liveRule ? ' <b style="color:var(--green)">← LIVE RULE</b>' : ''), k === best ? 'color:var(--gold)' : '') + td(t.trades) + td(t.wins) + td(t.winPct != null ? t.winPct + '%' : '—') + td(rr(t.R), 'color:' + col(t.R)) + td(money(t.usd), 'font-weight:700;color:' + col(t.usd)) + '</tr>'; }
+    h += '<tr>' + td((k === best ? '★ ' : '') + esc(t.label) + (k === d.liveRule ? ' <b style="color:var(--green)">← LIVE RULE</b>' : ''), k === best ? 'color:var(--gold)' : '') + td(t.trades) + td(t.wins) + td(t.winPct != null ? t.winPct + '%' : '—')
+      + td(rr(t.R), 'color:' + col(t.R)) + td(money(t.usd), 'color:' + col(t.usd))
+      + td(t.Rnet != null ? rr(t.Rnet) : '—', 'color:' + col(t.Rnet)) + td(t.usdNet != null ? money(t.usdNet) : '—', 'font-weight:700;color:' + col(t.usdNet)) + '</tr>'; }
   h += '</table></div>';
   const syms = Object.keys(d.perTrade || {});
   if (syms.length) {
@@ -1032,7 +1038,7 @@ function renderSipReplay(d) {
     for (const sym of syms) { const row = d.perTrade[sym];
       h += '<tr>' + td('<b>' + esc(sym) + '</b>') + keys.map(k => { const r = row[k]; if (!r) return td('—');
         if (!r.entered) return td('no trigger', 'color:var(--muted)');
-        return td(rr(r.R) + ' <span style="color:var(--muted)">' + esc(r.reason) + (r.peakR != null ? ', peak ' + r.peakR + 'R' : '') + '</span>', 'color:' + col(r.R)); }).join('') + '</tr>'; }
+        return td(rr(r.R) + (r.Rnet != null ? ' <span style="color:' + col(r.Rnet) + '">(net ' + rr(r.Rnet) + ')</span>' : '') + ' <span style="color:var(--muted)">' + esc(r.reason) + (r.peakR != null ? ', peak ' + r.peakR + 'R' : '') + '</span>', 'color:' + col(r.R)); }).join('') + '</tr>'; }
     h += '</table></div>';
   }
   out.innerHTML = h;
