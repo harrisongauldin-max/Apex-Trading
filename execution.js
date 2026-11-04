@@ -46,6 +46,7 @@ const { CAPITAL_FLOOR, MIN_OPTION_PREMIUM, MIN_OI,
         FEASIBILITY_MAX_RATIO = 1.0, FEASIBILITY_HOLD_MIN = 20, FLAT_SIZING_ENABLED = false,
         GEX_V2_ENABLED = true, GEX_V2_MAX_EXPIRIES = 6, GEX_V2_MAX_DAYS = 35, GEX_V2_STRIKE_BAND = 0.05, GEX_V2_SNAP_CONCURRENCY = 6,
         ITREND_ADX_SIZE_ENABLED = false, ITREND_ADX_SIZE_MIN = 40, ITREND_ADX_SIZE_CONTRACTS = 2, GEX_V2_INCLUDE_MONTHLY = false,
+        GEX_0DTE_MODE = "live",
         TREND_SIZE_AT_STOP = false, TREND_MAX_RISK_PCT = 0.03, TREND_ATR_STOP_MULT = 3.5, TREND_USTOP_FLOOR = 0.20, TREND_USTOP_CEIL = 0.55,
 }                                          = require('./constants');
 const { confirmPendingOrder } = require('./closeEngine');
@@ -1352,9 +1353,14 @@ async function _fetchGexChainV2(ticker, spot) {
       return out;
     };
     const [callsAll, putsAll] = await Promise.all([_list("call"), _list("put")]);
-    // first N FUTURE expiries (0DTE excluded — no greeks/OI on Alpaca's same-day snapshot)
+    // first N FUTURE expiries. 11/04: plus TODAY's expiry (0DTE) unless GEX_0DTE_MODE is "off" — Alpaca gives no greeks
+    // for it, so its gamma is priced here from the mid quote (gex.js impliedVol + bsGamma). Open interest comes from the
+    // contracts endpoint (yesterday's close), the same source as every other expiry.
     const _allExps = [...new Set([...callsAll, ...putsAll].map(c => c.expiration_date))].filter(e => e > todayStr).sort();
     const exps = _allExps.slice(0, GEX_V2_MAX_EXPIRIES);
+    const _etOffH = (() => { try { const m = /GMT([+-]\d+)/.exec(new Date().toLocaleString("en-US", { timeZone: "America/New_York", timeZoneName: "shortOffset" })); return m ? +m[1] : -5; } catch (_) { return -5; } })();
+    const _closeMs = Date.parse(`${todayStr}T16:00:00${_etOffH < 0 ? "-" : "+"}${String(Math.abs(_etOffH)).padStart(2, "0")}:00`);
+    const _want0 = GEX_0DTE_MODE !== "off" && [...callsAll, ...putsAll].some(c => c.expiration_date === todayStr) && _closeMs - Date.now() > 60000;
     if (GEX_V2_INCLUDE_MONTHLY) {   // 10/6: always include the monthly (third-Friday) expiration inside the window
       try {
         const DC = require('./dayContext');
@@ -1368,6 +1374,7 @@ async function _fetchGexChainV2(ticker, spot) {
     }
     if (!exps.length) return false;
     const expSet = new Set(exps);
+    if (_want0) expSet.add(todayStr);
     const calls = callsAll.filter(c => expSet.has(c.expiration_date));
     const puts  = putsAll.filter(c => expSet.has(c.expiration_date));
     if (!calls.length || !puts.length) return false;
@@ -1389,10 +1396,42 @@ async function _fetchGexChainV2(ticker, spot) {
     // sides run sequentially so GEX_V2_SNAP_CONCURRENCY is the TOTAL in-flight cap, not per side
     const cSnap = await _snaps(calls);
     const pSnap = await _snaps(puts);
-    const _rows = (contracts, snaps) => {
+    const GEXM = require('./gex');
+    let _n0 = 0, _n0skip = 0;
+    // 0DTE implied vol per STRIKE from the out-of-the-money side (standard practice: an in-the-money option's price is mostly
+    // intrinsic value, so a one-cent quote error swings its implied vol wildly). Both sides at a strike share that vol.
+    const _iv0 = new Map();
+    if (_want0) {
+      const T0 = Math.max(15 * 60000, _closeMs - Date.now()) / (365 * 86400000);
+      const _mid = (sn) => { const q = (sn && sn.latestQuote) || {}, bp = +q.bp || 0, ap = +q.ap || 0; return bp > 0 && ap >= bp ? (bp + ap) / 2 : 0; };
+      for (const c of [...calls, ...puts]) {
+        if (c.expiration_date !== todayStr) continue;
+        const K = parseFloat(c.strike_price), isCall = c.type === "call" || /C\d{8}$/.test(c.symbol);
+        if (isCall !== (K >= spot)) continue;   // OTM side only: calls at/above spot, puts below
+        const sn = (isCall ? cSnap : pSnap)[c.symbol];
+        const iv = (sn && +sn.impliedVolatility > 0) ? +sn.impliedVolatility : GEXM.impliedVol(_mid(sn), spot, K, T0, isCall ? "call" : "put");
+        if (iv > 0) _iv0.set(K, iv);
+      }
+    }
+    const _rows = (contracts, snaps, type) => {
       const rows = [];
       for (const c of contracts) {
         const snap = snaps[c.symbol]; if (!snap) continue;
+        if (c.expiration_date === todayStr) {   // 0DTE: price the gamma ourselves
+          const oi0 = parseInt((c.open_interest != null ? c.open_interest : 0) || 0, 10);
+          const K = parseFloat(c.strike_price);
+          const T0 = Math.max(15 * 60000, _closeMs - Date.now()) / (365 * 86400000);   // floor 15 min: gamma -> infinity at expiry
+          const q = snap.latestQuote || {}, bp = +q.bp || 0, ap = +q.ap || 0;
+          const mid = bp > 0 && ap >= bp ? (bp + ap) / 2 : 0;
+          // no usable OTM quote at this strike (far wings quote 0.00): borrow the nearest strike's out-of-the-money vol
+          const _near = () => { let best = null, bd = Infinity; for (const [k, v] of _iv0) { const d = Math.abs(k - K); if (d < bd) { bd = d; best = v; } } return best; };
+          let iv0 = _iv0.get(K) || _near() || parseFloat(snap.impliedVolatility || 0);
+          if (!(iv0 > 0)) iv0 = GEXM.impliedVol(mid, spot, K, T0, type) || 0;
+          const gamma0 = iv0 > 0 ? GEXM.bsGamma(spot, K, T0, iv0) : 0;
+          if (gamma0 > 0 && oi0 > 0) { rows.push({ strike: K, gamma: gamma0, oi: oi0, iv: iv0, T: T0, exp: todayStr, z0: true }); _n0++; }
+          else _n0skip++;
+          continue;
+        }
         const g = snap.greeks || {};
         const gamma = parseFloat(g.gamma || 0);
         const oi = parseInt((c.open_interest != null ? c.open_interest : (snap.openInterest || snap.open_interest || 0)) || 0, 10);
@@ -1402,7 +1441,13 @@ async function _fetchGexChainV2(ticker, spot) {
       }
       return rows;
     };
-    const callRows = _rows(calls, cSnap), putRows = _rows(puts, pSnap);
+    let callRows = _rows(calls, cSnap, "call"), putRows = _rows(puts, pSnap, "put");
+    // shadow mode: keep 0DTE rows out of the regime but report what they would have done
+    let _z0shadow = null;
+    if (GEX_0DTE_MODE === "shadow") {
+      _z0shadow = { call: callRows.filter(r => r.z0), put: putRows.filter(r => r.z0) };
+      callRows = callRows.filter(r => !r.z0); putRows = putRows.filter(r => !r.z0);
+    }
     if (!callRows.length || !putRows.length) return false;
 
     const nearExp = exps[0];
@@ -1413,9 +1458,9 @@ async function _fetchGexChainV2(ticker, spot) {
     state._gexChain[ticker] = {
       call: { rows: callRows, dte, spot, ts },
       put:  { rows: putRows,  dte, spot, ts },
-      v2: true, exps, farDte,
+      v2: true, exps, farDte, z0: _want0 ? { mode: GEX_0DTE_MODE, rows: _n0, skipped: _n0skip, shadow: _z0shadow } : null,
     };
-    _gexFetchLog(ticker, `v2|${exps.length}|${dte}-${farDte}`, `[GEX-FETCH] ${ticker} v2 ${exps.length} exp (${dte}-${farDte}DTE) strikes ±${(GEX_V2_STRIKE_BAND*100).toFixed(0)}%: ${callRows.length}c/${putRows.length}p rows in ${Date.now() - _t0}ms`);
+    _gexFetchLog(ticker, `v2|${exps.length}|${dte}-${farDte}`, `[GEX-FETCH] ${ticker} v2 ${exps.length} exp (${dte}-${farDte}DTE)${_want0 ? ` + 0DTE (${_n0} priced, ${_n0skip} skipped, ${GEX_0DTE_MODE})` : ""} strikes ±${(GEX_V2_STRIKE_BAND*100).toFixed(0)}%: ${callRows.length}c/${putRows.length}p rows in ${Date.now() - _t0}ms`);
     return true;
   } catch (e) {
     logEvent("scan", `[GEX-FETCH] ${ticker} v2 failed — ${e && e.message}`);
