@@ -485,6 +485,26 @@ function lockFloorR(peakR) {
 let _otoUnsupported = false;   // set if Alpaca rejects the one-triggers-other form: fall back to entry, then stop
 
 // options-book cash correction: Alpaca cash moves by share notional; the options book should not see that
+// 11/05 (Harrison): the share sleeve in PORTFOLIO HEAT. Heat is total open risk (Van Tharp; Elder's 6% rule): for a long
+// option that is the premium paid; for a share position it is what we lose from the ENTRY if the resting stop is hit, plus
+// the measured stop-exit slippage (COST_EXIT_ATR x ATR). A stop locked in profit contributes only the slippage.
+// Filled shares only — a resting entry order risks nothing until it fills. Notional is reported beside it, not counted.
+function openRiskUsd(state) {
+  const s = state && state._sip, out = { risk: 0, notional: 0, n: 0, long: 0, short: 0, riskLong: 0, riskShort: 0 };
+  if (!s) return out;
+  for (const c of [...(s.cands || []), ...(s.carry || [])]) {
+    const q = openQty(c); if (!q || !(c.fillPx > 0)) continue;
+    const L = c.side === "long", stop = +c.stopPx > 0 ? +c.stopPx : (c.stopDist > 0 ? stopPxFor(c, -1) : null);
+    const toStop = stop == null ? (c.stopDist || 0) : Math.max(0, L ? c.fillPx - stop : stop - c.fillPx);
+    const slip = (CFG.COST_EXIT_ATR || 0) * (+c.atr || 0);
+    const lastPx = (s.last && s.last[c.sym] && s.last[c.sym].px) || c.fillPx;
+    const r = q * (toStop + slip);
+    out.risk += r; out.notional += q * lastPx; out.n++;
+    if (L) { out.long += q * lastPx; out.riskLong += r; } else { out.short += q * lastPx; out.riskShort += r; }
+  }
+  for (const k of ["risk", "notional", "long", "short", "riskLong", "riskShort"]) out[k] = +out[k].toFixed(2);
+  return out;
+}
 function cashAdjustment(state) {
   const s = state && state._sip; if (!s) return 0;
   let adj = 0;
@@ -1017,7 +1037,7 @@ ${s.variants ? `<div style="margin-top:8px;font-weight:bold;color:#9cf">Exit var
 </div>`;
 }
 
-module.exports = { CFG, tick, cashAdjustment, flattenAll, isSipOrder, eodCSV, eodSection, replayToday, EXIT_VARIANTS, historyTable,
+module.exports = { CFG, tick, cashAdjustment, openRiskUsd, flattenAll, isSipOrder, eodCSV, eodSection, replayToday, EXIT_VARIANTS, historyTable,
                    _t: { etParts, etToUtcMs, dailyStats, sizePosition, selectCandidates, simulate, summarize, setIO, freshDay, poll, exitPass, placeEntries, recordExit, closeMarket, brokerQty, refreshLast, simulateExit, replayVariants, manageExits, noiseBand, splitOpening, recordHistory, liveRuleKey,
                          setHistState: (st) => { _histState = st; }, moveStop, hardCap, lockFloorR, stopPxFor,
                          resetOto: () => { _otoUnsupported = false; },
