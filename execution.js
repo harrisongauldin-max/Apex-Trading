@@ -27,7 +27,7 @@ try {
 const { state, logEvent, markDirty, saveStateNow, dataGatherActive }          = require('./state');
 const { calcGreeks, getETTime,
         openRisk, heatPct, getDeployableCash, effectiveHeatCap,
-        calcCreditSpreadTP ,
+        calcCreditSpreadTP , sipOpenRisk,
   totalCap
 }                                 = require('./signals');
 const { CAPITAL_FLOOR, MIN_OPTION_PREMIUM, MIN_OI,
@@ -637,7 +637,7 @@ async function executeTrade(stock, price, score, scoreReasons, vix, optionType =
   // ever touches it) and overstating cash. Gate heat HERE, before any order is submitted, using
   // the pre-fill cost estimate. Mirrors the pre-submit cash check directly above.
   if (!_dryRunMode) {
-    const _projHeatPre = (openRisk() + cost) / totalCap();
+    const _projHeatPre = (openRisk() + sipOpenRisk() + cost) / totalCap();   // 11/05: + open share-sleeve risk
     if (_projHeatPre > effectiveHeatCap()) {
       logEvent("filter", `${stock.ticker} - projected heat ${(_projHeatPre*100).toFixed(0)}% would exceed ${(effectiveHeatCap()*100).toFixed(0)}% max - skipping before submit`);
       return false;
@@ -865,7 +865,7 @@ async function executeTrade(stock, price, score, scoreReasons, vix, optionType =
 
   // Post-fill heat is now a safety net only — the primary gate runs pre-submit (above). If it
   // still trips here the order has already FILLED, so record the position rather than orphan it.
-  const projectedHeat = (openRisk() + finalCost) / totalCap();
+  const projectedHeat = (openRisk() + sipOpenRisk() + finalCost) / totalCap();   // 11/05: + open share-sleeve risk
   if (projectedHeat > effectiveHeatCap()) {
     if (alpacaOrderId) {
       logEvent("warn", `${stock.ticker} - projected heat ${(projectedHeat*100).toFixed(0)}% over ${(effectiveHeatCap()*100).toFixed(0)}% cap but order already filled — recording position rather than orphaning it`);
