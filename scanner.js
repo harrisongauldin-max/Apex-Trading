@@ -409,7 +409,7 @@ async function runScan() {
 
   const _totalCap  = totalCap();
   const _openRisk  = openRisk();
-  const _heatPct   = Math.max(0, openCostBasis()) / _totalCap;
+  const _heatPct   = heatPct();   // 11/05: includes open share-sleeve risk
   const _heatPctPc = parseFloat((_heatPct * 100).toFixed(1));
 
   if (!runScan._cache || Date.now() - (runScan._cacheTime||0) > 8000) {
@@ -3590,7 +3590,9 @@ async function runScan() {
     const MAX_DIR_HEAT = effectiveHeatCap();
     const isGLDHedge = stock.ticker === "GLD" && optionType === "call";
     const dirCost = state.positions.filter(p => { if (p.ticker === "GLD") return false; return p.optionType === optionType; }).reduce((s,p) => s + p.cost, 0);
-    const dirHeat = dirCost / totalCap();
+    // 11/05: long shares are bullish risk (call side), short shares bearish (put side)
+    let _sipDir = 0; try { const _sr = require('./stocksInPlay').openRiskUsd(state); _sipDir = optionType === "call" ? _sr.riskLong : _sr.riskShort; } catch (_) { _sipDir = 0; }
+    const dirHeat = (dirCost + _sipDir) / totalCap();
     if (!isGLDHedge && dirHeat >= MAX_DIR_HEAT && !dryRunMode) {
       logEvent("filter", `${stock.ticker} ${optionType} directional heat ${(dirHeat*100).toFixed(0)}% at cap`);
       continue;
