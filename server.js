@@ -1052,6 +1052,8 @@ app.get("/api/state", async (req, res) => {
     positions: enrichedPositions,
     dataGatherActive: require('./state').dataGatherActive(require('./constants').DATA_GATHER_MODE),
     heatPct:       parseFloat((heatPct()*100).toFixed(1)),
+    sipHeat:       (() => { try { const r = require('./stocksInPlay').openRiskUsd(state), tc = require('./signals').totalCap();
+                     return { ...r, pct: tc > 0 ? parseFloat((r.risk / tc * 100).toFixed(2)) : 0 }; } catch (_) { return null; } })(),   // 11/05
     heatCap:       parseFloat((effectiveHeatCap()*100).toFixed(0)),
     fillQuality:   state._fillQuality || { count: 0, totalSlippage: 0, misses: 0, avgSlippage: 0 },
     paperSlippage: state._paperSlippage || { trades: 0, totalEst: 0, avgEst: 0 },
