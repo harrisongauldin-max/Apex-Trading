@@ -982,20 +982,29 @@ function _replayTables(d) {   // -> { rules: [[...]], grid: [[...]] } with heade
   for (const k of keys) { const t = tot[k]; rules.push([t.label, k, k === d.liveRule ? 'LIVE' : '', t.trades, t.wins, t.winPct == null ? '' : t.winPct, t.R, t.usd, t.Rnet == null ? '' : t.Rnet, t.usdNet == null ? '' : t.usdNet]); }
   const grid = [['symbol', ...keys.flatMap(k => [k + '_R', k + '_netR', k + '_exit', k + '_peakR'])]];
   for (const [sym, row] of Object.entries(d.perTrade || {})) grid.push([sym, ...keys.flatMap(k => { const r = row[k]; return !r ? ['', '', '', ''] : !r.entered ? ['', '', 'no trigger', ''] : [r.R, r.Rnet == null ? '' : r.Rnet, r.reason, r.peakR == null ? '' : r.peakR]; })]);
-  return { rules, grid };
+  // 11/05: running totals across nights (each night's final replay, net of slippage)
+  const hist = [['rule', 'key', 'live', 'days', 'trades', 'won', 'grossR', 'grossPnl', 'netR', 'netPnl', 'netRPerTrade', 'daysNetPositive']];
+  const H = d.history;
+  if (H && H.rules && H.rules.length) {
+    if (H.live && H.live.n) hist.push(['Actual live (real fills)', 'live', '', H.days, H.live.n, H.live.w, '', '', H.live.R, H.live.u, (H.live.R / H.live.n).toFixed(3), '']);
+    for (const r of H.rules) hist.push([r.label, r.key, r.key === H.liveRule ? 'LIVE' : '', r.days, r.tradesNet, r.winsNet, r.R, r.usd, r.Rnet, r.usdNet, r.netRPerTrade == null ? '' : r.netRPerTrade, r.posDaysNet + '/' + r.days]);
+  }
+  return { rules, grid, hist };
 }
 function copySipReplay() {
   const d = window._sipReplayLast; if (!d || !d.totals) { _copyText('Run the replay first.', 'sip-rcopy-btn', '&#9112; Copy for Claude'); return; }
-  const { rules, grid } = _replayTables(d);
+  const { rules, grid, hist } = _replayTables(d);
   const text = 'APEX stocks-in-play exit replay ' + d.day + ' — bars to ' + d.asOf + (d.final ? ' (final)' : ' (still trading: open trades marked at the latest bar)') + '\n'
     + 'Same entries for every rule, each sized so its stop = 1R. gross = ideal fills; net = slippage of ' + JSON.stringify(d.costs || {}) + ' (fractions of ATR)' + (d.liveRule ? '; live rule = ' + d.liveRule : '') + '\n\n'
-    + rules.map(r => r.join('\t')).join('\n') + '\n\n' + grid.map(r => r.join('\t')).join('\n') + '\n';
+    + rules.map(r => r.join('\t')).join('\n') + '\n\n' + grid.map(r => r.join('\t')).join('\n') + '\n'
+    + (hist.length > 1 ? '\nRUNNING TOTALS ' + d.history.first + ' to ' + d.history.last + ' (' + d.history.days + ' nights, final replays)\n' + hist.map(r => r.join('\t')).join('\n') + '\n' : '');
   _copyText(text, 'sip-rcopy-btn', '&#9112; Copy for Claude');
 }
 function downloadSipReplayCsv() {
   const d = window._sipReplayLast; if (!d || !d.totals) { alert('Run the replay first.'); return; }
-  const { rules, grid } = _replayTables(d);
-  _saveFile('apex-sip-replay-' + d.day + '.csv', rules.map(r => r.map(_csvCell).join(',')).join('\n') + '\n\n' + grid.map(r => r.map(_csvCell).join(',')).join('\n') + '\n');
+  const { rules, grid, hist } = _replayTables(d);
+  _saveFile('apex-sip-replay-' + d.day + '.csv', rules.map(r => r.map(_csvCell).join(',')).join('\n') + '\n\n' + grid.map(r => r.map(_csvCell).join(',')).join('\n') + '\n'
+    + (hist.length > 1 ? '\n' + hist.map(r => r.map(_csvCell).join(',')).join('\n') + '\n' : ''));
 }
 
 // ── 11/03: exit replay — same entries, every exit rule, today's 1-minute bars (/api/sip/replay) ──
@@ -1039,6 +1048,16 @@ function renderSipReplay(d) {
       h += '<tr>' + td('<b>' + esc(sym) + '</b>') + keys.map(k => { const r = row[k]; if (!r) return td('—');
         if (!r.entered) return td('no trigger', 'color:var(--muted)');
         return td(rr(r.R) + (r.Rnet != null ? ' <span style="color:' + col(r.Rnet) + '">(net ' + rr(r.Rnet) + ')</span>' : '') + ' <span style="color:var(--muted)">' + esc(r.reason) + (r.peakR != null ? ', peak ' + r.peakR + 'R' : '') + '</span>', 'color:' + col(r.R)); }).join('') + '</tr>'; }
+    h += '</table></div>';
+  }
+  // 11/05: running totals across nights — the number that decides which rule stays live
+  const Hs = d.history;
+  if (Hs && Hs.rules && Hs.rules.length) {
+    h += '<div style="font-size:11px;color:var(--muted);margin:10px 0 4px"><b>Running totals</b> · ' + esc(Hs.first) + ' → ' + esc(Hs.last) + ' · ' + Hs.days + ' night' + (Hs.days === 1 ? '' : 's') + ' (each night\'s final replay, net of slippage) · sorted by net P&amp;L</div>';
+    h += '<div style="overflow-x:auto"><table style="border-collapse:collapse;font-size:11px;width:100%"><tr>' + ['Exit rule', 'Nights', 'Trades', 'Won', 'Gross R', 'Net R', 'Net R / trade', 'Net P&amp;L', 'Nights net +'].map(th).join('') + '</tr>';
+    if (Hs.live && Hs.live.n) h += '<tr>' + td('<i>Actual live (real fills)</i>', 'color:var(--muted)') + td(Hs.days) + td(Hs.live.n) + td(Hs.live.w) + td('—') + td(rr(Hs.live.R), 'color:' + col(Hs.live.R)) + td((Hs.live.R / Hs.live.n).toFixed(3)) + td(money(Hs.live.u), 'font-weight:700;color:' + col(Hs.live.u)) + td('—') + '</tr>';
+    for (const r of Hs.rules) h += '<tr>' + td(esc(r.label) + (r.key === Hs.liveRule ? ' <b style="color:var(--green)">← LIVE RULE</b>' : '')) + td(r.days) + td(r.tradesNet) + td(r.winsNet)
+      + td(rr(r.R), 'color:' + col(r.R)) + td(rr(r.Rnet), 'color:' + col(r.Rnet)) + td(r.netRPerTrade != null ? r.netRPerTrade : '—') + td(money(r.usdNet), 'font-weight:700;color:' + col(r.usdNet)) + td(r.posDaysNet + '/' + r.days) + '</tr>';
     h += '</table></div>';
   }
   out.innerHTML = h;
