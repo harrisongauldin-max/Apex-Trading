@@ -943,7 +943,9 @@ app.get("/api/sip/replay", async (req, res) => {   // 11/03: today's sleeve cand
 });
 
 app.get("/api/sip", (req, res) => {   // 11/02: today's stocks-in-play sleeve (candidates, orders, fills, summary)
-  res.json({ cfg: require('./stocksInPlay').CFG, day: state._sip || null, cashAdj: state._sipCashAdj || 0 });
+  const SIPm = require('./stocksInPlay');
+  let history = null; try { history = SIPm.historyTable(state); } catch (_) {}
+  res.json({ cfg: SIPm.CFG, day: state._sip || null, cashAdj: state._sipCashAdj || 0, history });   // 11/05: + running totals
 });
 
 app.get("/api/market-state", (req, res) => {
