@@ -682,7 +682,9 @@ const openRisk    = () => state.positions.reduce((s,p) => {
 }, 0);
 // Entry cost basis (for heat calculations - should use cost not market value)
 const openCostBasis = () => state.positions.reduce((s,p) => s + p.cost * (p.partialClosed ? 0.5 : 1), 0);
-const heatPct     = () => Math.max(0, openCostBasis()) / totalCap(); // margin deployed / total cap — 0% with no positions
+// 11/05 (Harrison): open share-sleeve risk (entry-to-stop + stop slippage, filled shares only) counts in heat too
+const sipOpenRisk = () => { try { return require('./stocksInPlay').openRiskUsd(state).risk || 0; } catch (_) { return 0; } };
+const heatPct     = () => Math.max(0, openCostBasis() + sipOpenRisk()) / totalCap(); // options cost + share risk / total cap — 0% with no positions
 const realizedPnL = () => state.closedTrades.reduce((s,t) => s + t.pnl, 0);
 const stockValue  = () => state.stockPositions.reduce((s,p) => s + p.cost, 0);
 
@@ -691,7 +693,7 @@ module.exports = {
   calcIVRank, calcGreeks, calcVWAP, calcKellySize,
   calcSharpeRatio, calcVaR, calcRiskOfRuin, calcDrawdownDuration,
   getLiveBeta, getDynamicSignals, calcBetaWeightedDelta, calcAggregateGreeks,
-  totalCap, openRisk, openCostBasis, heatPct, realizedPnL, stockValue,
+  totalCap, openRisk, openCostBasis, heatPct, realizedPnL, stockValue, sipOpenRisk,
   getDeployableCash, effectiveHeatCap, getAccountPhase, calcCreditSpreadTP,
   getETTime, isDST, isMarketHours, isEntryWindow, getBusinessDaysAgo,
   getWeeklyTrend, getSupportResistance, setSignalsLogger,
