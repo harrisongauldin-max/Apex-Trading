@@ -301,7 +301,7 @@ input[type=text]:focus{border-color:var(--blue)}
       <div class="card-title">Portfolio Heat</div>
       <div class="metric-sm" id="heat">--%</div>
       <div class="heat-bar"><div class="heat-fill" id="heat-fill" style="width:0%;background:var(--green)"></div></div>
-      <div class="sub">max 60% | <span id="put-heat" style="color:var(--red)">P:--%</span> <span id="call-heat" style="color:var(--blue)">C:--%</span></div>
+      <div class="sub">max 60% | <span id="put-heat" style="color:var(--red)">P:--%</span> <span id="call-heat" style="color:var(--blue)">C:--%</span> <span id="stock-heat" style="color:var(--gold)" title="Share sleeve: open risk to the stops (+ stop slippage), filled shares only. Notional shown on hover.">S:--%</span></div>
     </div>
     <div class="card">
       <div class="card-title">Monthly Revenue</div>
@@ -1448,6 +1448,12 @@ function renderMetrics() {
   const callHeatEl  = document.getElementById('call-heat');
   if (putHeatEl)  putHeatEl.textContent  = 'P:' + (totalCapVal > 0 ? (putCostVal/totalCapVal*100).toFixed(0) : '0') + '%';
   if (callHeatEl) callHeatEl.textContent = 'C:' + (totalCapVal > 0 ? (callCostVal/totalCapVal*100).toFixed(0) : '0') + '%';
+  // 11/05: share sleeve — open risk to the stops is in the heat number; notional is shown, not counted
+  const stockHeatEl = document.getElementById('stock-heat'), sh = state.sipHeat;
+  if (stockHeatEl) {
+    stockHeatEl.textContent = 'S:' + (sh ? sh.pct.toFixed(1) : '0') + '%';
+    stockHeatEl.title = sh && sh.n ? (sh.n + ' share position' + (sh.n === 1 ? '' : 's') + ' · $' + sh.risk.toFixed(0) + ' at risk to the stops · $' + Math.round(sh.notional).toLocaleString() + ' notional ($' + Math.round(sh.long).toLocaleString() + ' long / $' + Math.round(sh.short).toLocaleString() + ' short)') : 'No open share positions';
+  }
 
   const rev = state.totalRevenue || 0;
   document.getElementById('revenue').textContent = fmt(rev);
