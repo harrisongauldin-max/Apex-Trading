@@ -61,6 +61,14 @@ const CFG = {
   COST_EXIT_ATR:  Number.isFinite(C.SIP_COST_EXIT_ATR) ? C.SIP_COST_EXIT_ATR : 0.10,
   COST_CLOSE_ATR: Number.isFinite(C.SIP_COST_CLOSE_ATR) ? C.SIP_COST_CLOSE_ATR : 0.02,
   MAX_LATE_R:     2,                            // already-through entries: market only if within 2R of the level
+  // 11/05 (Harrison): the live stop unit. "noise" = each stock's own NOISE BAND N, set at 9:35 from the first 5-minute candle
+  // (high - low), floored at 0.1 ATR (never tighter than the paper) and capped at 1 ATR (a huge gap candle can't shrink the
+  // position to nothing). 1R = N: the stop, the -0.5R lock arm (+1N) and the 1N trail all move with today's real swings,
+  // and size = $12.50 / N. "paper" = the old fixed 10% of the daily ATR.
+  STOP_MODE:      C.SIP_STOP_MODE === "paper" ? "paper" : "noise",
+  NOISE_MULT:     Number.isFinite(C.SIP_NOISE_MULT) ? C.SIP_NOISE_MULT : 1,
+  NOISE_FLOOR_ATR: 0.10,
+  NOISE_CAP_ATR:  1.0,
   BATCH:          100,
   CONCURRENCY:    6,
 };
@@ -180,6 +188,11 @@ function sizePosition(entry, stopDist, cfg = CFG) {
   if (!(entry > 0) || !(stopDist > 0)) return 0;
   return Math.max(0, Math.floor(Math.min((cfg.RISK_PCT * alloc) / stopDist, (cfg.LEVERAGE * alloc) / entry)));
 }
+// 11/05: noise band from the first 5-minute candle, clamped to [0.1, 1] ATR
+function noiseBand(h, l, atr, mult = 1) {
+  const raw = Math.max(0, (+h || 0) - (+l || 0)) * mult;
+  return Math.min(Math.max(raw, CFG.NOISE_FLOOR_ATR * atr), CFG.NOISE_CAP_ATR * atr);
+}
 // universe stats + today's first 5-minute bars -> ranked candidates (top N, dojis kept and marked, so they are counted)
 function selectCandidates(universe, firstBars, cfg = CFG) {
   const rows = [];
@@ -196,8 +209,11 @@ function selectCandidates(universe, firstBars, cfg = CFG) {
   return rows.slice(0, cfg.TOP_N).map((r, i) => {
     const side = r.c > r.o ? "long" : r.c < r.o ? "short" : "doji";
     const entry = side === "long" ? cents(r.h) : side === "short" ? cents(r.l) : null;
-    const stopDist = cfg.ATR_STOP * r.atr;
-    return { rank: i + 1, ...r, rvol: +r.rvol.toFixed(2), side, entry, stopDist: +stopDist.toFixed(4),
+    const paperStop = cfg.ATR_STOP * r.atr;
+    const noise = noiseBand(r.h, r.l, r.atr, cfg.NOISE_MULT || 1);
+    const stopDist = cfg.STOP_MODE === "paper" ? paperStop : noise;
+    return { rank: i + 1, ...r, rvol: +r.rvol.toFixed(2), side, entry, stopDist: +stopDist.toFixed(4), paperStopDist: +paperStop.toFixed(4),
+             noiseN: +noise.toFixed(4), stopMode: cfg.STOP_MODE || "paper",
              qty: entry ? sizePosition(entry, stopDist, cfg) : 0, status: side === "doji" ? "doji" : "planned" };
   });
 }
@@ -207,7 +223,7 @@ function selectCandidates(universe, firstBars, cfg = CFG) {
 // bar the low comes after the entry (stopped iff l <= stop). Mirror for shorts. After the entry bar, any touch stops.
 function simulate(cand, bars) {
   if (!cand || !cand.entry || cand.side === "doji" || !Array.isArray(bars) || !bars.length) return null;
-  const L = cand.side === "long", sd = cand.stopDist;
+  const L = cand.side === "long", sd = cand.paperStopDist || cand.stopDist;   // 11/05: the paper rule always uses the paper stop
   let entryPx = null, stopPx = null;
   for (const b of bars) {
     const o = +b.o, h = +b.h, l = +b.l;
@@ -284,6 +300,16 @@ const EXIT_VARIANTS = {
                    entryCapAtr: 0.05, floorR: (pk) => pk >= 2 ? pk - 1 : pk >= 1 ? -0.5 : null },
   atr50_l05_cap: { label: "0.5 ATR stop + lock/trail, entry capped at 0.05 ATR past the level (approx.)", stop: (c) => 0.5 * c.atr,
                    entryCapAtr: 0.05, floorR: (pk) => pk >= 2 ? pk - 1 : pk >= 1 ? -0.5 : null },
+  // 11/05 (Harrison): NOISE-BAND rules — R = the stock's own opening swing N (first 5-min range, clamped 0.1-1 ATR)
+  noiseA: { label: "Noise A: stop 1N, lock -0.5R at +1R, 1R trail from +2R", stop: (c) => noiseBand(c.h, c.l, c.atr, 1),
+            floorR: (pk) => pk >= 2 ? pk - 1 : pk >= 1 ? -0.5 : null },
+  noiseB: { label: "Noise B: stop/trail 1.5N, lock -0.5R at +1R, 1R trail from +2R", stop: (c) => noiseBand(c.h, c.l, c.atr, 1.5),
+            floorR: (pk) => pk >= 2 ? pk - 1 : pk >= 1 ? -0.5 : null },
+  noiseC: { label: "Noise C: N = 2 x 1-min ATR (9:30-9:35), same lock/trail as A",
+            stop: (c) => (c._atr1m > 0 ? Math.min(Math.max(2 * c._atr1m, CFG.NOISE_FLOOR_ATR * c.atr), CFG.NOISE_CAP_ATR * c.atr) : noiseBand(c.h, c.l, c.atr, 1)),
+            floorR: (pk) => pk >= 2 ? pk - 1 : pk >= 1 ? -0.5 : null },
+  noiseD: { label: "Noise D: stop 1N, BREAKEVEN at +1R, 1R trail from +2R", stop: (c) => noiseBand(c.h, c.l, c.atr, 1),
+            floorR: (pk) => pk >= 2 ? pk - 1 : pk >= 1 ? 0 : null },
   or_apex: { label: "OR stop + APEX lock ladder (in R)",         stop: (c) => Math.max(c.h - c.l, 0.1 * c.atr),
              floorR: (pk) => { const L = _apexLadderR.rungs; if (!L.length || pk < L[0][0]) return null; let f = L[0][1];
                                for (const [a, fl] of L) if (pk >= a) f = fl; const top = L[L.length - 1]; if (pk >= top[0]) f = Math.max(f, pk - _apexLadderR.trail); return f; } },
@@ -334,6 +360,24 @@ function simulateExit(cand, bars, v, closeOpen = true, costs = null) {
   return { entered: true, entryPx, R: +(rOf(last) - (closeOpen ? cr : 0)).toFixed(3), reason: closeOpen ? "close" : "still open (marked)", peakR: +peakR.toFixed(2), at, sd };
 }
 const replayCosts = () => ({ entryAtr: CFG.COST_ENTRY_ATR, exitAtr: CFG.COST_EXIT_ATR, closeAtr: CFG.COST_CLOSE_ATR });
+// 11/05: attach the 9:30-9:35 one-minute ATR (noise C) from bars starting 9:30; returns the bars from 9:35 for simulation
+function splitOpening(cands, raw, exitMin) {
+  const out = {};
+  for (const c of cands) {
+    const all = (raw[c.sym] || []).map(x => ({ x, m: etParts(Date.parse(x.t)).min }));
+    const op = all.filter(e => e.m >= 570 && e.m < 575).map(e => e.x);
+    if (op.length) {
+      let tr = 0;
+      for (let i = 0; i < op.length; i++) { const h = +op[i].h, l = +op[i].l, pc = i ? +op[i - 1].c : null; tr += pc == null ? h - l : Math.max(h - l, Math.abs(h - pc), Math.abs(l - pc)); }
+      c._atr1m = tr / op.length;
+    }
+    out[c.sym] = all.filter(e => e.m >= 575 && e.m < exitMin).map(e => e.x);
+  }
+  return out;
+}
+const liveRuleKey = () => CFG.EXIT_MODE === "hold" ? "paper"
+  : (CFG.LOCK_AT_R === 1 && CFG.LOCK_FLOOR_R === -0.5 && CFG.TRAIL_FROM_R === 2 && CFG.TRAIL_R === 1
+     ? (CFG.STOP_MODE === "paper" ? "paper_l05" : (CFG.NOISE_MULT === 1.5 ? "noiseB" : "noiseA")) : null);
 // every variant on every candidate -> { perTrade: {SYM: {variant: result}}, totals: {variant: {...}} }
 // 11/04: every rule twice — gross (ideal fills) and NET (with replayCosts()). Totals carry both; per-trade results carry Rnet.
 function replayVariants(cands, barsBySym, closeOpen = true, costs = replayCosts()) {
@@ -373,12 +417,11 @@ async function replayToday(state) {
   const endMin = p.day === s.day ? Math.min(p.min, exitMin) : exitMin;
   const closed = !(p.day === s.day && p.min < exitMin);
   const cs = s.cands.filter(c => c.side !== "doji" && c.entry);
-  const raw = await multiBars(cs.map(c => c.sym), "1Min", iso(etToUtcMs(s.day, 9, 35)), iso(etToUtcMs(s.day, Math.floor(endMin / 60), Math.floor(endMin % 60)) - 1000));
-  const bars = {};
-  for (const c of cs) bars[c.sym] = (raw[c.sym] || []).filter(x => { const m = etParts(Date.parse(x.t)).min; return m >= 575 && m < exitMin; });
-  const liveRule = CFG.EXIT_MODE === "hold" ? "paper"
-    : (CFG.LOCK_AT_R === 1 && CFG.LOCK_FLOOR_R === -0.5 && CFG.TRAIL_FROM_R === 2 && CFG.TRAIL_R === 1 ? "paper_l05" : null);
-  const out = { day: s.day, asOf: hhmm(endMin) + " ET", final: closed, liveRule, costs: replayCosts(), ...replayVariants(cs, bars, closed),
+  const raw = await multiBars(cs.map(c => c.sym), "1Min", iso(etToUtcMs(s.day, 9, 30)), iso(etToUtcMs(s.day, Math.floor(endMin / 60), Math.floor(endMin % 60)) - 1000));
+  const bars = splitOpening(cs, raw, exitMin);
+  const liveRule = liveRuleKey();
+  _histState = state;
+  const out = { day: s.day, asOf: hhmm(endMin) + " ET", final: closed, liveRule, costs: replayCosts(), history: historyTable(state), ...replayVariants(cs, bars, closed),
                 live: cs.filter(c => c.status === "closed").reduce((a, c) => ({ trades: a.trades + 1, wins: a.wins + (c.pnl > 0 ? 1 : 0), usd: +(a.usd + (c.pnl || 0)).toFixed(2), R: +(a.R + (c.R || 0)).toFixed(2) }), { trades: 0, wins: 0, usd: 0, R: 0 }) };
   _replayCache = { day: s.day, at: Date.now(), out };
   return out;
@@ -749,10 +792,13 @@ async function simulateDay(s, log) {
   const cs = s.cands.filter(c => c.side !== "doji" && c.entry);
   if (!cs.length) { s.summary = summarize(s); return; }
   const exitMin = s.sessionCloseMin - CFG.EXIT_BEFORE_CLOSE_MIN;
-  const bars = await multiBars(cs.map(c => c.sym), "1Min", iso(etToUtcMs(s.day, 9, 35)), iso(etToUtcMs(s.day, Math.floor(exitMin / 60), exitMin % 60) - 1000));
+  const bars = await multiBars(cs.map(c => c.sym), "1Min", iso(etToUtcMs(s.day, 9, 30)), iso(etToUtcMs(s.day, Math.floor(exitMin / 60), exitMin % 60) - 1000));
+  const sim = splitOpening(cs, bars, exitMin);
+  const _lk = liveRuleKey(), _lv = _lk && EXIT_VARIANTS[_lk];
   for (const c of cs) {
-    const b = (bars[c.sym] || []).filter(x => { const m = etParts(Date.parse(x.t)).min; return m >= 575 && m < exitMin; });
-    c.ideal = simulate(c, b);
+    const b = sim[c.sym] || [];
+    // 11/05: "ideal" = the LIVE rule at perfect prices, so ideal - actual = pure execution cost
+    c.ideal = _lv && _lk !== "paper" ? simulateExit(c, b, _lv) : simulate(c, b);
     if (c.ideal && c.ideal.entered) c.idealPnl = +((c.ideal.R * c.stopDist) * (c.qty || 0)).toFixed(2);
     if (c.status === "closed" && c.ideal && c.ideal.entered) {
       const sign = c.side === "long" ? 1 : -1;
@@ -761,10 +807,41 @@ async function simulateDay(s, log) {
     }
   }
   s.summary = summarize(s);
-  try { s.variants = replayVariants(cs, Object.fromEntries(cs.map(c => [c.sym, (bars[c.sym] || []).filter(x => { const m2 = etParts(Date.parse(x.t)).min; return m2 >= 575 && m2 < exitMin; })])), true).totals; s.variantCosts = replayCosts(); } catch (_) {}
+  try {
+    s.variants = replayVariants(cs, sim, true).totals; s.variantCosts = replayCosts(); s.liveRule = _lk;
+    recordHistory(s);
+  } catch (_) {}
   const m = s.summary;
-  log("trade", `[SIP] DAY ${s.day} (${s.mode}): ${m.candidates} in play, ${m.triggered} triggered live, actual ${m.actualPnl >= 0 ? "+" : ""}$${m.actualPnl} (${m.actualR >= 0 ? "+" : ""}${m.actualR}R) | paper's ideal on all ${m.idealTrades} triggers ${m.idealR >= 0 ? "+" : ""}${m.idealR}R | slippage on traded ${m.slipRPerTrade != null ? m.slipRPerTrade + "R/trade" : "n/a"}`);
+  log("trade", `[SIP] DAY ${s.day} (${s.mode}): ${m.candidates} in play, ${m.triggered} triggered live, actual ${m.actualPnl >= 0 ? "+" : ""}$${m.actualPnl} (${m.actualR >= 0 ? "+" : ""}${m.actualR}R) | live rule at ideal prices on all ${m.idealTrades} triggers ${m.idealR >= 0 ? "+" : ""}${m.idealR}R | slippage on traded ${m.slipRPerTrade != null ? m.slipRPerTrade + "R/trade" : "n/a"}`);
 }
+// 11/05: running multi-day table — each night's net + gross totals per rule, last 40 days (small: ~25 rules x 6 numbers)
+let _histState = null;
+function recordHistory(s) {
+  const st = _histState; if (!st || !s || !s.variants) return;
+  const h = st._sipHist || (st._sipHist = { days: [] });
+  h.days = h.days.filter(d => d.day !== s.day);
+  const rules = {};
+  for (const [k, t] of Object.entries(s.variants)) rules[k] = { n: t.trades, w: t.wins, R: t.R, u: t.usd, nn: t.tradesNet, wn: t.winsNet, Rn: t.Rnet, un: t.usdNet };
+  const live = (s.cands || []).filter(c => c.status === "closed");
+  h.days.push({ day: s.day, live: s.liveRule || null, liveActual: { n: live.length, w: live.filter(c => c.pnl > 0).length, R: +live.reduce((a, c) => a + (c.R || 0), 0).toFixed(2), u: +live.reduce((a, c) => a + (c.pnl || 0), 0).toFixed(2) }, rules });
+  h.days.sort((a, b) => (a.day < b.day ? -1 : 1));
+  if (h.days.length > 40) h.days = h.days.slice(-40);
+}
+function historyTable(st) {
+  const h = st && st._sipHist; if (!h || !h.days.length) return { days: 0, rules: [] };
+  const agg = {}, labels = Object.fromEntries(Object.entries(EXIT_VARIANTS).map(([k, v]) => [k, v.label]));
+  for (const d of h.days) for (const [k, r] of Object.entries(d.rules || {})) {
+    const a = agg[k] || (agg[k] = { key: k, label: labels[k] || k, days: 0, trades: 0, wins: 0, R: 0, usd: 0, tradesNet: 0, winsNet: 0, Rnet: 0, usdNet: 0, posDaysNet: 0 });
+    a.days++; a.trades += r.n || 0; a.wins += r.w || 0; a.R += r.R || 0; a.usd += r.u || 0;
+    a.tradesNet += r.nn || 0; a.winsNet += r.wn || 0; a.Rnet += r.Rn || 0; a.usdNet += r.un || 0; if ((r.un || 0) > 0) a.posDaysNet++;
+  }
+  const live = h.days.reduce((a, d) => ({ n: a.n + (d.liveActual ? d.liveActual.n : 0), w: a.w + (d.liveActual ? d.liveActual.w : 0), R: a.R + (d.liveActual ? d.liveActual.R : 0), u: a.u + (d.liveActual ? d.liveActual.u : 0) }), { n: 0, w: 0, R: 0, u: 0 });
+  const rules = Object.values(agg).map(a => ({ ...a, R: +a.R.toFixed(2), usd: +a.usd.toFixed(2), Rnet: +a.Rnet.toFixed(2), usdNet: +a.usdNet.toFixed(2),
+    netRPerTrade: a.tradesNet ? +(a.Rnet / a.tradesNet).toFixed(3) : null })).sort((x, y) => y.usdNet - x.usdNet);
+  return { days: h.days.length, first: h.days[0].day, last: h.days[h.days.length - 1].day, liveRule: liveRuleKey(),
+           live: { ...live, R: +live.R.toFixed(2), u: +live.u.toFixed(2) }, rules };
+}
+
 function summarize(s) {
   const cl = s.cands.filter(c => c.status === "closed");
   const id = s.cands.filter(c => c.ideal && c.ideal.entered);
@@ -797,6 +874,7 @@ async function refreshLast(s) {
 async function tick(deps) {
   if (!CFG.ENABLED || _busy) return;
   const { state, logEvent: log } = deps;
+  _histState = state;
   const markDirty = deps.markDirty || (() => {});
   const saveNow = async () => { markDirty(); if (deps.saveNow) { try { await deps.saveNow(); } catch (_) {} } };
   const p = etParts(deps.now ? deps.now() : Date.now());
@@ -939,7 +1017,8 @@ ${s.variants ? `<div style="margin-top:8px;font-weight:bold;color:#9cf">Exit var
 </div>`;
 }
 
-module.exports = { CFG, tick, cashAdjustment, flattenAll, isSipOrder, eodCSV, eodSection, replayToday, EXIT_VARIANTS,
-                   _t: { etParts, etToUtcMs, dailyStats, sizePosition, selectCandidates, simulate, summarize, setIO, freshDay, poll, exitPass, placeEntries, recordExit, closeMarket, brokerQty, refreshLast, simulateExit, replayVariants, manageExits, moveStop, hardCap, lockFloorR, stopPxFor,
+module.exports = { CFG, tick, cashAdjustment, flattenAll, isSipOrder, eodCSV, eodSection, replayToday, EXIT_VARIANTS, historyTable,
+                   _t: { etParts, etToUtcMs, dailyStats, sizePosition, selectCandidates, simulate, summarize, setIO, freshDay, poll, exitPass, placeEntries, recordExit, closeMarket, brokerQty, refreshLast, simulateExit, replayVariants, manageExits, noiseBand, splitOpening, recordHistory, liveRuleKey,
+                         setHistState: (st) => { _histState = st; }, moveStop, hardCap, lockFloorR, stopPxFor,
                          resetOto: () => { _otoUnsupported = false; },
                          setUniverse: (u) => { _universe = u; }, NON_COMMON_RE } };
