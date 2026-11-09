@@ -3333,7 +3333,56 @@ async function runScan() {
     // 9/14 (Harrison): VOL-CONDITIONAL STRADDLE — the ONLY negative-gamma edge this tape confirms.
     // Non-directional (ATM call + ATM put); fires only when neg gamma AND trailing 30-min range > 0.50%
     // (corr 0.87 with a straddle-payable forward move; 89% hit in the active bucket, 0% when dead).
-    if (STRADDLESTRAT.STRADDLE.ENABLED && liveStock) {
+    // 11/08 (Harrison): V2 LONG STRADDLE — negative gamma + implied below realized, 10:00-12:00 ET, hold to 3:58 (constants STRADDLE_*).
+    if (STRADDLESTRAT.V2 && STRADDLESTRAT.V2.ENABLED && liveStock && price > 0) {
+      const _tk = liveStock.ticker, _sv = STRADDLESTRAT.V2;
+      try {
+        const _sG = (state._gexFresh && state._gexFresh[_tk]) || (state._gexNow && state._gexNow[_tk]) || null;
+        const _reg = (state._gexRegime || {})[_tk] || (_sG && _sG.regime) || null;
+        const _gate = STRADDLESTRAT.preGate(_tk, state, { etHour: etHourNow, regime: _reg, rv: liveStock._rv, now: Date.now() });
+        if (_gate.ok) {
+          const _ds = STRADDLESTRAT.dayState(state);
+          _ds.lastEval[_tk] = Date.now();
+          const _rows = await require('./execution').fetchStraddleRows(_tk, price);
+          const _pair = STRADDLESTRAT.pickPair(_rows, price);
+          const _dec  = STRADDLESTRAT.decide(_pair, liveStock._rv);
+          const _say  = !_ds.lastLog[_tk] || _dec.fire || Date.now() - _ds.lastLog[_tk] > 15 * 60000;   // a decline speaks every 15 min
+          if (_say) { _ds.lastLog[_tk] = Date.now(); logEvent("filter", `[STRADDLE] ${_tk} ${_dec.fire ? "FIRE" : "no"} — ${_dec.reason}`); }
+          STRADDLESTRAT.tally(state, `${_tk}: ${_dec.fire ? "FIRED" : _dec.reason.split(" — ").pop()}`);
+          if (_dec.fire && _sv.MODE === "shadow") {
+            _ds.done[_tk] = "shadow";
+            recordGateShadow("straddle-shadow", "vol-straddle", _tk, "call", price, { ivrv: +_dec.ratio.toFixed(3), iv: +_pair.iv.toFixed(4), dte: _pair.dte, cost: _pair.cost });
+            markDirty();
+          } else if (_dec.fire) {
+            const _tries = (_ds.tries[_tk] = (_ds.tries[_tk] || 0) + 1);
+            const _sSig = `${_tk}-straddle-${Date.now()}`;
+            liveStock._straddle = "hold"; liveStock._stradIvRv = +_dec.ratio.toFixed(3);
+            liveStock._cachedContract = STRADDLESTRAT.asContract(_pair.call);
+            await executeTrade(liveStock, price, 0, [_dec.reason], state.vix, "call", false, 1.0, "sameweek", null, _sSig);
+            const _haveCall = state.positions.some(p => p._isStraddle && p.signalId === _sSig);
+            if (_haveCall) {   // only buy the put once the call is held — never a lone put
+              liveStock._cachedContract = STRADDLESTRAT.asContract(_pair.put);
+              await executeTrade(liveStock, price, 0, [_dec.reason], state.vix, "put", false, 1.0, "sameweek", null, _sSig);
+            }
+            liveStock._straddle = null; liveStock._stradIvRv = null; delete liveStock._cachedContract;
+            const _legs = state.positions.filter(p => p._isStraddle && p.signalId === _sSig);
+            if (_legs.length === 2) {
+              _ds.done[_tk] = "entered";
+              logEvent("trade", `[STRADDLE] ${_tk} PAIR OPEN — ${_pair.dte}DTE $${_pair.strike} call + put, ~$${_pair.cost.toFixed(0)}, IV/RV ${_dec.ratio.toFixed(2)}; holding to 3:58 ET`);
+            } else if (_legs.length === 1) {
+              _legs[0]._straddleOrphan = true; _ds.done[_tk] = "orphan";
+              logEvent("warn", `[STRADDLE] ${_tk} only the ${_legs[0].optionType} leg filled — flagged orphan, closing it (no naked direction)`);
+            } else if (_tries >= _sv.MAX_TRIES) {
+              _ds.done[_tk] = "entry failed";
+              logEvent("warn", `[STRADDLE] ${_tk} entry did not fill after ${_tries} attempts — done for today`);
+            } else logEvent("warn", `[STRADDLE] ${_tk} entry did not fill (attempt ${_tries}/${_sv.MAX_TRIES}) — retrying next minute`);
+            markDirty();
+            if (_legs.length >= 1) continue;
+          }
+        } else if (!_gate.quiet) STRADDLESTRAT.tally(state, `${_tk}: ${_gate.reason}`);
+      } catch (_s2Err) { liveStock._straddle = null; delete liveStock._cachedContract; logEvent("filter", `[STRADDLE] ${_tk} error: ${_s2Err && _s2Err.message}`); }
+    }
+    if (STRADDLESTRAT.STRADDLE.ENABLED && liveStock) {   // 9/14 rule — retired (ENABLED false); kept for the record
       try {
         const _sGex = (state._gexFresh && state._gexFresh[liveStock.ticker]) || (state._gexNow && state._gexNow[liveStock.ticker]) || null;  // 9/14: fresh-first (no one-scan lag)
         const _sDec = STRADDLESTRAT.evaluateStraddle(liveStock.ticker,
