@@ -547,6 +547,8 @@ async function _doClosePosition(ticker, reason, exitPremium = null, contractSym 
     agentSignal:   (state._agentMacro || {}).signal || "neutral",
   };
   state.closedTrades.push(tradeOutcome);
+  // 11/08: a hold-to-close straddle leg is scored against its pair for the EOD report / pass line
+  try { if (pos._straddleHold) require('./straddleStrategy').recordLeg(state, pos, { pnl, exitPremium: ep, qty: contractsToSell, reason }); } catch (_) {}
   // 8/05: outcome-joined table — one flat (X,y) row per FULL close for the feedback loop. The
   // position still carries every entry field + hold extreme here (spliced from state.positions
   // above, but this local `pos` ref is intact). Observation only; recordOutcome swallows any error.
