@@ -166,6 +166,7 @@ async function sendEmail(type) {
       dailyLog:      (state._dailyLogBuffer || []).slice(),
       standDownTally: JSON.parse(JSON.stringify(state._standDownTally || { brk:{}, mrf:{}, trend:{}, itrend:{} })),  // 9/09: snapshot before EOD reset wipes it
       sip:           JSON.parse(JSON.stringify(state._sip || null)),   // 11/02: stocks-in-play share sleeve
+      stradPairs:    JSON.parse(JSON.stringify(state._stradPairs || [])),   // 11/08: long-straddle pair results (running)
     };
 
     let attachments = [];
@@ -376,7 +377,7 @@ async function sendEmail(type) {
         const dateStr = new Date().toLocaleDateString("en-CA", { timeZone: "America/New_York" });
         const t = (_eodSnap && _eodSnap.standDownTally) ? _eodSnap.standDownTally : ((state && state._standDownTally) ? state._standDownTally : { brk: {}, mrf: {} });   // 9/09: snapshot, not live (EOD reset race)
         const lines = ["strategy,reason,count,pct"];
-        for (const [strat, book] of [["break", t.brk || {}], ["mr-fade", t.mrf || {}], ["trend-swing", t.trend || {}], ["intraday-trend", t.itrend || {}], ["eod-momentum", t.eodm || {}]]) {   // 9/01: CSV was hardcoded to brk/mrf — trend/itrend buckets were recorded but never exported
+        for (const [strat, book] of [["break", t.brk || {}], ["mr-fade", t.mrf || {}], ["trend-swing", t.trend || {}], ["intraday-trend", t.itrend || {}], ["eod-momentum", t.eodm || {}], ["straddle", t.straddle || {}]]) {   // 11/08: + straddle   // 9/01: CSV was hardcoded to brk/mrf — trend/itrend buckets were recorded but never exported
           const entries = Object.entries(book).sort((a, b) => b[1] - a[1]);
           const total = entries.reduce((s, [, n]) => s + n, 0) || 1;
           for (const [reason, n] of entries) {
@@ -399,6 +400,15 @@ async function sendEmail(type) {
           _retainToRedis("stocksinplay", dateStr, _sipCsv).catch(() => {});
         }
       } catch (_sipErr) { /* best-effort */ }
+      // ── 11/08: LONG-STRADDLE pairs CSV — every pair so far (running), one row each ──
+      try {
+        if ((_eodSnap.stradPairs || []).length) {
+          const _stCsv = require('./straddleStrategy').eodCSV(_eodSnap.stradPairs);
+          const dateStr = new Date().toLocaleDateString("en-CA", { timeZone: "America/New_York" });
+          attachments.push({ filename: `argo-straddle-${dateStr}.csv`, content: Buffer.from(_stCsv, "utf8").toString("base64") });
+          _retainToRedis("straddle", dateStr, _stCsv).catch(() => {});
+        }
+      } catch (_stErr) { /* best-effort */ }
 
       // ── 8/17: FULL SESSION LOG, GZIPPED ─────────────────────────────────────
       // Every [BREAK] rejection, [RANGE-REGIME] transition, [FEASIBILITY] ratio, [U-STOP]
@@ -453,6 +463,7 @@ async function sendEmail(type) {
       try { bodyHtml += buildTrendShadowSection(_eodSnap); } catch (_tsErr) { logEvent("warn", `[TREND-SHADOW] EOD section skipped: ${_tsErr.message}`); }   // 10/14
       try { bodyHtml += require('./holdShadow').section(_eodSnap.holdShadow, _eodSnap.outcomeBuffer, require('./outcomes').OUTCOME_HEADER); } catch (_hsErr) { logEvent("warn", `[HOLD-SHADOW] EOD section skipped: ${_hsErr.message}`); }   // 10/15
       try { bodyHtml += require('./stocksInPlay').eodSection(_eodSnap.sip); } catch (_sipErr2) { logEvent("warn", `[SIP] EOD section skipped: ${_sipErr2.message}`); }   // 11/02
+      try { bodyHtml += require('./straddleStrategy').eodSection(_eodSnap.stradPairs, new Date().toLocaleDateString("en-CA", { timeZone: "America/New_York" })); } catch (_stErr2) { logEvent("warn", `[STRADDLE] EOD section skipped: ${_stErr2.message}`); }   // 11/08
       try { bodyHtml += buildStandDownSection(_eodSnap); }
       catch (_sdErr) { logEvent("warn", `[STAND-DOWN] EOD section skipped: ${_sdErr.message}`); }
     }
