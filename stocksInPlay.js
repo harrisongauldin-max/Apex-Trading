@@ -310,6 +310,18 @@ const EXIT_VARIANTS = {
             floorR: (pk) => pk >= 2 ? pk - 1 : pk >= 1 ? -0.5 : null },
   noiseD: { label: "Noise D: stop 1N, BREAKEVEN at +1R, 1R trail from +2R", stop: (c) => noiseBand(c.h, c.l, c.atr, 1),
             floorR: (pk) => pk >= 2 ? pk - 1 : pk >= 1 ? 0 : null },
+  // 11/08 (Harrison): three replay-only tests of the live rule (noise A), chosen from 11/05-11/06 and scored from 11/09 on
+  //   cap 0.5 ATR — the 1-ATR cap bound on 14/20 (11/05) and 8/20 (11/06) names, so the cap level is the operative setting
+  //   skip late   — breakouts already through the level at 9:35 (the bar opens at/through it): 3 of 15, -9.2R in two days
+  //   with SPY    — longs only if SPY's 9:30-9:35 candle closed up, shorts only if down (flat/unknown: both sides)
+  noiseA_c50:  { label: "Noise A, N capped at 0.5 ATR", stop: (c) => Math.min(Math.max(Math.max(0, (+c.h || 0) - (+c.l || 0)), CFG.NOISE_FLOOR_ATR * c.atr), 0.5 * c.atr),
+                 floorR: (pk) => pk >= 2 ? pk - 1 : pk >= 1 ? -0.5 : null },
+  noiseA_ontime: { label: "Noise A, skip entries already through at 9:35", stop: (c) => noiseBand(c.h, c.l, c.atr, 1),
+                 floorR: (pk) => pk >= 2 ? pk - 1 : pk >= 1 ? -0.5 : null,
+                 skip: (c, bars) => { const o = bars && bars[0] ? +bars[0].o : NaN; return Number.isFinite(o) && (c.side === "long" ? o >= c.entry : o <= c.entry) ? "already through at 9:35" : null; } },
+  noiseA_spy:  { label: "Noise A, only the side SPY's first 5 min agrees with", stop: (c) => noiseBand(c.h, c.l, c.atr, 1),
+                 floorR: (pk) => pk >= 2 ? pk - 1 : pk >= 1 ? -0.5 : null,
+                 skip: (c) => (c._spyDir > 0 && c.side === "short") || (c._spyDir < 0 && c.side === "long") ? `against SPY's first 5 min (${c._spyDir > 0 ? "up" : "down"})` : null },
   or_apex: { label: "OR stop + APEX lock ladder (in R)",         stop: (c) => Math.max(c.h - c.l, 0.1 * c.atr),
              floorR: (pk) => { const L = _apexLadderR.rungs; if (!L.length || pk < L[0][0]) return null; let f = L[0][1];
                                for (const [a, fl] of L) if (pk >= a) f = fl; const top = L[L.length - 1]; if (pk >= top[0]) f = Math.max(f, pk - _apexLadderR.trail); return f; } },
@@ -321,6 +333,8 @@ function simulateExit(cand, bars, v, closeOpen = true, costs = null) {
   if (!cand || !cand.entry || cand.side === "doji" || !Array.isArray(bars) || !bars.length) return null;
   const L = cand.side === "long", sg = L ? 1 : -1, sd = v.stop(cand);
   if (!(sd > 0)) return null;
+  const _skip = typeof v.skip === "function" ? v.skip(cand, bars) : null;   // 11/08: a filter rule that passes on this trade
+  if (_skip) return { entered: false, R: 0, reason: `skipped: ${_skip}`, sd };
   const atr = +cand.atr || 0;
   let ec = costs ? (costs.entryAtr || 0) * atr : 0;
   const xr = costs ? (costs.exitAtr || 0) * atr / sd : 0, cr = costs ? (costs.closeAtr || 0) * atr / sd : 0;
@@ -363,6 +377,9 @@ const replayCosts = () => ({ entryAtr: CFG.COST_ENTRY_ATR, exitAtr: CFG.COST_EXI
 // 11/05: attach the 9:30-9:35 one-minute ATR (noise C) from bars starting 9:30; returns the bars from 9:35 for simulation
 function splitOpening(cands, raw, exitMin) {
   const out = {};
+  // 11/08: SPY's own 9:30-9:35 candle direction, for the "with SPY" replay rule (+1 up, -1 down, 0 flat, null unknown)
+  const spyOp = (raw.SPY || []).filter(x => { const m = etParts(Date.parse(x.t)).min; return m >= 570 && m < 575; });
+  const spyDir = spyOp.length ? Math.sign(+spyOp[spyOp.length - 1].c - +spyOp[0].o) : null;
   for (const c of cands) {
     const all = (raw[c.sym] || []).map(x => ({ x, m: etParts(Date.parse(x.t)).min }));
     const op = all.filter(e => e.m >= 570 && e.m < 575).map(e => e.x);
@@ -371,6 +388,7 @@ function splitOpening(cands, raw, exitMin) {
       for (let i = 0; i < op.length; i++) { const h = +op[i].h, l = +op[i].l, pc = i ? +op[i - 1].c : null; tr += pc == null ? h - l : Math.max(h - l, Math.abs(h - pc), Math.abs(l - pc)); }
       c._atr1m = tr / op.length;
     }
+    c._spyDir = spyDir;
     out[c.sym] = all.filter(e => e.m >= 575 && e.m < exitMin).map(e => e.x);
   }
   return out;
@@ -417,7 +435,7 @@ async function replayToday(state) {
   const endMin = p.day === s.day ? Math.min(p.min, exitMin) : exitMin;
   const closed = !(p.day === s.day && p.min < exitMin);
   const cs = s.cands.filter(c => c.side !== "doji" && c.entry);
-  const raw = await multiBars(cs.map(c => c.sym), "1Min", iso(etToUtcMs(s.day, 9, 30)), iso(etToUtcMs(s.day, Math.floor(endMin / 60), Math.floor(endMin % 60)) - 1000));
+  const raw = await multiBars([...new Set([...cs.map(c => c.sym), "SPY"])], "1Min", iso(etToUtcMs(s.day, 9, 30)), iso(etToUtcMs(s.day, Math.floor(endMin / 60), Math.floor(endMin % 60)) - 1000));
   const bars = splitOpening(cs, raw, exitMin);
   const liveRule = liveRuleKey();
   _histState = state;
@@ -812,7 +830,7 @@ async function simulateDay(s, log) {
   const cs = s.cands.filter(c => c.side !== "doji" && c.entry);
   if (!cs.length) { s.summary = summarize(s); return; }
   const exitMin = s.sessionCloseMin - CFG.EXIT_BEFORE_CLOSE_MIN;
-  const bars = await multiBars(cs.map(c => c.sym), "1Min", iso(etToUtcMs(s.day, 9, 30)), iso(etToUtcMs(s.day, Math.floor(exitMin / 60), exitMin % 60) - 1000));
+  const bars = await multiBars([...new Set([...cs.map(c => c.sym), "SPY"])], "1Min", iso(etToUtcMs(s.day, 9, 30)), iso(etToUtcMs(s.day, Math.floor(exitMin / 60), exitMin % 60) - 1000));
   const sim = splitOpening(cs, bars, exitMin);
   const _lk = liveRuleKey(), _lv = _lk && EXIT_VARIANTS[_lk];
   for (const c of cs) {
@@ -843,7 +861,8 @@ function recordHistory(s) {
   const rules = {};
   for (const [k, t] of Object.entries(s.variants)) rules[k] = { n: t.trades, w: t.wins, R: t.R, u: t.usd, nn: t.tradesNet, wn: t.winsNet, Rn: t.Rnet, un: t.usdNet };
   const live = (s.cands || []).filter(c => c.status === "closed");
-  h.days.push({ day: s.day, live: s.liveRule || null, liveActual: { n: live.length, w: live.filter(c => c.pnl > 0).length, R: +live.reduce((a, c) => a + (c.R || 0), 0).toFixed(2), u: +live.reduce((a, c) => a + (c.pnl || 0), 0).toFixed(2) }, rules });
+  const gamma = s.gamma || ((st._gexRegime || {}).SPY) || null;   // 11/08: tag the night with the regime
+  h.days.push({ day: s.day, gamma, live: s.liveRule || null, liveActual: { n: live.length, w: live.filter(c => c.pnl > 0).length, R: +live.reduce((a, c) => a + (c.R || 0), 0).toFixed(2), u: +live.reduce((a, c) => a + (c.pnl || 0), 0).toFixed(2) }, rules });
   h.days.sort((a, b) => (a.day < b.day ? -1 : 1));
   if (h.days.length > 40) h.days = h.days.slice(-40);
 }
@@ -851,14 +870,18 @@ function historyTable(st) {
   const h = st && st._sipHist; if (!h || !h.days.length) return { days: 0, rules: [] };
   const agg = {}, labels = Object.fromEntries(Object.entries(EXIT_VARIANTS).map(([k, v]) => [k, v.label]));
   for (const d of h.days) for (const [k, r] of Object.entries(d.rules || {})) {
-    const a = agg[k] || (agg[k] = { key: k, label: labels[k] || k, days: 0, trades: 0, wins: 0, R: 0, usd: 0, tradesNet: 0, winsNet: 0, Rnet: 0, usdNet: 0, posDaysNet: 0 });
+    const a = agg[k] || (agg[k] = { key: k, label: labels[k] || k, days: 0, trades: 0, wins: 0, R: 0, usd: 0, tradesNet: 0, winsNet: 0, Rnet: 0, usdNet: 0, posDaysNet: 0,
+                                    gamma: { neg: { days: 0, n: 0, Rnet: 0 }, pos: { days: 0, n: 0, Rnet: 0 } } });
     a.days++; a.trades += r.n || 0; a.wins += r.w || 0; a.R += r.R || 0; a.usd += r.u || 0;
     a.tradesNet += r.nn || 0; a.winsNet += r.wn || 0; a.Rnet += r.Rn || 0; a.usdNet += r.un || 0; if ((r.un || 0) > 0) a.posDaysNet++;
+    const g = a.gamma[d.gamma === "pos" ? "pos" : d.gamma === "neg" ? "neg" : null];   // 11/08: split by the night's gamma regime
+    if (g) { g.days++; g.n += r.nn || 0; g.Rnet = +(g.Rnet + (r.Rn || 0)).toFixed(2); }
   }
+  const nights = { neg: h.days.filter(d => d.gamma === "neg").length, pos: h.days.filter(d => d.gamma === "pos").length };
   const live = h.days.reduce((a, d) => ({ n: a.n + (d.liveActual ? d.liveActual.n : 0), w: a.w + (d.liveActual ? d.liveActual.w : 0), R: a.R + (d.liveActual ? d.liveActual.R : 0), u: a.u + (d.liveActual ? d.liveActual.u : 0) }), { n: 0, w: 0, R: 0, u: 0 });
   const rules = Object.values(agg).map(a => ({ ...a, R: +a.R.toFixed(2), usd: +a.usd.toFixed(2), Rnet: +a.Rnet.toFixed(2), usdNet: +a.usdNet.toFixed(2),
     netRPerTrade: a.tradesNet ? +(a.Rnet / a.tradesNet).toFixed(3) : null })).sort((x, y) => y.usdNet - x.usdNet);
-  return { days: h.days.length, first: h.days[0].day, last: h.days[h.days.length - 1].day, liveRule: liveRuleKey(),
+  return { days: h.days.length, first: h.days[0].day, last: h.days[h.days.length - 1].day, liveRule: liveRuleKey(), nights,
            live: { ...live, R: +live.R.toFixed(2), u: +live.u.toFixed(2) }, rules };
 }
 
@@ -954,6 +977,7 @@ async function tick(deps) {
         if (Object.keys(first).length < syms.length * 0.5) { log("scan", `[SIP] 9:30 bars not complete yet (${Object.keys(first).length}/${syms.length}) — retrying`); return; }
         s.cands = selectCandidates(_universe.syms, first);
         s.scanned = true; s.scannedAt = iso(Date.now());
+        try { s.gamma = ((_histState && _histState._gexRegime) || {}).SPY || null; } catch (_) {}   // 11/08: the day's gamma regime at the scan
         log("scan", `[SIP] ${p.day} stocks in play: ${s.cands.length} (RVol >= ${CFG.RVOL_MIN * 100}%) — ${s.cands.map(c => `${c.sym} ${c.rvol}x ${c.side}`).join(", ")} | mode ${s.mode.toUpperCase()}`);
         if (live) await placeEntries(s, log);
         else for (const c of s.cands) if (c.side !== "doji") c.status = "shadow";
