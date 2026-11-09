@@ -497,7 +497,10 @@ async function executeTrade(stock, price, score, scoreReasons, vix, optionType =
   // Twin-entry: the prefetch caches ONE contract. Only the same-week leg may use it; the standard leg
   // must select its own (else it would inherit the same-week cache). Validate the cache against the band.
   let contract;
-  if (dteBand === "standard") {
+  if (stock && stock._straddle === "hold" && stock._cachedContract) {
+    // 11/08: hold-to-close straddle — both legs were chosen together (same strike, lowest-IV expiry); never re-selected
+    contract = stock._cachedContract;
+  } else if (dteBand === "standard") {
     contract = await findContract(stock.ticker, optionType, targetDelta, targetDTE, vix, stock);
   } else if (stock && (stock._iTrend || stock._eodMom) && ITREND_COST_SELECT === true) {
     // 10/28: intraday-trend always selects fresh by cost — a prefetched contract (chosen by another rule) is ignored
@@ -594,6 +597,7 @@ async function executeTrade(stock, price, score, scoreReasons, vix, optionType =
     contracts = Math.max(contracts, ITREND_ADX_SIZE_CONTRACTS);
     if (contracts !== _prev) logEvent("scan", `[ITREND-SIZE] ${stock.ticker} ADX ${stock.adx.toFixed(0)} >= ${ITREND_ADX_SIZE_MIN} -> ${contracts} contracts (was ${_prev})`);
   }
+  if (stock && stock._straddle === "hold") contracts = Math.max(1, Math.round(require('./constants').STRADDLE_CONTRACTS || 1));   // 11/08: fixed per leg
   if (sizeMod < 1.0) {
     contracts = Math.max(1, Math.floor(contracts * sizeMod));
     logEvent("scan", `[SIZING] ${stock.ticker} sizeMod ${sizeMod}x applied - ${contracts} contracts (oversold bear trend)`);
@@ -716,6 +720,7 @@ async function executeTrade(stock, price, score, scoreReasons, vix, optionType =
       state._entryInFlight[contract.symbol] = { at: Date.now(),
         strategy: stock._eodMom ? "eod-momentum" : stock._straddle ? "vol-straddle" : stock._iTrend ? "intraday-trend" : stock._isTrend ? "trend-swing" : stock._structBreak ? "struct-break" : (stock._mrFade ? "mr-fade-lit" : (_mrScalp ? "mr-scalp" : (stock._mrStrong ? "mr" : "breakout-or-context"))),
         iTrend: !!stock._iTrend, eodMom: !!stock._eodMom, isTrend: !!stock._isTrend, mrFade: !!stock._mrFade, straddle: !!stock._straddle, structBreak: !!stock._structBreak,
+        straddleHold: stock._straddle === "hold", signalId: signalId || null,   // 11/08: a rebuilt straddle leg keeps its pair id
         mrInv: stock._mrFade && typeof stock._mrFade.invalidationPx === "number" ? stock._mrFade.invalidationPx : null };
       const _MX = require('./midExec');
       const _steps = _MX.entrySteps(contract.bid, contract.ask);
@@ -1061,7 +1066,14 @@ async function executeTrade(stock, price, score, scoreReasons, vix, optionType =
     (_openSame || position)._isMrFade = true;
     (_openSame || position)._mrInvalidation = (typeof stock._mrFade.invalidationPx === "number") ? stock._mrFade.invalidationPx : null;
   }
-  if (stock._straddle) { (_openSame || position)._isStraddle = true; }
+  if (stock._straddle) {
+    (_openSame || position)._isStraddle = true;
+    if (stock._straddle === "hold") {   // 11/08
+      const _sp = _openSame || position;
+      _sp._straddleHold = true; _sp._stradIvRv = stock._stradIvRv != null ? stock._stradIvRv : null;
+      _sp._stradBid = contract && contract.bid != null ? contract.bid : null; _sp._stradAsk = contract && contract.ask != null ? contract.ask : null;   // entry quote -> spread paid
+    }
+  }
   if (stock._structBreak) { (_openSame || position)._isStructBreak = true; }
   if (stock._isTrend) { (_openSame || position)._isTrend = true; }
   if (stock._eodMom) { (_openSame || position)._eodMom = true; (_openSame || position)._eodmRet = stock._eodmRet; }   // 10/29: end-of-day momentum
@@ -1526,8 +1538,44 @@ async function _fetchGexChainV1(ticker, spot) {
   } catch (e) { logEvent("scan", `[GEX-FETCH] ${ticker} failed — ${e && e.message}`); return false; }
 }
 
+// 11/08: the straddle chain — both types, strikes within STRADDLE_STRIKE_BAND of spot, every 1-7 DTE expiry, with quotes,
+// greeks and feed IV. Returns rows for straddleStrategy.pickPair (which picks the expiry and strike).
+async function fetchStraddleRows(ticker, spot) {
+  const C = require('./constants');
+  const band = C.STRADDLE_STRIKE_BAND || 0.01, dMin = Math.max(1, C.STRADDLE_DTE_MIN || 1), dMax = C.STRADDLE_DTE_MAX || 7;
+  const etToday = new Date().toLocaleDateString("en-CA", { timeZone: "America/New_York" });
+  const d0 = (k) => new Date(Date.parse(etToday + "T12:00:00Z") + k * 86400000).toISOString().slice(0, 10);
+  const dte = (exp) => Math.round((Date.parse(exp + "T12:00:00Z") - Date.parse(etToday + "T12:00:00Z")) / 86400000);
+  const rows = [];
+  for (const type of ["call", "put"]) {
+    const base = `/options/contracts?underlying_symbol=${ticker}&expiration_date_gte=${d0(dMin)}&expiration_date_lte=${d0(dMax)}&type=${type}&limit=200` +
+                 `&strike_price_gte=${(spot * (1 - band)).toFixed(2)}&strike_price_lte=${(spot * (1 + band)).toFixed(2)}`;
+    let all = [], tok = null, pages = 0;
+    do {
+      const pg = await alpacaGet(tok ? `${base}&page_token=${tok}` : base, ALPACA_OPTIONS);
+      if (!pg || !pg.option_contracts) break;
+      all = all.concat(pg.option_contracts); tok = pg.next_page_token || null; pages++;
+    } while (tok && pages < 5);
+    all = all.filter(c => String(c.expiration_date) > etToday);   // never 0DTE
+    const syms = all.map(c => c.symbol), snaps = {};
+    for (let i = 0; i < syms.length; i += 25) {
+      const r = await alpacaGet(`/options/snapshots?symbols=${syms.slice(i, i + 25).join(",")}&feed=${OPTION_FEED}`, ALPACA_OPT_SNAP).catch(() => null);
+      Object.assign(snaps, (r && r.snapshots) || {});
+    }
+    for (const c of all) {
+      const sn = snaps[c.symbol]; if (!sn) continue;
+      const q = sn.latestQuote || {}, g = sn.greeks || {};
+      rows.push({ symbol: c.symbol, type, strike: parseFloat(c.strike_price), exp: String(c.expiration_date), dte: dte(String(c.expiration_date)),
+                  bid: parseFloat(q.bp || 0), ask: parseFloat(q.ap || 0), iv: parseFloat(sn.impliedVolatility || 0),
+                  delta: parseFloat(g.delta || 0), theta: parseFloat(g.theta || 0), gamma: parseFloat(g.gamma || 0), vega: parseFloat(g.vega || 0),
+                  oi: parseInt(sn.openInterest || c.open_interest || 0) });
+    }
+  }
+  return rows;
+}
+
 module.exports = {
-  executeTrade,
+  executeTrade, fetchStraddleRows,
   fetchGexChain,
   executeCreditSpread,
   findContract, bsStrikeForDelta, getOptionsPrice,
