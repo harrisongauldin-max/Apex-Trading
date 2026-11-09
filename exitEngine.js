@@ -461,6 +461,23 @@ async function checkExits(positions, posSnapshots, posQuotes, posNewsCache, ctx)
       // lone leg. Legs are matched by shared signalId.
       const _stHeld = (Date.now() - new Date(pos.openDate || pos.entryTime || Date.now()).getTime()) / 60000;
       const _stReg  = state._gexNow && state._gexNow[pos.ticker] && state._gexNow[pos.ticker].regime;
+      // 11/08: V2 hold-to-close straddle. server.js closes both legs at 3:58 / 3:59 ET; from 3:57 this engine leaves them alone
+      // (so a leg closed first by the 3:58 pass never reads as an orphan here). Carried overnight by a failed exit = no longer
+      // the trade -> close at the next session's first scan.
+      if (pos._straddleHold) {
+        const _sEt = getETTime(), _sH = _sEt.getHours() + _sEt.getMinutes() / 60;
+        const _etD = (ms) => new Date(ms).toLocaleDateString("en-CA", { timeZone: "America/New_York" });
+        const _op = Date.parse(pos.openDate || pos.entryTime || "");
+        if (Number.isFinite(_op) && _etD(_op) < _etD(Date.now())) {
+          if (!_closedThisCycle.has(pi)) {
+            _closedThisCycle.add(pi);
+            logEvent("warn", `[STRADDLE] ${pos.ticker} ${pos.contractSymbol} was carried overnight (opened ${_etD(_op)}) — closing now`);
+            decisions.push({ pi, ticker: pos.ticker, action: 'close', reason: 'straddle-stale', exitPremium: null, contractSym: pos.contractSymbol || null });
+          }
+          continue;
+        }
+        if (_sH >= 15.95) { pos.currentPrice = curP; markDirty(); continue; }
+      }
 
       // orphan (only one leg ever filled) — close this lone leg, never hold naked-directional
       if (pos._straddleOrphan && !_closedThisCycle.has(pi)) {
@@ -493,6 +510,8 @@ async function checkExits(positions, posSnapshots, posQuotes, posNewsCache, ctx)
       const _pairCost = ((pos.cost || pos.premium * (pos.contracts||1) * 100) + (_sib.cost || _sib.premium * (_sib.contracts||1) * 100)) || 1;
       const _pairPct  = _pairPnl / _pairCost;   // combined return on total premium paid
 
+      // 11/08: V2 holds to 3:58 by design — no take-profit, time stop or regime exit (the orphan rules above still apply)
+      if (pos._straddleHold) { pos.currentPrice = curP; markDirty(); continue; }
       // decide on the PAIR; act on BOTH legs at once (only the lower-index leg drives, to avoid double-firing)
       let _stReason = null;
       if (_pairPct >= STRADDLE_TP_PCT)             _stReason = "straddle-tp";         // combined move paid — harvest both
