@@ -498,7 +498,11 @@ async function runReconciliation() {
               if (_st.eodMom) reconPos._eodMom = true;
               if (_st.isTrend) reconPos._isTrend = true;
               if (_st.mrFade) { reconPos._isMrFade = true; reconPos._mrInvalidation = _st.mrInv != null ? _st.mrInv : null; }
-              if (_st.straddle) reconPos._isStraddle = true;
+              if (_st.straddle) {
+                reconPos._isStraddle = true;
+                if (_st.straddleHold) reconPos._straddleHold = true;   // 11/08: hold-to-close straddle keeps its own exit
+                if (_st.signalId) reconPos.signalId = _st.signalId;     // ...and its pair id (else the leg reads as an orphan)
+              }
               if (_st.structBreak) reconPos._isStructBreak = true;
               reconPos.dteLabel = 'RECONCILED-' + _st.strategy;
               _log('warn', `[RECONCILE] ${p.ticker} (${p.sym}) label restored: ${_st.strategy} (from the entry stamp) — managed by that sleeve's exits`);
