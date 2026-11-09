@@ -21,7 +21,19 @@ const CFG = {
   ENTRY_START_ET:    typeof C.EODM_ENTRY_START_ET === "number" ? C.EODM_ENTRY_START_ET : 15.5,
   ENTRY_END_ET:      typeof C.EODM_ENTRY_END_ET === "number" ? C.EODM_ENTRY_END_ET : 15.5833,
   REQUIRE_NEG_GAMMA: C.EODM_REQUIRE_NEG_GAMMA !== false,
+  // 11/08 (Harrison): "shadow" = decide and log at 3:30, place no order; the decision goes to the gate-shadow ledger
+  MODE:              C.EODM_MODE === "shadow" ? "shadow" : "live",
 };
+// 11/08: the shadow trade, in the gate-shadow ledger's schema (gate "eodm-shadow"): the scanner stamps the 10/20-min marks and
+// the move to 3:55 (fClose) on every row, so each 3:30 decision is scored on the underlying in its direction.
+function recordShadow(state, tk, side, px, ctx) {
+  try {
+    if (!Array.isArray(state._gateShadow)) state._gateShadow = [];
+    state._gateShadow.push({ gate: "eodm-shadow", sleeve: "eod-momentum", ticker: tk, side, at: Date.now(), px: +px.toFixed(2), ctx: ctx || null,
+      mfe: 0, mae: 0, f10: null, f20: null, f30: null, done: false, fClose: null, vTrail: null, vTrailMin: null, closeDone: false });
+    while (state._gateShadow.length > 300) state._gateShadow.shift();
+  } catch (_) { /* measurement only */ }
+}
 
 const etDay = (ms = Date.now()) => new Date(ms).toLocaleDateString("en-CA", { timeZone: "America/New_York" });
 const isEodPos = (p) => !!(p && (p._eodMom || p.entryStrategy === "eod-momentum"));
@@ -79,6 +91,13 @@ async function runEntry(deps) {
       const side = ret > 0 ? "call" : "put";
       const reason = `end-of-day momentum: ${tk} ${ret >= 0 ? "+" : ""}${ret.toFixed(2)}% from prior close $${prevC.toFixed(2)} at 3:30 in NEGATIVE gamma -> ${side.toUpperCase()} to the close (Baltussen et al. 2021)`;
       logEvent("filter", `[EOD-MOM] ${tk} ${side.toUpperCase()} — ${reason}`);
+      if (CFG.MODE === "shadow") {
+        state._eodm.done[tk] = "shadow";
+        recordShadow(state, tk, side, px, { ret: +ret.toFixed(3), regime: regime || null });
+        tally(state, `${tk}: SHADOW ${side}`);
+        logEvent("filter", `[EOD-MOM] ${tk} ${side.toUpperCase()} — SHADOW only (no order); scored in the gate-shadow ledger (eodm-shadow)`);
+        out.push({ tk, action: "shadow", side, ret }); continue;
+      }
       const stock = { ticker: tk, isIndex: true, price: px, _eodMom: side, _eodmRet: +ret.toFixed(3), _eodmPrevClose: prevC };
       const ok = await executeTrade(stock, px, 0, [reason], state.vix, side, false, 1.0, null, null, `${tk}-${side}-eodmom-${Date.now()}`);
       tally(state, `${tk}: ${ok ? "ENTERED" : "entry did not complete"} ${side}`);
@@ -108,4 +127,4 @@ async function runExit(deps, pass = 1) {
   return { closed: open.length - left.length, left: left.length };
 }
 
-module.exports = { runEntry, runExit, isEodPos, CFG };
+module.exports = { runEntry, runExit, isEodPos, CFG, recordShadow };
