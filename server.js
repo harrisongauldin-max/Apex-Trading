@@ -4,6 +4,7 @@
 
 const express = require('express');
 const { redisFetch } = require('./redisIO');   // 10/12: compressed + metered Upstash calls
+const HANDOFF = require('./handoff');            // 11/08: one trading process at a time across a deploy overlap
 const cron    = require('node-cron');
 const path    = require('path');
 const fs      = require('fs');
@@ -384,7 +385,10 @@ async function gracefulShutdown(signal) {
     logEvent("scan", `[SHUTDOWN] ${signal} — clean shutdown (deploy ${(process.env.RAILWAY_DEPLOYMENT_ID || "local").slice(0, 8)}, up ${(process.uptime() / 60).toFixed(0)} min) — saving state, log and telemetry`);
   } catch (_) {}
   let saved = false;
-  for (let i = 1; i <= 3; i++) {
+  // 11/08: a process still HELD for a deploy hand-off never traded and holds the stale copy of state — don't save it
+  const _wasHeld = HANDOFF.isHeld();
+  if (_wasHeld) { console.log("[SHUTDOWN] held for a deploy hand-off — state NOT saved (the stale copy); hand-off mark only"); saved = true; }
+  for (let i = 1; i <= 3 && !_wasHeld; i++) {
     try {
       await redisSave(state);
       saved = true;
@@ -395,6 +399,11 @@ async function gracefulShutdown(signal) {
       if (i < 3) await new Promise(r => setTimeout(r, 1000));
     }
   }
+  // 11/08: tell a new process waiting on the hand-off that the final state is in Redis (time-capped)
+  try {
+    const _okMark = await Promise.race([HANDOFF.writeMark(redisFetch, REDIS_URL, REDIS_TOKEN, { signal, deploy: process.env.RAILWAY_DEPLOYMENT_ID || null, saved }), new Promise(r => setTimeout(() => r(false), 3000))]);
+    console.log(`[SHUTDOWN] hand-off mark ${_okMark ? "written" : "NOT written (the new process waits up to 90 s, then reloads anyway)"}`);
+  } catch (e) { console.error("[SHUTDOWN] hand-off mark failed:", e.message); }
   try {
     fs.writeFileSync(STATE_FILE, JSON.stringify(state, null, 2));
     console.log("[SHUTDOWN] State saved to local file backup");
@@ -417,6 +426,7 @@ async function gracefulShutdown(signal) {
 }
 
 setInterval(() => {
+  if (isShuttingDown || HANDOFF.isHeld()) return;   // 11/08: no scans while shutting down or held for a deploy hand-off
   const day = getETTime().getDay();
   if (day >= 1 && day <= 5) runScan();
 }, 10000);
@@ -494,6 +504,7 @@ setInterval(async () => {
   if (day === 0 || day === 6) return;
   const etH = et.getHours() + et.getMinutes() / 60;
   if (etH < 9.5 || etH > 16.1) return;
+  if (isShuttingDown || HANDOFF.isHeld()) return;   // 11/08
   try { await runReconciliation(); } catch(e) { logEvent('warn', `[RECONCILE] Interval error: ${e.message}`); }
 }, 3 * 60 * 1000);
 
@@ -754,15 +765,18 @@ async function runEodFlatten(pass) {
   // 8/27: label-driven flatten. swing-class positions (trend-swing) hold overnight; the exit engine
   // resumes managing them at next open. Everything intraday still hard-closes.
   // 10/29: end-of-day momentum positions are closed by their own 3:58 exit (they exist to hold into the close)
-  const _isEod = (p) => !!(p && (p._eodMom || p.entryStrategy === "eod-momentum"));
+  // 11/08: + the hold-to-close straddle (closed by its own 3:58 exit)
+  const _isEod = (p) => !!(p && (p._eodMom || p.entryStrategy === "eod-momentum" || p._straddleHold));
   const positions = _allPos.filter(p => !isFlattenExempt(p.entryStrategy) && !_isEod(p));
   const _held = _allPos.length - positions.length;
+  const _heldEod = _allPos.filter(_isEod).length, _heldSwing = _held - _heldEod;
+  const _heldTxt = [_heldSwing ? `${_heldSwing} swing position(s) HELD overnight` : "", _heldEod ? `${_heldEod} held to their own 3:58 exit` : ""].filter(Boolean).join(", ");
   const _label = pass === 1 ? "3:45pm" : pass === 2 ? "3:50pm RETRY" : "3:55pm FINAL (crossing)";
   if (positions.length === 0) {
-    if (pass === 1 && _held > 0) logEvent("scan", `[EOD CLOSE] 3:45pm — ${_held} swing position(s) HELD overnight, 0 intraday to close.`);
+    if (pass === 1 && _held > 0) logEvent("scan", `[EOD CLOSE] 3:45pm — ${_heldTxt}, 0 intraday to close.`);   // 11/08: was "N swing HELD overnight" for 3:58-exit positions too
     return { closed: 0, left: 0 };
   }
-  logEvent(pass === 1 ? "scan" : "warn", `[EOD CLOSE] ${_label} — closing ${positions.length} intraday position(s)${_held ? `; HOLDING ${_held} swing overnight` : ""}.`);
+  logEvent(pass === 1 ? "scan" : "warn", `[EOD CLOSE] ${_label} — closing ${positions.length} intraday position(s)${_held ? `; ${_heldTxt}` : ""}.`);
   for (const pos of [...positions]) {
     const _curPrice = (pos.currentPrice != null && !isNaN(pos.currentPrice) && pos.currentPrice > 0)
       ? pos.currentPrice : pos.premium;
@@ -790,6 +804,8 @@ for (const min of [30, 31, 32, 33, 34]) {
   cron.schedule(`${min} 19,20 * * 1-5`, async () => {
     const et = getETTime();
     if (!(et.getHours() === 15 && et.getMinutes() === min)) return;
+    if (isShuttingDown) return;
+    await HANDOFF.waitReady(45000);   // 11/08: a deploy hand-off in progress -> wait for it (then go ahead regardless)
     try {
       const { executeTrade } = require('./execution');
       const { paperDataActive } = require('./state');
@@ -810,8 +826,12 @@ for (const [min, pass] of [[58, 1], [59, 2]]) {
   cron.schedule(`${min} 19,20 * * 1-5`, async () => {
     const et = getETTime();
     if (!(et.getHours() === 15 && et.getMinutes() === min)) return;
+    if (isShuttingDown) return;
+    await HANDOFF.waitReady(45000);   // 11/08
     try { await EODM.runExit({ state, closePosition, logEvent }, pass); markDirty(); }
     catch (e) { logEvent("error", `[EOD-MOM] exit run failed: ${e.message}`); }
+    try { await require('./straddleStrategy').runExit({ state, closePosition, logEvent }, pass); markDirty(); }   // 11/08: hold-to-close straddle legs
+    catch (e) { logEvent("error", `[STRADDLE] exit run failed: ${e.message}`); }
   });
 }
 
@@ -819,6 +839,8 @@ for (const [min, pass] of [[45, 1], [50, 2], [55, 3]]) {
   cron.schedule(`${min} 19,20 * * 1-5`, async () => {
     const et = getETTime();
     if (!(et.getHours() === 15 && et.getMinutes() === min)) return;
+    if (isShuttingDown) return;
+    await HANDOFF.waitReady(45000);   // 11/08
     await runEodFlatten(pass);
   });
 }
@@ -2429,7 +2451,27 @@ initState().then(async () => {
                 : (_ls && _ls.at >= (_alive || 0) - 5000) ? `previous process shut down cleanly (${_ls.signal} at ${_fmt(_ls.at)})`
                 : `previous process last scanned at ${_fmt(_alive)}; its shutdown may still be in progress (deploy overlap) — look for its [SHUTDOWN] line`;
     logEvent("scan", `[BOOT] APEX started — deploy ${_dep}${_sha ? " commit " + _sha : ""}${_prevDep ? (_prevDep === _dep ? " (SAME deploy as before: a restart, not a deploy)" : " (NEW deploy)") : ""} | pid ${process.pid} | ${_prev}`);
-    state._bootInfo = { deploy: _dep, sha: _sha, at: Date.now(), pid: process.pid };
+    state._bootInfo = { deploy: _dep, sha: _sha, at: Date.now(), pid: process.pid, bootId: HANDOFF.BOOT_ID };
+    // 11/08: the previous process looks alive -> HOLD (no trading, no Redis saves) until it writes the hand-off mark after its
+    // final save, then reload state from Redis and start. 90 s cap: a process killed without warning never writes it.
+    if (HANDOFF.overlapSuspected({ lastScan: _alive, lastShutdown: _ls, lastCrash: _lc }) && REDIS_URL && REDIS_TOKEN) {
+      HANDOFF.hold("previous process still alive");
+      logEvent("scan", `[HANDOFF] previous process scanned ${((Date.now() - _alive) / 1000).toFixed(0)}s ago and has not shut down — HOLDING (no trades, no saves) until it hands off`);
+      const _bootAt = Date.now();
+      (async () => {
+        const r = await HANDOFF.waitForMark({ read: () => HANDOFF.readMark(redisFetch, REDIS_URL, REDIS_TOKEN), bootAt: _bootAt });
+        try {
+          const fresh = await redisLoad();
+          if (fresh && typeof fresh.cash === "number" && Array.isArray(fresh.positions)) {
+            const keep = { _bootInfo: state._bootInfo, _dailyLogBuffer: state._dailyLogBuffer, _telemetryBuffer: state._telemetryBuffer, _outcomeBuffer: state._outcomeBuffer };
+            Object.assign(state, fresh, keep);
+          }
+        } catch (e) { logEvent("warn", `[HANDOFF] state reload failed (${e.message}) — continuing on the boot copy`); }
+        HANDOFF.release();
+        logEvent("scan", `[HANDOFF] ${r.ok ? `previous process handed off after ${(r.waitedMs / 1000).toFixed(0)}s` : `no hand-off mark after ${(r.waitedMs / 1000).toFixed(0)}s`} — state reloaded (cash $${state.cash}, ${state.positions.length} positions) — trading`);
+        markDirty();
+      })().catch(e => { HANDOFF.release(); logEvent("error", `[HANDOFF] ${e.message} — released`); });
+    }
   } catch (_be) { console.error("[BOOT] line failed:", _be && _be.message); }
   initAgent({
     logFn:               logEvent,
@@ -2456,7 +2498,7 @@ initState().then(async () => {
   try {
     const SIP = require('./stocksInPlay');
     if (SIP.CFG.ENABLED) {
-      setInterval(() => { SIP.tick({ state, logEvent, markDirty, saveNow: saveStateNow }).catch(e => logEvent("error", `[SIP] ${e.message}`)); }, 5000);
+      setInterval(() => { if (isShuttingDown || HANDOFF.isHeld()) return; SIP.tick({ state, logEvent, markDirty, saveNow: saveStateNow }).catch(e => logEvent("error", `[SIP] ${e.message}`)); }, 5000);   // 11/08: hand-off gate
       logEvent("scan", `[SIP] stocks-in-play sleeve ON — mode ${SIP.CFG.MODE.toUpperCase()}, sleeve $${SIP.CFG.SLEEVE_USD.toLocaleString()}`);
     }
   } catch (e) { logEvent("error", `[SIP] could not start: ${e.message}`); }
