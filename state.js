@@ -172,6 +172,8 @@ async function redisSave(data) {
   try { fs.writeFileSync(STATE_FILE, JSON.stringify(data, null, 2)); } catch(e) {}
 
   if (!REDIS_URL || !REDIS_TOKEN) return;
+  // 11/08: a process held for a deploy hand-off must not overwrite the previous process's state (handoff.js)
+  try { if (require('./handoff').isHeld()) return; } catch (_) {}
 
   try {
     const serialized = JSON.stringify(slim);
