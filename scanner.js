@@ -723,7 +723,8 @@ async function runScan() {
     const agentIsBearish   = ["strongly bearish","bearish"].includes(agentSignal);
     const agentFresh       = _agentFreshForDefensive;
     const defensiveSuppressed = agentFresh && !agentIsBearish;
-    const openCallPositions = (state.positions || []).filter(p => p.optionType === "call");
+    // 11/09: the hold-to-close straddle's legs are exempt from the discretionary macro closes (non-directional; own 3:58 exit)
+    const openCallPositions = (state.positions || []).filter(p => p.optionType === "call" && !p._straddleHold);
     if (macro.mode === "defensive" && state.circuitOpen && !defensiveSuppressed) {
       if (openCallPositions.length === 0) {
         logEvent("macro", `[DEFENSIVE] No open calls - nothing to close (macro: ${macro.signal})`);
@@ -731,10 +732,10 @@ async function runScan() {
         const defTriggers = (macro.triggers || []).slice(0,3).join(", ") || "strongly bearish signal";
         logEvent("macro", `DEFENSIVE MODE - closing calls: ${defTriggers}`);
         for (const pos of [...state.positions]) {
-          if (pos.optionType === "call") {
+          if (pos.optionType === "call" && !pos._straddleHold) {
             if (!state._macroDefensiveCooldown) state._macroDefensiveCooldown = {};
             state._macroDefensiveCooldown[pos.ticker] = Date.now();
-            await closePosition(pos.ticker, "macro-defensive");
+            await closePosition(pos.ticker, "macro-defensive", null, pos.contractSymbol || pos.buySymbol);   // 11/09: this contract, not the ticker's first
           }
         }
       }
@@ -759,7 +760,7 @@ async function runScan() {
     if (macro.mode === "aggressive" && !dryRunMode && bullishCloseAllowed) {
       logEvent("macro", `BULLISH MACRO - closing losing puts`);
       for (const pos of [...state.positions]) {
-        if (pos.optionType !== "put") continue;
+        if (pos.optionType !== "put" || pos._straddleHold) continue;   // 11/09: straddle legs exempt
         const curP = pos.currentPrice || pos.premium;
         const chg  = pos.premium > 0 ? (curP - pos.premium) / pos.premium : 0;
         if (chg < -0.05) await closePosition(pos.ticker, "macro-bullish", null, pos.contractSymbol || pos.buySymbol);
@@ -1252,6 +1253,9 @@ async function runScan() {
       let reversalCount = 0;
       for (const pos of [...state.positions]) {
         if (pos.optionType !== "put") continue;
+        // 11/09: a hold-to-close straddle's put is half of a non-directional pair — a rally is not its exit. On 11/09 this
+        // close took the QQQ put at -40% at 15:31 and left the call to be closed as an orphan (pair -$54).
+        if (pos._straddleHold) { if (!state._macroRevStradLogged) { state._macroRevStradLogged = true; logEvent("scan", `[MACRO-REVERSAL] ${pos.ticker} straddle put EXEMPT — the pair closes at 3:58`); } continue; }
         const snap = posSnapshots[pos.contractSymbol];
         const quote  = snap ? (snap.latestQuote || {}) : {};
         const bid    = parseFloat(quote.bp || 0);
