@@ -690,6 +690,7 @@ const STRATEGY_CLASS = {
   "trend-swing":          { hold: "swing",    flattenExempt: true  },
   "intraday-trend":       { hold: "intraday", flattenExempt: false },
   "eod-momentum":         { hold: "intraday", flattenExempt: false },   // 10/29: closed by its own 3:58 exit; the 3:45 flatten skips it
+  "vol-straddle":         { hold: "intraday", flattenExempt: false },   // 11/08: the hold-to-close straddle is closed by its own 3:58 exit; the 3:45 flatten skips it
 };
 function strategyClass(entryStrategy) { return STRATEGY_CLASS[entryStrategy] || STRATEGY_CLASS["breakout-or-context"]; }
 function isFlattenExempt(entryStrategy) { return !!(STRATEGY_CLASS[entryStrategy] && STRATEGY_CLASS[entryStrategy].flattenExempt); }
@@ -789,6 +790,34 @@ const EODM_ENTRY_END_ET      = 15.5833;   // retries allowed until 3:35pm if an 
 const EODM_EXIT_ET           = 15.9667;   // 3:58pm (3:59pm = crossing retry)
 const EODM_REQUIRE_NEG_GAMMA = true;
 const EODM_HOLD_MIN          = 28;        // decay term for the contract selector
+// 11/08 (Harrison): END-OF-DAY MOMENTUM -> SHADOW. The 10-year harness (T1, 10/15-16) found it dead on SPY and QQQ (about
+// zero before costs); live it went 5 of 14, -$334 (10/29-11/06), every trade in negative gamma. In shadow the 3:30
+// decision is still made and logged, and each one goes to the gate-shadow ledger (gate "eodm-shadow": 10/20-min marks
+// plus the move to 3:55) so it can earn its way back. "live" restores the orders.
+const EODM_MODE              = "shadow";
+
+// 11/08 (Harrison): LONG STRADDLE IN NEGATIVE GAMMA, LIVE ON PAPER (straddleStrategy.js). Theory: dealers short gamma
+// amplify moves (Ni, Pearson, Poteshman & White 2021; Barbon & Buraschi; Baltussen et al. 2021); long options lose the
+// volatility premium on average (Coval & Shumway 2001; Bakshi & Kapadia 2003), so it only buys when implied vol is BELOW
+// the realized vol the tape is already delivering. Rule: first scan 10:00-12:00 ET where the ticker's gamma regime is
+// negative AND ATM implied / today's realized (Parkinson, 1-min bars) < 1.0 -> buy 1 ATM call + 1 ATM put, same strike,
+// the 1-7 DTE expiry with the LOWEST ATM IV (for ATM options theta per unit of gamma is set by IV alone, so the lowest-IV
+// expiry buys the most gamma per dollar of decay; <= 7 DTE keeps vega small). Hold both legs to 3:58 ET; no stop (max loss
+// = the premium). One per ticker per day. Pass line set 11/08: after ~30 trades, mean P&L after the spread > 0 with t >= 2,
+// else shadow. The old 9/14 straddle rule (range trigger, +35% TP, 75-min time stop, regime-flip exit) stays retired.
+const STRADDLE_ENABLED        = true;
+const STRADDLE_MODE           = "live";    // "live" | "shadow" (shadow: decision logged + gate-shadow ledger, no orders)
+const STRADDLE_TICKERS        = ["SPY", "QQQ"];
+const STRADDLE_ENTRY_START_ET = 10;        // 10:00 ET
+const STRADDLE_ENTRY_END_ET   = 12;        // nothing new from 12:00 ET
+const STRADDLE_IVRV_MAX       = 1.0;       // implied / realized must be below this
+const STRADDLE_DTE_MIN        = 1;         // never 0DTE
+const STRADDLE_DTE_MAX        = 7;
+const STRADDLE_STRIKE_BAND    = 0.01;      // strikes within 1% of spot are fetched
+const STRADDLE_MAX_SPREAD_PCT = 0.05;      // per leg, (ask - bid) / ask — same line as MAX_SPREAD_PCT
+const STRADDLE_CONTRACTS      = 1;         // per leg
+const STRADDLE_EVAL_SEC       = 60;        // re-check the chain at most once a minute per ticker
+const STRADDLE_MAX_TRIES      = 3;         // entry attempts per ticker per day (a leg that doesn't fill is retried)
 // 11/02 (Harrison): STOCKS-IN-PLAY OPENING-RANGE BREAKOUT, SHARES (stocksInPlay.js), live on paper. Zarattini, Barbon & Aziz
 // (2024): top 20 US stocks by opening 5-min relative volume (>= 100%), stop entry at the first 5-min high/low in that candle's
 // direction, stop 10% of the 14-day ATR, exit at the close, 1% risk per position on sleeve/20, 4x leverage cap. No APEX data yet —
@@ -1105,7 +1134,9 @@ module.exports = {
   TREND_CUTOFF_ET, TREND_RISK_BUDGET, TREND_TRAIL_ARM_PCT, TREND_STOP_UNDL_PCT, TREND_STOP_PCT, TREND_ATR_STOP_MULT, TREND_USTOP_FLOOR, TREND_USTOP_CEIL, TREND_STALE_DAYS, TREND_STALE_PEAK, TREND_TRAIL_GIVEBACK_PCT,
   SIP_ENABLED, SIP_MODE, SIP_SLEEVE_USD, SIP_OPT_BP_RESERVE,
   SIP_EXIT_MODE, SIP_LOCK_AT_R, SIP_LOCK_FLOOR_R, SIP_TRAIL_FROM_R, SIP_TRAIL_R, SIP_HARD_CAP_R, SIP_USE_OTO, SIP_STOP_BASE, SIP_COST_ENTRY_ATR, SIP_COST_EXIT_ATR, SIP_COST_CLOSE_ATR, SIP_STOP_MODE, SIP_NOISE_MULT,
-  EODM_ENABLED, EODM_TICKERS, EODM_ENTRY_START_ET, EODM_ENTRY_END_ET, EODM_EXIT_ET, EODM_REQUIRE_NEG_GAMMA, EODM_HOLD_MIN,
+  EODM_ENABLED, EODM_TICKERS, EODM_ENTRY_START_ET, EODM_ENTRY_END_ET, EODM_EXIT_ET, EODM_REQUIRE_NEG_GAMMA, EODM_HOLD_MIN, EODM_MODE,
+  STRADDLE_ENABLED, STRADDLE_MODE, STRADDLE_TICKERS, STRADDLE_ENTRY_START_ET, STRADDLE_ENTRY_END_ET, STRADDLE_IVRV_MAX, STRADDLE_DTE_MIN,
+  STRADDLE_DTE_MAX, STRADDLE_STRIKE_BAND, STRADDLE_MAX_SPREAD_PCT, STRADDLE_CONTRACTS, STRADDLE_EVAL_SEC, STRADDLE_MAX_TRIES,
   ITREND_ENABLED, ITREND_DELTA, ITREND_DELTA_MIN, ITREND_DELTA_MAX, ITREND_TARGET_DTE, ITREND_DTE_MIN, ITREND_DTE_MAX, ITREND_COST_SELECT, ITREND_SELECT_DTE_MIN, ITREND_SELECT_DTE_MAX, ITREND_SELECT_HOLD_MIN, ITREND_SELECT_STRIKE_BAND,
   ITREND_ADX_MIN, ITREND_VWAP_MIN, ITREND_BREADTH_STRONG, ITREND_START_ET, ITREND_END_ET, ITREND_NEG_GAMMA_BLOCK,
   ITREND_ADX_SIZE_ENABLED, ITREND_ADX_SIZE_MIN, ITREND_ADX_SIZE_CONTRACTS, TREND_SIZE_AT_STOP, TREND_MAX_RISK_PCT,
