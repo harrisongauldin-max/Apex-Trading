@@ -476,7 +476,7 @@ async function checkExits(positions, posSnapshots, posQuotes, posNewsCache, ctx)
           }
           continue;
         }
-        if (_sH >= 15.95) { pos.currentPrice = curP; markDirty(); continue; }
+        if (_sH >= 15.95) { pos.currentPrice = curP; try { require('./straddleStrategy').trackLeg(state, pos, curP); } catch (_) {} markDirty(); continue; }
       }
 
       // orphan (only one leg ever filled) — close this lone leg, never hold naked-directional
@@ -511,7 +511,7 @@ async function checkExits(positions, posSnapshots, posQuotes, posNewsCache, ctx)
       const _pairPct  = _pairPnl / _pairCost;   // combined return on total premium paid
 
       // 11/08: V2 holds to 3:58 by design — no take-profit, time stop or regime exit (the orphan rules above still apply)
-      if (pos._straddleHold) { pos.currentPrice = curP; markDirty(); continue; }
+      if (pos._straddleHold) { pos.currentPrice = curP; try { require('./straddleStrategy').trackLeg(state, pos, curP); } catch (_) {} markDirty(); continue; }   // 11/10: + pair path tracker
       // decide on the PAIR; act on BOTH legs at once (only the lower-index leg drives, to avoid double-firing)
       let _stReason = null;
       if (_pairPct >= STRADDLE_TP_PCT)             _stReason = "straddle-tp";         // combined move paid — harvest both
