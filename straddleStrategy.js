@@ -198,6 +198,53 @@ async function runExit(deps, pass = 1) {
   return { closed: open.length - left.length, left: left.length };
 }
 
+// ── 11/10 (Harrison): PAIR PATH TRACKER + replayed profit locks (measurement only — the live rule still holds to 3:58) ──
+// Each scan, every hold-straddle leg reports its mark; once both legs of a pair are in, the pair's value at the BID (what it
+// could be sold for) is tracked against its cost: peak, low, the time of each, and a 30-second path. When the pair closes, a
+// few lock rules are replayed on that path, so after 15-30 pairs the data says whether any lock beats holding to the close.
+const LOCK_RULES = {
+  tp25:        { label: "Take profit at +25%",        exit: (pct) => pct >= 25 },
+  lock10at20:  { label: "Lock +10% once up +20%",     exit: (pct, pk) => pk >= 20 && pct <= 10 },
+  trail10:     { label: "Trail 10 pts once up +10%",  exit: (pct, pk) => pk >= 10 && pct <= pk - 10 },
+  trail15at20: { label: "Trail 15 pts once up +20%",  exit: (pct, pk) => pk >= 20 && pct <= pk - 15 },
+};
+const _hhmm = (ms) => new Date(ms).toLocaleTimeString("en-US", { timeZone: "America/New_York", hour12: false, hour: "2-digit", minute: "2-digit" });
+function trackLeg(state, pos, mid, now = Date.now()) {
+  try {
+    if (!state || !pos || !pos._straddleHold || !pos.signalId || !(mid > 0)) return null;
+    const T = state._stradTrack || (state._stradTrack = {});
+    const q = Math.max(1, +pos.contracts || 1);
+    let t = T[pos.signalId];
+    if (!t) t = T[pos.signalId] = { day: _etDay(now), ticker: pos.ticker, legs: {}, path: [], peak: null, low: null, peakAt: null, lowAt: null, lastAt: 0 };
+    const bid = pos.bid > 0 && (!pos._bidAt || now - pos._bidAt < 120000) ? pos.bid : mid;
+    t.legs[pos.contractSymbol || pos.optionType] = { cost: (+pos.premium || 0) * 100 * q, mid: mid * 100 * q, bid: bid * 100 * q, at: now };
+    const L = Object.values(t.legs);
+    if (L.length < 2) return t;
+    // both legs marked in the SAME scan (within 5 s) — otherwise the pair value mixes a fresh leg with a stale one
+    if (L.some(l => now - l.at > 5000)) return t;
+    const cost = L.reduce((a, l) => a + l.cost, 0); if (!(cost > 0)) return t;
+    const pctBid = (L.reduce((a, l) => a + l.bid, 0) / cost - 1) * 100, pctMid = (L.reduce((a, l) => a + l.mid, 0) / cost - 1) * 100;
+    if (t.peak == null || pctBid > t.peak) { t.peak = +pctBid.toFixed(2); t.peakAt = now; }
+    if (t.low == null || pctBid < t.low) { t.low = +pctBid.toFixed(2); t.lowAt = now; }
+    if (now - t.lastAt >= 30000) { t.path.push([now, +pctBid.toFixed(2), +pctMid.toFixed(2)]); t.lastAt = now; if (t.path.length > 900) t.path.shift(); }
+    return t;
+  } catch (_) { return null; }
+}
+// replay every lock rule on a path; a rule that never triggers holds to the close (= the actual result)
+function replayLocks(path, holdPct) {
+  const out = {};
+  for (const [k, r] of Object.entries(LOCK_RULES)) {
+    let pk = -Infinity, hit = null;
+    for (const [at, pct] of path || []) { pk = Math.max(pk, pct); if (r.exit(pct, pk)) { hit = { pct, at }; break; } }
+    out[k] = hit ? { pct: +hit.pct.toFixed(2), exitAt: _hhmm(hit.at), fired: true } : { pct: holdPct != null ? +(+holdPct).toFixed(2) : null, exitAt: null, fired: false };
+  }
+  return out;
+}
+function summarizeTrack(t, holdPct) {
+  if (!t) return null;
+  return { peakPct: t.peak, lowPct: t.low, peakAt: t.peakAt ? _hhmm(t.peakAt) : null, lowAt: t.lowAt ? _hhmm(t.lowAt) : null, samples: t.path.length, locks: replayLocks(t.path, holdPct) };
+}
+
 // ── 11/08: PAIR RESULTS — each closed leg is recorded against its pair (signalId); the EOD report scores the pairs ──
 // Pass line (set 11/08): after ~30 pairs, mean pair P&L (real fills, so already after the spread) > 0 with t >= 2.
 function recordLeg(state, pos, o = {}) {
@@ -214,6 +261,14 @@ function recordLeg(state, pos, o = {}) {
     p.legs.push({ type: pos.optionType, sym: pos.contractSymbol || null, qty: q, entry: +pos.premium || 0, exit: o.exitPremium != null ? +o.exitPremium : null,
                   cost: +((+pos.premium || 0) * 100 * q).toFixed(2), pnl: +(+o.pnl || 0).toFixed(2), reason: o.reason || null,
                   spread: es != null ? +(((es + (xs != null ? xs : 0)) * 100 * q)).toFixed(2) : null, at: Date.now() });
+    // 11/10: second leg closed -> the pair's path summary + replayed locks (hold % = actual pair P&L / cost)
+    if (p.legs.length >= 2 && !p.track) {
+      const T = state._stradTrack || {};
+      const cost = p.legs.reduce((a, l) => a + (l.cost || 0), 0), pnl = p.legs.reduce((a, l) => a + (l.pnl || 0), 0);
+      p.track = summarizeTrack(T[sig], cost > 0 ? pnl / cost * 100 : null);
+      delete T[sig];
+      for (const [k, v] of Object.entries(T)) if (v && v.day && v.day < _etDay(Date.now() - 2 * 864e5)) delete T[k];   // tidy stale paths
+    }
     while (L.length > 150) L.shift();
     return p;
   } catch (_) { return null; }
@@ -229,18 +284,29 @@ function pairStats(pairs, day) {
   const mean = n ? done.reduce((a, r) => a + r.pnl, 0) / n : null;
   const sd = n > 1 ? Math.sqrt(done.reduce((a, r) => a + (r.pnl - mean) ** 2, 0) / (n - 1)) : null;
   const t = n > 1 && sd > 0 ? mean / (sd / Math.sqrt(n)) : null;
-  return { today: rows.filter(r => r.day === day), n, wins: done.filter(r => r.pnl > 0).length, total: +done.reduce((a, r) => a + r.pnl, 0).toFixed(2),
+  // 11/10: replayed locks vs hold, on the complete pairs that have a tracked path
+  const tracked = done.filter(r => r.track && r.track.locks);
+  const locks = Object.entries(LOCK_RULES).map(([k, r]) => {
+    const usd = tracked.reduce((a, x) => a + (x.track.locks[k] && x.track.locks[k].pct != null ? x.track.locks[k].pct / 100 * x.cost : 0), 0);
+    const fired = tracked.filter(x => x.track.locks[k] && x.track.locks[k].fired).length;
+    return { key: k, label: r.label, pairs: tracked.length, fired, usd: +usd.toFixed(2), meanPct: tracked.length ? +(tracked.reduce((a, x) => a + (x.track.locks[k].pct || 0), 0) / tracked.length).toFixed(2) : null };
+  });
+  const holdTracked = { pairs: tracked.length, usd: +tracked.reduce((a, x) => a + x.pnl, 0).toFixed(2), meanPct: tracked.length ? +(tracked.reduce((a, x) => a + (x.pct || 0), 0) / tracked.length).toFixed(2) : null };
+  return { locks, holdTracked, today: rows.filter(r => r.day === day), n, wins: done.filter(r => r.pnl > 0).length, total: +done.reduce((a, r) => a + r.pnl, 0).toFixed(2),
            mean: mean != null ? +mean.toFixed(2) : null, sd: sd != null ? +sd.toFixed(2) : null, t: t != null ? +t.toFixed(2) : null,
            spread: +done.reduce((a, r) => a + (r.spread || 0), 0).toFixed(2), incomplete: rows.filter(r => !r.complete).length,
            verdict: n < 30 ? `collecting (${n} of ~30 pairs)` : (mean > 0 && t >= 2 ? "PASS — keep live" : "FAIL — to shadow per the pass line") };
 }
 function eodCSV(pairs) {
-  const head = ["day", "ticker", "strike", "exp", "dte", "ivrv", "complete", "cost", "pnl", "pctOfCost", "spreadPaidEst", "exitReasons", "callEntry", "callExit", "putEntry", "putExit", "sig"];
+  const head = ["day", "ticker", "strike", "exp", "dte", "ivrv", "complete", "cost", "pnl", "pctOfCost", "spreadPaidEst", "exitReasons", "callEntry", "callExit", "putEntry", "putExit", "sig",
+                "peakPct", "peakAt", "lowPct", "lowAt", ...Object.keys(LOCK_RULES).map(k => `lock_${k}_pct`)];   // 11/10
   const q = (v) => (v == null ? "" : /[",\n]/.test(String(v)) ? `"${String(v).replace(/"/g, '""')}"` : String(v));
   const out = [head.join(",")];
   for (const p of (pairs || [])) {
     const s = pairStats([p], p.day).today[0], c = p.legs.find(l => l.type === "call") || {}, pu = p.legs.find(l => l.type === "put") || {};
-    out.push([p.day, p.ticker, p.strike, p.exp, p.dte, p.ivrv, s.complete, s.cost, s.pnl, s.pct, s.spread, s.reasons, c.entry, c.exit, pu.entry, pu.exit, p.sig].map(q).join(","));
+    const tr = p.track || {};
+    out.push([p.day, p.ticker, p.strike, p.exp, p.dte, p.ivrv, s.complete, s.cost, s.pnl, s.pct, s.spread, s.reasons, c.entry, c.exit, pu.entry, pu.exit, p.sig,
+              tr.peakPct, tr.peakAt, tr.lowPct, tr.lowAt, ...Object.keys(LOCK_RULES).map(k => (tr.locks && tr.locks[k] ? tr.locks[k].pct : null))].map(q).join(","));
   }
   return out.join("\n");
 }
@@ -251,13 +317,21 @@ function eodSection(pairs, day) {
   const td = (v, st = "") => `<td style="padding:3px 6px;border-bottom:1px solid #eee;${st}">${v}</td>`;
   let h = `<h3 style="margin:18px 0 6px">Long straddle (negative gamma, IV &lt; realized, hold to 3:58)</h3>`;
   if (S.today.length) {
-    h += `<table style="border-collapse:collapse;font-size:12px"><tr>${["Ticker", "Strike / DTE", "IV/RV at entry", "Cost", "P&amp;L", "% of cost", "Spread paid (est.)", "Exit"].map(x => `<th style="text-align:left;padding:3px 6px;border-bottom:2px solid #ccc">${x}</th>`).join("")}</tr>`;
-    for (const r of S.today) h += `<tr>${td(r.ticker)}${td(`$${r.strike} / ${r.dte != null ? r.dte + "DTE" : "?"}`)}${td(r.ivrv != null ? r.ivrv.toFixed(2) : "—")}${td(`$${r.cost.toFixed(0)}`)}${td(money(r.pnl), `font-weight:700;color:${r.pnl >= 0 ? "#1a7f37" : "#c62828"}`)}${td(r.pct != null ? r.pct + "%" : "—")}${td(r.spread != null ? "$" + r.spread.toFixed(2) : "—")}${td((r.complete ? "" : "ONE LEG ONLY — ") + (r.reasons || "open"))}</tr>`;
+    h += `<table style="border-collapse:collapse;font-size:12px"><tr>${["Ticker", "Strike / DTE", "IV/RV at entry", "Cost", "P&amp;L", "% of cost", "Peak / low (at bid)", "Spread paid (est.)", "Exit"].map(x => `<th style="text-align:left;padding:3px 6px;border-bottom:2px solid #ccc">${x}</th>`).join("")}</tr>`;
+    const _pl = (r) => (r.track && r.track.peakPct != null ? `${r.track.peakPct >= 0 ? "+" : ""}${r.track.peakPct.toFixed(1)}% ${r.track.peakAt || ""} / ${r.track.lowPct.toFixed(1)}% ${r.track.lowAt || ""}` : "—");   // 11/10
+    for (const r of S.today) h += `<tr>${td(r.ticker)}${td(`$${r.strike} / ${r.dte != null ? r.dte + "DTE" : "?"}`)}${td(r.ivrv != null ? r.ivrv.toFixed(2) : "—")}${td(`$${r.cost.toFixed(0)}`)}${td(money(r.pnl), `font-weight:700;color:${r.pnl >= 0 ? "#1a7f37" : "#c62828"}`)}${td(r.pct != null ? r.pct + "%" : "—")}${td(_pl(r))}${td(r.spread != null ? "$" + r.spread.toFixed(2) : "—")}${td((r.complete ? "" : "ONE LEG ONLY — ") + (r.reasons || "open"))}</tr>`;
     h += `</table>`;
   } else h += `<div style="font-size:12px;color:#666">No straddle today.</div>`;
+  if (S.holdTracked.pairs) {   // 11/10: replayed profit locks on the same pairs (measurement only)
+    h += `<div style="font-size:12px;margin-top:8px"><b>Profit locks, replayed</b> on the ${S.holdTracked.pairs} tracked pair${S.holdTracked.pairs === 1 ? "" : "s"} (sold at the bid; live still holds to 3:58):</div>`;
+    h += `<table style="border-collapse:collapse;font-size:12px"><tr>${["Rule", "Fired", "Total", "Mean % of cost"].map(x => `<th style="text-align:left;padding:3px 6px;border-bottom:2px solid #ccc">${x}</th>`).join("")}</tr>`;
+    h += `<tr>${td("<i>Hold to 3:58 (live)</i>")}${td("—")}${td(money(S.holdTracked.usd), "font-weight:700")}${td(S.holdTracked.meanPct != null ? S.holdTracked.meanPct + "%" : "—")}</tr>`;
+    for (const l of S.locks) h += `<tr>${td(l.label)}${td(`${l.fired}/${l.pairs}`)}${td(money(l.usd), `font-weight:700;color:${l.usd >= S.holdTracked.usd ? "#1a7f37" : "#c62828"}`)}${td(l.meanPct != null ? l.meanPct + "%" : "—")}</tr>`;
+    h += `</table>`;
+  }
   h += `<div style="font-size:12px;margin-top:6px">Running: <b>${S.n}</b> pair${S.n === 1 ? "" : "s"}, ${S.wins} won, total ${money(S.total)}, mean ${money(S.mean)}${S.t != null ? `, t = ${S.t.toFixed(2)}` : ""}, est. spread paid $${S.spread.toFixed(0)}${S.incomplete ? `, ${S.incomplete} one-leg` : ""} — <b>${S.verdict}</b>. Pass line (set 11/08): after ~30 pairs, mean &gt; 0 with t ≥ 2.</div>`;
   return h;
 }
 
 module.exports = { evaluateStraddle, trailingRangePct, STRADDLE, V2, preGate, pickPair, asContract, decide, runExit, isHoldStraddle, dayState, tally,
-                   recordLeg, pairStats, eodCSV, eodSection };
+                   recordLeg, pairStats, eodCSV, eodSection, trackLeg, replayLocks, summarizeTrack, LOCK_RULES };
