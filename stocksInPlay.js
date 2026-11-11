@@ -1061,7 +1061,7 @@ ${s.variants ? `<div style="margin-top:8px;font-weight:bold;color:#9cf">Exit var
 </div>`;
 }
 
-module.exports = { CFG, tick, cashAdjustment, openRiskUsd, flattenAll, isSipOrder, eodCSV, eodSection, replayToday, EXIT_VARIANTS, historyTable,
+module.exports = { CFG, tick, cashAdjustment, openRiskUsd, flattenAll, isSipOrder, eodCSV, eodSection, replayToday, EXIT_VARIANTS, historyTable, multiBars,   // 11/10: multiBars shared with the straddle RV forecast
                    _t: { etParts, etToUtcMs, dailyStats, sizePosition, selectCandidates, simulate, summarize, setIO, freshDay, poll, exitPass, placeEntries, recordExit, closeMarket, brokerQty, refreshLast, simulateExit, replayVariants, manageExits, noiseBand, splitOpening, recordHistory, liveRuleKey,
                          setHistState: (st) => { _histState = st; }, moveStop, hardCap, lockFloorR, stopPxFor,
                          resetOto: () => { _otoUnsupported = false; },
