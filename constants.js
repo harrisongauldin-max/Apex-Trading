@@ -818,6 +818,16 @@ const STRADDLE_MAX_SPREAD_PCT = 0.05;      // per leg, (ask - bid) / ask — sam
 const STRADDLE_CONTRACTS      = 1;         // per leg
 const STRADDLE_EVAL_SEC       = 60;        // re-check the chain at most once a minute per ticker
 const STRADDLE_MAX_TRIES      = 3;         // entry attempts per ticker per day (a leg that doesn't fill is retried)
+// 11/10: the IV/RV gate compares implied vol with a FORECAST of realized vol over the hold window (10:00-15:58 ET), not with
+// the 9:30-10:00 reading. The open is the most volatile half hour of the day (intraday U-shape: Wood, McInish & Ord 1985;
+// Andersen & Bollerslev 1997); on 11/09-11/10 the rest of the day ran at 0.43-0.59x the open, so the old gate let through
+// three straddles whose implied vol was ABOVE what the hold delivered. Forecast = fixed-weight HAR (Corsi 2009), 1/3 each:
+// yesterday's hold-window RV, the 5-day average, and today's 9:30-10:00 RV x the median hold/open ratio of the last 20 days.
+// Fixed weights, nothing fitted to APEX data. The 30-pair pass-line count restarts at this change (the 3 earlier pairs used the
+// biased gate). Parkinson on 1-minute bars, annualized like the IV (vol.js).
+const STRADDLE_RV_MODE        = "har";     // "har" | "session" (old: today's RV since the open)
+const STRADDLE_RV_LOOKBACK_D  = 20;        // days for the hold/open ratio
+const STRADDLE_RV_MIN_DAYS    = 10;        // fewer usable past days -> no trade
 // 11/02 (Harrison): STOCKS-IN-PLAY OPENING-RANGE BREAKOUT, SHARES (stocksInPlay.js), live on paper. Zarattini, Barbon & Aziz
 // (2024): top 20 US stocks by opening 5-min relative volume (>= 100%), stop entry at the first 5-min high/low in that candle's
 // direction, stop 10% of the 14-day ATR, exit at the close, 1% risk per position on sleeve/20, 4x leverage cap. No APEX data yet —
@@ -1137,6 +1147,7 @@ module.exports = {
   EODM_ENABLED, EODM_TICKERS, EODM_ENTRY_START_ET, EODM_ENTRY_END_ET, EODM_EXIT_ET, EODM_REQUIRE_NEG_GAMMA, EODM_HOLD_MIN, EODM_MODE,
   STRADDLE_ENABLED, STRADDLE_MODE, STRADDLE_TICKERS, STRADDLE_ENTRY_START_ET, STRADDLE_ENTRY_END_ET, STRADDLE_IVRV_MAX, STRADDLE_DTE_MIN,
   STRADDLE_DTE_MAX, STRADDLE_STRIKE_BAND, STRADDLE_MAX_SPREAD_PCT, STRADDLE_CONTRACTS, STRADDLE_EVAL_SEC, STRADDLE_MAX_TRIES,
+  STRADDLE_RV_MODE, STRADDLE_RV_LOOKBACK_D, STRADDLE_RV_MIN_DAYS,
   ITREND_ENABLED, ITREND_DELTA, ITREND_DELTA_MIN, ITREND_DELTA_MAX, ITREND_TARGET_DTE, ITREND_DTE_MIN, ITREND_DTE_MAX, ITREND_COST_SELECT, ITREND_SELECT_DTE_MIN, ITREND_SELECT_DTE_MAX, ITREND_SELECT_HOLD_MIN, ITREND_SELECT_STRIKE_BAND,
   ITREND_ADX_MIN, ITREND_VWAP_MIN, ITREND_BREADTH_STRONG, ITREND_START_ET, ITREND_END_ET, ITREND_NEG_GAMMA_BLOCK,
   ITREND_ADX_SIZE_ENABLED, ITREND_ADX_SIZE_MIN, ITREND_ADX_SIZE_CONTRACTS, TREND_SIZE_AT_STOP, TREND_MAX_RISK_PCT,
