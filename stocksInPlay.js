@@ -61,6 +61,7 @@ const CFG = {
   COST_EXIT_ATR:  Number.isFinite(C.SIP_COST_EXIT_ATR) ? C.SIP_COST_EXIT_ATR : 0.10,
   COST_CLOSE_ATR: Number.isFinite(C.SIP_COST_CLOSE_ATR) ? C.SIP_COST_CLOSE_ATR : 0.02,
   MAX_LATE_R:     2,                            // already-through entries: market only if within 2R of the level
+  CHASE_LATE:     C.SIP_CHASE_LATE === true,    // 11/11: false = an already-through entry is skipped live (still simulated)
   // 11/05 (Harrison): the live stop unit. "noise" = each stock's own NOISE BAND N, set at 9:35 from the first 5-minute candle
   // (high - low), floored at 0.1 ATR (never tighter than the paper) and capped at 1 ATR (a huge gap candle can't shrink the
   // position to nothing). 1R = N: the stop, the -0.5R lock arm (+1N) and the 1N trail all move with today's real swings,
@@ -602,7 +603,10 @@ async function placeEntries(s, log) {
     if (!r.ok && /stop.?price/i.test(r.msg) && /current|market|greater|less|above|below/i.test(r.msg)) {
       const px = await lastTrade(c.sym);
       const pastR = px ? sgnOf(c) * (px - c.entry) / c.stopDist : 0;
-      if (pastR > CFG.MAX_LATE_R) { r = { ok: false, msg: `already ${pastR.toFixed(1)}R past the level — not chased` }; }
+      if (!CFG.CHASE_LATE) {
+        c.lateSkipped = true;
+        r = { ok: false, skip: true, msg: `already through the level${px ? ` (last $${px.toFixed(2)}, ${pastR.toFixed(1)}R past)` : ""} — not chased (simulated only)` };
+      } else if (pastR > CFG.MAX_LATE_R) { r = { ok: false, msg: `already ${pastR.toFixed(1)}R past the level — not chased` }; }
       else {
         r = await send({ symbol: c.sym, qty: String(c.qty), side, type: "market", time_in_force: "day", client_order_id: cid(s.day, c.sym, "EM") });
         if (r.ok) c.late = true;
@@ -613,7 +617,7 @@ async function placeEntries(s, log) {
       const lg = Array.isArray(r.order.legs) && r.order.legs[0];
       if (lg && lg.id) { c.oto = true; c.stopOrderId = lg.id; c.stopPx = +lg.stop_price || stopPxFor(c, -1); c.floorR = -1; }
     }
-    else { c.status = `rejected: ${String(r.msg).slice(0, 80)}`; }
+    else { c.status = r.skip ? r.msg : `rejected: ${String(r.msg).slice(0, 80)}`; }
     log(r.ok ? "trade" : "warn", `[SIP] #${c.rank} ${c.sym} ${c.side.toUpperCase()} rvol ${c.rvol}x ${c.late ? "MARKET (already through)" : `${c.side === "long" ? "buy" : "sell"}-stop $${c.entry.toFixed(2)}`} qty ${c.qty} ($${(notional / 1000).toFixed(1)}k) stop dist $${c.stopDist.toFixed(2)} -> ${c.status}`);
   }
   s.grossWorking = +gross.toFixed(0);
@@ -1042,7 +1046,7 @@ function eodCSV(s) {
     const i = c.ideal || {};
     lines.push([s.day, s.mode, c.rank || "", c.sym, c.side, f(c.rvol), f(c.atr), f(c.entry), f(c.stopDist, 4), c.qty || 0, f(c.status),
                 f(c.fillPx), f(c.exitPx), f(c.exitReason), f(c.pnl), f(c.R, 3), i.entered == null ? "" : i.entered, f(i.entryPx), f(i.exitPx),
-                f(i.reason), f(i.R, 3), f(c.entrySlipR, 3), f(c.slipR, 3), f(c.peakR), f(c.floorR), c.late ? "Y" : "", f(c.stopRejectMsg)].join(","));
+                f(i.reason), f(i.R, 3), f(c.entrySlipR, 3), f(c.slipR, 3), f(c.peakR), f(c.floorR), c.late ? "Y" : c.lateSkipped ? "skipped" : "", f(c.stopRejectMsg)].join(","));
   }
   return lines.join("\n");
 }

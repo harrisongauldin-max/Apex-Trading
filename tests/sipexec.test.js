@@ -4,7 +4,7 @@
 const H = require("./helpers"); H.quiet();
 const SIP = require(H.R("stocksInPlay.js"));
 const T = SIP._t;
-Object.assign(SIP.CFG, { USE_OTO: true, EXIT_MODE: "lock_trail", STOP_MODE: "paper", STOP_BASE: "level", HARD_CAP_R: 2, LOCK_AT_R: 1, LOCK_FLOOR_R: -0.5, TRAIL_FROM_R: 2, TRAIL_R: 1 });
+Object.assign(SIP.CFG, { CHASE_LATE: true, USE_OTO: true, EXIT_MODE: "lock_trail", STOP_MODE: "paper", STOP_BASE: "level", HARD_CAP_R: 2, LOCK_AT_R: 1, LOCK_FLOOR_R: -0.5, TRAIL_FROM_R: 2, TRAIL_R: 1 });
 
 // ---- rule math ----
 H.ok(T.lockFloorR(0.9) === -1 && T.lockFloorR(1) === -0.5 && T.lockFloorR(1.9) === -0.5 && T.lockFloorR(2) === 1 && T.lockFloorR(3.4) === 2.4, "floor: -1R, then -0.5R from +1R, then peak-1R from +2R");
@@ -82,6 +82,24 @@ const mk = (sym, side, entry, sd, qty, extra) => ({ rank: 1, sym, side, entry, s
        "already through (Alpaca: 'stop price must be less than current price'): goes at MARKET with its stop leg — the LPX miss is fixed", JSON.stringify(eL));
   const cF = s.cands[3];
   H.ok(/not chased/.test(cF.status) && !orders.some(o => /FAR-EM/.test(o.client_order_id)), "already 4R past the level: not chased (max 2R)", cF.status);
+
+  // 11/11: CHASE_LATE false (the live default) — an already-through entry is NOT sent at market; it stays in the replay
+  H.ok(require(H.R("constants.js")).SIP_CHASE_LATE === false, "live default: SIP_CHASE_LATE = false (don't chase already-through entries)");
+  SIP.CFG.CHASE_LATE = false;
+  const sN = T.freshDay(D); sN.scanned = true; sN.sessionKnown = true;
+  sN.cands = [mk("NCH", "short", 40.00, 0.4, 30), mk("NOK", "long", 20.00, 0.2, 60)];
+  price.NCH = 39.80; price.NOK = 19.95; rejectEntry.NCH = "stop price must be less than current price";
+  const nPost = posts.length;
+  await T.placeEntries(sN, log);
+  const cN = sN.cands[0], cOK = sN.cands[1];
+  H.ok(cN.lateSkipped && !cN.late && /not chased \(simulated only\)/.test(cN.status) && !orders.some(o => /NCH-EM/.test(o.client_order_id))
+       && posts.slice(nPost).filter(b => b.symbol === "NCH").length === 1,
+       "no chase: Alpaca rejects the resting stop (already through) -> no market order, status 'not chased (simulated only)'", cN.status);
+  H.ok(/0\.5R past/.test(cN.status) && LOG.some(l => /NCH SHORT .*not chased \(simulated only\)/.test(l)), "the skip says how far past the level it was (last $39.80 = 0.5R)", cN.status);
+  H.ok(cOK.status === "working" && orders.some(o => o.client_order_id.endsWith("NOK-E") && o.type === "stop"), "an on-time entry still rests its stop as before");
+  const csv = T.eodCSV ? T.eodCSV(sN) : SIP.eodCSV(sN);
+  H.ok(/NCH.*,skipped,/.test(csv), "end-of-day CSV marks it late = 'skipped' (chased entries stay 'Y')");
+  SIP.CFG.CHASE_LATE = true;
 
   // AAA fills at 30.62 — stop already resting, nothing new posted
   fill(eA, 30.62); const n0 = posts.length;

@@ -935,7 +935,7 @@ function _sipRows(d) {   // one flat record per candidate, same fields for copy 
     const held = now && c.fillPx > 0 && (c.filledQty || 0) > 0 ? sg(c) * (now / c.fillPx - 1) * 100 : null;
     const pct = c.status === 'closed' && c.fillPx > 0 && c.exitPx > 0 ? sg(c) * (c.exitPx / c.fillPx - 1) * 100 : null;
     return { day: s.day, mode: s.mode || '', rank: c.rank || '', symbol: c.sym, side: c.side, rvol: r2(c.rvol), atr: r2(c.atr), entry: r2(c.entry), stopDist: r2(c.stopDist, 4),
-      qty: c.qty || '', status: (c._carry ? 'carried ' : '') + (openQ(c) > 0 ? 'OPEN ' + openQ(c) + ' sh' : (c.status || '')), late: c.late ? 'Y' : '',
+      qty: c.qty || '', status: (c._carry ? 'carried ' : '') + (openQ(c) > 0 ? 'OPEN ' + openQ(c) + ' sh' : (c.status || '')), late: c.late ? 'Y' : c.lateSkipped ? 'skipped' : '',
       fill: r2(c.fillPx), stop: r2(c.stopPx), lockR: r2(c.floorR), peakR: r2(c.peakR), exit: r2(c.exitPx), exitReason: c.exitReason || '',
       pnl: r2(c.pnl), pct: r2(pct), R: r2(c.R, 3), idealR: c.ideal ? (c.ideal.entered ? r2(c.ideal.R, 3) : 'no trigger') : '',
       now: r2(now), ifHeldPct: r2(held), stopRejectMsg: c.stopRejectMsg || '' };
