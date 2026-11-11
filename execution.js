@@ -1072,6 +1072,7 @@ async function executeTrade(stock, price, score, scoreReasons, vix, optionType =
       const _sp = _openSame || position;
       _sp._straddleHold = true; _sp._stradIvRv = stock._stradIvRv != null ? stock._stradIvRv : null;
       _sp._stradBid = contract && contract.bid != null ? contract.bid : null; _sp._stradAsk = contract && contract.ask != null ? contract.ask : null;   // entry quote -> spread paid
+      _sp._stradRule = stock._stradRule || null;   // 11/10: which RV gate opened it ("har" | "session") — the pass line counts "har" only
     }
   }
   if (stock._structBreak) { (_openSame || position)._isStructBreak = true; }
