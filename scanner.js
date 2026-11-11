@@ -3347,9 +3347,13 @@ async function runScan() {
         if (_gate.ok) {
           const _ds = STRADDLESTRAT.dayState(state);
           _ds.lastEval[_tk] = Date.now();
-          const _rows = await require('./execution').fetchStraddleRows(_tk, price);
-          const _pair = STRADDLESTRAT.pickPair(_rows, price);
-          const _dec  = STRADDLESTRAT.decide(_pair, liveStock._rv);
+          // 11/10: compare IV with a FORECAST of the hold window's realized vol (HAR), not the 9:30-10:00 reading
+          let _rvUse = liveStock._rv, _rvLbl = "realized since open", _rvF = null;
+          if (_sv.RV_MODE === "har") { _rvF = await STRADDLESTRAT.rvForecast(state, _tk); _rvUse = _rvF && _rvF.ok ? _rvF.forecast : null; _rvLbl = "forecast RV"; }
+          const _rows = _rvUse > 0 ? await require('./execution').fetchStraddleRows(_tk, price) : [];
+          const _pair = _rvUse > 0 ? STRADDLESTRAT.pickPair(_rows, price) : { none: `RV forecast unavailable — ${(_rvF && _rvF.reason) || "?"}` };
+          const _dec  = STRADDLESTRAT.decide(_pair, _rvUse, undefined, _rvLbl);
+          if (_rvF && _rvF.ok && _dec.reason) _dec.reason += ` [HAR: yday ${(_rvF.d1 * 100).toFixed(1)}%, 5d ${(_rvF.w5 * 100).toFixed(1)}%, open ${(_rvF.rvOpenToday * 100).toFixed(1)}% x ${_rvF.ratio.toFixed(2)} = ${(_rvF.todayAdj * 100).toFixed(1)}%]`;
           const _say  = !_ds.lastLog[_tk] || _dec.fire || Date.now() - _ds.lastLog[_tk] > 15 * 60000;   // a decline speaks every 15 min
           if (_say) { _ds.lastLog[_tk] = Date.now(); logEvent("filter", `[STRADDLE] ${_tk} ${_dec.fire ? "FIRE" : "no"} — ${_dec.reason}`); }
           STRADDLESTRAT.tally(state, `${_tk}: ${_dec.fire ? "FIRED" : _dec.reason.split(" — ").pop()}`);
@@ -3360,7 +3364,7 @@ async function runScan() {
           } else if (_dec.fire) {
             const _tries = (_ds.tries[_tk] = (_ds.tries[_tk] || 0) + 1);
             const _sSig = `${_tk}-straddle-${Date.now()}`;
-            liveStock._straddle = "hold"; liveStock._stradIvRv = +_dec.ratio.toFixed(3);
+            liveStock._straddle = "hold"; liveStock._stradIvRv = +_dec.ratio.toFixed(3); liveStock._stradRule = _sv.RV_MODE;
             liveStock._cachedContract = STRADDLESTRAT.asContract(_pair.call);
             await executeTrade(liveStock, price, 0, [_dec.reason], state.vix, "call", false, 1.0, "sameweek", null, _sSig);
             const _haveCall = state.positions.some(p => p._isStraddle && p.signalId === _sSig);
@@ -3368,7 +3372,7 @@ async function runScan() {
               liveStock._cachedContract = STRADDLESTRAT.asContract(_pair.put);
               await executeTrade(liveStock, price, 0, [_dec.reason], state.vix, "put", false, 1.0, "sameweek", null, _sSig);
             }
-            liveStock._straddle = null; liveStock._stradIvRv = null; delete liveStock._cachedContract;
+            liveStock._straddle = null; liveStock._stradIvRv = null; liveStock._stradRule = null; delete liveStock._cachedContract;
             const _legs = state.positions.filter(p => p._isStraddle && p.signalId === _sSig);
             if (_legs.length === 2) {
               _ds.done[_tk] = "entered";
