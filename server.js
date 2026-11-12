@@ -443,6 +443,7 @@ setInterval(async () => {
     const truth = await getAlpacaTruth();
     if (truth) {
       state._alpacaTruth = truth;
+      try { require("./profitLock").observe(state, truth, Date.now(), logEvent); } catch (_plErr) { logEvent("warn", `[PROFIT-LOCK] shadow skipped: ${_plErr.message}`); }   // 11/11: shadow only
       if (truth.openPositions && truth.openPositions.length > 0) {
         const alpacaBySymbol = {};
         truth.openPositions.forEach(ap => { alpacaBySymbol[ap.symbol] = ap; });

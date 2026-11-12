@@ -825,6 +825,13 @@ const STRADDLE_MAX_TRIES      = 3;         // entry attempts per ticker per day 
 // yesterday's hold-window RV, the 5-day average, and today's 9:30-10:00 RV x the median hold/open ratio of the last 20 days.
 // Fixed weights, nothing fitted to APEX data. The 30-pair pass-line count restarts at this change (the 3 earlier pairs used the
 // biased gate). Parkinson on 1-minute bars, annualized like the IV (vol.js).
+// 11/11 (Harrison): daily profit lock — SHADOW first. profitLock.js records when the day's Alpaca-truth P&L first reaches each
+// target (and a giveback rule: armed at +ARM, triggers when the day falls back to FRAC of its peak) and scores "flatten there"
+// and "no new entries after" against the actual close in the EOD email. Nothing is stopped. Only "shadow" exists so far.
+const PROFIT_LOCK_MODE          = "shadow";
+const PROFIT_LOCK_TARGETS       = [100, 150, 200];
+const PROFIT_LOCK_GIVEBACK_ARM  = 100;
+const PROFIT_LOCK_GIVEBACK_FRAC = 0.5;
 const STRADDLE_RV_MODE        = "har";     // "har" | "session" (old: today's RV since the open)
 const STRADDLE_RV_LOOKBACK_D  = 20;        // days for the hold/open ratio
 const STRADDLE_RV_MIN_DAYS    = 10;        // fewer usable past days -> no trade
@@ -1153,6 +1160,7 @@ module.exports = {
   STRADDLE_ENABLED, STRADDLE_MODE, STRADDLE_TICKERS, STRADDLE_ENTRY_START_ET, STRADDLE_ENTRY_END_ET, STRADDLE_IVRV_MAX, STRADDLE_DTE_MIN,
   STRADDLE_DTE_MAX, STRADDLE_STRIKE_BAND, STRADDLE_MAX_SPREAD_PCT, STRADDLE_CONTRACTS, STRADDLE_EVAL_SEC, STRADDLE_MAX_TRIES,
   STRADDLE_RV_MODE, STRADDLE_RV_LOOKBACK_D, STRADDLE_RV_MIN_DAYS,
+  PROFIT_LOCK_MODE, PROFIT_LOCK_TARGETS, PROFIT_LOCK_GIVEBACK_ARM, PROFIT_LOCK_GIVEBACK_FRAC,
   ITREND_ENABLED, ITREND_DELTA, ITREND_DELTA_MIN, ITREND_DELTA_MAX, ITREND_TARGET_DTE, ITREND_DTE_MIN, ITREND_DTE_MAX, ITREND_COST_SELECT, ITREND_SELECT_DTE_MIN, ITREND_SELECT_DTE_MAX, ITREND_SELECT_HOLD_MIN, ITREND_SELECT_STRIKE_BAND,
   ITREND_ADX_MIN, ITREND_VWAP_MIN, ITREND_BREADTH_STRONG, ITREND_START_ET, ITREND_END_ET, ITREND_NEG_GAMMA_BLOCK,
   ITREND_ADX_SIZE_ENABLED, ITREND_ADX_SIZE_MIN, ITREND_ADX_SIZE_CONTRACTS, TREND_SIZE_AT_STOP, TREND_MAX_RISK_PCT,

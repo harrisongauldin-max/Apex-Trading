@@ -167,6 +167,7 @@ async function sendEmail(type) {
       standDownTally: JSON.parse(JSON.stringify(state._standDownTally || { brk:{}, mrf:{}, trend:{}, itrend:{} })),  // 9/09: snapshot before EOD reset wipes it
       sip:           JSON.parse(JSON.stringify(state._sip || null)),   // 11/02: stocks-in-play share sleeve
       stradPairs:    JSON.parse(JSON.stringify(state._stradPairs || [])),   // 11/08: long-straddle pair results (running)
+      plock:         (() => { try { return require('./profitLock').finalize(state); } catch (_) { return null; } })(),   // 11/11: profit-lock shadow (scores today + running)
     };
 
     let attachments = [];
@@ -464,6 +465,7 @@ async function sendEmail(type) {
       try { bodyHtml += require('./holdShadow').section(_eodSnap.holdShadow, _eodSnap.outcomeBuffer, require('./outcomes').OUTCOME_HEADER); } catch (_hsErr) { logEvent("warn", `[HOLD-SHADOW] EOD section skipped: ${_hsErr.message}`); }   // 10/15
       try { bodyHtml += require('./stocksInPlay').eodSection(_eodSnap.sip); } catch (_sipErr2) { logEvent("warn", `[SIP] EOD section skipped: ${_sipErr2.message}`); }   // 11/02
       try { bodyHtml += require('./straddleStrategy').eodSection(_eodSnap.stradPairs, new Date().toLocaleDateString("en-CA", { timeZone: "America/New_York" })); } catch (_stErr2) { logEvent("warn", `[STRADDLE] EOD section skipped: ${_stErr2.message}`); }   // 11/08
+      try { bodyHtml += require('./profitLock').eodSection(_eodSnap.plock); } catch (_plErr2) { logEvent("warn", `[PROFIT-LOCK] EOD section skipped: ${_plErr2.message}`); }   // 11/11
       try { bodyHtml += buildStandDownSection(_eodSnap); }
       catch (_sdErr) { logEvent("warn", `[STAND-DOWN] EOD section skipped: ${_sdErr.message}`); }
     }
