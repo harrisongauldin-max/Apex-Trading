@@ -87,7 +87,7 @@ const today = DAYCTX.etDateStr(Date.now());
     H.ok(JSON.stringify(me) === "[true,true,true,false,false]" && F.monthEdge("2026-11-30").toME === 0 && F.monthEdge("2026-11-27").toME === 1,
       "flows: turn of month = last trading day + first three (holidays skipped)", JSON.stringify(me));
     const o = require(H.R("outcomes.js"));
-    H.ok(o.OUTCOME_HEADER.split(",").slice(-6).join(",") === "eRROD,eHedgeFlow,eRebalDir,eDistPin,eToME,eTOM" && /_flow: +\(\(\) => \{ try \{ return require\('\.\/flows'\)\.snapshot/.test(H.read("execution.js")),
+    H.ok(o.OUTCOME_HEADER.includes("eRROD,eHedgeFlow,eRebalDir,eDistPin,eToME,eTOM") && /_flow: +\(\(\) => \{ try \{ return require\('\.\/flows'\)\.snapshot/.test(H.read("execution.js")),
       "outcomes: flow state stamped at entry (6 new columns)");
 
     // ---- 4. blocked signals: hold-to-close marks ----

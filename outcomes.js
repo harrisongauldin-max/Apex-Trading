@@ -86,6 +86,7 @@ const OUTCOME_HEADER = [
   "eWinMin",   // 10/12: intraday-trend — minutes since the entry window opened (does a setup that formed before 10:00 lose?)
   "eDTrend",   // 10/14: intraday-trend — with | against | none vs the daily trend (price vs 50d vs 100d)   // 10/7: mr-fade stamps + shadow invalidation             // 10/6: opening range at entry — APEX range, then textbook range
   "eRROD","eHedgeFlow","eRebalDir","eDistPin","eToME","eTOM",   // 10/15: flow state at entry (flows.js) — measurement only
+  "eExtMin","eExtPull",   // 11/13: intraday-trend — minutes since the session high (call) / low (put), and % off it
 ].join(",");
 
 function _csv(s) {
@@ -219,6 +220,7 @@ function buildOutcomeRow(pos, o) {
     (pos._iMeta && pos._iMeta.dTrend ? pos._iMeta.dTrend : ""),   // 10/14: eDTrend
     ...(() => { const f = pos._flow || {};   // 10/15: flow state at entry
       return [f.rROD ?? "", f.hedgeFlow ?? "", f.rebalDir ?? "", f.distPinPct ?? "", f.toME ?? "", f.tom == null ? "" : (f.tom ? "Y" : "N")]; })(),
+    (pos._iMeta && pos._iMeta.extMin != null ? pos._iMeta.extMin : ""), (pos._iMeta && pos._iMeta.extPullPct != null ? pos._iMeta.extPullPct : ""),   // 11/13
   ].map(_csv).join(",");
 
   return row;

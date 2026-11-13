@@ -22,6 +22,7 @@ function logOnChange(key, sig, type, msg, everyMs = 15 * 60000) {
 
 const { state, logEvent, markDirty, saveStateNow, flushStateIfDirty, paperDataActive, dataGatherActive, mrFadeActive, recordStandDown , markFresh, auditFreshness } = require('./state');
 const STRADDLESTRAT = require('./straddleStrategy');
+const SESSEXT = require('./sessionExt');   // 11/13: session high/low age at each intraday-trend entry (measurement only)
 const { recordTelemetry } = require('./telemetry');
 // 8/12: DEFENSIVE REQUIRE. vol.js is OPTIONAL instrumentation — realized vol, IV-RV, surface,
 // feasibility. It gates nothing and executes no trades. A hard top-level require made a missing
@@ -3060,6 +3061,7 @@ async function runScan() {
     // Own path, bypasses the score/enforce like the other sleeves. Deliberate paper experiment: the tape
     // test said continuation doesn't continue, so this is gated HARD (ADX>=25 + real OR break) and fully
     // logged so forward fills settle it. Fires 10:00-13:30 ET only.
+    if (liveStock && price > 0) { try { SESSEXT.update(state, liveStock.ticker, price); } catch (_seErr) {} }   // 11/13: running session high/low (measurement only)
     if (ITREND_ENABLED && liveStock && price > 0) {
       try {
         const _iH = (() => { const d = getETTime(); return d.getHours() + d.getMinutes() / 60; })();
@@ -3164,13 +3166,18 @@ async function runScan() {
                 const _dUp = _dOk && price > _iDT.ma50 && _iDT.ma50 > _iDT.ma100, _dDn = _dOk && price < _iDT.ma50 && _iDT.ma50 < _iDT.ma100;
                 const _dAlign = !_dOk ? null : _dUp ? (_iSide === "call" ? "with" : "against") : _dDn ? (_iSide === "put" ? "with" : "against") : "none";
                 if (_dAlign === "against")                            _skip.push("vs-daily-trend");
+                // 11/13 (Harrison): how long since the day's high (call) / low (put), and how far off it. Label only — 150 past trades
+                // said 90+ min after the extreme went 8-of-32 (-$655, t -2.4), found after the fact, so it must hold on new trades.
+                const _ext = (() => { try { return SESSEXT.at(state, liveStock.ticker, _iSide, price); } catch (_) { return null; } })();
+                if (_ext && _ext.min >= SESSEXT.STALE_MIN)          _skip.push("ext-stale90");
                 liveStock._iMeta = { adxTier: _iAdx >= ITREND_LATE_ADX_MIN ? "40+" : "25-40",
                   gexReg: _g ? _g.regime : null, gexRaw: _g ? (_g.regimeRaw ?? _g.regime) : null,
                   gexNetM: _g && typeof _g.netGexM === "number" ? Math.round(_g.netGexM) : null,
                   gexDistFlip: _g && typeof _g.distFlipPct === "number" ? +_g.distFlipPct.toFixed(3) : null, skipBy: _skip,
                   winMin: Math.max(0, Math.round((_iH - ITREND_START_ET) * 60)),   // 10/12: minutes since the 10:00 window opened (stale-setup test)
-                  dTrend: _dAlign };                                                 // 10/14: with | against | none (daily trend flat/mixed)
-                logEvent("filter", `[ITREND-META] ${liveStock.ticker} ${_iSide.toUpperCase()} — ADX ${_iAdx.toFixed(0)} (${liveStock._iMeta.adxTier}) | gamma ${_g ? _g.regime : "n/a"}${_g && _g.regimeHeld ? " (held)" : ""} net ${_g ? Math.round(_g.netGexM) + "M" : "n/a"} flip ${_g && _g.distFlipPct != null ? _g.distFlipPct.toFixed(2) + "%" : "n/a"} | would-skip: ${_skip.length ? _skip.join(", ") : "none"} | ${liveStock._iMeta.winMin} min into the window | daily trend: ${_dAlign || "n/a"} [label only — entering as normal]`);
+                  dTrend: _dAlign,                                                   // 10/14: with | against | none (daily trend flat/mixed)
+                  extMin: _ext ? _ext.min : null, extPullPct: _ext ? _ext.pullPct : null };   // 11/13: min since session high/low; % off it
+                logEvent("filter", `[ITREND-META] ${liveStock.ticker} ${_iSide.toUpperCase()} — ADX ${_iAdx.toFixed(0)} (${liveStock._iMeta.adxTier}) | gamma ${_g ? _g.regime : "n/a"}${_g && _g.regimeHeld ? " (held)" : ""} net ${_g ? Math.round(_g.netGexM) + "M" : "n/a"} flip ${_g && _g.distFlipPct != null ? _g.distFlipPct.toFixed(2) + "%" : "n/a"} | would-skip: ${_skip.length ? _skip.join(", ") : "none"} | ${liveStock._iMeta.winMin} min into the window | daily trend: ${_dAlign || "n/a"} | day ${_iSide === "call" ? "high" : "low"} ${_ext ? `${_ext.min} min ago, ${_ext.pullPct.toFixed(2)}% off` : "n/a"} [label only — entering as normal]`);
               } catch (_mErr) { liveStock._iMeta = null; }
               // 10/28 (Harrison, bug check): the 30-min cooldown starts only when an entry actually FILLS (stamped
               // below). It used to be stamped here, before the order, so a failed entry (no fill, no contract, the
