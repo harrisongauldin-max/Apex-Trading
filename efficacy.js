@@ -72,12 +72,20 @@ const _fx = (v, d = 1) => (v == null || !isFinite(v)) ? "  -  " : v.toFixed(d);
 const _pad = (s, w) => { s = String(s); return s.length >= w ? s : s + " ".repeat(w - s.length); };
 const _padL = (s, w) => { s = String(s); return s.length >= w ? s : " ".repeat(w - s.length) + s; };
 
+// 11/16: rungs from the record's own peaks, so older rows (written while confPeakPct was stuck at 0) are counted right too.
+// Confirmed peak when it moved, else the raw peak; a stored rung flag of 1 always counts.
+function _rungPct(r) {
+  const c = _num(r.confPeakPct), p = _num(r.peakPct);
+  const v = (c != null && c > 0) ? c : (p != null ? p : 0);
+  return Math.max(v, String(r.rung125) === "1" ? 12.5 : String(r.rung5) === "1" ? 5 : -Infinity);
+}
+
 // bucket-level outcome stats over a set of records
 function _stats(recs) {
   const n = recs.length;
   const won = recs.filter(r => String(r.won) === "1").length;
-  const r5  = recs.filter(r => String(r.rung5) === "1").length;
-  const r125 = recs.filter(r => String(r.rung125) === "1").length;
+  const r5  = recs.filter(r => _rungPct(r) >= 5).length;
+  const r125 = recs.filter(r => _rungPct(r) >= 12.5).length;
   const pnls  = recs.map(r => _num(r.pnl)).filter(x => x != null);
   const peaks = recs.map(r => _num(r.peakPct)).filter(x => x != null);
   const maes  = recs.map(r => _num(r.maePct)).filter(x => x != null);
@@ -159,6 +167,11 @@ function buildEfficacyReport(records, opts = {}) {
 
   // 4) SCORE BUCKETS — does the score actually rank outcomes?
   push("── SCORE BUCKETS (does the score rank? the -0.11 question) ─");
+  // 11/16: the current sleeves don't set a score (it is 0 on almost every row), so the buckets measured nothing.
+  const _scored = recs.filter(r => { const v = _num(r.score); return v != null && v > 0; }).length;
+  if (_scored < MIN_N) {
+    push(`  skipped — only ${_scored} of ${recs.length} trades carry a score; the current strategies don't set one.`);
+  } else {
   const edges = [[0, 70], [70, 75], [75, 80], [80, 85], [85, 101]];
   for (const [lo, hi] of edges) {
     const b = recs.filter(r => { const s = _num(r.score); return s != null && s >= lo && s < hi; });
@@ -170,12 +183,14 @@ function buildEfficacyReport(records, opts = {}) {
     const rr = _pearson(xs, ys);
     push(`  score↔win correlation: ${rr == null ? "n/a" : _fx(rr, 2)} (n=${xs.length}). Near 0 ⇒ score does not rank; |r|>~0.2 on a real N ⇒ it carries signal.`);
   }
+  }
   push("");
 
   // 5) FEATURE SIGNAL RANKING — which inputs move the needle
   push("── FEATURE SIGNAL RANKING (correlation with win) ─────────");
   const ranked = [];
   for (const [key, label] of FEATURES) {
+    if (key === "score" && _scored < MIN_N) continue;   // 11/16: unset score is not a feature
     const xs = [], ys = [];
     for (const r of recs) { const x = _num(r[key]); if (x != null) { xs.push(x); ys.push(String(r.won) === "1" ? 1 : 0); } }
     const rr = _pearson(xs, ys);

@@ -21,7 +21,7 @@ MR.ALLOW_VWAP_BAND = false;
 H.ok(evaluateMRFade(put, g("pos", -3, 0.20), 738.5).fire, "put fade, call wall 0.20% ABOVE price: fires");
 H.ok(!evaluateMRFade(put, g("pos", -3, -0.10), 740.7).fire, "put fade, price 0.10% through the call wall: no fade");
 // 10/15: negative-gamma fades are OFF by default (contradict the literature); the strict path is still tested with the flag on
-H.ok(MR.NEG_GAMMA_FADE === true && /regime not fade-friendly/.test(evaluateMRFade(call, g("neg", -0.10, 2), 730.7, { ...MR, NEG_GAMMA_FADE: false }).reason), "flag off: negative gamma, no fade at all (10/28: default is ON as a paper experiment)");
+H.ok(MR.NEG_GAMMA_FADE === false && /regime not fade-friendly/.test(evaluateMRFade(call, g("neg", -0.10, 2), 730.7, MR).reason), "default (11/16): negative gamma, no fade at all — the default config stands aside");
 const NEG = { ...MR, NEG_GAMMA_FADE: true };
 H.ok(evaluateMRFade(call, g("neg", -0.10, 2), 730.7, NEG).fire, "flag on: negative gamma, intact wall + CVD exhaustion fires");
 H.ok(!evaluateMRFade({ ...call, cvdSlope: -5 }, g("neg", -0.10, 2), 730.7, NEG).fire, "flag on: intact wall but CVD still pushing: no fade");

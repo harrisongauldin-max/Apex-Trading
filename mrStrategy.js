@@ -44,7 +44,11 @@ const MR = {
   // (SpotGamma: fade the overshoot AT the wall; Sinclair: only after flow EXHAUSTS) + expert panel + data
   // all converge. So: ALSO fade in neg gamma, but ONLY when at-wall AND CVD shows exhaustion (flow stalling/
   // turning against the push). Pos-gamma path unchanged. Measure-first via a flag, then confirm live.
-  NEG_GAMMA_FADE:         true,   // 10/28 (Harrison): ON AGAIN AS A PAPER EXPERIMENT — "just let it run, it's paper". SPY/QQQ read negative
+  NEG_GAMMA_FADE:         false,  // 11/16 (Harrison): OFF — the 10/28 experiment hit its own review line and lost. Since 10/29 the fade
+                                  // fired 25 times in negative gamma: 15 won, -$406, avg win +$22 vs avg loss -$73 (needs ~77% wins, ran
+                                  // 60%). Matches the literature this module rests on (Baltussen, Da, Lammers & Martens 2021; Ni, Pearson,
+                                  // Poteshman & White 2021: dealers hedge WITH the move in negative gamma). Back to positive-gamma fades only.
+                                  // History: 10/28 (Harrison): ON AGAIN AS A PAPER EXPERIMENT — "just let it run, it's paper". SPY/QQQ read negative
                                   // gamma on every scan since 10/19, so the fade sleeve has been off for 8 straight sessions. Strict path
                                   // only (at an intact wall AND CVD exhaustion). Tagged gamma:neg-neg-fade in the reason/outcome so it is
                                   // scored separately. Review after ~20 fades; switch back to false if it loses. Prior note:

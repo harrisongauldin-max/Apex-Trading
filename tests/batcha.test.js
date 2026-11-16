@@ -141,7 +141,7 @@ const today = DAYCTX.etDateStr(Date.now());
       "wired: opened on every intraday-trend fill, stepped every scan, reset daily");
 
     // ---- 3. negative-gamma fades off ----
-    H.ok(require(H.R("mrStrategy.js")).MR.NEG_GAMMA_FADE === true, "10/28: negative-gamma MR fades ON (paper experiment, strict wall + CVD path)");
+    H.ok(require(H.R("mrStrategy.js")).MR.NEG_GAMMA_FADE === false, "11/16: negative-gamma MR fades OFF again (10/28 experiment: 25 fades, -$406)");
   } catch (e) { H.ok(false, "batch A test crashed", e.stack.split("\n").slice(0, 4).join(" | ")); }
   H.done();
 })();

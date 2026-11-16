@@ -116,8 +116,12 @@ function buildOutcomeRow(pos, o) {
   const minHeld     = openMs ? (closeMs - openMs) / 60000 : "";
   const minToPeak   = (openMs && pos._peakTime) ? (pos._peakTime - openMs) / 60000 : "";
   // Rungs measured off the CONFIRMED peak — that is what the trail-floor exit model actually uses.
-  const rung5   = confPeakPct >= 5    ? 1 : 0;
-  const rung125 = confPeakPct >= 12.5 ? 1 : 0;
+  // 11/16: only the trail-floor path maintains _confirmedPeak; every current sleeve (itrend lock/noarm, fades, eodm, straddle)
+  // exits before it, so confPeakPct sat at 0 and rung5/rung12.5 read 0% on every report. Fall back to the raw peak when the
+  // confirmed peak never moved.
+  const rungPct = (pos._confirmedPeak != null && pos._confirmedPeak > prem) ? confPeakPct : peakPct;
+  const rung5   = rungPct >= 5    ? 1 : 0;
+  const rung125 = rungPct >= 12.5 ? 1 : 0;
 
   const x = pos._entryX || {};
   const delta = pos.greeks && pos.greeks.delta != null ? parseFloat(pos.greeks.delta) : "";
