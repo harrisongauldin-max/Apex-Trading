@@ -112,7 +112,9 @@ const V2 = {
   RV_MODE:     _C.STRADDLE_RV_MODE === "session" ? "session" : "har",
   RV_LOOKBACK: _num(_C.STRADDLE_RV_LOOKBACK_D, 20),
   RV_MIN_DAYS: _num(_C.STRADDLE_RV_MIN_DAYS, 10),
+  IV_BASIS:    _C.STRADDLE_IV_BASIS === "calendar" ? "calendar" : "trading",   // 11/24: implied vol on trading time before the gate (tradingTime.js)
 };
+const TT = require("./tradingTime");
 const _etDay = (ms = Date.now()) => new Date(ms).toLocaleDateString("en-CA", { timeZone: "America/New_York" });
 const isHoldStraddle = (p) => !!(p && p._straddleHold);
 
@@ -177,13 +179,23 @@ function asContract(r) {
            spread: r.ask > 0 ? (r.ask - r.bid) / r.ask : 1, oi: r.oi || 0, iv: r.iv,
            greeks: { delta: (+r.delta || 0).toFixed(3), theta: (+r.theta || 0).toFixed(3), gamma: (+r.gamma || 0).toFixed(4), vega: (+r.vega || 0).toFixed(3) } };
 }
-function decide(pair, rv, cfg = V2, rvLabel = "realized") {
+// 11/24 (Harrison): `now` (ms) switches on the trading-time conversion — the chain's IV is annualized on calendar days, the
+// realized-vol forecast on trading minutes, so an expiry spanning a weekend/holiday read as cheap (11/23: 0.98 and 1.00 quoted,
+// 1.04 and 1.06 on trading time; both pairs lost). The expiry PICK is unchanged (lowest quoted IV): on trading time the 1-7 DTE
+// expiries price within ~2% of each other, so the pick sets the size of the pair, not its cheapness. No `now` (or
+// STRADDLE_IV_BASIS "calendar") = the old comparison.
+function decide(pair, rv, cfg = V2, rvLabel = "realized", now = null) {
   if (!pair || pair.none) return { fire: false, reason: pair && pair.none ? pair.none : "no pair" };
   if (!(rv > 0)) return { fire: false, reason: "no realized vol" };
-  const ratio = pair.iv / rv;
-  const txt = `ATM IV ${(pair.iv * 100).toFixed(1)}% (${pair.dte}DTE $${pair.strike}) / ${rvLabel} ${(rv * 100).toFixed(1)}% = ${ratio.toFixed(2)}`;
-  if (!(ratio < cfg.IVRV_MAX)) return { fire: false, ratio, reason: `${txt} — not below ${cfg.IVRV_MAX.toFixed(2)} (options not cheap vs the tape)` };
-  return { fire: true, ratio, reason: `LONG STRADDLE — negative gamma, ${txt} < ${cfg.IVRV_MAX.toFixed(2)}; hold both legs to 3:58 ET` };
+  const tt = (cfg.IV_BASIS !== "calendar" && now != null && pair.exp) ? TT.factor(now, pair.exp) : null;
+  const iv = tt ? pair.iv * tt.factor : pair.iv;
+  const ratio = iv / rv;
+  const ivTxt = tt ? `ATM IV ${(iv * 100).toFixed(1)}% on trading time (${(pair.iv * 100).toFixed(1)}% quoted, ${pair.dte}DTE $${pair.strike}, ${tt.sessions} sessions${tt.covered ? "" : ", holiday list missing for this year"})`
+                   : `ATM IV ${(pair.iv * 100).toFixed(1)}% (${pair.dte}DTE $${pair.strike})`;
+  const txt = `${ivTxt} / ${rvLabel} ${(rv * 100).toFixed(1)}% = ${ratio.toFixed(2)}`;
+  const extra = { ratio, iv, ivQuoted: pair.iv, ttFactor: tt ? tt.factor : null, basis: tt ? "trading" : "calendar" };
+  if (!(ratio < cfg.IVRV_MAX)) return { fire: false, ...extra, reason: `${txt} — not below ${cfg.IVRV_MAX.toFixed(2)} (options not cheap vs the tape)` };
+  return { fire: true, ...extra, reason: `LONG STRADDLE — negative gamma, ${txt} < ${cfg.IVRV_MAX.toFixed(2)}; hold both legs to 3:58 ET` };
 }
 
 // ── 11/10: REALIZED-VOL FORECAST FOR THE HOLD WINDOW (fixed-weight HAR, Corsi 2009) ──
@@ -255,7 +267,22 @@ const LOCK_RULES = {
   lock10at20:  { label: "Lock +10% once up +20%",     exit: (pct, pk) => pk >= 20 && pct <= 10 },
   trail10:     { label: "Trail 10 pts once up +10%",  exit: (pct, pk) => pk >= 10 && pct <= pk - 10 },
   trail15at20: { label: "Trail 15 pts once up +20%",  exit: (pct, pk) => pk >= 20 && pct <= pk - 15 },
+  // 11/24 (Harrison): replay only. 11/23 both pairs were up +4% / +6% late morning and closed -6% / -8.5%. `tp` lets pairs
+  // recorded before this rule existed be scored from their stored peak (see lockOf).
+  tp10:        { label: "Take profit at +10%",        exit: (pct) => pct >= 10, tp: 10 },
 };
+// a pair's result under rule k. Pairs closed before a rule was added have no replay for it (the path is not kept): for a
+// take-profit rule the stored peak settles it — peak below the target = never fired = the hold result (exact); peak at or
+// above = fired, booked AT the target (the first mark at/above it is never lower, so this understates a little) and flagged est.
+function lockOf(x, k) {
+  const tr = x && x.track; if (!tr || !tr.locks) return null;
+  if (tr.locks[k]) return tr.locks[k];
+  const r = LOCK_RULES[k];
+  if (!r || r.tp == null || tr.peakPct == null) return null;
+  const c = (x.legs || []).reduce((a, l) => a + (l.cost || 0), 0), pn = (x.legs || []).reduce((a, l) => a + (l.pnl || 0), 0);
+  const hold = c > 0 ? +(pn / c * 100).toFixed(2) : (x.pct != null ? x.pct : null);
+  return tr.peakPct >= r.tp ? { pct: r.tp, exitAt: null, fired: true, est: true } : { pct: hold, exitAt: null, fired: false, est: true };
+}
 const _hhmm = (ms) => new Date(ms).toLocaleTimeString("en-US", { timeZone: "America/New_York", hour12: false, hour: "2-digit", minute: "2-digit" });
 function trackLeg(state, pos, mid, now = Date.now()) {
   try {
@@ -302,7 +329,7 @@ function recordLeg(state, pos, o = {}) {
     const opened = Date.parse(pos.openDate || "") || Date.now();
     const sig = pos.signalId || `${pos.ticker}-${_etDay(opened)}`;
     let p = L.find(x => x.sig === sig);
-    if (!p) { p = { sig, day: _etDay(opened), rule: pos._stradRule || "session", ticker: pos.ticker, strike: pos.strike, exp: pos.expDate || null, dte: pos.expiryDays != null ? pos.expiryDays : (pos.expDays != null ? pos.expDays : null), ivrv: pos._stradIvRv != null ? pos._stradIvRv : null, legs: [] }; L.push(p); }
+    if (!p) { p = { sig, day: _etDay(opened), rule: pos._stradRule || "session", ivBasis: V2.IV_BASIS, ticker: pos.ticker, strike: pos.strike, exp: pos.expDate || null, dte: pos.expiryDays != null ? pos.expiryDays : (pos.expDays != null ? pos.expDays : null), ivrv: pos._stradIvRv != null ? pos._stradIvRv : null, legs: [] }; L.push(p); }
     const q = Math.max(1, +o.qty || +pos.contracts || 1);
     const half = (b, a) => (b > 0 && a > b ? (a - b) / 2 : null);
     const es = half(pos._stradBid, pos._stradAsk), xs = half(pos.bid, pos.ask);
@@ -336,9 +363,11 @@ function pairStats(pairs, day) {
   // 11/10: replayed locks vs hold, on the complete pairs that have a tracked path
   const tracked = done.filter(r => r.track && r.track.locks);
   const locks = Object.entries(LOCK_RULES).map(([k, r]) => {
-    const usd = tracked.reduce((a, x) => a + (x.track.locks[k] && x.track.locks[k].pct != null ? x.track.locks[k].pct / 100 * x.cost : 0), 0);
-    const fired = tracked.filter(x => x.track.locks[k] && x.track.locks[k].fired).length;
-    return { key: k, label: r.label, pairs: tracked.length, fired, usd: +usd.toFixed(2), meanPct: tracked.length ? +(tracked.reduce((a, x) => a + (x.track.locks[k].pct || 0), 0) / tracked.length).toFixed(2) : null };
+    const L = tracked.map(x => ({ x, l: lockOf(x, k) })).filter(o => o.l && o.l.pct != null);   // 11/24: pairs this rule can be scored on
+    const usd = L.reduce((a, o) => a + o.l.pct / 100 * o.x.cost, 0);
+    return { key: k, label: r.label, pairs: L.length, fired: L.filter(o => o.l.fired).length, usd: +usd.toFixed(2),
+             meanPct: L.length ? +(L.reduce((a, o) => a + o.l.pct, 0) / L.length).toFixed(2) : null,
+             holdUsd: +L.reduce((a, o) => a + o.x.pnl, 0).toFixed(2), est: L.filter(o => o.l.est).length };
   });
   const holdTracked = { pairs: tracked.length, usd: +tracked.reduce((a, x) => a + x.pnl, 0).toFixed(2), meanPct: tracked.length ? +(tracked.reduce((a, x) => a + (x.pct || 0), 0) / tracked.length).toFixed(2) : null };
   return { locks, holdTracked, today: rows.filter(r => r.day === day), n, wins: done.filter(r => r.pnl > 0).length, total: +done.reduce((a, r) => a + r.pnl, 0).toFixed(2),
@@ -349,14 +378,14 @@ function pairStats(pairs, day) {
 }
 function eodCSV(pairs) {
   const head = ["day", "ticker", "strike", "exp", "dte", "ivrv", "complete", "cost", "pnl", "pctOfCost", "spreadPaidEst", "exitReasons", "callEntry", "callExit", "putEntry", "putExit", "sig",
-                "peakPct", "peakAt", "lowPct", "lowAt", ...Object.keys(LOCK_RULES).map(k => `lock_${k}_pct`), "rvGate"];   // 11/10
+                "peakPct", "peakAt", "lowPct", "lowAt", ...Object.keys(LOCK_RULES).map(k => `lock_${k}_pct`), "rvGate", "ivBasis"];   // 11/10; 11/24: + lock_tp10_pct, ivBasis
   const q = (v) => (v == null ? "" : /[",\n]/.test(String(v)) ? `"${String(v).replace(/"/g, '""')}"` : String(v));
   const out = [head.join(",")];
   for (const p of (pairs || [])) {
     const s = pairStats([p], p.day).today[0], c = p.legs.find(l => l.type === "call") || {}, pu = p.legs.find(l => l.type === "put") || {};
     const tr = p.track || {};
     out.push([p.day, p.ticker, p.strike, p.exp, p.dte, p.ivrv, s.complete, s.cost, s.pnl, s.pct, s.spread, s.reasons, c.entry, c.exit, pu.entry, pu.exit, p.sig,
-              tr.peakPct, tr.peakAt, tr.lowPct, tr.lowAt, ...Object.keys(LOCK_RULES).map(k => (tr.locks && tr.locks[k] ? tr.locks[k].pct : null)), p.rule || "session"].map(q).join(","));
+              tr.peakPct, tr.peakAt, tr.lowPct, tr.lowAt, ...Object.keys(LOCK_RULES).map(k => { const l = lockOf(p, k); return l ? l.pct : null; }), p.rule || "session", p.ivBasis || "calendar"].map(q).join(","));
   }
   return out.join("\n");
 }
@@ -376,7 +405,7 @@ function eodSection(pairs, day) {
     h += `<div style="font-size:12px;margin-top:8px"><b>Profit locks, replayed</b> on the ${S.holdTracked.pairs} tracked pair${S.holdTracked.pairs === 1 ? "" : "s"} (sold at the bid; live still holds to 3:58):</div>`;
     h += `<table style="border-collapse:collapse;font-size:12px"><tr>${["Rule", "Fired", "Total", "Mean % of cost"].map(x => `<th style="text-align:left;padding:3px 6px;border-bottom:2px solid #ccc">${x}</th>`).join("")}</tr>`;
     h += `<tr>${td("<i>Hold to 3:58 (live)</i>")}${td("—")}${td(money(S.holdTracked.usd), "font-weight:700")}${td(S.holdTracked.meanPct != null ? S.holdTracked.meanPct + "%" : "—")}</tr>`;
-    for (const l of S.locks) h += `<tr>${td(l.label)}${td(`${l.fired}/${l.pairs}`)}${td(money(l.usd), `font-weight:700;color:${l.usd >= S.holdTracked.usd ? "#1a7f37" : "#c62828"}`)}${td(l.meanPct != null ? l.meanPct + "%" : "—")}</tr>`;
+    for (const l of S.locks) h += `<tr>${td(l.label + (l.est ? ` <span style="color:#888">(${l.est} from the stored peak)</span>` : ""))}${td(`${l.fired}/${l.pairs}`)}${td(money(l.usd), `font-weight:700;color:${l.usd >= l.holdUsd ? "#1a7f37" : "#c62828"}`)}${td(l.meanPct != null ? l.meanPct + "%" : "—")}</tr>`;
     h += `</table>`;
   }
   h += `<div style="font-size:12px;margin-top:6px">Running: <b>${S.n}</b> pair${S.n === 1 ? "" : "s"}, ${S.wins} won, total ${money(S.total)}, mean ${money(S.mean)}${S.t != null ? `, t = ${S.t.toFixed(2)}` : ""}, est. spread paid $${S.spread.toFixed(0)}${S.incomplete ? `, ${S.incomplete} one-leg` : ""} — <b>${S.verdict}</b>. Pass line (set 11/08): after ~30 pairs, mean &gt; 0 with t ≥ 2${S.preFix ? `; count restarted 11/10 with the HAR forecast gate — ${S.preFix} earlier pair${S.preFix === 1 ? "" : "s"} (${money(S.preFixTotal)}) not counted` : ""}.</div>`;
@@ -384,4 +413,4 @@ function eodSection(pairs, day) {
 }
 
 module.exports = { evaluateStraddle, trailingRangePct, STRADDLE, V2, preGate, pickPair, asContract, decide, runExit, isHoldStraddle, dayState, tally,
-                   recordLeg, pairStats, eodCSV, eodSection, trackLeg, replayLocks, summarizeTrack, LOCK_RULES, dayWindows, harForecast, rvForecast };
+                   recordLeg, pairStats, eodCSV, eodSection, trackLeg, replayLocks, summarizeTrack, LOCK_RULES, lockOf, dayWindows, harForecast, rvForecast };

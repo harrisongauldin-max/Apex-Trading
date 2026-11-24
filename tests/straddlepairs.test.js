@@ -29,7 +29,7 @@ const html = ST.eodSection(st._stradPairs, day);
 H.ok(/Long straddle/.test(html) && /\+\$60\.00/.test(html) && /−\$400\.00/.test(html) && /ONE LEG ONLY/.test(html) && /Running: <b>2<\/b> pairs, 1 won/.test(html) && /t = -0\.74/.test(html), "EOD section: today's pairs + running line with t and the verdict");
 H.ok(ST.eodSection([], day) === "", "no pairs ever: no section");
 const csv = ST.eodCSV(st._stradPairs).split("\n");
-H.ok(csv[0].startsWith("day,ticker,strike,exp,dte,ivrv,complete,cost,pnl") && csv.length === 4 && /,true,1000,60,6,/.test(csv[1]) && /,har$/.test(csv[1]), "CSV: one row per pair (running)", csv[1]);
+H.ok(csv[0].startsWith("day,ticker,strike,exp,dte,ivrv,complete,cost,pnl") && csv.length === 4 && /,true,1000,60,6,/.test(csv[1]) && /,har,trading$/.test(csv[1]), "CSV: one row per pair (running; 11/24: + ivBasis)", csv[1]);
 // wiring
 const ce = H.read("closeEngine.js"), rp = H.read("reporting.js"), ex = H.read("execution.js");
 H.ok(/if \(pos\._straddleHold\) require\('\.\/straddleStrategy'\)\.recordLeg\(state, pos, \{ pnl, exitPremium: ep, qty: contractsToSell, reason \}\)/.test(ce), "closeEngine records every closed straddle leg");

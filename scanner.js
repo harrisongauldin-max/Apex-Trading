@@ -3359,7 +3359,7 @@ async function runScan() {
           if (_sv.RV_MODE === "har") { _rvF = await STRADDLESTRAT.rvForecast(state, _tk); _rvUse = _rvF && _rvF.ok ? _rvF.forecast : null; _rvLbl = "forecast RV"; }
           const _rows = _rvUse > 0 ? await require('./execution').fetchStraddleRows(_tk, price) : [];
           const _pair = _rvUse > 0 ? STRADDLESTRAT.pickPair(_rows, price) : { none: `RV forecast unavailable — ${(_rvF && _rvF.reason) || "?"}` };
-          const _dec  = STRADDLESTRAT.decide(_pair, _rvUse, undefined, _rvLbl);
+          const _dec  = STRADDLESTRAT.decide(_pair, _rvUse, undefined, _rvLbl, Date.now());   // 11/24: now -> IV on trading time (tradingTime.js)
           if (_rvF && _rvF.ok && _dec.reason) _dec.reason += ` [HAR: yday ${(_rvF.d1 * 100).toFixed(1)}%, 5d ${(_rvF.w5 * 100).toFixed(1)}%, open ${(_rvF.rvOpenToday * 100).toFixed(1)}% x ${_rvF.ratio.toFixed(2)} = ${(_rvF.todayAdj * 100).toFixed(1)}%]`;
           const _say  = !_ds.lastLog[_tk] || _dec.fire || Date.now() - _ds.lastLog[_tk] > 15 * 60000;   // a decline speaks every 15 min
           if (_say) { _ds.lastLog[_tk] = Date.now(); logEvent("filter", `[STRADDLE] ${_tk} ${_dec.fire ? "FIRE" : "no"} — ${_dec.reason}`); }

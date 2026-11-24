@@ -37,7 +37,8 @@ H.ok(S.holdTracked.pairs === 1 && S.holdTracked.usd === 100 && tp.usd === 600 &&
 const html = ST.eodSection(st._stradPairs, "2026-11-10");
 H.ok(/Profit locks, replayed/.test(html) && /Hold to 3:58 \(live\)/.test(html) && /Take profit at \+25%/.test(html) && /\+30\.0%/.test(html), "EOD section: peak/low column + the replayed-lock table");
 const csv = ST.eodCSV(st._stradPairs).split("\n");
-H.ok(/peakPct,peakAt,lowPct,lowAt,lock_tp25_pct,lock_lock10at20_pct,lock_trail10_pct,lock_trail15at20_pct,rvGate$/.test(csv[0]) && /,30,\d\d:\d\d,0,\d\d:\d\d,30,6,12,12,har$/.test(csv[1]), "CSV: peak/low and each lock rule's result", csv[1]);
+H.ok(/peakPct,peakAt,lowPct,lowAt,lock_tp25_pct,lock_lock10at20_pct,lock_trail10_pct,lock_trail15at20_pct,lock_tp10_pct,rvGate,ivBasis$/.test(csv[0]) && /,30,\d\d:\d\d,0,\d\d:\d\d,30,6,12,12,15,har,trading$/.test(csv[1]), "CSV: peak/low and each lock rule's result (11/24: + take profit +10%, IV basis)", csv[1]);
+H.ok(L.tp10.fired && L.tp10.pct === 15, "11/24 take profit +10%: sells at the first mark >= +10% (+15%)", JSON.stringify(L.tp10));
 const ex = H.read("exitEngine.js");
 H.ok((ex.match(/require\('\.\/straddleStrategy'\)\.trackLeg\(state, pos, curP\)/g) || []).length === 2, "exit engine feeds the tracker every scan (incl. 3:57-3:58)");
 H.done();

@@ -835,6 +835,13 @@ const PROFIT_LOCK_GIVEBACK_FRAC = 0.5;
 const STRADDLE_RV_MODE        = "har";     // "har" | "session" (old: today's RV since the open)
 const STRADDLE_RV_LOOKBACK_D  = 20;        // days for the hold/open ratio
 const STRADDLE_RV_MIN_DAYS    = 10;        // fewer usable past days -> no trade
+// 11/24 (Harrison): the gate compares implied vol ON TRADING TIME with the forecast (tradingTime.js). The chain's IV is annualized
+// on calendar days, the forecast on trading minutes (252 x 390), so an expiry spanning a weekend or holiday read as cheap: on
+// 11/23 the 11/30 expiry (7.2 calendar days, ~4.4 sessions) gave 0.98 / 1.00 and both pairs lost $313; on trading time 1.04 /
+// 1.06. Variance accrues while the market is open (French & Roll 1986; French 1984); 846 saved chains agree (ATM IV spread
+// across 1-8 DTE: 11.6% quoted, 2.2% on trading time). The pass-line count is NOT restarted (the 3 HAR pairs stay in it).
+// "calendar" restores the old comparison.
+const STRADDLE_IV_BASIS       = "trading";
 // 11/02 (Harrison): STOCKS-IN-PLAY OPENING-RANGE BREAKOUT, SHARES (stocksInPlay.js), live on paper. Zarattini, Barbon & Aziz
 // (2024): top 20 US stocks by opening 5-min relative volume (>= 100%), stop entry at the first 5-min high/low in that candle's
 // direction, stop 10% of the 14-day ATR, exit at the close, 1% risk per position on sleeve/20, 4x leverage cap. No APEX data yet —
@@ -1159,7 +1166,7 @@ module.exports = {
   EODM_ENABLED, EODM_TICKERS, EODM_ENTRY_START_ET, EODM_ENTRY_END_ET, EODM_EXIT_ET, EODM_REQUIRE_NEG_GAMMA, EODM_HOLD_MIN, EODM_MODE,
   STRADDLE_ENABLED, STRADDLE_MODE, STRADDLE_TICKERS, STRADDLE_ENTRY_START_ET, STRADDLE_ENTRY_END_ET, STRADDLE_IVRV_MAX, STRADDLE_DTE_MIN,
   STRADDLE_DTE_MAX, STRADDLE_STRIKE_BAND, STRADDLE_MAX_SPREAD_PCT, STRADDLE_CONTRACTS, STRADDLE_EVAL_SEC, STRADDLE_MAX_TRIES,
-  STRADDLE_RV_MODE, STRADDLE_RV_LOOKBACK_D, STRADDLE_RV_MIN_DAYS,
+  STRADDLE_RV_MODE, STRADDLE_RV_LOOKBACK_D, STRADDLE_RV_MIN_DAYS, STRADDLE_IV_BASIS,
   PROFIT_LOCK_MODE, PROFIT_LOCK_TARGETS, PROFIT_LOCK_GIVEBACK_ARM, PROFIT_LOCK_GIVEBACK_FRAC,
   ITREND_ENABLED, ITREND_DELTA, ITREND_DELTA_MIN, ITREND_DELTA_MAX, ITREND_TARGET_DTE, ITREND_DTE_MIN, ITREND_DTE_MAX, ITREND_COST_SELECT, ITREND_SELECT_DTE_MIN, ITREND_SELECT_DTE_MAX, ITREND_SELECT_HOLD_MIN, ITREND_SELECT_STRIKE_BAND,
   ITREND_ADX_MIN, ITREND_VWAP_MIN, ITREND_BREADTH_STRONG, ITREND_START_ET, ITREND_END_ET, ITREND_NEG_GAMMA_BLOCK,

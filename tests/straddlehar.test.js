@@ -57,7 +57,7 @@ H.ok(oldDec.fire && !newDec.fire && /forecast RV/.test(newDec.reason), "11/10 QQ
   H.ok(/count restarted 11\/10 with the HAR forecast gate — 2 earlier pairs/.test(ST.eodSection([P("session", -54), P("session", -153), P("har", 40)], "2026-11-10")), "EOD line says so");
   // wiring
   const sc = H.read("scanner.js"), ex = H.read("execution.js");
-  H.ok(/if \(_sv\.RV_MODE === "har"\) \{ _rvF = await STRADDLESTRAT\.rvForecast\(state, _tk\);/.test(sc) && /STRADDLESTRAT\.decide\(_pair, _rvUse, undefined, _rvLbl\)/.test(sc) && /liveStock\._stradRule = _sv\.RV_MODE;/.test(sc), "scanner: IV compared with the HAR forecast; the leg records which gate opened it");
+  H.ok(/if \(_sv\.RV_MODE === "har"\) \{ _rvF = await STRADDLESTRAT\.rvForecast\(state, _tk\);/.test(sc) && /STRADDLESTRAT\.decide\(_pair, _rvUse, undefined, _rvLbl, Date\.now\(\)\)/.test(sc) && /liveStock\._stradRule = _sv\.RV_MODE;/.test(sc), "scanner: IV compared with the HAR forecast; the leg records which gate opened it");
   H.ok(/_sp\._stradRule = stock\._stradRule \|\| null;/.test(ex), "execution stamps the gate on each leg");
   H.done();
 })().catch(e => { console.log("  FAIL  harness error: " + (e.stack || e.message).split("\n").slice(0, 3).join(" | ")); process.exit(1); });
