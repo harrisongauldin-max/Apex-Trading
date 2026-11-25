@@ -101,7 +101,13 @@ function dayTrades(day, outcomeRows, sip) {
 function finalize(state, now = Date.now()) {
   const s = state._plock, day = etDay(now);
   if (!s || s.day !== day || !s.last) return null;
-  const close = (state._alpacaTruth && Number.isFinite(state._alpacaTruth.totalPnL)) ? +state._alpacaTruth.totalPnL.toFixed(2) : s.last.tot;
+  let close = s.last.tot;
+  if (state._alpacaTruth && Number.isFinite(state._alpacaTruth.totalPnL)) {
+    close = state._alpacaTruth.totalPnL;
+    // 11/25: same basis as observe() — the QQQ momentum share sleeve is left out (server.js takes it out of every reading)
+    try { const q = require("./qqqMomentum").dayPnL(state, state._alpacaTruth.openPositions, now); close -= (q.real + q.unreal); } catch (_) {}
+    close = +close.toFixed(2);
+  }
   const trades = dayTrades(day, state._outcomeBuffer, state._sip);
   const rules = {};
   for (const k of ruleKeys()) {
@@ -144,7 +150,7 @@ function eodSection(pl) {
   const tot = (pl.totals || []).map(x => `<tr><td style="padding:2px 10px 2px 0">${x.rule}</td><td style="${td}">${x.hit}/${x.days}</td><td style="${td}">${money(x.actual)}</td><td style="${td}">${money(x.flatten)} (${money(x.flatten - x.actual)})</td><td style="${td}">${money(x.noNew)} (${money(x.noNew - x.actual)})</td></tr>`).join("");
   const f = "font-family:system-ui,sans-serif";
   return `<h3 style="${f};margin:18px 0 6px">Profit lock — shadow (nothing was stopped)</h3>` +
-    `<div style="${f};font-size:12px;margin-bottom:4px">Today: close ${money(t.close)}, peak ${money(t.peak)} at ${t.peakAt} ET (5-min Alpaca truth).</div>` +
+    `<div style="${f};font-size:12px;margin-bottom:4px">Today: close ${money(t.close)}, peak ${money(t.peak)} at ${t.peakAt} ET (5-min Alpaca truth; the QQQ momentum sleeve is left out).</div>` +
     `<table style="${f};font-size:12px;border-collapse:collapse"><tr style="color:#888"><td>rule</td><td style="${td}">triggered</td><td style="${td}">flatten there</td><td style="${td}">no new entries</td><td style="${td}">trades opened after</td></tr>${rows}</table>` +
     `<div style="${f};font-size:12px;margin:10px 0 4px">Running (days recorded):</div>` +
     `<table style="${f};font-size:12px;border-collapse:collapse"><tr style="color:#888"><td>rule</td><td style="${td}">days hit</td><td style="${td}">actual</td><td style="${td}">flatten (vs actual)</td><td style="${td}">no new entries (vs actual)</td></tr>${tot}</table>` +

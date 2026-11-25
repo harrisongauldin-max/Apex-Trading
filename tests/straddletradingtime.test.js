@@ -59,7 +59,7 @@ H.ok(pk.exp === "2026-11-30" && pk.iv === 0.24, "expiry pick unchanged: lowest q
 const sc = H.read("scanner.js");
 H.ok(/STRADDLESTRAT\.decide\(_pair, _rvUse, undefined, _rvLbl, Date\.now\(\)\)/.test(sc), "scanner passes the clock to the gate");
 H.ok(/liveStock\._stradIvRv = \+_dec\.ratio\.toFixed\(3\)/.test(sc), "the ratio stored on the pair is the one the gate used (trading time)");
-H.ok(!/tradingTime/.test(H.read("execution.js")) && !/tradingTime/.test(H.read("exitEngine.js")), "order and exit paths don't read it");
+H.ok(!/\.factor\(/.test(H.read("execution.js")) && !/tradingTime/.test(H.read("exitEngine.js")), "order and exit paths don't use the IV conversion (11/25: execution.js reads only the calendar, for the holiday / early-close entry guard)");
 
 // ── take profit +10%: replay only ──
 H.ok(ST.LOCK_RULES.tp10 && ST.LOCK_RULES.tp10.tp === 10 && Object.keys(ST.LOCK_RULES).join(",") === "tp25,lock10at20,trail10,trail15at20,tp10", "tp10 added after the four existing replay rules");

@@ -440,10 +440,21 @@ setInterval(async () => {
   if (h < 9 || h > 16) return;
   if (h === 9 && m < 30) return;
   try {
+    let _qmPL = null, _qmSeq0 = 0;
+    try { _qmPL = require('./qqqMomentum'); _qmSeq0 = _qmPL.flightSeq(); } catch (_) { _qmPL = null; }
     const truth = await getAlpacaTruth();
     if (truth) {
       state._alpacaTruth = truth;
-      try { require("./profitLock").observe(state, truth, Date.now(), logEvent); } catch (_plErr) { logEvent("warn", `[PROFIT-LOCK] shadow skipped: ${_plErr.message}`); }   // 11/11: shadow only
+      try {
+        // 11/25: the shadow keeps the basis it has had since 11/11 (options + the stocks sleeve). The QQQ momentum sleeve's
+        // P&L is taken out; a reading taken across one of its fills is skipped.
+        let _plTruth = truth;
+        if (_qmPL) {
+          if (_qmPL.inFlight(state) || _qmPL.flightSeq() !== _qmSeq0) _plTruth = null;
+          else { const _q = _qmPL.dayPnL(state, truth.openPositions); if (_q.real || _q.unreal) _plTruth = Object.assign({}, truth, { totalPnL: truth.totalPnL - _q.real - _q.unreal, realizedPnL: truth.realizedPnL - _q.real, unrealizedPnL: truth.unrealizedPnL - _q.unreal }); }
+        }
+        if (_plTruth) require("./profitLock").observe(state, _plTruth, Date.now(), logEvent);
+      } catch (_plErr) { logEvent("warn", `[PROFIT-LOCK] shadow skipped: ${_plErr.message}`); }   // 11/11: shadow only
       if (truth.openPositions && truth.openPositions.length > 0) {
         const alpacaBySymbol = {};
         truth.openPositions.forEach(ap => { alpacaBySymbol[ap.symbol] = ap; });
@@ -2226,6 +2237,7 @@ app.post("/api/emergency-close", requireSecret, async (req, res) => {
   }
   let _sipClosed = 0;
   try { _sipClosed = await require('./stocksInPlay').flattenAll(state, logEvent, "emergency-close"); } catch (e) { logEvent("error", `[SIP] emergency flatten failed: ${e.message}`); }
+  try { await require('./qqqMomentum').flattenAll(state, logEvent, "emergency-close"); } catch (e) { logEvent("error", `[QMOM] emergency flatten failed: ${e.message}`); }   // 11/25
   logEvent("circuit", `EMERGENCY CLOSE ALL complete - ${closed} closed, ${failed} failed${_sipClosed ? `; ${_sipClosed} share position(s) sent to market` : ""}`);
   try { await saveStateNow(); } catch(e) {}
   res.json({ ok: true, closed, failed, total: count, sharesClosed: _sipClosed });
@@ -2503,6 +2515,15 @@ initState().then(async () => {
       logEvent("scan", `[SIP] stocks-in-play sleeve ON — mode ${SIP.CFG.MODE.toUpperCase()}, sleeve $${SIP.CFG.SLEEVE_USD.toLocaleString()}`);
     }
   } catch (e) { logEvent("error", `[SIP] could not start: ${e.message}`); }
+
+  // 11/25 (Harrison): QQQ intraday momentum on shares (qqqMomentum.js). Own 5 s clock, half-hour checks 10:00-15:30 ET.
+  try {
+    const QMOM = require('./qqqMomentum');
+    if (QMOM.CFG.ENABLED) {
+      setInterval(() => { if (isShuttingDown || HANDOFF.isHeld()) return; QMOM.tick({ state, logEvent, markDirty, saveNow: saveStateNow }).catch(e => logEvent("error", `[QMOM] ${e.message}`)); }, 5000);
+      logEvent("scan", `[QMOM] QQQ intraday momentum sleeve ON — mode ${QMOM.CFG.MODE.toUpperCase()}, ${Math.round(QMOM.CFG.NOTIONAL_PCT * 100)}% of equity per position`);
+    }
+  } catch (e) { logEvent("error", `[QMOM] could not start: ${e.message}`); }
 
   app.listen(PORT, () => {
     console.log(`APEX running on port ${PORT}`);

@@ -452,6 +452,20 @@ async function executeTrade(stock, price, score, scoreReasons, vix, optionType =
   // Checks the CLOCK as well as the flag: if the watchdog force-resets a stuck scan, two scans can overlap and
   // one can clear the flag while the other is still past 3:15. The clock check can't be cleared. (Before this
   // change no entry could ever happen after 3:15 — scans stopped there — so refusing by clock removes nothing.)
+  // 11/25 (Harrison): the options side had no market calendar (weekday + clock only). No option entry on a holiday, and none on
+  // an early-close day: the 3:45 flatten and the 3:58 straddle exit are fixed times, so anything opened on a 1:00 pm close
+  // (Fri 11/27) would be carried over the weekend. Exits are untouched. The share sleeves read the calendar themselves.
+  try {
+    const _dX = getETTime();   // ET wall-clock fields
+    const _sessMin = require('./tradingTime').sessionMinutes(`${_dX.getFullYear()}-${String(_dX.getMonth() + 1).padStart(2, '0')}-${String(_dX.getDate()).padStart(2, '0')}`);
+    if (_sessMin !== 390 && !_dryRunMode) {
+      if (!state._calSkipLogAt || Date.now() - state._calSkipLogAt > 900000) {
+        state._calSkipLogAt = Date.now();
+        logEvent("skip", `${stock && stock.ticker} — entry refused: ${_sessMin === 0 ? "market holiday" : "early-close day (1:00 pm ET)"} — no option entries today`);
+      }
+      return false;
+    }
+  } catch (_calErr) { /* calendar unavailable: fall through to the normal checks */ }
   const _etNowX = getETTime(); const _etHX = _etNowX.getHours() + _etNowX.getMinutes() / 60;
   // 10/29: the end-of-day momentum trade enters at 3:30 by design — it is the one entry allowed in the observe window
   if (!(stock && stock._eodMom) && (state._observeOnly || (!_dryRunMode && _etHX >= 15.25 && _etHX < 16))) {

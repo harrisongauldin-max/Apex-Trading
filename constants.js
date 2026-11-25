@@ -847,6 +847,16 @@ const STRADDLE_IV_BASIS       = "trading";
 // direction, stop 10% of the 14-day ATR, exit at the close, 1% risk per position on sleeve/20, 4x leverage cap. No APEX data yet —
 // the paper modeled no slippage, so every trade is also replayed at the paper's ideal prices and the EOD report shows the gap.
 // Its own sleeve: positions are NOT in state.positions; share cash is backed out of the options sizing cash (cashAdjustment).
+// 11/25 (Harrison): QQQ INTRADAY MOMENTUM ON SHARES (qqqMomentum.js) — the one intraday rule that passed the 10-year test
+// (flowBacktest T2, QQQ: Sharpe 0.93 net, both halves positive; Zarattini, Aziz & Barbon 2024). Half-hour checks 10:00-15:30 ET,
+// long above / short below the day's noise band, out on a close back through max(band, VWAP) or at the close. Shares only (the
+// options versions failed), QQQ only (SPY failed), flat every night, not traded on half days.
+// QMOM_NOTIONAL_PCT: position size as a share of account equity (0.5 = about $40k on $80k). "shadow" = no orders, same ledger.
+const QMOM_ENABLED       = true;
+const QMOM_MODE          = "live";
+const QMOM_TICKER        = "QQQ";
+const QMOM_NOTIONAL_PCT  = 0.5;
+const QMOM_ALLOW_SHORT   = true;
 const SIP_ENABLED        = true;
 const SIP_MODE           = "live";    // "live" = real paper orders; "shadow" = log + ideal replay only (env SIP_MODE overrides)
 const SIP_SLEEVE_USD     = 25000;     // the paper's starting capital: $1,250 per position, $12.50 risk, <= $5,000 notional each
@@ -1161,6 +1171,7 @@ module.exports = {
   TREND_ENABLED, TREND_DELTA, TREND_DELTA_MIN, TREND_DELTA_MAX, TREND_TARGET_DTE, TREND_DTE_MIN, TREND_DTE_MAX,
   TREND_ROLL_DTE, TREND_COOLDOWN_DAYS, TREND_MODE, TREND_RETIRE_LIVE, TREND_RETIRE_AFTER_ET, TREND_TICKERS, TREND_EXIT_MODE, TREND_CHANDELIER_ATR, TREND_CHANDELIER_CHECK_ET, TREND_MA_FAST, TREND_MA_SLOW, TREND_RSI_MIN, TREND_RSI_MAX, TREND_OVEREXT_ATR, TREND_BREADTH_MIN,
   TREND_CUTOFF_ET, TREND_RISK_BUDGET, TREND_TRAIL_ARM_PCT, TREND_STOP_UNDL_PCT, TREND_STOP_PCT, TREND_ATR_STOP_MULT, TREND_USTOP_FLOOR, TREND_USTOP_CEIL, TREND_STALE_DAYS, TREND_STALE_PEAK, TREND_TRAIL_GIVEBACK_PCT,
+  QMOM_ENABLED, QMOM_MODE, QMOM_TICKER, QMOM_NOTIONAL_PCT, QMOM_ALLOW_SHORT,
   SIP_ENABLED, SIP_MODE, SIP_SLEEVE_USD, SIP_OPT_BP_RESERVE,
   SIP_EXIT_MODE, SIP_LOCK_AT_R, SIP_LOCK_FLOOR_R, SIP_TRAIL_FROM_R, SIP_TRAIL_R, SIP_HARD_CAP_R, SIP_USE_OTO, SIP_CHASE_LATE, SIP_STOP_BASE, SIP_COST_ENTRY_ATR, SIP_COST_EXIT_ATR, SIP_COST_CLOSE_ATR, SIP_STOP_MODE, SIP_NOISE_MULT,
   EODM_ENABLED, EODM_TICKERS, EODM_ENTRY_START_ET, EODM_ENTRY_END_ET, EODM_EXIT_ET, EODM_REQUIRE_NEG_GAMMA, EODM_HOLD_MIN, EODM_MODE,

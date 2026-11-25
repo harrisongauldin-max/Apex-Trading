@@ -61,7 +61,17 @@ H.ok(PL.eodSection(null) === "", "no section without data");
 
 // wiring
 const srv = H.read("server.js"), rep = H.read("reporting.js");
-H.ok(/state\._alpacaTruth = truth;\n\s+try \{ require\("\.\/profitLock"\)\.observe\(state, truth, Date\.now\(\), logEvent\)/.test(srv), "server.js: every 5-min Alpaca truth refresh feeds the shadow");
+H.ok(/state\._alpacaTruth = truth;\r?\n\s+try \{[\s\S]{0,900}if \(_plTruth\) require\("\.\/profitLock"\)\.observe\(state, _plTruth, Date\.now\(\), logEvent\)/.test(srv), "server.js: every 5-min Alpaca truth refresh feeds the shadow (11/25: with the QQQ momentum sleeve's P&L taken out)");
+{ // 11/25: the day's close is on the same basis — the QQQ share sleeve's closed trades are left out
+  const PLx = require("../profitLock"), now = Date.parse("2026-11-30T21:05:00Z");
+  const st = { _plock: { day: "2026-11-30", peak: 50, peakAt: "11:00:00", last: { tot: 40, et: "15:55:00" }, hits: {} }, _alpacaTruth: { totalPnL: 240, openPositions: [] }, _outcomeBuffer: [],
+               _qmom: { day: "2026-11-30", mode: "live", pos: 0, trades: [{ pnl: 200 }] } };
+  const r = PLx.finalize(st, now);
+  const closeOf = (x) => x && (x.close != null ? x.close : (x.today && x.today.close));
+  const hist = st._plockHist || st._plHist || {};
+  const seen = closeOf(r) != null ? closeOf(r) : JSON.stringify([r, hist]);
+  H.ok(closeOf(r) === 40 || /"close":40[,}]/.test(JSON.stringify([r, st])), "finalize: close = account day P&L minus the QQQ sleeve (240 - 200 = 40)", String(seen).slice(0, 200));
+}
 H.ok(/plock:\s+\(\(\) => \{ try \{ return require\('\.\/profitLock'\)\.finalize\(state\)/.test(rep) && /require\('\.\/profitLock'\)\.eodSection\(_eodSnap\.plock\)/.test(rep), "reporting.js: scored in the EOD snapshot (before the buffers clear) and shown in the email");
 H.ok(!/profitLock/.test(H.read("scanner.js")) && !/profitLock/.test(H.read("execution.js")), "nothing in the entry/order path reads it (shadow)");
 

@@ -183,12 +183,19 @@ function initCloseEngine({ dryRunMode, getOptionsPrice, sendAlert, fmt } = {}) {
 async function syncCashFromAlpaca() {
   if (!ALPACA_KEY) return;
   try {
+    // 11/25: the QQQ momentum sleeve holds ~50% of equity in shares. A cash reading taken while one of its orders is between
+    // the broker and its book is off by the whole position (it would read as a -$40k day, or lift peakCash by $40k), so that
+    // reading is skipped; the next sync (5 min, or the next option close) takes a clean one.
+    let _qm = null, _qmSeq = 0;
+    try { _qm = require('./qqqMomentum'); _qmSeq = _qm.flightSeq(); } catch (_) { _qm = null; }
     const acct = await alpacaGet("/account");
     if (!acct || !acct.cash) return;
+    if (_qm && (_qm.inFlight(state) || _qm.flightSeq() !== _qmSeq)) return;
     // 11/02: the stocks-in-play share sleeve moves Alpaca cash by its notional (a long spends it, a short receives it).
     // Back that out so options sizing, heat, the capital floor and peakCash see the same cash they would without it.
     let _sipAdj = 0;
     try { _sipAdj = require('./stocksInPlay').cashAdjustment(state) || 0; } catch (_) { _sipAdj = 0; }
+    try { _sipAdj += require('./qqqMomentum').cashAdjustment(state) || 0; } catch (_) {}   // 11/25: the QQQ momentum sleeve's shares, same treatment
     const alpacaCash      = parseFloat((parseFloat(acct.cash) + _sipAdj).toFixed(2));
     state._sipCashAdj     = _sipAdj;
     const alpacaBuyPower  = parseFloat(acct.buying_power || acct.cash);
@@ -449,6 +456,9 @@ async function _doClosePosition(ticker, reason, exitPremium = null, contractSym 
             pos._permissionBlockedAt = new Date().toISOString();
             pos._permBlockReason = "40310000 transient reject — 15min cooldown then auto-retry";
             logEvent("warn", `[PERM BLOCK] ${ticker} ${closeSym} blocked (40310000) — 15min cooldown, will auto-retry. If persists after retry, check Alpaca options tier.`);
+            // 11/25: this return left _closingSubmitted set (and it is saved with state), so after the cooldown EVERY close of this
+            // position — the exit engine, the end-of-day flatten, a manual close — stopped at the "already submitted" guard above.
+            delete pos._closingSubmitted;
             return;
           }
         }
