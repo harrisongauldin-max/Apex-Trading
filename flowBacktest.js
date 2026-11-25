@@ -36,6 +36,13 @@
 //   T8  Selling premium, on REAL option prices: Cboe's benchmark indexes built from actual SPX option trades — PUT
 //       (S&P 500 put-write, cash-secured) and CNDR (S&P 500 iron condor, defined risk) — against SPY buy-and-hold
 //       (Alpaca daily bars, dividend-adjusted = total return). BXM (covered call) reported, not graded.
+//   v1.4 (pre-registered 11/25 BEFORE their first run) — the "try them all" batch, on DAILY data (runB2, ?tests=B2):
+//   T9  Overnight hold — buy the close, sell the next open (Cliff, Cooper & Gulen 2008; Kelly & Clark 2011;
+//       Lou, Polk & Skouras, JFE 2019). SPY and QQQ, dividend-adjusted daily bars, against buy-and-hold.
+//   T10 Trend on five ETFs — Faber (2007, J. Wealth Management): hold each of SPY/EFA/IEF/VNQ/DBC while its month-end
+//       close is above its 10-month average, else T-bills via BIL (time-series momentum: Moskowitz, Ooi & Pedersen, JFE 2012).
+//   T11 Put credit spread on REAL option prices — no Cboe index is a put spread, so it is built from two that are:
+//       PUT (cash + short monthly at-the-money SPX put) + the long monthly 5%-out-of-the-money put held inside PPUT.
 // Not testable here (no history in Alpaca): dealer gamma (needs historical open interest), expiration pinning (same),
 // macro-announcement days (dayContext only holds the 2026 calendar). Gamma conditioning is being collected live.
 'use strict';
@@ -60,6 +67,10 @@ const PASS = {
   T7c:  'The held version on shares (net 1 bp per side): annualised daily Sharpe >= 0.5 AND positive in both halves — per ticker (the T2 line).',
   T7cOpt: 'The held version as the same options: mean return on premium per trade > 0 with t >= 2.0, AND positive in both halves — per ticker.',
   // v1.3 — written 10/19, BEFORE T8 was ever computed
+  // v1.4 — written 11/25, BEFORE T9, T10 or T11 were ever computed. One shot each.
+  T9:   'Overnight hold (buy the close, sell the next open) on dividend-adjusted daily bars, 2016 on, net of 1 bp per side (2 bp a night) — per ticker (SPY, QQQ): annualised Sharpe >= buy-and-hold\'s on the same days, AND worst drawdown no deeper than buy-and-hold\'s, AND mean net overnight return > 0 in both halves. Reported, not graded: the result before costs, and the open-to-close leg.',
+  T10:  'Faber (2007) on SPY, EFA, IEF, VNQ, DBC at 20% each: an ETF is held while its month-end close (dividend-adjusted) is above the average of its last 10 month-end closes, otherwise that 20% is in T-bills (BIL, the 1-3 month Treasury bill ETF, dividend-adjusted); decided at the month-end close, traded at the NEXT session\'s close, 2 bp per side on everything traded, back to 20% each at every monthly trade. One trial: Sharpe over T-bills >= 0.5, AND >= the same five held 20% each (rebalanced monthly, same costs), AND worst drawdown no deeper than that benchmark\'s, AND mean excess return > 0 in both halves. SPY buy-and-hold is reported, not graded.',
+  T11:  'Put credit spread on real SPX option prices, built from two Cboe indexes: daily return = PUT + PPUT − SPY total return (PUT = cash + short monthly at-the-money put; PPUT − SPY = the long monthly 5%-out-of-the-money put). The T8 line: annualised Sharpe >= SPY buy-and-hold\'s AND worst drawdown no deeper, 2016-01-04 on; both indexes current (<= 10 days old). One trial. The two legs are reported separately, not graded.',
   T8:   'Per index (PUT, CNDR), 2016-01-04 to now vs SPY buy-and-hold total return on the same dates: annualised Sharpe >= SPY\'s AND worst drawdown no deeper than SPY\'s; the index series must be current (<= 10 days old). 2007-2015 is reported against SPX without dividends (no total-return SPY history before 2016) and is NOT graded — it flatters the option indexes by roughly the dividend yield.',
 };
 const MIN_HALF_DAYS = 250, MIN_CELL_DAYS = 60, MAX_STALE_DAYS = 10;
@@ -449,6 +460,125 @@ function t8(series, opts = {}) {
   return out;
 }
 
+// ── v1.4: T9 / T10 / T11 on daily data ────────────────────────────────────────────────────────────────────────────
+const B2_COST_BP = 2;        // per side, T10 (EFA / VNQ / DBC trade wider than SPY)
+const B2_ETFS = ['SPY', 'EFA', 'IEF', 'VNQ', 'DBC'];
+const B2_FROM = '2016-01-04';
+// { date: level } from rows [{ date, r }], starting at 1 on the day before the first row
+function levelsOf(rows, f, startDate) {
+  const ser = {}, dates = []; let L = 1;
+  if (startDate) { ser[startDate] = 1; dates.push(startDate); }
+  for (const r of rows) { L *= 1 + f(r); ser[r.date] = L; dates.push(r.date); }
+  return { ser, dates };
+}
+const staleOf = (last, asOf) => (asOf && last ? Math.round((Date.parse(asOf) - Date.parse(last)) / 864e5) : null);
+
+// T9. bars: [{ date, o, c }] dividend-adjusted daily bars, sorted. Overnight return of day i = open(i) / close(i-1) - 1.
+function t9(bars, opts = {}) {
+  const b = (bars || []).filter(x => x && x.date >= B2_FROM && x.o > 0 && x.c > 0).sort((a, z) => (a.date < z.date ? -1 : 1));
+  if (b.length < 2 * MIN_HALF_DAYS) return { note: `not enough daily bars (${b.length})`, pass: false, grade: 'INCOMPLETE' };
+  const cost = 2 * COST_BP / 1e4, rows = [];
+  for (let i = 1; i < b.length; i++) {
+    const on = b[i].o / b[i - 1].c - 1;
+    rows.push({ date: b[i].date, on, net: on - cost, id: b[i].c / b[i].o - 1, cc: b[i].c / b[i - 1].c - 1 });
+  }
+  const mk = (f) => { const L = levelsOf(rows, f, b[0].date); return seriesStats(L.dates, L.ser); };
+  const night = mk(r => r.net), gross = mk(r => r.on), hold = mk(r => r.cc), day = mk(r => r.id);
+  const h = halves(rows, r => r.net * 1e4);
+  const stale = staleOf(b[b.length - 1].date, opts.asOf), current = stale != null && stale <= MAX_STALE_DAYS;
+  const ok = night.sharpe >= hold.sharpe && night.maxDD >= hold.maxDD && h.h1.mean > 0 && h.h2.mean > 0;
+  return { n: rows.length, from: rows[0].date, to: rows[rows.length - 1].date, staleDays: stale,
+           night, gross, hold, day, halves: h, perNight: summ(rows.map(r => r.net * 1e4)), perNightGross: summ(rows.map(r => r.on * 1e4)),
+           perDay: summ(rows.map(r => r.id * 1e4)), byYear: byYear(rows, r => r.net * 1e4), conc: concentration(rows, r => r.net),
+           ...grade(ok, current && halvesOk(h)) };
+}
+
+// T10. closes: { SPY: { date: adjClose }, EFA, IEF, VNQ, DBC, BIL } — BIL is the cash leg and the risk-free rate.
+function t10(closes, opts = {}) {
+  // opts.etfs / opts.costBp exist for the unit tests only; the route passes neither (the graded run is the pre-registered one)
+  const etfs = opts.etfs || B2_ETFS, N = etfs.length, SMA = 10, W = 1 / N, cost = (opts.costBp != null ? opts.costBp : B2_COST_BP) / 1e4;
+  const missing = [...etfs, 'BIL'].filter(k => !closes || !closes[k] || Object.keys(closes[k]).length < 300);
+  if (missing.length) return { note: `no daily history for ${missing.join(', ')}`, pass: false, grade: 'INCOMPLETE' };
+  const dates = Object.keys(closes[etfs[0]]).filter(d => d >= B2_FROM && closes.BIL[d] > 0 && etfs.every(k => closes[k][d] > 0)).sort();
+  if (dates.length < 2 * MIN_HALF_DAYS + 220) return { note: `not enough common days (${dates.length})`, pass: false, grade: 'INCOMPLETE' };
+  const rfAt = (i) => closes.BIL[dates[i]] / closes.BIL[dates[i - 1]] - 1;   // the day ending at dates[i]
+  // month-ends: the last common day of each month that is followed by a day in another month (the last day of the data never is)
+  const monthEnd = []; for (let i = 0; i < dates.length - 1; i++) if (dates[i].slice(0, 7) !== dates[i + 1].slice(0, 7)) monthEnd.push(i);
+  const signalAt = {};   // index of the day the signal is TRADED (close of the session after the month-end) -> flags
+  for (let k = SMA - 1; k < monthEnd.length; k++) {
+    const flags = etfs.map(e => { let s = 0; for (let j = k - SMA + 1; j <= k; j++) s += closes[e][dates[monthEnd[j]]]; return closes[e][dates[monthEnd[k]]] > s / SMA ? 1 : 0; });
+    signalAt[monthEnd[k] + 1] = flags;
+  }
+  const first = monthEnd[SMA - 1] + 1;
+  if (!(first < dates.length - 2 * MIN_HALF_DAYS)) return { note: 'not enough history after the first 10 month-ends', pass: false, grade: 'INCOMPLETE' };
+  // one book: N sleeves reset to equal value at every monthly trade; `always` = the buy-and-hold benchmark
+  const book = (always) => {
+    let v = new Array(N).fill(W), flags = new Array(N).fill(0), V = 1, switches = 0, turnover = 0; const rows = [], inDays = new Array(N).fill(0);
+    for (let i = first; i < dates.length; i++) {
+      if (i > first) {
+        const rf = rfAt(i);
+        for (let e = 0; e < N; e++) { v[e] *= 1 + (flags[e] ? closes[etfs[e]][dates[i]] / closes[etfs[e]][dates[i - 1]] - 1 : rf); if (flags[e]) inDays[e]++; }
+      }
+      let tot = v.reduce((a, x) => a + x, 0);
+      if (signalAt[i]) {
+        const nf = always ? new Array(N).fill(1) : signalAt[i];
+        let traded = 0;
+        for (let e = 0; e < N; e++) { traded += Math.abs((nf[e] ? tot * W : 0) - (flags[e] ? v[e] : 0)); if (i > first && nf[e] !== flags[e]) switches++; }
+        tot -= traded * cost; if (i > first) turnover += traded / Math.max(tot, 1e-12);   // the first purchase is not turnover
+        v = new Array(N).fill(tot * W); flags = nf.slice();
+      }
+      if (i > first) rows.push({ date: dates[i], r: tot / V - 1, x: tot / V - 1 - rfAt(i) });
+      V = tot;
+    }
+    const L = levelsOf(rows, r => r.r, dates[first]), st = seriesStats(L.dates, L.ser);
+    const days = rows.length || 1;
+    return { rows, stats: st, sharpeX: sharpe(rows.map(r => r.x)), sharpeXH1: sharpe(rows.filter(r => r.date < SPLIT).map(r => r.x)), sharpeXH2: sharpe(rows.filter(r => r.date >= SPLIT).map(r => r.x)),
+             halves: halves(rows, r => r.x * 1e4), switches, turnoverPerYear: turnover / (days / 252), inShare: Object.fromEntries(etfs.map((e, k) => [e, inDays[k] / days])), flagsNow: flags };
+  };
+  const trend = book(false), hold = book(true);
+  // SPY buy-and-hold on the same days (reported, not graded)
+  const spyRows = trend.rows.map((r, k) => { const i = first + 1 + k, rr = closes.SPY ? closes.SPY[dates[i]] / closes.SPY[dates[i - 1]] - 1 : 0; return { date: r.date, r: rr, x: rr - rfAt(i) }; });
+  const spyL = levelsOf(spyRows, r => r.r, dates[first]);
+  const spy = closes.SPY ? { stats: seriesStats(spyL.dates, spyL.ser), sharpeX: sharpe(spyRows.map(r => r.x)) } : null;
+  const stale = staleOf(dates[dates.length - 1], opts.asOf), current = stale != null && stale <= MAX_STALE_DAYS;
+  const ok = trend.sharpeX >= 0.5 && trend.sharpeX >= hold.sharpeX && trend.stats.maxDD >= hold.stats.maxDD && trend.halves.h1.mean > 0 && trend.halves.h2.mean > 0;
+  const strip = (o) => ({ ...o, rows: undefined });
+  return { etfs, from: dates[first], to: dates[dates.length - 1], days: trend.rows.length, staleDays: stale, monthsTraded: Object.keys(signalAt).length,
+           trend: strip(trend), hold: strip(hold), spy, ...grade(ok, current && halvesOk(trend.halves)) };
+}
+
+// T11. series: { PUT, PPUT, SPYTR } each { date: level }.
+function t11(series, opts = {}) {
+  const has = (k) => series && series[k] && Object.keys(series[k]).length > 50;
+  const missing = ['PUT', 'PPUT', 'SPYTR'].filter(k => !has(k));
+  if (missing.length) return { note: `no history for ${missing.join(', ')}`, pass: false, grade: 'INCOMPLETE' };
+  const ds = Object.keys(series.PUT).filter(d => d >= B2_FROM && series.PPUT[d] > 0 && series.SPYTR[d] > 0 && series.PUT[d] > 0).sort();
+  if (ds.length < 500) return { note: `not enough common days (${ds.length})`, pass: false, grade: 'INCOMPLETE' };
+  const rows = [];
+  for (let i = 1; i < ds.length; i++) {
+    const g = (k) => series[k][ds[i]] / series[k][ds[i - 1]] - 1, put = g('PUT'), longPut = g('PPUT') - g('SPYTR');
+    rows.push({ date: ds[i], r: put + longPut, put, longPut });
+  }
+  const L = levelsOf(rows, r => r.r, ds[0]), LP = levelsOf(rows, r => r.put, ds[0]);
+  const spread = seriesStats(L.dates, L.ser), spy = seriesStats(ds, series.SPYTR), putOnly = seriesStats(LP.dates, LP.ser);
+  const lastOf = (k) => { const x = Object.keys(series[k]).sort(); return x[x.length - 1]; };
+  const lastIdx = lastOf('PUT') < lastOf('PPUT') ? lastOf('PUT') : lastOf('PPUT');
+  const stale = staleOf(lastIdx, opts.asOf), current = stale != null && stale <= MAX_STALE_DAYS;
+  const ok = spread.sharpe >= spy.sharpe && spread.maxDD >= spy.maxDD;
+  return { from: ds[0], to: ds[ds.length - 1], n: rows.length, lastIndexDate: lastIdx, staleDays: stale, spread, spy, putOnly,
+           longPutPerYear: summ(rows.map(r => r.longPut)).mean * 252, ...grade(ok, current) };
+}
+
+// daily: { SPY: [{date,o,c}], QQQ: [...] } · closes: { SPY: {date: c}, EFA, IEF, VNQ, DBC, BIL } · series: { PUT, PPUT, SPYTR }
+function runB2(daily = {}, closes = {}, series = {}, opts = {}) {
+  const out = { pass: { T9: PASS.T9, T10: PASS.T10, T11: PASS.T11 }, asOf: opts.asOf || null, T9: {} };
+  for (const tk of ['SPY', 'QQQ']) out.T9[tk] = t9(daily[tk], opts);
+  out.T10 = t10(closes, opts);
+  out.T11 = t11(series, opts);
+  out.trials = 4;   // T9 x2, T10, T11
+  return out;
+}
+
 // ── run + report ────────────────────────────────────────────────────────────────────────────────────────────────
 function run(barsByTicker, ivByTicker = {}, vixFn = null, opts = {}) {
   const out = { pass: PASS, tickers: {} };
@@ -500,6 +630,65 @@ function t8Report(T8) {
     if (inf) L.push(`   2007-2015, not graded (vs SPX WITHOUT dividends): ${k} CAGR ${p(inf.idx.cagr)}, Sharpe ${f2(inf.idx.sharpe)}, worst DD ${p(inf.idx.maxDD)} | SPX CAGR ${p(inf.spx.cagr)}, Sharpe ${f2(inf.spx.sharpe)}, worst DD ${p(inf.spx.maxDD)}`);
   }
   return L;
+}
+
+function b2Report(res, sources = {}) {
+  const L = [], p = (x, d = 1) => x == null || !isFinite(x) ? '—' : (x >= 0 ? '+' : '') + (x * 100).toFixed(d) + '%';
+  const line = (nm, s) => `   ${nm.padEnd(13)} CAGR ${p(s.cagr)} · vol ${p(s.vol)} · Sharpe ${f2(s.sharpe)} (2016-20 ${f2(s.sharpeH1)}, 2021-on ${f2(s.sharpeH2)}) · worst drawdown ${p(s.maxDD)} (${s.maxDDAt})`;
+  const yrs = (a, b) => Object.keys(a.years).map(y => `${y} ${p(a.years[y], 0)}/${p(b.years[y], 0)}`).join('  ');
+  L.push('APEX FLOW HARNESS v1.4 — pre-registered tests on DAILY data (read-only; places no trades)');
+  L.push(`Sources: ${Object.entries(sources).map(([k, v]) => `${k}: ${v}`).join(' · ') || 'Alpaca daily bars (dividend-adjusted), Cboe PUT / PPUT'}`);
+  L.push(`Trials reported: ${res.trials} (every one, pass or fail). Run as of ${res.asOf || '—'}.`);
+  L.push('');
+  for (const [tk, r] of Object.entries(res.T9 || {})) {
+    L.push(`════════ T9 Overnight hold — ${tk} (buy the close, sell the next open; 2 bp a night) ════════`);
+    if (r.note) { L.push(`   not run — ${r.note}`); L.push(''); continue; }
+    L.push(`${tk}: ${r.grade}   (${r.from} → ${r.to}, ${r.n} nights${r.staleDays > MAX_STALE_DAYS ? ` — ⚠ data ends ${r.staleDays} days before the run date` : ''})`);
+    L.push(line('overnight net', r.night));
+    L.push(line('buy-and-hold', r.hold));
+    L.push(`   per night, net: ${fs(r.perNight)} · halves: 2016-20 ${fs(r.halves.h1)} | 2021-on ${fs(r.halves.h2)}`);
+    L.push(`   not graded — before costs: ${fs(r.perNightGross)}, Sharpe ${f2(r.gross.sharpe)} · open-to-close leg: ${fs(r.perDay)}, Sharpe ${f2(r.day.sharpe)}`);
+    L.push(`   stress (overnight / hold)  Feb-2018: ${p(r.night.stress.feb2018)} / ${p(r.hold.stress.feb2018)} · Covid 2020: ${p(r.night.stress.covid2020)} / ${p(r.hold.stress.covid2020)} · 2022 bear: ${p(r.night.stress.bear2022)} / ${p(r.hold.stress.bear2022)}`);
+    L.push(`   by year (overnight net / hold): ${yrs(r.night, r.hold)}`);
+    L.push(`   concentration (diagnostic): ${fc(r.conc)}`);
+    L.push('');
+  }
+  const t = res.T10;
+  L.push('════════ T10 Trend on five ETFs — Faber 10-month rule (SPY, EFA, IEF, VNQ, DBC; 20% each; BIL when out) ════════');
+  if (!t || t.note) L.push(`   not run — ${(t && t.note) || 'no data'}`);
+  else {
+    L.push(`${t.grade}   (${t.from} → ${t.to}, ${t.days} days, ${t.monthsTraded} monthly trades${t.staleDays > MAX_STALE_DAYS ? ` — ⚠ data ends ${t.staleDays} days before the run date` : ''})`);
+    const xl = (nm, o) => `   ${nm.padEnd(13)} CAGR ${p(o.stats.cagr)} · vol ${p(o.stats.vol)} · Sharpe over T-bills ${f2(o.sharpeX)} (2016-20 ${f2(o.sharpeXH1)}, 2021-on ${f2(o.sharpeXH2)}) · worst drawdown ${p(o.stats.maxDD)} (${o.stats.maxDDAt})`;
+    L.push(xl('trend', t.trend));
+    L.push(xl('hold all five', t.hold));
+    if (t.spy) L.push(`   SPY alone (not graded): CAGR ${p(t.spy.stats.cagr)} · Sharpe over T-bills ${f2(t.spy.sharpeX)} · worst drawdown ${p(t.spy.stats.maxDD)}`);
+    L.push(`   mean excess return per day: 2016-20 ${fs(t.trend.halves.h1)} | 2021-on ${fs(t.trend.halves.h2)}`);
+    L.push(`   share of days held: ${t.etfs.map(e => `${e} ${(t.trend.inShare[e] * 100).toFixed(0)}%`).join(' · ')} · ${t.trend.switches} in/out switches · turnover ${(t.trend.turnoverPerYear * 100).toFixed(0)}% a year (hold: ${(t.hold.turnoverPerYear * 100).toFixed(0)}%)`);
+    L.push(`   held now: ${t.etfs.filter((e, k) => t.trend.flagsNow[k]).join(', ') || 'none (all T-bills)'}`);
+    L.push(`   stress (trend / hold)  Feb-2018: ${p(t.trend.stats.stress.feb2018)} / ${p(t.hold.stats.stress.feb2018)} · Covid 2020: ${p(t.trend.stats.stress.covid2020)} / ${p(t.hold.stats.stress.covid2020)} · 2022 bear: ${p(t.trend.stats.stress.bear2022)} / ${p(t.hold.stats.stress.bear2022)}`);
+    L.push(`   by year (trend / hold): ${yrs(t.trend.stats, t.hold.stats)}`);
+  }
+  L.push('');
+  const c = res.T11;
+  L.push('════════ T11 Put credit spread on REAL option prices (Cboe PUT + the long 5%-OTM put inside PPUT) vs SPY ════════');
+  if (!c || c.note) L.push(`   not run — ${(c && c.note) || 'no data'}`);
+  else {
+    L.push(`${c.grade}   (${c.from} → ${c.to}${c.staleDays > MAX_STALE_DAYS ? ` — ⚠ index data ends ${c.lastIndexDate}, ${c.staleDays} days old` : ''})`);
+    L.push(line('put spread', c.spread));
+    L.push(line('SPY', c.spy));
+    L.push(`   legs, not graded — PUT alone (short at-the-money put): CAGR ${p(c.putOnly.cagr)}, Sharpe ${f2(c.putOnly.sharpe)}, worst drawdown ${p(c.putOnly.maxDD)} · the long 5%-OTM put costs ${p(c.longPutPerYear)} a year`);
+    L.push(`   stress (spread / SPY)  Feb-2018: ${p(c.spread.stress.feb2018)} / ${p(c.spy.stress.feb2018)} · Covid 2020: ${p(c.spread.stress.covid2020)} / ${p(c.spy.stress.covid2020)} · 2022 bear: ${p(c.spread.stress.bear2022)} / ${p(c.spy.stress.bear2022)}`);
+    L.push(`   by year (spread / SPY): ${yrs(c.spread, c.spy)}`);
+  }
+  L.push('');
+  L.push('PRE-REGISTERED PASS LINES (written 11/25, before the first run of any of them)');
+  for (const [k, v] of Object.entries(res.pass || {})) L.push(`  ${k}: ${v}`);
+  L.push('');
+  L.push('Limits: T9 uses the consolidated daily open and close (a real order would go to the opening / closing auction; the');
+  L.push('difference on SPY/QQQ is a fraction of a basis point) and no financing cost. T10 starts after the first 10 month-ends');
+  L.push('(late 2016), so its first half is about four years. T11 is two indexes added together — the same monthly SPX expiry,');
+  L.push('fully cash-secured at the short strike — not one traded spread; it says nothing about weekly or 0DTE spreads.');
+  return L.join('\n');
 }
 
 function textReport(res, sources = {}) {
@@ -577,4 +766,5 @@ function textReport(res, sources = {}) {
 }
 
 module.exports = { PASS, groupDays, pxAt, summ, sharpe, t1, t2, t2Day, t2opt, t3, t5, t6, t7, adxOf, t8, seriesStats, t8Report, fadeDay, concentration, run, textReport, etParts,
+  t9, t10, t11, runB2, b2Report, B2_ETFS,
   MIN_HALF_DAYS, MIN_CELL_DAYS, MAX_STALE_DAYS };

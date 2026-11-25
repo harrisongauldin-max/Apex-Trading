@@ -1725,12 +1725,50 @@ app.get("/api/flow-backtest", requireSecret, async (req, res) => {
     const et = getETTime(), h = et.getHours() + et.getMinutes() / 60, wd = et.getDay() >= 1 && et.getDay() <= 5;
     // v1.3 (10/19): ?tests=T8 runs only the premium-selling benchmark test (1 Alpaca call + 4 Cboe files) — allowed any time
     const onlyT8 = String(req.query.tests || "").toUpperCase() === "T8";
-    if (!onlyT8 && wd && h >= 9.25 && h < 16.25 && req.query.force !== "1")
+    const onlyB2 = String(req.query.tests || "").toUpperCase() === "B2";
+    if (!onlyT8 && !onlyB2 && wd && h >= 9.25 && h < 16.25 && req.query.force !== "1")
       return res.status(409).type("text/plain").send("The flow harness runs outside market hours (it pulls ~10 years of 5-minute bars). Run it after 4:15 PM ET, or add &force=1.");
     const FB = require("./flowBacktest"), TO = require("./trendOptions"), DAYCTX_FB = require("./dayContext");
     const { ALPACA_DATA } = require("./constants");
     const { alpacaHeaders, withTimeout } = require("./broker");
     const nf = require("node-fetch");
+    // v1.4 (11/25): ?tests=B2 runs only the three daily-data tests (T9 overnight hold, T10 five-ETF trend, T11 put credit
+    // spread) — 7 small Alpaca daily-bar downloads + 2 Cboe files, so it is allowed at any time. Own fetch, as above.
+    if (onlyB2) {
+      const t0b = Date.now(), srcB = {};
+      const endDayB = /^\d{4}-\d{2}-\d{2}$/.test(String(req.query.end || "")) ? req.query.end : null;
+      const endB = endDayB ? endDayB + "T21:00:00Z" : new Date(Date.now() - 20 * 60000).toISOString();
+      const dailyAdj = async (tk) => {
+        const out = []; let tok = null, pg = 0;
+        try {
+          do {
+            const u = `${ALPACA_DATA}/stocks/${tk}/bars?timeframe=1Day&start=2016-01-01T00:00:00Z&end=${endB}&adjustment=all&feed=sip&limit=10000` + (tok ? `&page_token=${encodeURIComponent(tok)}` : "");
+            const r = await withTimeout(nf(u, { headers: alpacaHeaders() }), 30000);
+            if (!r || !r.ok) { srcB[tk + " note"] = `fetch stopped (HTTP ${r ? r.status : "timeout"})`; break; }
+            const d = await r.json();
+            for (const b of d.bars || []) out.push({ date: FB.etParts(b.t).day, o: +b.o, c: +b.c });
+            tok = d.next_page_token || null; pg++;
+          } while (tok && pg < 5);
+        } catch (e) { srcB[tk + " note"] = "fetch failed: " + e.message; }
+        return out;
+      };
+      const TKS = ["SPY", "QQQ", "EFA", "IEF", "VNQ", "DBC", "BIL"];
+      const got = await Promise.all(TKS.map(dailyAdj));
+      const dailyB = {}, closesB = {};
+      TKS.forEach((tk, i) => { dailyB[tk] = got[i]; closesB[tk] = {}; for (const b of got[i]) if (b.c > 0) closesB[tk][b.date] = b.c; });
+      srcB["Alpaca daily (dividend-adjusted)"] = TKS.map((tk, i) => `${tk} ${got[i].length}${got[i].length ? " to " + got[i][got[i].length - 1].date : ""}`).join(", ");
+      const getTextB = async (url) => { try { const r = await withTimeout(nf(url), 20000); return (r && r.ok) ? await r.text() : null; } catch (_) { return null; } };
+      const CBb = "https://cdn.cboe.com/api/global/us_indices/daily_prices/";
+      const [putB, pputB] = await Promise.all(["PUT", "PPUT"].map(k => getTextB(CBb + k + "_History.csv")));
+      const seriesB = { PUT: TO.parseSeriesCsv(putB), PPUT: TO.parseSeriesCsv(pputB), SPYTR: closesB.SPY };
+      const lastB = (o) => { const k = Object.keys(o).sort(); return k.length ? k[k.length - 1] : "none"; };
+      srcB.Cboe = ["PUT", "PPUT"].map(k => `${k} ${Object.keys(seriesB[k]).length} days to ${lastB(seriesB[k])}`).join(", ");
+      const resB = FB.runB2({ SPY: dailyB.SPY, QQQ: dailyB.QQQ }, closesB, seriesB, { asOf: endDayB || DAYCTX_FB.etDateStr(Date.now()) });
+      const repB = FB.b2Report(resB, srcB);
+      logEvent("scan", `[FLOW-HARNESS] B2 ran in ${((Date.now() - t0b) / 1000).toFixed(0)}s — T9 SPY ${resB.T9.SPY.grade}, QQQ ${resB.T9.QQQ.grade} · T10 ${resB.T10.grade} · T11 ${resB.T11.grade}`);
+      if (req.query.format === "json") return res.json({ sources: srcB, result: resB, report: repB });
+      return res.type("text/plain").send(repB);
+    }
     const start = /^\d{4}-\d{2}-\d{2}$/.test(String(req.query.start || "")) ? req.query.start : "2016-01-01";
     // ?end=YYYY-MM-DD runs (and grades) the harness as of a past date; default is now
     const endDay = /^\d{4}-\d{2}-\d{2}$/.test(String(req.query.end || "")) ? req.query.end : null;
